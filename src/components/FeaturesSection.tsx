@@ -1,5 +1,5 @@
 import { Card, CardContent } from "@/components/ui/card";
-import { Palette, Zap, Shield } from "lucide-react";
+import { Palette, Zap, Shield, Bolt } from "lucide-react";
 
 const FeaturesSection = () => {
   const features = [
@@ -35,6 +35,16 @@ const FeaturesSection = () => {
         "End-to-end encryption for all voice data",
         "Complete transparency in data handling"
       ]
+    },
+    {
+      icon: Bolt,
+      title: "Lightning Fast",
+      description: "Instant responses without interruption",
+      details: [
+        "800ms response time",
+        "Interruptible",
+        "Doesn't Interrupt you"
+      ]
     }
   ];
 
@@ -50,7 +60,7 @@ const FeaturesSection = () => {
           </p>
         </div>
         
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 max-w-6xl mx-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-8 max-w-7xl mx-auto">
           {features.map((feature, index) => (
             <Card 
               key={feature.title}
