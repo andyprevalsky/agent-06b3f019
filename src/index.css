@@ -780,11 +780,11 @@
     position: absolute;
     top: -6px;
     left: -6px;
-    right: -6px;
+    right: 0px;
     height: 6px;
     background: linear-gradient(
       90deg,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
     );
     background-size: 200% 100%;
     animation: borderFlowTop 8s linear infinite;
@@ -796,11 +796,11 @@
     position: absolute;
     top: -6px;
     right: -6px;
-    bottom: -6px;
+    bottom: 0px;
     width: 6px;
     background: linear-gradient(
       180deg,
-      #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED
+      #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED
     );
     background-size: 100% 200%;
     animation: borderFlowRight 8s linear infinite;
@@ -811,12 +811,12 @@
   .animated-gradient-border .border-bottom {
     position: absolute;
     bottom: -6px;
-    left: -6px;
+    left: 0px;
     right: -6px;
     height: 6px;
     background: linear-gradient(
       270deg,
-      #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC
+      #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC
     );
     background-size: 200% 100%;
     animation: borderFlowBottom 8s linear infinite;
@@ -826,13 +826,13 @@
   /* Left Border */
   .animated-gradient-border .border-left {
     position: absolute;
-    top: -6px;
+    top: 0px;
     left: -6px;
     bottom: -6px;
     width: 6px;
     background: linear-gradient(
       0deg,
-      #E062CC, #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776
+      #E062CC, #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776
     );
     background-size: 100% 200%;
     animation: borderFlowLeft 8s linear infinite;
