@@ -859,28 +859,21 @@
   
   /* Border Flow Animations */
   @keyframes borderFlowTop {
-    0%, 75% { background-position: -100% 0; opacity: 0; }
-    0%, 25% { background-position: -100% 0; opacity: 1; }
-    25% { background-position: 100% 0; opacity: 1; }
-    25%, 100% { opacity: 0; }
+    0% { background-position: -100% 0; }
+    100% { background-position: 100% 0; }
   }
   
   @keyframes borderFlowRight {
-    0%, 75% { background-position: 0 -100%; opacity: 0; }
-    25%, 50% { background-position: 0 -100%; opacity: 1; }
-    50% { background-position: 0 100%; opacity: 1; }
-    50%, 100% { opacity: 0; }
+    0% { background-position: 0 -100%; }
+    100% { background-position: 0 100%; }
   }
   
   @keyframes borderFlowBottom {
-    0%, 75% { background-position: 100% 0; opacity: 0; }
-    50%, 75% { background-position: 100% 0; opacity: 1; }
-    75% { background-position: -100% 0; opacity: 1; }
-    75%, 100% { opacity: 0; }
+    0% { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
   }
   
   @keyframes borderFlowLeft {
-    0%, 25% { background-position: 0 100%; opacity: 0; }
-    75%, 100% { background-position: 0 100%; opacity: 1; }
-    100% { background-position: 0 -100%; opacity: 1; }
+    0% { background-position: 0 100%; }
+    100% { background-position: 0 -100%; }
   }
