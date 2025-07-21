@@ -1,5 +1,3 @@
-import naviEmblem from "@/assets/navi-gradient-emblem.png";
-
 const NaviFooter = () => {
   return (
     <footer className="bg-primary text-primary-foreground py-16">
@@ -8,7 +6,7 @@ const NaviFooter = () => {
           
           <div className="md:col-span-2">
             <div className="flex items-center space-x-3 mb-4">
-              <img src={naviEmblem} alt="Navi" className="w-8 h-8" />
+              <div className="w-8 h-8 bg-gradient-to-br from-purple-600 via-violet-600 to-blue-600 rounded-lg"></div>
               <span className="text-xl font-semibold">Navi</span>
             </div>
             <p className="text-primary-foreground/70 max-w-md leading-relaxed">
