@@ -5,7 +5,7 @@ const NaviHeader = () => {
     <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border/50">
       <div className="container mx-auto px-6 h-16 flex items-center justify-between">
         <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 bg-gradient-to-tr from-violet-400 via-orange-300 via-orange-400 via-orange-500 via-red-500 to-blue-600 rounded-lg"></div>
+          <div className="w-8 h-8 bg-gradient-to-bl from-blue-600 via-red-500 via-orange-500 to-violet-400 rounded-lg"></div>
           <span className="text-xl font-semibold tracking-tight">Navi</span>
         </div>
         
