@@ -41,14 +41,13 @@ const PreOrderSection = () => {
             <CardContent className="p-8 text-center">
               <div className="mb-6">
                 <video 
-                  className="w-24 h-24 rounded-3xl mx-auto mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300 object-cover"
+                  className="w-48 h-48 rounded-3xl mx-auto mb-4 group-hover:scale-110 transition-transform duration-300 object-cover"
                   autoPlay
                   loop
                   muted
                   playsInline
                 >
                   <source src="/navi-black-demo.webm" type="video/webm" />
-                  <div className="w-24 h-24 bg-primary rounded-3xl"></div>
                 </video>
                 <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
                 <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
@@ -77,14 +76,13 @@ const PreOrderSection = () => {
             <CardContent className="p-8 text-center">
               <div className="mb-6">
                 <video 
-                  className="w-24 h-24 rounded-3xl mx-auto mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300 object-cover border-2 border-border"
+                  className="w-48 h-48 rounded-3xl mx-auto mb-4 group-hover:scale-110 transition-transform duration-300 object-cover"
                   autoPlay
                   loop
                   muted
                   playsInline
                 >
                   <source src="/navi-white-demo.webm" type="video/webm" />
-                  <div className="w-24 h-24 bg-surface-elevated border-2 border-border rounded-3xl"></div>
                 </video>
                 <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
                 <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
