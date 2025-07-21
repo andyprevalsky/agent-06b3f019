@@ -773,14 +773,11 @@
     margin-top: 64px;
     padding: 6px;
     background: conic-gradient(from 0deg, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503);
-    background-size: 200% 200%;
     animation: rotateGradient 4s linear infinite;
-    border-radius: 12px;
   }
   
   .animated-gradient-border section {
     background: hsl(var(--background));
-    border-radius: 6px;
     position: relative;
     z-index: 1;
   }
@@ -806,9 +803,9 @@
   /* Simple rotating gradient animation */
   @keyframes rotateGradient {
     0% { 
-      background-position: 0% 50%;
+      transform: rotate(0deg);
     }
     100% { 
-      background-position: 100% 50%;
+      transform: rotate(360deg);
     }
   }
