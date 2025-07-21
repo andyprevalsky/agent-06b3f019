@@ -3,8 +3,7 @@ import FloatingParticles from "./FloatingParticles";
 
 const HeroSection = () => {
   return (
-    <div className="animated-gradient-border">
-      <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-gradient-to-br from-background via-surface to-secondary/30">
+    <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-gradient-to-br from-background via-surface to-secondary/30">
       <FloatingParticles />
       
       <div className="container mx-auto px-6 relative z-10">
@@ -44,7 +43,6 @@ const HeroSection = () => {
       {/* Gradient overlay for depth */}
       <div className="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-background/100 to-transparent"></div>
     </section>
-    </div>
   );
 };
 
