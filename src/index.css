@@ -789,6 +789,7 @@
     );
     background-size: 200% 100%;
     animation: borderFlowTop 8s linear infinite;
+    z-index: 4;
   }
   
   /* Right Border */
@@ -805,6 +806,7 @@
     );
     background-size: 100% 200%;
     animation: borderFlowRight 8s linear infinite;
+    z-index: 3;
   }
   
   /* Bottom Border */
@@ -821,6 +823,7 @@
     );
     background-size: 200% 100%;
     animation: borderFlowBottom 8s linear infinite;
+    z-index: 2;
   }
   
   /* Left Border */
@@ -837,6 +840,7 @@
     );
     background-size: 100% 200%;
     animation: borderFlowLeft 8s linear infinite;
+    z-index: 1;
   }
   
   /* Fade into next section */
