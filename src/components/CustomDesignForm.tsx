@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { HelpCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 const customDesignSchema = z.object({
@@ -79,6 +80,14 @@ const CustomDesignForm = () => {
     }
   };
 
+  const handleServiceFeeClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    document.getElementById('service-fee')?.scrollIntoView({ 
+      behavior: 'smooth',
+      block: 'start'
+    });
+  };
+
   return (
     <section className="py-24 bg-gradient-to-b from-surface to-background">
       <div className="container mx-auto px-6">
@@ -98,7 +107,16 @@ const CustomDesignForm = () => {
                   alt="Custom Design Navi"
                   className="w-2/3 h-auto mx-auto rounded-lg mb-3"
                 />
-                <p className="text-sm text-muted-foreground">Starting at $299 + <a href="#service-fee" className="text-primary hover:underline cursor-pointer">service fee</a></p>
+                <p className="text-sm text-muted-foreground">
+                  Starting at $299 + 
+                  <button 
+                    onClick={handleServiceFeeClick}
+                    className="text-xs text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                  >
+                    service fee
+                    <HelpCircle size={10} />
+                  </button>
+                </p>
                 <p className="text-sm text-muted-foreground mt-1">Bring your unique vision to life with a personalized Navi device.</p>
               </div>
               <Form {...form}>

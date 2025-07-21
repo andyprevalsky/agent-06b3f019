@@ -2,6 +2,7 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { HelpCircle } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 const PreOrderSection = () => {
@@ -46,6 +47,14 @@ const PreOrderSection = () => {
     window.open(checkoutUrls[variant], '_blank');
   };
 
+  const handleServiceFeeClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    document.getElementById('service-fee')?.scrollIntoView({ 
+      behavior: 'smooth',
+      block: 'start'
+    });
+  };
+
   return (
     <section id="pre-order" className="py-32 bg-gradient-to-b from-surface to-background relative overflow-hidden">
       <div className="container mx-auto px-6">
@@ -82,7 +91,16 @@ const PreOrderSection = () => {
               </div>
               
               <div className="mb-8">
-                <div className="text-3xl font-light tracking-tight">$299 + <a href="#service-fee" className="text-primary hover:underline cursor-pointer text-lg">service fee</a></div>
+                <div className="text-3xl font-light tracking-tight">
+                  $299 + 
+                  <button 
+                    onClick={handleServiceFeeClick}
+                    className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                  >
+                    service fee
+                    <HelpCircle size={12} />
+                  </button>
+                </div>
               </div>
               
               <Button 
@@ -117,7 +135,16 @@ const PreOrderSection = () => {
               </div>
               
               <div className="mb-8">
-                <div className="text-3xl font-light tracking-tight">$199 + <a href="#service-fee" className="text-primary hover:underline cursor-pointer text-lg">service fee</a></div>
+                <div className="text-3xl font-light tracking-tight">
+                  $199 + 
+                  <button 
+                    onClick={handleServiceFeeClick}
+                    className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                  >
+                    service fee
+                    <HelpCircle size={12} />
+                  </button>
+                </div>
               </div>
               
               <Button 
