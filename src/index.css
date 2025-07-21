@@ -199,29 +199,29 @@
 
   /* Feature Cards Styling */
   .feature-card {
-    position: relative;
-    padding: 2rem;
-    border-radius: 1.5rem;
-    backdrop-filter: blur(10px);
-    background: linear-gradient(135deg, 
-      hsl(var(--background)) 0%, 
-      hsl(var(--surface)) 100%);
-    border: 1px solid hsl(var(--border) / 0.2);
-    transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-    overflow: hidden;
+    @apply bg-card border border-border/50 rounded-2xl p-8 transition-all duration-500;
+    @apply hover:shadow-[var(--shadow-elegant)] hover:border-primary/20;
+    transform: translateY(20px);
+    opacity: 0;
   }
 
-  .feature-card:hover {
-    transform: translateY(-8px);
-    border-color: hsl(var(--primary) / 0.3);
-    box-shadow: 
-      0 20px 40px -10px hsl(var(--primary) / 0.2),
-      0 0 60px -20px hsl(var(--primary) / 0.1);
+  .feature-card-no-bg {
+    @apply p-8 transition-all duration-500;
+    transform: translateY(20px);
+    opacity: 0;
+  }
+
+  .feature-visible {
+    transform: translateY(0);
+    opacity: 1;
   }
 
   .feature-content {
-    position: relative;
-    z-index: 2;
+    @apply h-full flex flex-col justify-between;
+  }
+
+  .feature-content-no-bg {
+    @apply h-full flex flex-col justify-between;
   }
 
   .feature-animation-wrapper {
@@ -706,7 +706,11 @@
   /* Feature 0: Logo Ticker Animation */
   .logo-ticker {
     position: relative;
-    width: 100%;
+    width: 100vw;
+    left: 50%;
+    right: 50%;
+    margin-left: -50vw;
+    margin-right: -50vw;
     height: 80px;
     overflow: hidden;
     mask: linear-gradient(90deg, transparent, white 20%, white 80%, transparent);

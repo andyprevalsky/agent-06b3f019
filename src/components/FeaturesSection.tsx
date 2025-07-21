@@ -8,14 +8,7 @@ const FeaturesSection = () => {
     {
       title: "Pick Any Provider",
       description: "Choose from leading AI providers",
-      details: [
-        "OpenAI GPT models",
-        "Anthropic Claude",
-        "Cerebrus AI",
-        "ElevenLabs voice synthesis",
-        "Google AI",
-        "Meta Llama"
-      ]
+      details: []
     },
     {
       title: "Fully Customizable",
@@ -79,27 +72,8 @@ const FeaturesSection = () => {
 
   const getAnimationComponent = (index: number, isVisible: boolean) => {
     switch (index) {
-      case 0: // Pick Any Provider - Rotating logos ticker
-        return (
-          <div className="feature-animation-container">
-            <div className={`logo-ticker ${isVisible ? 'animate' : ''}`}>
-              <div className="ticker-track">
-                <img src="/src/assets/openai-logo.svg" alt="OpenAI" className="provider-logo" />
-                <img src="/src/assets/anthropic-logo.png" alt="Anthropic" className="provider-logo" />
-                <div className="provider-logo provider-logo-text">Cerebrus</div>
-                <div className="provider-logo provider-logo-text">ElevenLabs</div>
-                <div className="provider-logo provider-logo-text">Google AI</div>
-                <div className="provider-logo provider-logo-text">Meta</div>
-                <img src="/src/assets/openai-logo.svg" alt="OpenAI" className="provider-logo" />
-                <img src="/src/assets/anthropic-logo.png" alt="Anthropic" className="provider-logo" />
-                <div className="provider-logo provider-logo-text">Cerebrus</div>
-                <div className="provider-logo provider-logo-text">ElevenLabs</div>
-                <div className="provider-logo provider-logo-text">Google AI</div>
-                <div className="provider-logo provider-logo-text">Meta</div>
-              </div>
-            </div>
-          </div>
-        );
+      case 0: // Pick Any Provider - No animation here, full-width ticker below
+        return null;
       case 1: // Fully Customizable - Morphing shapes
         return (
           <div className="feature-animation-container">
@@ -162,31 +136,55 @@ const FeaturesSection = () => {
             <div 
               key={feature.title}
               data-index={index}
-              className={`feature-card reveal-up reveal-delay-${index + 1} ${
+              className={`feature-card-no-bg reveal-up reveal-delay-${index + 1} ${
                 visibleItems.has(index) ? 'feature-visible' : ''
               }`}
             >
-              <div className="feature-content">
-                <div className="feature-animation-wrapper">
-                  {getAnimationComponent(index, visibleItems.has(index))}
-                </div>
+              <div className="feature-content-no-bg">
+                {index !== 0 && (
+                  <div className="feature-animation-wrapper">
+                    {getAnimationComponent(index, visibleItems.has(index))}
+                  </div>
+                )}
                 
                 <div className="feature-text">
-                  <h3 className="text-2xl font-semibold mb-2">{feature.title}</h3>
+                  <h3 className="text-2xl font-semibold mb-2 text-foreground">{feature.title}</h3>
                   <p className="text-muted-foreground mb-6">{feature.description}</p>
                   
-                  <ul className="space-y-3">
-                    {feature.details.map((detail, detailIndex) => (
-                      <li key={detailIndex} className="flex items-start space-x-3 feature-detail">
-                        <div className="w-1.5 h-1.5 bg-primary rounded-full mt-2 flex-shrink-0"></div>
-                        <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  {feature.details.length > 0 && (
+                    <ul className="space-y-3">
+                      {feature.details.map((detail, detailIndex) => (
+                        <li key={detailIndex} className="flex items-start space-x-3 feature-detail">
+                          <div className="w-1.5 h-1.5 bg-primary rounded-full mt-2 flex-shrink-0"></div>
+                          <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               </div>
             </div>
           ))}
+        </div>
+
+        {/* Full-width provider ticker below all features */}
+        <div className="mt-16 w-full overflow-hidden">
+          <div className="logo-ticker animate">
+            <div className="ticker-track">
+              <img src="/src/assets/openai-logo.svg" alt="OpenAI" className="provider-logo" />
+              <img src="/src/assets/anthropic-logo.png" alt="Anthropic" className="provider-logo" />
+              <img src="/src/assets/cerebras-logo.png" alt="Cerebras" className="provider-logo" />
+              <img src="/src/assets/elevenlabs-logo.png" alt="ElevenLabs" className="provider-logo" />
+              <img src="/src/assets/google-ai-logo.png" alt="Google AI" className="provider-logo" />
+              <img src="/src/assets/meta-logo.png" alt="Meta" className="provider-logo" />
+              <img src="/src/assets/openai-logo.svg" alt="OpenAI" className="provider-logo" />
+              <img src="/src/assets/anthropic-logo.png" alt="Anthropic" className="provider-logo" />
+              <img src="/src/assets/cerebras-logo.png" alt="Cerebras" className="provider-logo" />
+              <img src="/src/assets/elevenlabs-logo.png" alt="ElevenLabs" className="provider-logo" />
+              <img src="/src/assets/google-ai-logo.png" alt="Google AI" className="provider-logo" />
+              <img src="/src/assets/meta-logo.png" alt="Meta" className="provider-logo" />
+            </div>
+          </div>
         </div>
       </div>
     </section>
