@@ -769,7 +769,8 @@
   /* Animated Gradient Border - Navi Logo Colors */
   .animated-gradient-border {
     position: relative;
-    z-index: 60; /* Higher than header's z-50 */
+    z-index: 10; /* Below header's z-50 */
+    margin-top: 64px; /* Height of header (h-16 = 64px) */
     padding: 6px 6px 0 6px; /* Remove bottom padding */
     background: linear-gradient(
       0deg,
