@@ -166,20 +166,20 @@ const FeaturesSection = () => {
                   {index === 0 && (
                     <div className="mt-8 w-full overflow-hidden">
                       <div className="logo-ticker animate">
-                        <div className="ticker-track">
-                          <img src="/lovable-uploads/62a020ea-47e5-4023-ad55-7b6466acd665.png" alt="OpenAI" className="provider-logo" />
-                          <img src="/lovable-uploads/08d900d5-b4c6-43d7-8e90-87a13069cd14.png" alt="Anthropic" className="provider-logo" />
-                          <img src="/lovable-uploads/744124eb-2645-458e-8b89-dd1336ffb39c.png" alt="Cerebras" className="provider-logo" />
-                          <img src="/lovable-uploads/5cfb69dd-e48d-49bf-b9f9-2769e53b023f.png" alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
-                          <img src="/lovable-uploads/91e751a7-115a-416b-b7b3-9e7cee11584b.png" alt="Google AI" className="provider-logo" />
-                          <img src="/lovable-uploads/1a447f91-b21f-4746-9f75-278db25daedd.png" alt="Meta" className="provider-logo" />
-                          <img src="/lovable-uploads/62a020ea-47e5-4023-ad55-7b6466acd665.png" alt="OpenAI" className="provider-logo" />
-                          <img src="/lovable-uploads/08d900d5-b4c6-43d7-8e90-87a13069cd14.png" alt="Anthropic" className="provider-logo" />
-                          <img src="/lovable-uploads/744124eb-2645-458e-8b89-dd1336ffb39c.png" alt="Cerebras" className="provider-logo" />
-                          <img src="/lovable-uploads/5cfb69dd-e48d-49bf-b9f9-2769e53b023f.png" alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
-                          <img src="/lovable-uploads/91e751a7-115a-416b-b7b3-9e7cee11584b.png" alt="Google AI" className="provider-logo" />
-                          <img src="/lovable-uploads/1a447f91-b21f-4746-9f75-278db25daedd.png" alt="Meta" className="provider-logo" />
-                        </div>
+                      <div className="ticker-track">
+                        <img src="/lovable-uploads/62a020ea-47e5-4023-ad55-7b6466acd665.png" alt="OpenAI" className="provider-logo" />
+                        <img src="/lovable-uploads/08d900d5-b4c6-43d7-8e90-87a13069cd14.png" alt="Anthropic" className="provider-logo" />
+                        <img src="/lovable-uploads/744124eb-2645-458e-8b89-dd1336ffb39c.png" alt="Cerebras" className="provider-logo" />
+                        <img src="/lovable-uploads/5cfb69dd-e48d-49bf-b9f9-2769e53b023f.png" alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
+                        <img src="/lovable-uploads/91e751a7-115a-416b-b7b3-9e7cee11584b.png" alt="Google AI" className="provider-logo" />
+                        <img src="/lovable-uploads/1a447f91-b21f-4746-9f75-278db25daedd.png" alt="Meta" className="provider-logo" />
+                        <img src="/lovable-uploads/62a020ea-47e5-4023-ad55-7b6466acd665.png" alt="OpenAI" className="provider-logo" />
+                        <img src="/lovable-uploads/08d900d5-b4c6-43d7-8e90-87a13069cd14.png" alt="Anthropic" className="provider-logo" />
+                        <img src="/lovable-uploads/744124eb-2645-458e-8b89-dd1336ffb39c.png" alt="Cerebras" className="provider-logo" />
+                        <img src="/lovable-uploads/5cfb69dd-e48d-49bf-b9f9-2769e53b023f.png" alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
+                        <img src="/lovable-uploads/91e751a7-115a-416b-b7b3-9e7cee11584b.png" alt="Google AI" className="provider-logo" />
+                        <img src="/lovable-uploads/1a447f91-b21f-4746-9f75-278db25daedd.png" alt="Meta" className="provider-logo" />
+                      </div>
                       </div>
                     </div>
                   )}
