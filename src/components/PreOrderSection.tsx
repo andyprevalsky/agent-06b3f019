@@ -73,7 +73,7 @@ const PreOrderSection = () => {
               <div className="mb-6">
                 <video 
                   ref={blackVideoRef}
-                  className="w-48 h-48 rounded-3xl mx-auto mb-4 group-hover:scale-110 transition-transform duration-300 object-cover"
+                  className="w-48 h-48 rounded-3xl mx-auto mb-4 object-cover"
                   loop
                   muted
                   playsInline
@@ -135,7 +135,7 @@ const PreOrderSection = () => {
               <div className="mb-6">
                 <video 
                   ref={whiteVideoRef}
-                  className="w-48 h-48 rounded-3xl mx-auto mb-4 group-hover:scale-110 transition-transform duration-300 object-cover"
+                  className="w-48 h-48 rounded-3xl mx-auto mb-4 object-cover"
                   loop
                   muted
                   playsInline
