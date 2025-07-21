@@ -772,8 +772,15 @@
     z-index: 10;
     margin-top: 64px;
     padding: 6px;
+  }
+  
+  .animated-gradient-border::before {
+    content: '';
+    position: absolute;
+    inset: 0;
     background: conic-gradient(from 0deg, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503);
     animation: rotateGradient 4s linear infinite;
+    z-index: -1;
   }
   
   .animated-gradient-border section {
