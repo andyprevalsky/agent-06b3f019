@@ -786,7 +786,7 @@
       90deg,
       #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503, #FC585C
     );
-    background-size: 200% 100%;
+    background-size: 300% 100%;
     animation: borderFlowTop 8s linear infinite;
     z-index: 4;
   }
@@ -802,7 +802,7 @@
       180deg,
       #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503
     );
-    background-size: 100% 200%;
+    background-size: 100% 300%;
     animation: borderFlowRight 8s linear infinite;
     z-index: 3;
   }
@@ -818,7 +818,7 @@
       270deg,
       #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
     );
-    background-size: 200% 100%;
+    background-size: 300% 100%;
     animation: borderFlowBottom 8s linear infinite;
     z-index: 2;
   }
@@ -834,7 +834,7 @@
       0deg,
       #E062CC, #A76CED, #7A6BEC, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED
     );
-    background-size: 100% 200%;
+    background-size: 100% 300%;
     animation: borderFlowLeft 8s linear infinite;
     z-index: 1;
   }
@@ -859,21 +859,21 @@
   
   /* Border Flow Animations */
   @keyframes borderFlowTop {
-    0% { background-position: -100% 0; }
+    0% { background-position: 0% 0; }
     100% { background-position: 100% 0; }
   }
   
   @keyframes borderFlowRight {
-    0% { background-position: 0 -100%; }
+    0% { background-position: 0 0%; }
     100% { background-position: 0 100%; }
   }
   
   @keyframes borderFlowBottom {
-    0% { background-position: 100% 0; }
-    100% { background-position: -100% 0; }
+    0% { background-position: 0% 0; }
+    100% { background-position: 100% 0; }
   }
   
   @keyframes borderFlowLeft {
-    0% { background-position: 0 100%; }
-    100% { background-position: 0 -100%; }
+    0% { background-position: 0 0%; }
+    100% { background-position: 0 100%; }
   }
