@@ -772,13 +772,12 @@
     z-index: 10; /* Below header's z-50 */
     margin-top: 64px; /* Height of header (h-16 = 64px) */
     padding: 6px 6px 0 6px; /* Remove bottom padding */
-    background: linear-gradient(
-      90deg,
+    background: conic-gradient(
+      from 0deg,
       #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503
     );
-    background-size: 400% 400%;
-    animation: gradientBorderRotate 6s linear infinite;
+    animation: gradientBorderRotate 8s linear infinite;
     border-radius: 0;
   }
   
@@ -801,18 +800,9 @@
   
   @keyframes gradientBorderRotate {
     0% {
-      background-position: 0% 0%;
-    }
-    25% {
-      background-position: 100% 0%;
-    }
-    50% {
-      background-position: 100% 100%;
-    }
-    75% {
-      background-position: 0% 100%;
+      transform: rotate(0deg);
     }
     100% {
-      background-position: 0% 0%;
+      transform: rotate(360deg);
     }
   }
