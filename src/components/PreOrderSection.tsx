@@ -1,31 +1,20 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { createClient } from "@supabase/supabase-js";
 
 const PreOrderSection = () => {
-  const handlePreOrder = async (variant: 'black' | 'white') => {
-    try {
-      // Create Supabase client for edge function call
-      const supabase = createClient(
-        import.meta.env.VITE_SUPABASE_URL || 'https://placeholder.supabase.co',
-        import.meta.env.VITE_SUPABASE_ANON_KEY || 'placeholder-key'
-      );
+  const handlePreOrder = (variant: 'black' | 'white') => {
+    // Mock Stripe checkout URLs for demo - replace with real Stripe integration
+    const mockCheckoutUrls = {
+      black: 'https://buy.stripe.com/test_mock_navi_midnight_black_299',
+      white: 'https://buy.stripe.com/test_mock_navi_pearl_white_199'
+    };
 
-      const { data, error } = await supabase.functions.invoke('create-payment', {
-        body: { variant }
-      });
-
-      if (error) throw error;
-
-      // Open Stripe checkout in a new tab
-      if (data?.url) {
-        window.open(data.url, '_blank');
-      }
-    } catch (error) {
-      console.error('Payment error:', error);
-      alert('Sorry, there was an error processing your request. Please try again.');
-    }
+    // Simulate creating a checkout session and redirect
+    console.log(`Creating checkout session for ${variant} Navi - $${variant === 'black' ? '299' : '199'}`);
+    
+    // Open mock Stripe checkout in new tab
+    window.open(mockCheckoutUrls[variant], '_blank');
   };
 
   return (
