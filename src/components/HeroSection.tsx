@@ -4,6 +4,9 @@ import FloatingParticles from "./FloatingParticles";
 const HeroSection = () => {
   return (
     <div className="animated-gradient-border">
+      <div className="border-right"></div>
+      <div className="border-bottom"></div>
+      <div className="border-left"></div>
       <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-gradient-to-br from-background via-surface to-secondary/30" style={{ minHeight: 'calc(100vh - 64px)' }}>
       <FloatingParticles />
       

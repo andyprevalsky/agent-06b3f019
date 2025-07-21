@@ -771,31 +771,84 @@
     position: relative;
     z-index: 10; /* Below header's z-50 */
     margin-top: 64px; /* Height of header (h-16 = 64px) */
-    padding: 6px 6px 0 6px; /* Remove bottom padding */
+    border: 6px solid transparent;
   }
   
+  /* Top Border */
   .animated-gradient-border::before {
     content: '';
     position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: conic-gradient(
-      from 0deg,
+    top: -6px;
+    left: -6px;
+    right: -6px;
+    height: 6px;
+    background: linear-gradient(
+      90deg,
       #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
     );
-    animation: gradientBorderRotate 8s linear infinite;
-    z-index: -1;
+    background-size: 200% 100%;
+    animation: borderFlowTop 8s linear infinite;
   }
   
+  /* Right Border */
+  .animated-gradient-border .border-right {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    bottom: -6px;
+    width: 6px;
+    background: linear-gradient(
+      180deg,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+    );
+    background-size: 100% 200%;
+    animation: borderFlowRight 8s linear infinite;
+    animation-delay: 2s;
+  }
+  
+  /* Bottom Border */
+  .animated-gradient-border .border-bottom {
+    position: absolute;
+    bottom: -6px;
+    left: -6px;
+    right: -6px;
+    height: 6px;
+    background: linear-gradient(
+      270deg,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+    );
+    background-size: 200% 100%;
+    animation: borderFlowBottom 8s linear infinite;
+    animation-delay: 4s;
+  }
+  
+  /* Left Border */
+  .animated-gradient-border .border-left {
+    position: absolute;
+    top: -6px;
+    left: -6px;
+    bottom: -6px;
+    width: 6px;
+    background: linear-gradient(
+      0deg,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+    );
+    background-size: 100% 200%;
+    animation: borderFlowLeft 8s linear infinite;
+    animation-delay: 6s;
+  }
+  
+  /* Fade into next section */
   .animated-gradient-border::after {
     content: '';
     position: absolute;
     bottom: -6px;
-    left: 6px;
-    right: 6px;
+    left: 0;
+    right: 0;
     height: 60px;
     background: linear-gradient(to bottom, transparent, hsl(var(--background)));
     z-index: 2;
@@ -807,11 +860,30 @@
     z-index: 1;
   }
   
-  @keyframes gradientBorderRotate {
-    0% {
-      transform: rotate(0deg);
-    }
-    100% {
-      transform: rotate(360deg);
-    }
+  /* Border Flow Animations */
+  @keyframes borderFlowTop {
+    0%, 75% { background-position: -100% 0; opacity: 0; }
+    0%, 25% { background-position: -100% 0; opacity: 1; }
+    25% { background-position: 100% 0; opacity: 1; }
+    25%, 100% { opacity: 0; }
+  }
+  
+  @keyframes borderFlowRight {
+    0%, 75% { background-position: 0 -100%; opacity: 0; }
+    25%, 50% { background-position: 0 -100%; opacity: 1; }
+    50% { background-position: 0 100%; opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+  
+  @keyframes borderFlowBottom {
+    0%, 75% { background-position: 100% 0; opacity: 0; }
+    50%, 75% { background-position: 100% 0; opacity: 1; }
+    75% { background-position: -100% 0; opacity: 1; }
+    75%, 100% { opacity: 0; }
+  }
+  
+  @keyframes borderFlowLeft {
+    0%, 25% { background-position: 0 100%; opacity: 0; }
+    75%, 100% { background-position: 0 100%; opacity: 1; }
+    100% { background-position: 0 -100%; opacity: 1; }
   }
