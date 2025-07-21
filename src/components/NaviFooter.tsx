@@ -6,7 +6,7 @@ const NaviFooter = () => {
           
           <div className="md:col-span-2">
             <div className="flex items-center space-x-3 mb-4">
-              <div className="w-8 h-8 bg-gradient-to-bl from-blue-600 via-red-500 via-orange-500 to-violet-400 rounded-lg"></div>
+              <div className="w-8 h-8 bg-gradient-to-bl from-orange-500 to-violet-600 rounded-lg"></div>
               <span className="text-xl font-semibold">Navi</span>
             </div>
             <p className="text-primary-foreground/70 max-w-md leading-relaxed">
