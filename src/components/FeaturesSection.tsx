@@ -64,11 +64,11 @@ const FeaturesSection = () => {
           {features.map((feature, index) => (
             <Card 
               key={feature.title}
-              className={`group bg-card border-border/50 hover:border-border transition-all duration-500 hover:shadow-[var(--shadow-elegant)] hover:scale-105 reveal-up reveal-delay-${index + 1}`}
+              className={`bg-card border-border/50 reveal-up reveal-delay-${index + 1}`}
             >
               <CardContent className="p-8">
                 <div className="mb-6">
-                  <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform duration-300">
+                  <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mb-4">
                     <feature.icon className="w-8 h-8 text-primary" />
                   </div>
                   <h3 className="text-2xl font-semibold mb-2">{feature.title}</h3>
