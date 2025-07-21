@@ -20,7 +20,7 @@ const ProductShowcase = () => {
           {/* White Navi */}
           <div className="relative reveal-up reveal-delay-1">
             <img 
-              src="/lovable-uploads/744124eb-2645-458e-8b89-dd1336ffb39c.png" 
+              src="/lovable-uploads/08d900d5-b4c6-43d7-8e90-87a13069cd14.png" 
               alt="Navi in Pearl White"
               className="w-3/4 h-auto mx-auto"
             />
