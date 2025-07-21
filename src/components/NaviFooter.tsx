@@ -15,16 +15,6 @@ const NaviFooter = () => {
               Transforming voice commands into infinite possibilities. 
               The first truly customizable AI hardware companion.
             </p>
-            <div className="flex items-center mt-4">
-              <div className="bg-white rounded px-2 py-1 mr-3">
-                <img 
-                  src="/lovable-uploads/94a0055b-961b-46ff-9e38-1ee39c4c5ef7.png" 
-                  alt="Y Combinator" 
-                  className="h-4 w-auto"
-                />
-              </div>
-              <span className="text-primary-foreground/70 text-sm">Founded by Y Combinator alum</span>
-            </div>
           </div>
           
           <div>
