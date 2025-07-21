@@ -4,17 +4,17 @@ import { Badge } from "@/components/ui/badge";
 
 const PreOrderSection = () => {
   const handlePreOrder = (variant: 'black' | 'white') => {
-    // Mock Stripe checkout URLs for demo - replace with real Stripe integration
-    const mockCheckoutUrls = {
-      black: 'https://buy.stripe.com/test_mock_navi_midnight_black_299',
-      white: 'https://buy.stripe.com/test_mock_navi_pearl_white_199'
+    // Real Stripe Payment Links - create these in your Stripe dashboard
+    const checkoutUrls = {
+      black: 'https://buy.stripe.com/YOUR_BLACK_PAYMENT_LINK', // Replace with your actual Stripe payment link
+      white: 'https://buy.stripe.com/YOUR_WHITE_PAYMENT_LINK'  // Replace with your actual Stripe payment link
     };
 
     // Simulate creating a checkout session and redirect
     console.log(`Creating checkout session for ${variant} Navi - $${variant === 'black' ? '299' : '199'}`);
     
     // Open mock Stripe checkout in new tab
-    window.open(mockCheckoutUrls[variant], '_blank');
+    window.open(checkoutUrls[variant], '_blank');
   };
 
   return (
