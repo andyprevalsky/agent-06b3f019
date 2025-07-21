@@ -37,13 +37,6 @@ const HeroSection = () => {
             </Button>
           </div>
           
-          <div className="mt-16 reveal-up reveal-delay-3">
-            <p className="text-sm text-muted-foreground mb-4">Available in two finishes</p>
-            <div className="flex justify-center space-x-4">
-              <div className="w-3 h-3 bg-primary rounded-full shadow-lg"></div>
-              <div className="w-3 h-3 bg-surface-elevated border border-border rounded-full shadow-lg"></div>
-            </div>
-          </div>
         </div>
       </div>
       

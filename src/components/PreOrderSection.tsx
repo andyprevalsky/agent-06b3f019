@@ -2,11 +2,15 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { processVideoWithBackgroundRemoval } from "@/lib/backgroundRemoval";
 
 const PreOrderSection = () => {
   const blackVideoRef = useRef<HTMLVideoElement>(null);
   const whiteVideoRef = useRef<HTMLVideoElement>(null);
+  const [blackProcessedSrc, setBlackProcessedSrc] = useState<string>('');
+  const [whiteProcessedSrc, setWhiteProcessedSrc] = useState<string>('');
+  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
     const syncVideos = async () => {
@@ -23,6 +27,24 @@ const PreOrderSection = () => {
             blackVideoRef.current.play(),
             whiteVideoRef.current.play()
           ]);
+
+          // Process videos to remove background after they start playing
+          if (!isProcessing) {
+            setIsProcessing(true);
+            try {
+              const [blackProcessed, whiteProcessed] = await Promise.all([
+                processVideoWithBackgroundRemoval(blackVideoRef.current),
+                processVideoWithBackgroundRemoval(whiteVideoRef.current)
+              ]);
+              
+              setBlackProcessedSrc(blackProcessed);
+              setWhiteProcessedSrc(whiteProcessed);
+            } catch (error) {
+              console.log('Background removal failed, using original videos:', error);
+            } finally {
+              setIsProcessing(false);
+            }
+          }
         } catch (error) {
           console.log('Video sync failed:', error);
         }
@@ -30,7 +52,7 @@ const PreOrderSection = () => {
     };
 
     syncVideos();
-  }, []);
+  }, [isProcessing]);
 
   const handlePreOrder = (variant: 'black' | 'white') => {
     // Real Stripe Payment Links - create these in your Stripe dashboard

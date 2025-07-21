@@ -43,16 +43,6 @@ const FeaturesSection = () => {
       ]
     },
     {
-      title: "Privacy First",
-      description: "Navi stores no data from your conversations, ensuring complete privacy",
-      details: [
-        "All data is streamed directly to frontier AI model providers anonymously",
-        "Navi does not passively listen to conversations",
-        "Triggered only on wake word 'Hi Navi'",
-        "Complete transparency in our commitment to your privacy"
-      ]
-    },
-    {
       title: "Navi Grows With You",
       description: "A robust, state-of-the-art memory system that learns to be your perfect companion",
       details: [
@@ -60,6 +50,16 @@ const FeaturesSection = () => {
         "AI meetup summaries and meal prep lists",
         "Regular check-ins and relationship tracking",
         "Evolving personality that adapts to your needs"
+      ]
+    },
+    {
+      title: "Privacy First",
+      description: "Navi stores no data from your conversations, ensuring complete privacy",
+      details: [
+        "All data is streamed directly to frontier AI model providers anonymously",
+        "Navi does not passively listen to conversations",
+        "Triggered only on wake word 'Hi Navi'",
+        "Complete transparency in our commitment to your privacy"
       ]
     }
   ];
@@ -124,23 +124,23 @@ const FeaturesSection = () => {
             </div>
           </div>
         );
-      case 4: // Privacy First - Shield animation
-        return (
-          <div className="feature-animation-container">
-            <div className={`shield-container ${isVisible ? 'animate' : ''}`}>
-              <div className="shield-base"></div>
-              <div className="shield-lock"></div>
-              <div className="shield-rings"></div>
-            </div>
-          </div>
-        );
-      case 5: // Navi Grows - Growing brain network
+      case 4: // Navi Grows - Growing brain network
         return (
           <div className="feature-animation-container">
             <div className={`morphing-shapes ${isVisible ? 'animate' : ''}`}>
               <div className="shape shape-1"></div>
               <div className="shape shape-2"></div>
               <div className="shape shape-3"></div>
+            </div>
+          </div>
+        );
+      case 5: // Privacy First - Shield animation
+        return (
+          <div className="feature-animation-container">
+            <div className={`shield-container ${isVisible ? 'animate' : ''}`}>
+              <div className="shield-base"></div>
+              <div className="shield-lock"></div>
+              <div className="shield-rings"></div>
             </div>
           </div>
         );
