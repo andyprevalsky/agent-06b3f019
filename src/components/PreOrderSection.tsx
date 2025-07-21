@@ -1,13 +1,31 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { createClient } from "@supabase/supabase-js";
 
 const PreOrderSection = () => {
-  const handlePreOrder = (variant: 'black' | 'white') => {
-    // This would integrate with Stripe checkout
-    console.log(`Pre-ordering ${variant} Navi`);
-    // For now, just scroll to show the action
-    window.open('#', '_blank');
+  const handlePreOrder = async (variant: 'black' | 'white') => {
+    try {
+      // Create Supabase client for edge function call
+      const supabase = createClient(
+        import.meta.env.VITE_SUPABASE_URL || 'https://placeholder.supabase.co',
+        import.meta.env.VITE_SUPABASE_ANON_KEY || 'placeholder-key'
+      );
+
+      const { data, error } = await supabase.functions.invoke('create-payment', {
+        body: { variant }
+      });
+
+      if (error) throw error;
+
+      // Open Stripe checkout in a new tab
+      if (data?.url) {
+        window.open(data.url, '_blank');
+      }
+    } catch (error) {
+      console.error('Payment error:', error);
+      alert('Sorry, there was an error processing your request. Please try again.');
+    }
   };
 
   return (
@@ -38,8 +56,7 @@ const PreOrderSection = () => {
               </div>
               
               <div className="mb-8">
-                <div className="text-sm text-muted-foreground mb-2">Starting at</div>
-                <div className="text-3xl font-light tracking-tight">Contact for pricing</div>
+                <div className="text-3xl font-light tracking-tight">$299</div>
               </div>
               
               <Button 
@@ -66,8 +83,7 @@ const PreOrderSection = () => {
               </div>
               
               <div className="mb-8">
-                <div className="text-sm text-muted-foreground mb-2">Starting at</div>
-                <div className="text-3xl font-light tracking-tight">Contact for pricing</div>
+                <div className="text-3xl font-light tracking-tight">$199</div>
               </div>
               
               <Button 
