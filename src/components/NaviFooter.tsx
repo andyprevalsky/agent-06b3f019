@@ -1,4 +1,4 @@
-import naviLogo from "@/assets/navi-logo.png";
+import naviEmblem from "@/assets/navi-emblem.png";
 
 const NaviFooter = () => {
   return (
@@ -8,7 +8,7 @@ const NaviFooter = () => {
           
           <div className="md:col-span-2">
             <div className="flex items-center space-x-3 mb-4">
-              <img src={naviLogo} alt="Navi" className="w-8 h-8" />
+              <img src={naviEmblem} alt="Navi" className="w-8 h-8" />
               <span className="text-xl font-semibold">Navi</span>
             </div>
             <p className="text-primary-foreground/70 max-w-md leading-relaxed">
