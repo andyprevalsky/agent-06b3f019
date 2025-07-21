@@ -62,11 +62,11 @@ const FeaturesSection = () => {
         
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-8 max-w-7xl mx-auto">
           {features.map((feature, index) => (
-            <Card 
+            <div 
               key={feature.title}
-              className={`bg-card border-border/50 reveal-up reveal-delay-${index + 1}`}
+              className={`reveal-up reveal-delay-${index + 1}`}
             >
-              <CardContent className="p-8">
+              <div className="p-8">
                 <div className="mb-6">
                   <div className="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center mb-4">
                     <feature.icon className="w-8 h-8 text-primary" />
@@ -83,8 +83,8 @@ const FeaturesSection = () => {
                     </li>
                   ))}
                 </ul>
-              </CardContent>
-            </Card>
+              </div>
+            </div>
           ))}
         </div>
       </div>
