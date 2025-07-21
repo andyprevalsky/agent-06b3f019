@@ -766,39 +766,18 @@
   }
   }
   
-  /* Animated Gradient Border - Simple Snake */
+  /* Animated Gradient Border - Navi Logo Colors */
   .animated-gradient-border {
     position: relative;
-    z-index: 10;
-    margin-top: 64px;
-    padding: 6px;
-  }
-  
-  .animated-gradient-border::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: conic-gradient(from 0deg, #FE7503 0deg, #FC585C 60deg, #FD5776 120deg, #E062CC 180deg, #A76CED 240deg, #7A6BEC 300deg, #FE7503 360deg);
-    animation: rotateGradient 4s linear infinite;
-    z-index: -1;
-  }
-  
-  .animated-gradient-border section {
-    background: hsl(var(--background));
-    position: relative;
-    z-index: 1;
-  }
-  
-  /* Fade into next section */
-  .animated-gradient-border::after {
-    content: '';
-    position: absolute;
-    bottom: -6px;
-    left: 0;
-    right: 0;
-    height: 60px;
-    background: linear-gradient(to bottom, transparent, hsl(var(--background)));
-    z-index: 2;
+    padding: 6px; /* Border thickness */
+    background: linear-gradient(
+      0deg,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+    );
+    background-size: 300% 300%;
+    animation: gradientBorderRotate 8s linear infinite;
+    border-radius: 0;
   }
   
   .animated-gradient-border section {
@@ -807,12 +786,45 @@
     z-index: 1;
   }
   
-  /* Simple rotating gradient animation */
-  @keyframes rotateGradient {
-    0% { 
-      transform: rotate(0deg);
+  @keyframes gradientBorderRotate {
+    0% {
+      background-position: 0% 0%;
+      background-image: linear-gradient(
+        0deg,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+      );
     }
-    100% { 
-      transform: rotate(360deg);
+    25% {
+      background-position: 100% 0%;
+      background-image: linear-gradient(
+        90deg,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+      );
+    }
+    50% {
+      background-position: 100% 100%;
+      background-image: linear-gradient(
+        180deg,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+      );
+    }
+    75% {
+      background-position: 0% 100%;
+      background-image: linear-gradient(
+        270deg,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+      );
+    }
+    100% {
+      background-position: 0% 0%;
+      background-image: linear-gradient(
+        360deg,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+      );
     }
   }
