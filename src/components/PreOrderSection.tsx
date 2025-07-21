@@ -39,7 +39,16 @@ const PreOrderSection = () => {
           <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
             <CardContent className="p-8 text-center">
               <div className="mb-6">
-                <div className="w-24 h-24 bg-primary rounded-3xl mx-auto mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300"></div>
+                <video 
+                  className="w-24 h-24 rounded-3xl mx-auto mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300 object-cover"
+                  autoPlay
+                  loop
+                  muted
+                  playsInline
+                >
+                  <source src="/navi-black-demo.webm" type="video/webm" />
+                  <div className="w-24 h-24 bg-primary rounded-3xl"></div>
+                </video>
                 <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
                 <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
               </div>
@@ -66,7 +75,16 @@ const PreOrderSection = () => {
           <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
             <CardContent className="p-8 text-center">
               <div className="mb-6">
-                <div className="w-24 h-24 bg-surface-elevated border-2 border-border rounded-3xl mx-auto mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300"></div>
+                <video 
+                  className="w-24 h-24 rounded-3xl mx-auto mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300 object-cover border-2 border-border"
+                  autoPlay
+                  loop
+                  muted
+                  playsInline
+                >
+                  <source src="/navi-white-demo.webm" type="video/webm" />
+                  <div className="w-24 h-24 bg-surface-elevated border-2 border-border rounded-3xl"></div>
+                </video>
                 <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
                 <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
               </div>

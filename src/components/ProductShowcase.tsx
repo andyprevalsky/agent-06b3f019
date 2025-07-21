@@ -7,9 +7,9 @@ const ProductShowcase = () => {
           {/* Black Navi */}
           <div className="relative reveal-up">
             <img 
-              src="/lovable-uploads/62a020ea-47e5-4023-ad55-7b6466acd665.png" 
+              src="/lovable-uploads/ceb32f02-0a39-4b26-b145-35cf962ec759.png" 
               alt="Navi in Midnight Black"
-              className="w-full h-auto"
+              className="w-3/4 h-auto mx-auto"
             />
             <div className="mt-8 text-center">
               <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
@@ -22,7 +22,7 @@ const ProductShowcase = () => {
             <img 
               src="/lovable-uploads/1a447f91-b21f-4746-9f75-278db25daedd.png" 
               alt="Navi in Pearl White"
-              className="w-full h-auto"
+              className="w-3/4 h-auto mx-auto"
             />
             <div className="mt-8 text-center">
               <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
