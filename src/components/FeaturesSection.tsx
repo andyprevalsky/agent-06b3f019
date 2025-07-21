@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 // Import logos
-import openaiLogo from "@/assets/openai-logo.svg";
+import openaiLogo from "@/assets/openai-logo.png";
 import anthropicLogo from "@/assets/anthropic-logo.png";
 import cerebrasLogo from "@/assets/cerebras-logo.png";
 import elevenlabsLogo from "@/assets/elevenlabs-logo.png";
