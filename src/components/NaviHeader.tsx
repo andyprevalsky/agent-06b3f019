@@ -5,7 +5,7 @@ const NaviHeader = () => {
     <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border/50">
       <div className="container mx-auto px-6 h-16 flex items-center justify-between">
         <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 bg-gradient-to-bl from-orange-400 to-blue-600 rounded-lg"></div>
+          <div className="w-8 h-8 rounded-lg" style={{ background: 'linear-gradient(to bottom left, #FD7706, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #565FCE)' }}></div>
           <span className="text-xl font-semibold tracking-tight">Navi</span>
         </div>
         
