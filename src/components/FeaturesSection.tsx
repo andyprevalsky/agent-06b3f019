@@ -6,13 +6,25 @@ const FeaturesSection = () => {
 
   const features = [
     {
+      title: "Pick Any Provider",
+      description: "Choose from leading AI providers",
+      details: [
+        "OpenAI GPT models",
+        "Anthropic Claude",
+        "Cerebrus AI",
+        "ElevenLabs voice synthesis",
+        "Google AI",
+        "Meta Llama"
+      ]
+    },
+    {
       title: "Fully Customizable",
       description: "Tailor every aspect to your needs",
       details: [
         "Use any voice of your choice",
-        "Any LLM Provider - OpenAI, Anthropic, Cerebrus, and more",
         "Change your system prompt dynamically",
-        "Pick personalities from Marketplace (Jarvis, and countless others)"
+        "Pick personalities from Marketplace (Jarvis, and countless others)",
+        "Configure response styles and behaviors"
       ]
     },
     {
@@ -67,7 +79,28 @@ const FeaturesSection = () => {
 
   const getAnimationComponent = (index: number, isVisible: boolean) => {
     switch (index) {
-      case 0: // Fully Customizable - Morphing shapes
+      case 0: // Pick Any Provider - Rotating logos ticker
+        return (
+          <div className="feature-animation-container">
+            <div className={`logo-ticker ${isVisible ? 'animate' : ''}`}>
+              <div className="ticker-track">
+                <img src="/src/assets/openai-logo.svg" alt="OpenAI" className="provider-logo" />
+                <img src="/src/assets/anthropic-logo.png" alt="Anthropic" className="provider-logo" />
+                <div className="provider-logo provider-logo-text">Cerebrus</div>
+                <div className="provider-logo provider-logo-text">ElevenLabs</div>
+                <div className="provider-logo provider-logo-text">Google AI</div>
+                <div className="provider-logo provider-logo-text">Meta</div>
+                <img src="/src/assets/openai-logo.svg" alt="OpenAI" className="provider-logo" />
+                <img src="/src/assets/anthropic-logo.png" alt="Anthropic" className="provider-logo" />
+                <div className="provider-logo provider-logo-text">Cerebrus</div>
+                <div className="provider-logo provider-logo-text">ElevenLabs</div>
+                <div className="provider-logo provider-logo-text">Google AI</div>
+                <div className="provider-logo provider-logo-text">Meta</div>
+              </div>
+            </div>
+          </div>
+        );
+      case 1: // Fully Customizable - Morphing shapes
         return (
           <div className="feature-animation-container">
             <div className={`morphing-shapes ${isVisible ? 'animate' : ''}`}>
@@ -77,7 +110,7 @@ const FeaturesSection = () => {
             </div>
           </div>
         );
-      case 1: // Tool Call Enabled - Lightning effects
+      case 2: // Tool Call Enabled - Lightning effects
         return (
           <div className="feature-animation-container">
             <div className={`lightning-container ${isVisible ? 'animate' : ''}`}>
@@ -86,7 +119,7 @@ const FeaturesSection = () => {
             </div>
           </div>
         );
-      case 2: // Privacy First - Shield animation
+      case 3: // Privacy First - Shield animation
         return (
           <div className="feature-animation-container">
             <div className={`shield-container ${isVisible ? 'animate' : ''}`}>
@@ -96,7 +129,7 @@ const FeaturesSection = () => {
             </div>
           </div>
         );
-      case 3: // Lightning Fast - Pulse/speed
+      case 4: // Lightning Fast - Pulse/speed
         return (
           <div className="feature-animation-container">
             <div className={`speed-container ${isVisible ? 'animate' : ''}`}>
@@ -124,7 +157,7 @@ const FeaturesSection = () => {
           </p>
         </div>
         
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-8 max-w-7xl mx-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-5 gap-8 max-w-8xl mx-auto">
           {features.map((feature, index) => (
             <div 
               key={feature.title}
