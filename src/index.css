@@ -772,13 +772,22 @@
     z-index: 10; /* Below header's z-50 */
     margin-top: 64px; /* Height of header (h-16 = 64px) */
     padding: 6px 6px 0 6px; /* Remove bottom padding */
+  }
+  
+  .animated-gradient-border::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     background: conic-gradient(
       from 0deg,
       #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
       #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503
     );
     animation: gradientBorderRotate 8s linear infinite;
-    border-radius: 0;
+    z-index: -1;
   }
   
   .animated-gradient-border::after {
