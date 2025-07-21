@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
+// Import logos
+import openaiLogo from "@/assets/openai-logo.png";
+import anthropicLogo from "@/assets/anthropic-logo.png";
+import cerebrasLogo from "@/assets/cerebras-logo.png";
+import elevenlabsLogo from "@/assets/elevenlabs-logo.png";
+import googleAiLogo from "@/assets/google-ai-logo.png";
+import metaLogo from "@/assets/meta-logo.png";
+
 const FeaturesSection = () => {
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const sectionRef = useRef<HTMLDivElement>(null);
@@ -167,18 +175,18 @@ const FeaturesSection = () => {
                     <div className="mt-8 w-full overflow-hidden">
                       <div className="logo-ticker animate">
                       <div className="ticker-track">
-                        <img src="/lovable-uploads/62a020ea-47e5-4023-ad55-7b6466acd665.png" alt="OpenAI" className="provider-logo" />
-                        <img src="/lovable-uploads/08d900d5-b4c6-43d7-8e90-87a13069cd14.png" alt="Anthropic" className="provider-logo" />
-                        <img src="/lovable-uploads/744124eb-2645-458e-8b89-dd1336ffb39c.png" alt="Cerebras" className="provider-logo" />
-                        <img src="/lovable-uploads/5cfb69dd-e48d-49bf-b9f9-2769e53b023f.png" alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
-                        <img src="/lovable-uploads/91e751a7-115a-416b-b7b3-9e7cee11584b.png" alt="Google AI" className="provider-logo" />
-                        <img src="/lovable-uploads/1a447f91-b21f-4746-9f75-278db25daedd.png" alt="Meta" className="provider-logo" />
-                        <img src="/lovable-uploads/62a020ea-47e5-4023-ad55-7b6466acd665.png" alt="OpenAI" className="provider-logo" />
-                        <img src="/lovable-uploads/08d900d5-b4c6-43d7-8e90-87a13069cd14.png" alt="Anthropic" className="provider-logo" />
-                        <img src="/lovable-uploads/744124eb-2645-458e-8b89-dd1336ffb39c.png" alt="Cerebras" className="provider-logo" />
-                        <img src="/lovable-uploads/5cfb69dd-e48d-49bf-b9f9-2769e53b023f.png" alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
-                        <img src="/lovable-uploads/91e751a7-115a-416b-b7b3-9e7cee11584b.png" alt="Google AI" className="provider-logo" />
-                        <img src="/lovable-uploads/1a447f91-b21f-4746-9f75-278db25daedd.png" alt="Meta" className="provider-logo" />
+                        <img src={openaiLogo} alt="OpenAI" className="provider-logo" />
+                        <img src={anthropicLogo} alt="Anthropic" className="provider-logo" />
+                        <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" />
+                        <img src={elevenlabsLogo} alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
+                        <img src={googleAiLogo} alt="Google AI" className="provider-logo" />
+                        <img src={metaLogo} alt="Meta" className="provider-logo" />
+                        <img src={openaiLogo} alt="OpenAI" className="provider-logo" />
+                        <img src={anthropicLogo} alt="Anthropic" className="provider-logo" />
+                        <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" />
+                        <img src={elevenlabsLogo} alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
+                        <img src={googleAiLogo} alt="Google AI" className="provider-logo" />
+                        <img src={metaLogo} alt="Meta" className="provider-logo" />
                       </div>
                       </div>
                     </div>
