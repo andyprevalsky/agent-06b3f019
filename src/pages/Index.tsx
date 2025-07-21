@@ -1,5 +1,6 @@
 import NaviHeader from "@/components/NaviHeader";
 import HeroSection from "@/components/HeroSection";
+import PoweredByTicker from "@/components/PoweredByTicker";
 import ProductShowcase from "@/components/ProductShowcase";
 import FeaturesSection from "@/components/FeaturesSection";
 import PreOrderSection from "@/components/PreOrderSection";
@@ -10,6 +11,7 @@ const Index = () => {
     <div className="min-h-screen">
       <NaviHeader />
       <HeroSection />
+      <PoweredByTicker />
       <ProductShowcase />
       <FeaturesSection />
       <PreOrderSection />

@@ -1,60 +1,65 @@
 import { useEffect, useRef, useState } from "react";
 
-// Import logos
-import openaiLogo from "@/assets/openai-logo.png";
-import anthropicLogo from "@/assets/anthropic-logo.png";
-import cerebrasLogo from "@/assets/cerebras-logo.png";
-import elevenlabsLogo from "@/assets/elevenlabs-logo.png";
-import googleAiLogo from "@/assets/google-ai-logo.png";
-import metaLogo from "@/assets/meta-logo.png";
-
 const FeaturesSection = () => {
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const sectionRef = useRef<HTMLDivElement>(null);
 
   const features = [
     {
-      title: "Pick Any Provider",
-      description: "Choose from leading AI providers",
-      details: []
-    },
-    {
-      title: "Fully Customizable",
-      description: "Tailor every aspect to your needs",
+      title: "Frontier AI at Your Fingertips",
+      description: "Navi is a hardware device that brings frontier LLMs closer than ever before",
       details: [
-        "Use any voice of your choice",
-        "Change your system prompt dynamically",
-        "Pick personalities from Marketplace (Jarvis, and countless others)",
-        "Configure response styles and behaviors"
+        "Navi makes frontier reasoning models milliseconds away",
+        "Access state-of-the-art reasoning models in an instant to keep you on the go and building momentum"
       ]
     },
     {
-      title: "Tool Call Enabled",
-      description: "Voice commands that trigger real actions",
+      title: "Fully Customizable",
+      description: "Change the system prompt, voice model, chat providers & tools to tune Navi to your liking",
       details: [
-        "Trigger any arbitrary code through voice commands",
-        "Access comprehensive tool marketplace",
-        "Write your own custom tools in just 5 minutes",
-        "Seamless integration with your existing workflows"
+        "Customize system prompts, voice models, and chat model providers",
+        "Connect tools to tune Navi to your liking",
+        "Pick from a marketplace of hand-crafted presets to build from",
+        "Create your perfect AI companion"
+      ]
+    },
+    {
+      title: "Seamless Conversations",
+      description: "Navi is optimized to be blazing fast to make conversations feel seamless",
+      details: [
+        "AI models trained specifically to tell Navi when to talk and when not to",
+        "Navi feels more lifelike than anything else out there",
+        "Natural conversation flow without awkward interruptions"
+      ]
+    },
+    {
+      title: "Spawn Agents for Any Problem",
+      description: "Navi handles thousands of concurrent agents that interface with the real world",
+      details: [
+        "Agents can interface with the internet, hook into socials, and poll real-world oracles",
+        "Iterate towards any future outcome, whether you want to never miss a meal again or get your dream job",
+        "Continuously measure, learn, and build its way to any of your life goals",
+        "As AI gets better, the level of abstraction of problems that can be solved increases"
       ]
     },
     {
       title: "Privacy First",
-      description: "Your data stays yours, always",
+      description: "Navi stores no data from your conversations, ensuring complete privacy",
       details: [
-        "We never store any data about you",
-        "Direct communication from hardware to AI providers",
-        "End-to-end encryption for all voice data",
-        "Complete transparency in data handling"
+        "All data is streamed directly to frontier AI model providers anonymously",
+        "Navi does not passively listen to conversations",
+        "Triggered only on wake word 'Hi Navi'",
+        "Complete transparency in our commitment to your privacy"
       ]
     },
     {
-      title: "Lightning Fast",
-      description: "Instant responses without interruption",
+      title: "Navi Grows With You",
+      description: "A robust, state-of-the-art memory system that learns to be your perfect companion",
       details: [
-        "800ms response time",
-        "Interruptible",
-        "Doesn't Interrupt you"
+        "Remembers your preferences, anniversaries, and important information",
+        "AI meetup summaries and meal prep lists",
+        "Regular check-ins and relationship tracking",
+        "Evolving personality that adapts to your needs"
       ]
     }
   ];
@@ -80,9 +85,18 @@ const FeaturesSection = () => {
 
   const getAnimationComponent = (index: number, isVisible: boolean) => {
     switch (index) {
-      case 0: // Pick Any Provider - No animation here, full-width ticker below
-        return null;
-      case 1: // Fully Customizable - Morphing shapes
+      case 0: // Frontier AI - Pulsing core
+        return (
+          <div className="feature-animation-container">
+            <div className={`speed-container ${isVisible ? 'animate' : ''}`}>
+              <div className="speed-core"></div>
+              <div className="speed-ring-1"></div>
+              <div className="speed-ring-2"></div>
+              <div className="speed-particles"></div>
+            </div>
+          </div>
+        );
+      case 1: // Fully Customizable - Rotating gears
         return (
           <div className="feature-animation-container">
             <div className={`morphing-shapes ${isVisible ? 'animate' : ''}`}>
@@ -92,7 +106,7 @@ const FeaturesSection = () => {
             </div>
           </div>
         );
-      case 2: // Tool Call Enabled - Lightning effects
+      case 2: // Seamless Conversations - Wave forms
         return (
           <div className="feature-animation-container">
             <div className={`lightning-container ${isVisible ? 'animate' : ''}`}>
@@ -101,7 +115,16 @@ const FeaturesSection = () => {
             </div>
           </div>
         );
-      case 3: // Privacy First - Shield animation
+      case 3: // Spawn Agents - Network nodes
+        return (
+          <div className="feature-animation-container">
+            <div className={`lightning-container ${isVisible ? 'animate' : ''}`}>
+              <div className="lightning-bolt"></div>
+              <div className="lightning-glow"></div>
+            </div>
+          </div>
+        );
+      case 4: // Privacy First - Shield animation
         return (
           <div className="feature-animation-container">
             <div className={`shield-container ${isVisible ? 'animate' : ''}`}>
@@ -111,14 +134,13 @@ const FeaturesSection = () => {
             </div>
           </div>
         );
-      case 4: // Lightning Fast - Pulse/speed
+      case 5: // Navi Grows - Growing brain network
         return (
           <div className="feature-animation-container">
-            <div className={`speed-container ${isVisible ? 'animate' : ''}`}>
-              <div className="speed-core"></div>
-              <div className="speed-ring-1"></div>
-              <div className="speed-ring-2"></div>
-              <div className="speed-particles"></div>
+            <div className={`morphing-shapes ${isVisible ? 'animate' : ''}`}>
+              <div className="shape shape-1"></div>
+              <div className="shape shape-2"></div>
+              <div className="shape shape-3"></div>
             </div>
           </div>
         );
@@ -149,11 +171,9 @@ const FeaturesSection = () => {
               }`}
             >
               <div className="feature-content-no-bg">
-                {index !== 0 && (
-                  <div className="feature-animation-wrapper">
-                    {getAnimationComponent(index, visibleItems.has(index))}
-                  </div>
-                )}
+                <div className="feature-animation-wrapper">
+                  {getAnimationComponent(index, visibleItems.has(index))}
+                </div>
                 
                 <div className="feature-text">
                   <h3 className="text-2xl font-semibold mb-2 text-foreground">{feature.title}</h3>
@@ -168,28 +188,6 @@ const FeaturesSection = () => {
                         </li>
                       ))}
                     </ul>
-                  )}
-                  
-                  {/* Show ticker only for "Pick Any Provider" feature */}
-                  {index === 0 && (
-                    <div className="mt-8 w-full overflow-hidden">
-                      <div className="logo-ticker animate">
-                      <div className="ticker-track">
-                        <img src={openaiLogo} alt="OpenAI" className="provider-logo" />
-                        <img src={anthropicLogo} alt="Anthropic" className="provider-logo" />
-                        <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" />
-                        <img src={elevenlabsLogo} alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
-                        <img src={googleAiLogo} alt="Google AI" className="provider-logo" />
-                        <img src={metaLogo} alt="Meta" className="provider-logo" />
-                        <img src={openaiLogo} alt="OpenAI" className="provider-logo" />
-                        <img src={anthropicLogo} alt="Anthropic" className="provider-logo" />
-                        <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" />
-                        <img src={elevenlabsLogo} alt="ElevenLabs" className="provider-logo elevenlabs-logo" />
-                        <img src={googleAiLogo} alt="Google AI" className="provider-logo" />
-                        <img src={metaLogo} alt="Meta" className="provider-logo" />
-                      </div>
-                      </div>
-                    </div>
                   )}
                 </div>
               </div>
