@@ -736,6 +736,7 @@
 
   .elevenlabs-logo {
     height: 64px !important;
+    width: auto !important;
   }
 
   .provider-logo-text {

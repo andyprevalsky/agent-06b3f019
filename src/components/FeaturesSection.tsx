@@ -83,71 +83,6 @@ const FeaturesSection = () => {
     return () => observer.disconnect();
   }, []);
 
-  const getAnimationComponent = (index: number, isVisible: boolean) => {
-    switch (index) {
-      case 0: // Frontier AI - Pulsing core
-        return (
-          <div className="feature-animation-container">
-            <div className={`speed-container ${isVisible ? 'animate' : ''}`}>
-              <div className="speed-core"></div>
-              <div className="speed-ring-1"></div>
-              <div className="speed-ring-2"></div>
-              <div className="speed-particles"></div>
-            </div>
-          </div>
-        );
-      case 1: // Fully Customizable - Rotating gears
-        return (
-          <div className="feature-animation-container">
-            <div className={`morphing-shapes ${isVisible ? 'animate' : ''}`}>
-              <div className="shape shape-1"></div>
-              <div className="shape shape-2"></div>
-              <div className="shape shape-3"></div>
-            </div>
-          </div>
-        );
-      case 2: // Seamless Conversations - Wave forms
-        return (
-          <div className="feature-animation-container">
-            <div className={`lightning-container ${isVisible ? 'animate' : ''}`}>
-              <div className="lightning-bolt"></div>
-              <div className="lightning-glow"></div>
-            </div>
-          </div>
-        );
-      case 3: // Spawn Agents - Network nodes
-        return (
-          <div className="feature-animation-container">
-            <div className={`lightning-container ${isVisible ? 'animate' : ''}`}>
-              <div className="lightning-bolt"></div>
-              <div className="lightning-glow"></div>
-            </div>
-          </div>
-        );
-      case 4: // Navi Grows - Growing brain network
-        return (
-          <div className="feature-animation-container">
-            <div className={`morphing-shapes ${isVisible ? 'animate' : ''}`}>
-              <div className="shape shape-1"></div>
-              <div className="shape shape-2"></div>
-              <div className="shape shape-3"></div>
-            </div>
-          </div>
-        );
-      case 5: // Privacy First - Shield animation
-        return (
-          <div className="feature-animation-container">
-            <div className={`shield-container ${isVisible ? 'animate' : ''}`}>
-              <div className="shield-base"></div>
-              <div className="shield-lock"></div>
-              <div className="shield-rings"></div>
-            </div>
-          </div>
-        );
-      default:
-        return null;
-    }
-  };
 
   return (
     <section id="features" className="py-24 bg-surface relative" ref={sectionRef}>
@@ -161,7 +96,7 @@ const FeaturesSection = () => {
           </p>
         </div>
         
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-5 gap-8 max-w-8xl mx-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-12 max-w-6xl mx-auto">
           {features.map((feature, index) => (
             <div 
               key={feature.title}
@@ -171,12 +106,8 @@ const FeaturesSection = () => {
               }`}
             >
               <div className="feature-content-no-bg">
-                <div className="feature-animation-wrapper">
-                  {getAnimationComponent(index, visibleItems.has(index))}
-                </div>
-                
                 <div className="feature-text">
-                  <h3 className="text-2xl font-semibold mb-2 text-foreground">{feature.title}</h3>
+                  <h3 className="text-2xl font-semibold mb-4 text-foreground">{feature.title}</h3>
                   <p className="text-muted-foreground mb-6">{feature.description}</p>
                   
                   {feature.details.length > 0 && (

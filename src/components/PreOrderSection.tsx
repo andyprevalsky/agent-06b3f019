@@ -2,15 +2,11 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { useEffect, useRef, useState } from "react";
-import { processVideoWithBackgroundRemoval } from "@/lib/backgroundRemoval";
+import { useEffect, useRef } from "react";
 
 const PreOrderSection = () => {
   const blackVideoRef = useRef<HTMLVideoElement>(null);
   const whiteVideoRef = useRef<HTMLVideoElement>(null);
-  const [blackProcessedSrc, setBlackProcessedSrc] = useState<string>('');
-  const [whiteProcessedSrc, setWhiteProcessedSrc] = useState<string>('');
-  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
     const syncVideos = async () => {
@@ -27,24 +23,6 @@ const PreOrderSection = () => {
             blackVideoRef.current.play(),
             whiteVideoRef.current.play()
           ]);
-
-          // Process videos to remove background after they start playing
-          if (!isProcessing) {
-            setIsProcessing(true);
-            try {
-              const [blackProcessed, whiteProcessed] = await Promise.all([
-                processVideoWithBackgroundRemoval(blackVideoRef.current),
-                processVideoWithBackgroundRemoval(whiteVideoRef.current)
-              ]);
-              
-              setBlackProcessedSrc(blackProcessed);
-              setWhiteProcessedSrc(whiteProcessed);
-            } catch (error) {
-              console.log('Background removal failed, using original videos:', error);
-            } finally {
-              setIsProcessing(false);
-            }
-          }
         } catch (error) {
           console.log('Video sync failed:', error);
         }
@@ -52,7 +30,7 @@ const PreOrderSection = () => {
     };
 
     syncVideos();
-  }, [isProcessing]);
+  }, []);
 
   const handlePreOrder = (variant: 'black' | 'white') => {
     // Real Stripe Payment Links - create these in your Stripe dashboard
@@ -69,7 +47,7 @@ const PreOrderSection = () => {
   };
 
   return (
-    <section id="pre-order" className="py-24 bg-gradient-to-b from-surface to-background relative overflow-hidden">
+    <section id="pre-order" className="py-32 bg-gradient-to-b from-surface to-background relative overflow-hidden">
       <div className="container mx-auto px-6">
         <div className="text-center mb-16">
           <Badge variant="outline" className="mb-4 px-4 py-2 text-sm border-primary/20 text-primary">

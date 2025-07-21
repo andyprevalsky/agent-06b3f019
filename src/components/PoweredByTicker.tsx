@@ -7,7 +7,7 @@ import metaLogo from "@/assets/meta-logo.png";
 
 const PoweredByTicker = () => {
   return (
-    <section className="py-12 bg-background border-b border-border/50">
+    <section className="py-16 bg-background border-b border-border/50">
       <div className="container mx-auto px-6">
         <p className="text-center text-sm text-muted-foreground/60 mb-8 font-light">
           Powered by
