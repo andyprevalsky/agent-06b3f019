@@ -10,10 +10,25 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { useToast } from "@/hooks/use-toast";
 
 const customDesignSchema = z.object({
-  name: z.string().min(1, "Name is required"),
-  email: z.string().email("Invalid email address"),
-  phone: z.string().min(1, "Phone number is required"),
-  description: z.string().min(10, "Please provide at least 10 characters describing your custom design")
+  name: z.string()
+    .min(2, "Name must be at least 2 characters")
+    .max(50, "Name must be less than 50 characters")
+    .regex(/^[a-zA-Z\s]+$/, "Name can only contain letters and spaces"),
+  email: z.string()
+    .min(1, "Email is required")
+    .email("Please enter a valid email address")
+    .max(100, "Email must be less than 100 characters"),
+  phone: z.string()
+    .min(1, "Phone number is required")
+    .regex(/^[\+]?[1-9][\d]{0,15}$/, "Please enter a valid phone number")
+    .min(10, "Phone number must be at least 10 digits")
+    .max(17, "Phone number must be less than 17 characters"),
+  description: z.string()
+    .min(20, "Please provide at least 20 characters describing your custom design")
+    .max(1000, "Description must be less than 1000 characters")
+    .refine((val) => val.trim().split(' ').length >= 5, {
+      message: "Please provide at least 5 words in your description"
+    })
 });
 
 type CustomDesignForm = z.infer<typeof customDesignSchema>;
@@ -24,6 +39,7 @@ const CustomDesignForm = () => {
 
   const form = useForm<CustomDesignForm>({
     resolver: zodResolver(customDesignSchema),
+    mode: "onChange", // Enable real-time validation
     defaultValues: {
       name: "",
       email: "",
@@ -98,9 +114,13 @@ const CustomDesignForm = () => {
                     name="name"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Name</FormLabel>
+                        <FormLabel>Full Name *</FormLabel>
                         <FormControl>
-                          <Input placeholder="Your full name" {...field} />
+                          <Input 
+                            placeholder="Enter your full name" 
+                            {...field}
+                            className={form.formState.errors.name ? "border-destructive" : ""}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -112,9 +132,14 @@ const CustomDesignForm = () => {
                     name="email"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Email</FormLabel>
+                        <FormLabel>Email Address *</FormLabel>
                         <FormControl>
-                          <Input type="email" placeholder="your@email.com" {...field} />
+                          <Input 
+                            type="email" 
+                            placeholder="your.email@example.com" 
+                            {...field}
+                            className={form.formState.errors.email ? "border-destructive" : ""}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -126,9 +151,13 @@ const CustomDesignForm = () => {
                     name="phone"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Phone</FormLabel>
+                        <FormLabel>Phone Number *</FormLabel>
                         <FormControl>
-                          <Input placeholder="Your phone number" {...field} />
+                          <Input 
+                            placeholder="+1 (555) 123-4567" 
+                            {...field}
+                            className={form.formState.errors.phone ? "border-destructive" : ""}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -140,13 +169,18 @@ const CustomDesignForm = () => {
                     name="description"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Design Description</FormLabel>
+                        <FormLabel>Design Description *</FormLabel>
                         <FormControl>
-                          <Textarea 
-                            placeholder="Describe your custom design vision in detail..."
-                            className="min-h-[120px]"
-                            {...field} 
-                          />
+                          <div className="relative">
+                            <Textarea 
+                              placeholder="Describe your custom design vision in detail... Include colors, materials, patterns, or any specific features you'd like."
+                              className={`min-h-[120px] resize-none ${form.formState.errors.description ? "border-destructive" : ""}`}
+                              {...field} 
+                            />
+                            <div className="absolute bottom-2 right-2 text-xs text-muted-foreground">
+                              {field.value.length}/1000
+                            </div>
+                          </div>
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -156,10 +190,14 @@ const CustomDesignForm = () => {
                   <Button 
                     type="submit" 
                     className="w-full" 
-                    disabled={isSubmitting}
+                    disabled={isSubmitting || !form.formState.isValid}
                   >
                     {isSubmitting ? "Sending Request..." : "Send Custom Design Request"}
                   </Button>
+                  
+                  <p className="text-xs text-muted-foreground text-center mt-2">
+                    * Required fields. We'll respond within 24 hours with a custom quote.
+                  </p>
                  </form>
                </Form>
              </CardContent>
