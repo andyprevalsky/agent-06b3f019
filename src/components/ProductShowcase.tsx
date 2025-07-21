@@ -39,36 +39,8 @@ const ProductShowcase = () => {
           </p>
         </div>
 
-        {/* AI Provider Service Information */}
-        <div className="mt-24 reveal-up reveal-delay-3">
-          <div className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-lg p-8 max-w-4xl mx-auto">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
-              <div>
-                <h3 className="text-2xl font-semibold mb-4">AI Provider Services</h3>
-                <p className="text-muted-foreground mb-4">
-                  All Navi devices require AI provider services for optimal functionality. You have two options:
-                </p>
-                <ul className="text-muted-foreground space-y-2 mb-4">
-                  <li>• <strong>Provide your own API keys</strong> - Use your existing accounts</li>
-                  <li>• <strong>Pay-as-you-go service</strong> - We handle everything at cost (no markup)</li>
-                </ul>
-                <p className="text-sm text-muted-foreground/80">
-                  Service charges cover AI provider costs only. We don't profit from this component.
-                </p>
-              </div>
-              <div className="flex justify-center">
-                <img 
-                  src="https://images.unsplash.com/photo-1518770660439-4636190af475?w=400&h=300&fit=crop&crop=center" 
-                  alt="AI Technology"
-                  className="w-3/4 h-auto rounded-lg"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-
         {/* Custom Design Section */}
-        <div className="text-center mt-24 reveal-up reveal-delay-4">
+        <div className="text-center mt-24 reveal-up reveal-delay-3">
           <img 
             src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=600&h=400&fit=crop&crop=center" 
             alt="Custom Design Navi"

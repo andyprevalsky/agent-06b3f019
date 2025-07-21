@@ -84,29 +84,23 @@ const CustomDesignForm = () => {
       <div className="container mx-auto px-6">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center max-w-6xl mx-auto">
           
-          {/* Custom Design Image */}
-          <div className="relative reveal-up">
-            <img 
-              src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=600&h=400&fit=crop&crop=center" 
-              alt="Custom Design Navi"
-              className="w-3/4 h-auto mx-auto rounded-lg"
-            />
-            <div className="mt-4 text-center">
-              <h2 className="text-3xl font-bold mb-2">Custom Design</h2>
-              <p className="text-muted-foreground mb-2 text-lg font-medium">Starting at $299</p>
-              <p className="text-muted-foreground">
-                Ready to bring your unique vision to life? Fill out the form and we'll get back to you with a custom quote.
-              </p>
-            </div>
-          </div>
-          
           {/* Custom Design Form */}
-          <div className="reveal-up reveal-delay-1">
+          <div className="reveal-up">
             <Card className="bg-card/50 backdrop-blur-sm border-border/50">
               <CardHeader>
                 <CardTitle className="text-2xl text-center">Request Custom Design</CardTitle>
               </CardHeader>
             <CardContent>
+              {/* Image and Description */}
+              <div className="text-center mb-6 pb-6 border-b border-border/20">
+                <img 
+                  src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=300&h=200&fit=crop&crop=center" 
+                  alt="Custom Design Navi"
+                  className="w-2/3 h-auto mx-auto rounded-lg mb-3"
+                />
+                <p className="text-sm text-muted-foreground">Starting at $299 + <a href="#service-fee" className="text-primary hover:underline cursor-pointer">service fee</a></p>
+                <p className="text-sm text-muted-foreground mt-1">Bring your unique vision to life with a personalized Navi device.</p>
+              </div>
               <Form {...form}>
                 <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
                   <FormField
@@ -201,10 +195,13 @@ const CustomDesignForm = () => {
                  </form>
                </Form>
              </CardContent>
-           </Card>
-         </div>
-         
-       </div>
+            </Card>
+          </div>
+          
+          {/* Empty second column for spacing */}
+          <div></div>
+          
+        </div>
      </div>
    </section>
   );

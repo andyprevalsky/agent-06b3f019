@@ -82,7 +82,7 @@ const PreOrderSection = () => {
               </div>
               
               <div className="mb-8">
-                <div className="text-3xl font-light tracking-tight">$299</div>
+                <div className="text-3xl font-light tracking-tight">$299 + <a href="#service-fee" className="text-primary hover:underline cursor-pointer text-lg">service fee</a></div>
               </div>
               
               <Button 
@@ -117,7 +117,7 @@ const PreOrderSection = () => {
               </div>
               
               <div className="mb-8">
-                <div className="text-3xl font-light tracking-tight">$199</div>
+                <div className="text-3xl font-light tracking-tight">$199 + <a href="#service-fee" className="text-primary hover:underline cursor-pointer text-lg">service fee</a></div>
               </div>
               
               <Button 
