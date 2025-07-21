@@ -773,23 +773,24 @@
     margin-top: 64px; /* Height of header (h-16 = 64px) */
     padding: 6px 6px 0 6px; /* Remove bottom padding */
     background: linear-gradient(
-      0deg,
-      transparent, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, transparent
+      90deg,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
     );
-    animation: gradientBorderRotate 8s linear infinite;
+    background-size: 400% 400%;
+    animation: gradientBorderRotate 6s linear infinite;
     border-radius: 0;
   }
   
   .animated-gradient-border::after {
     content: '';
     position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 100px;
+    bottom: -6px;
+    left: 6px;
+    right: 6px;
+    height: 60px;
     background: linear-gradient(to bottom, transparent, hsl(var(--background)));
-    z-index: 1;
+    z-index: 2;
   }
   
   .animated-gradient-border section {
@@ -800,17 +801,18 @@
   
   @keyframes gradientBorderRotate {
     0% {
-      background-image: linear-gradient(
-        0deg,
-        transparent, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, transparent
-      );
+      background-position: 0% 50%;
+    }
+    25% {
+      background-position: 100% 50%;
+    }
+    50% {
+      background-position: 100% 100%;
+    }
+    75% {
+      background-position: 0% 100%;
     }
     100% {
-      background-image: linear-gradient(
-        360deg,
-        transparent, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, transparent
-      );
+      background-position: 0% 50%;
     }
   }
