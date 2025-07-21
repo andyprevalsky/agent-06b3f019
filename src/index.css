@@ -805,7 +805,6 @@
     );
     background-size: 100% 200%;
     animation: borderFlowRight 8s linear infinite;
-    animation-delay: 2s;
   }
   
   /* Bottom Border */
@@ -822,7 +821,6 @@
     );
     background-size: 200% 100%;
     animation: borderFlowBottom 8s linear infinite;
-    animation-delay: 4s;
   }
   
   /* Left Border */
@@ -839,7 +837,6 @@
     );
     background-size: 100% 200%;
     animation: borderFlowLeft 8s linear infinite;
-    animation-delay: 6s;
   }
   
   /* Fade into next section */
