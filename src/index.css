@@ -766,121 +766,23 @@
   }
   }
   
-  /* Animated Gradient Border - Navi Logo Colors */
+  /* Animated Gradient Border - Simple Snake */
   .animated-gradient-border {
     position: relative;
     z-index: 10;
     margin-top: 64px;
-    border: 6px solid transparent;
+    padding: 6px;
+    background: conic-gradient(from 0deg, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, #FE7503);
+    background-size: 200% 200%;
+    animation: rotateGradient 4s linear infinite;
+    border-radius: 12px;
   }
   
-  /* Top Border - NO corner overlap */
-  .animated-gradient-border::before {
-    content: '';
-    position: absolute;
-    top: -6px;
-    left: 0px;
-    right: 0px;
-    height: 6px;
-    background: linear-gradient(
-      90deg,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
-    );
-    background-size: 200% 100%;
-    animation: snakeFlowTop 8s linear infinite;
-  }
-  
-  /* Right Border - NO corner overlap */
-  .animated-gradient-border .border-right {
-    position: absolute;
-    top: 0px;
-    right: -6px;
-    bottom: 0px;
-    width: 6px;
-    background: linear-gradient(
-      180deg,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
-    );
-    background-size: 100% 200%;
-    animation: snakeFlowRight 8s linear infinite;
-    animation-delay: 2s;
-  }
-  
-  /* Bottom Border - NO corner overlap */
-  .animated-gradient-border .border-bottom {
-    position: absolute;
-    bottom: -6px;
-    left: 0px;
-    right: 0px;
-    height: 6px;
-    background: linear-gradient(
-      270deg,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
-    );
-    background-size: 200% 100%;
-    animation: snakeFlowBottom 8s linear infinite;
-    animation-delay: 4s;
-  }
-  
-  /* Left Border - NO corner overlap */
-  .animated-gradient-border .border-left {
-    position: absolute;
-    top: 0px;
-    left: -6px;
-    bottom: 0px;
-    width: 6px;
-    background: linear-gradient(
-      0deg,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
-    );
-    background-size: 100% 200%;
-    animation: snakeFlowLeft 8s linear infinite;
-    animation-delay: 6s;
-  }
-  
-  /* Corner pieces to fill gaps */
-  .animated-gradient-border .corner-tl {
-    position: absolute;
-    top: -6px;
-    left: -6px;
-    width: 6px;
-    height: 6px;
-    background: #FE7503;
-    animation: cornerColorTL 8s linear infinite;
-  }
-  
-  .animated-gradient-border .corner-tr {
-    position: absolute;
-    top: -6px;
-    right: -6px;
-    width: 6px;
-    height: 6px;
-    background: #FE7503;
-    animation: cornerColorTR 8s linear infinite;
-  }
-  
-  .animated-gradient-border .corner-br {
-    position: absolute;
-    bottom: -6px;
-    right: -6px;
-    width: 6px;
-    height: 6px;
-    background: #FE7503;
-    animation: cornerColorBR 8s linear infinite;
-  }
-  
-  .animated-gradient-border .corner-bl {
-    position: absolute;
-    bottom: -6px;
-    left: -6px;
-    width: 6px;
-    height: 6px;
-    background: #FE7503;
-    animation: cornerColorBL 8s linear infinite;
+  .animated-gradient-border section {
+    background: hsl(var(--background));
+    border-radius: 6px;
+    position: relative;
+    z-index: 1;
   }
   
   /* Fade into next section */
@@ -901,56 +803,12 @@
     z-index: 1;
   }
   
-  /* Snake Flow Animations - Coordinated clockwise movement */
-  @keyframes snakeFlowTop {
-    0% { background-position: 0% 0; }
-    100% { background-position: 100% 0; }
-  }
-  
-  @keyframes snakeFlowRight {
-    0% { background-position: 0 0%; }
-    100% { background-position: 0 100%; }
-  }
-  
-  @keyframes snakeFlowBottom {
-    0% { background-position: 0% 0; }
-    100% { background-position: 100% 0; }
-  }
-  
-  @keyframes snakeFlowLeft {
-    0% { background-position: 0 0%; }
-    100% { background-position: 0 100%; }
-  }
-  
-  /* Corner color animations */
-  @keyframes cornerColorTL {
-    0%, 12.5% { background-color: #FE7503; }
-    25%, 37.5% { background-color: #FC585C; }
-    50%, 62.5% { background-color: #FD5776; }
-    75%, 87.5% { background-color: #E062CC; }
-    100% { background-color: #FE7503; }
-  }
-  
-  @keyframes cornerColorTR {
-    0%, 12.5% { background-color: #7A6BEC; }
-    25%, 37.5% { background-color: #FE7503; }
-    50%, 62.5% { background-color: #FC585C; }
-    75%, 87.5% { background-color: #FD5776; }
-    100% { background-color: #7A6BEC; }
-  }
-  
-  @keyframes cornerColorBR {
-    0%, 12.5% { background-color: #A76CED; }
-    25%, 37.5% { background-color: #7A6BEC; }
-    50%, 62.5% { background-color: #FE7503; }
-    75%, 87.5% { background-color: #FC585C; }
-    100% { background-color: #A76CED; }
-  }
-  
-  @keyframes cornerColorBL {
-    0%, 12.5% { background-color: #E062CC; }
-    25%, 37.5% { background-color: #A76CED; }
-    50%, 62.5% { background-color: #7A6BEC; }
-    75%, 87.5% { background-color: #FE7503; }
-    100% { background-color: #E062CC; }
+  /* Simple rotating gradient animation */
+  @keyframes rotateGradient {
+    0% { 
+      background-position: 0% 50%;
+    }
+    100% { 
+      background-position: 100% 50%;
+    }
   }
