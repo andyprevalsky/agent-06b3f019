@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
+// Import logos
+import openaiLogo from "@/assets/openai-logo.svg";
+import anthropicLogo from "@/assets/anthropic-logo.png";
+import cerebrasLogo from "@/assets/cerebras-logo.png";
+import elevenlabsLogo from "@/assets/elevenlabs-logo.png";
+import googleAiLogo from "@/assets/google-ai-logo.png";
+import metaLogo from "@/assets/meta-logo.png";
+
 const FeaturesSection = () => {
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const sectionRef = useRef<HTMLDivElement>(null);
@@ -163,28 +171,30 @@ const FeaturesSection = () => {
                   )}
                 </div>
               </div>
+
+              {/* Show ticker only for "Pick Any Provider" feature */}
+              {index === 0 && (
+                <div className="mt-8 w-full overflow-hidden">
+                  <div className="logo-ticker animate">
+                    <div className="ticker-track">
+                      <img src={openaiLogo} alt="OpenAI" className="provider-logo" />
+                      <img src={anthropicLogo} alt="Anthropic" className="provider-logo" />
+                      <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" />
+                      <img src={elevenlabsLogo} alt="ElevenLabs" className="provider-logo" />
+                      <img src={googleAiLogo} alt="Google AI" className="provider-logo" />
+                      <img src={metaLogo} alt="Meta" className="provider-logo" />
+                      <img src={openaiLogo} alt="OpenAI" className="provider-logo" />
+                      <img src={anthropicLogo} alt="Anthropic" className="provider-logo" />
+                      <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" />
+                      <img src={elevenlabsLogo} alt="ElevenLabs" className="provider-logo" />
+                      <img src={googleAiLogo} alt="Google AI" className="provider-logo" />
+                      <img src={metaLogo} alt="Meta" className="provider-logo" />
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
-        </div>
-
-        {/* Full-width provider ticker below all features */}
-        <div className="mt-16 w-full overflow-hidden">
-          <div className="logo-ticker animate">
-            <div className="ticker-track">
-              <img src="/src/assets/openai-logo.svg" alt="OpenAI" className="provider-logo" />
-              <img src="/src/assets/anthropic-logo.png" alt="Anthropic" className="provider-logo" />
-              <img src="/src/assets/cerebras-logo.png" alt="Cerebras" className="provider-logo" />
-              <img src="/src/assets/elevenlabs-logo.png" alt="ElevenLabs" className="provider-logo" />
-              <img src="/src/assets/google-ai-logo.png" alt="Google AI" className="provider-logo" />
-              <img src="/src/assets/meta-logo.png" alt="Meta" className="provider-logo" />
-              <img src="/src/assets/openai-logo.svg" alt="OpenAI" className="provider-logo" />
-              <img src="/src/assets/anthropic-logo.png" alt="Anthropic" className="provider-logo" />
-              <img src="/src/assets/cerebras-logo.png" alt="Cerebras" className="provider-logo" />
-              <img src="/src/assets/elevenlabs-logo.png" alt="ElevenLabs" className="provider-logo" />
-              <img src="/src/assets/google-ai-logo.png" alt="Google AI" className="provider-logo" />
-              <img src="/src/assets/meta-logo.png" alt="Meta" className="provider-logo" />
-            </div>
-          </div>
         </div>
       </div>
     </section>
