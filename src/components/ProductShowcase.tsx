@@ -11,7 +11,7 @@ const ProductShowcase = () => {
               alt="Navi in Midnight Black"
               className="w-3/4 h-auto mx-auto"
             />
-            <div className="mt-8 text-center">
+            <div className="mt-4 text-center">
               <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
               <p className="text-muted-foreground">Precision-crafted aluminum with a deep, sophisticated finish</p>
             </div>
@@ -24,7 +24,7 @@ const ProductShowcase = () => {
               alt="Navi in Pearl White"
               className="w-3/4 h-auto mx-auto"
             />
-            <div className="mt-8 text-center">
+            <div className="mt-4 text-center">
               <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
               <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
             </div>
