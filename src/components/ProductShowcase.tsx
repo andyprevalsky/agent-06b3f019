@@ -32,13 +32,6 @@ const ProductShowcase = () => {
           
         </div>
         
-        <div className="text-center mt-16 mb-16 reveal-up reveal-delay-2">
-          <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-            Every Navi device is meticulously crafted with premium materials, 
-            featuring precision-engineered perforations that optimize both acoustics and aesthetics.
-          </p>
-        </div>
-
         {/* Custom Design Section */}
         <div className="text-center mt-24 reveal-up reveal-delay-3">
           <img 
