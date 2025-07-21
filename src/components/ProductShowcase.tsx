@@ -7,7 +7,7 @@ const ProductShowcase = () => {
           {/* Black Navi */}
           <div className="relative reveal-up">
             <img 
-              src="/lovable-uploads/ceb32f02-0a39-4b26-b145-35cf962ec759.png" 
+              src="/lovable-uploads/91e751a7-115a-416b-b7b3-9e7cee11584b.png" 
               alt="Navi in Midnight Black"
               className="w-3/4 h-auto mx-auto"
             />
