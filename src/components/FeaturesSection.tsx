@@ -1,13 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 
-// Import logos
-import openaiLogo from "@/assets/openai-logo.png";
-import anthropicLogo from "@/assets/anthropic-logo.png";
-import cerebrasLogo from "@/assets/cerebras-logo.png";
-import elevenlabsLogo from "@/assets/elevenlabs-logo.png";
-import googleAiLogo from "@/assets/google-ai-logo.png";
-import metaLogo from "@/assets/meta-logo.png";
-
 const FeaturesSection = () => {
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const sectionRef = useRef<HTMLDivElement>(null);
