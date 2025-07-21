@@ -66,18 +66,30 @@ const CustomDesignForm = () => {
   return (
     <section className="py-24 bg-gradient-to-b from-surface to-background">
       <div className="container mx-auto px-6">
-        <div className="max-w-2xl mx-auto">
-          <div className="text-center mb-12">
-            <h2 className="text-4xl font-bold mb-4">Request Your Custom Design</h2>
-            <p className="text-lg text-muted-foreground">
-              Ready to bring your unique vision to life? Fill out the form below and we'll get back to you with a custom quote.
-            </p>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center max-w-6xl mx-auto">
+          
+          {/* Custom Design Image */}
+          <div className="relative reveal-up">
+            <img 
+              src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=600&h=400&fit=crop&crop=center" 
+              alt="Custom Design Navi"
+              className="w-3/4 h-auto mx-auto rounded-lg"
+            />
+            <div className="mt-4 text-center">
+              <h2 className="text-3xl font-bold mb-2">Custom Design</h2>
+              <p className="text-muted-foreground mb-2 text-lg font-medium">Starting at $299</p>
+              <p className="text-muted-foreground">
+                Ready to bring your unique vision to life? Fill out the form and we'll get back to you with a custom quote.
+              </p>
+            </div>
           </div>
           
-          <Card className="bg-card/50 backdrop-blur-sm border-border/50">
-            <CardHeader>
-              <CardTitle className="text-2xl text-center">Custom Design Request</CardTitle>
-            </CardHeader>
+          {/* Custom Design Form */}
+          <div className="reveal-up reveal-delay-1">
+            <Card className="bg-card/50 backdrop-blur-sm border-border/50">
+              <CardHeader>
+                <CardTitle className="text-2xl text-center">Request Custom Design</CardTitle>
+              </CardHeader>
             <CardContent>
               <Form {...form}>
                 <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
@@ -148,13 +160,15 @@ const CustomDesignForm = () => {
                   >
                     {isSubmitting ? "Sending Request..." : "Send Custom Design Request"}
                   </Button>
-                </form>
-              </Form>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    </section>
+                 </form>
+               </Form>
+             </CardContent>
+           </Card>
+         </div>
+         
+       </div>
+     </div>
+   </section>
   );
 };
 

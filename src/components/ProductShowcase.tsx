@@ -47,7 +47,6 @@ const ProductShowcase = () => {
             className="w-1/2 lg:w-1/3 h-auto mx-auto rounded-lg mb-6"
           />
           <h3 className="text-2xl font-semibold mb-2">Custom Design</h3>
-          <p className="text-muted-foreground mb-2 text-lg font-medium">Starting at $299</p>
           <p className="text-muted-foreground max-w-2xl mx-auto">
             Bring your unique vision to life with a personalized Navi device. From custom colors to unique patterns, 
             we'll work with you to create something truly one-of-a-kind.
