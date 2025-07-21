@@ -1,12 +1,19 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import NaviHeader from "@/components/NaviHeader";
+import HeroSection from "@/components/HeroSection";
+import ProductShowcase from "@/components/ProductShowcase";
+import FeaturesSection from "@/components/FeaturesSection";
+import PreOrderSection from "@/components/PreOrderSection";
+import NaviFooter from "@/components/NaviFooter";
 
 const Index = () => {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
-      <div className="text-center">
-        <h1 className="text-4xl font-bold mb-4">Welcome to Your Blank App</h1>
-        <p className="text-xl text-muted-foreground">Start building your amazing project here!</p>
-      </div>
+    <div className="min-h-screen">
+      <NaviHeader />
+      <HeroSection />
+      <ProductShowcase />
+      <FeaturesSection />
+      <PreOrderSection />
+      <NaviFooter />
     </div>
   );
 };

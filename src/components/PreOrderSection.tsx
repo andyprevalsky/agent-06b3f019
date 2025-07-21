@@ -1,0 +1,113 @@
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+
+const PreOrderSection = () => {
+  const handlePreOrder = (variant: 'black' | 'white') => {
+    // This would integrate with Stripe checkout
+    console.log(`Pre-ordering ${variant} Navi`);
+    // For now, just scroll to show the action
+    window.open('#', '_blank');
+  };
+
+  return (
+    <section id="pre-order" className="py-24 bg-gradient-to-b from-surface to-background relative overflow-hidden">
+      <div className="container mx-auto px-6">
+        <div className="text-center mb-16">
+          <Badge variant="outline" className="mb-4 px-4 py-2 text-sm border-primary/20 text-primary">
+            Limited Early Access
+          </Badge>
+          <h2 className="text-5xl font-light tracking-tight mb-6 reveal-up">
+            <span className="gradient-text">Reserve Your Navi</span>
+          </h2>
+          <p className="text-xl text-muted-foreground max-w-2xl mx-auto reveal-up reveal-delay-1">
+            Be among the first to experience the future of voice AI. 
+            Choose your preferred finish and secure your place in line.
+          </p>
+        </div>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+          
+          {/* Midnight Black */}
+          <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
+            <CardContent className="p-8 text-center">
+              <div className="mb-6">
+                <div className="w-24 h-24 bg-primary rounded-3xl mx-auto mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300"></div>
+                <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
+                <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
+              </div>
+              
+              <div className="mb-8">
+                <div className="text-sm text-muted-foreground mb-2">Starting at</div>
+                <div className="text-3xl font-light tracking-tight">Contact for pricing</div>
+              </div>
+              
+              <Button 
+                onClick={() => handlePreOrder('black')}
+                className="btn-luxury w-full"
+                size="lg"
+              >
+                Pre-order Midnight Black
+              </Button>
+              
+              <p className="text-xs text-muted-foreground mt-4">
+                Free shipping • 30-day returns • 2-year warranty
+              </p>
+            </CardContent>
+          </Card>
+          
+          {/* Pearl White */}
+          <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
+            <CardContent className="p-8 text-center">
+              <div className="mb-6">
+                <div className="w-24 h-24 bg-surface-elevated border-2 border-border rounded-3xl mx-auto mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300"></div>
+                <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
+                <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
+              </div>
+              
+              <div className="mb-8">
+                <div className="text-sm text-muted-foreground mb-2">Starting at</div>
+                <div className="text-3xl font-light tracking-tight">Contact for pricing</div>
+              </div>
+              
+              <Button 
+                onClick={() => handlePreOrder('white')}
+                className="btn-pearl w-full"
+                size="lg"
+              >
+                Pre-order Pearl White
+              </Button>
+              
+              <p className="text-xs text-muted-foreground mt-4">
+                Free shipping • 30-day returns • 2-year warranty
+              </p>
+            </CardContent>
+          </Card>
+          
+        </div>
+        
+        <div className="text-center mt-12 reveal-up reveal-delay-3">
+          <p className="text-sm text-muted-foreground mb-4">
+            Expected delivery: Q2 2024 • Limited quantities available
+          </p>
+          <div className="flex justify-center space-x-8">
+            <div className="flex items-center space-x-2">
+              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+              <span className="text-xs text-muted-foreground">Secure payment</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+              <span className="text-xs text-muted-foreground">No upfront charges</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+              <span className="text-xs text-muted-foreground">Cancel anytime</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
+
+export default PreOrderSection;
