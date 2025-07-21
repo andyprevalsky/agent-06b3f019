@@ -2,8 +2,36 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { useEffect, useRef } from "react";
 
 const PreOrderSection = () => {
+  const blackVideoRef = useRef<HTMLVideoElement>(null);
+  const whiteVideoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const syncVideos = async () => {
+      if (blackVideoRef.current && whiteVideoRef.current) {
+        try {
+          // Ensure both videos are ready
+          await Promise.all([
+            blackVideoRef.current.load(),
+            whiteVideoRef.current.load()
+          ]);
+          
+          // Start both videos at the same time
+          await Promise.all([
+            blackVideoRef.current.play(),
+            whiteVideoRef.current.play()
+          ]);
+        } catch (error) {
+          console.log('Video sync failed:', error);
+        }
+      }
+    };
+
+    syncVideos();
+  }, []);
+
   const handlePreOrder = (variant: 'black' | 'white') => {
     // Real Stripe Payment Links - create these in your Stripe dashboard
     const checkoutUrls = {
@@ -41,8 +69,8 @@ const PreOrderSection = () => {
             <CardContent className="p-8 text-center">
               <div className="mb-6">
                 <video 
+                  ref={blackVideoRef}
                   className="w-48 h-48 rounded-3xl mx-auto mb-4 group-hover:scale-110 transition-transform duration-300 object-cover"
-                  autoPlay
                   loop
                   muted
                   playsInline
@@ -76,8 +104,8 @@ const PreOrderSection = () => {
             <CardContent className="p-8 text-center">
               <div className="mb-6">
                 <video 
+                  ref={whiteVideoRef}
                   className="w-48 h-48 rounded-3xl mx-auto mb-4 group-hover:scale-110 transition-transform duration-300 object-cover"
-                  autoPlay
                   loop
                   muted
                   playsInline
