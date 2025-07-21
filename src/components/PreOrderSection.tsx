@@ -94,7 +94,7 @@ const PreOrderSection = () => {
                         <HelpCircle size={12} />
                       </span>
                     </PopoverTrigger>
-                    <PopoverContent className="max-w-xs">
+                    <PopoverContent className="max-w-xs bg-background border shadow-md">
                       <div className="text-sm">
                         <p className="font-medium mb-2">AI Provider Services</p>
                         <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
@@ -156,7 +156,7 @@ const PreOrderSection = () => {
                         <HelpCircle size={12} />
                       </span>
                     </PopoverTrigger>
-                    <PopoverContent className="max-w-xs">
+                    <PopoverContent className="max-w-xs bg-background border shadow-md">
                       <div className="text-sm">
                         <p className="font-medium mb-2">AI Provider Services</p>
                         <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
