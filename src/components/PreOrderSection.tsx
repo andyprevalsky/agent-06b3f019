@@ -90,7 +90,7 @@ const PreOrderSection = () => {
                 className="btn-luxury w-full"
                 size="lg"
               >
-                Pre-order Midnight Black
+                Pre-order
               </Button>
               
               <p className="text-xs text-muted-foreground mt-4">
@@ -125,7 +125,7 @@ const PreOrderSection = () => {
                 className="btn-pearl w-full"
                 size="lg"
               >
-                Pre-order Pearl White
+                Pre-order
               </Button>
               
               <p className="text-xs text-muted-foreground mt-4">
