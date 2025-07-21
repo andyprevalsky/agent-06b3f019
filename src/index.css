@@ -775,9 +775,8 @@
     background: linear-gradient(
       0deg,
       transparent, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC
+      #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, transparent
     );
-    background-size: 300% 300%;
     animation: gradientBorderRotate 8s linear infinite;
     border-radius: 0;
   }
@@ -801,35 +800,17 @@
   
   @keyframes gradientBorderRotate {
     0% {
-      background-position: 0% 0%;
       background-image: linear-gradient(
         0deg,
         transparent, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-        #FE7503, #FC585C
-      );
-    }
-    33% {
-      background-position: 100% 0%;
-      background-image: linear-gradient(
-        120deg,
-        transparent, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-        #FE7503, #FC585C
-      );
-    }
-    66% {
-      background-position: 0% 100%;
-      background-image: linear-gradient(
-        240deg,
-        transparent, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-        #FE7503, #FC585C
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, transparent
       );
     }
     100% {
-      background-position: 0% 0%;
       background-image: linear-gradient(
         360deg,
         transparent, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC,
-        #FE7503, #FC585C
+        #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC, transparent
       );
     }
   }
