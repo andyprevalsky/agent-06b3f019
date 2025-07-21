@@ -4,6 +4,7 @@ import PoweredByTicker from "@/components/PoweredByTicker";
 import ProductShowcase from "@/components/ProductShowcase";
 import FeaturesSection from "@/components/FeaturesSection";
 import PreOrderSection from "@/components/PreOrderSection";
+import CustomDesignForm from "@/components/CustomDesignForm";
 import NaviFooter from "@/components/NaviFooter";
 
 const Index = () => {
@@ -15,6 +16,7 @@ const Index = () => {
       <ProductShowcase />
       <FeaturesSection />
       <PreOrderSection />
+      <CustomDesignForm />
       <NaviFooter />
     </div>
   );
