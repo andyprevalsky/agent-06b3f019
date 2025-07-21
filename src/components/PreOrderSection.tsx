@@ -4,6 +4,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { HelpCircle } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 const PreOrderSection = () => {
   const blackVideoRef = useRef<HTMLVideoElement>(null);
@@ -47,13 +48,6 @@ const PreOrderSection = () => {
     window.open(checkoutUrls[variant], '_blank');
   };
 
-  const handleServiceFeeClick = (e: React.MouseEvent) => {
-    e.preventDefault();
-    document.getElementById('service-fee')?.scrollIntoView({ 
-      behavior: 'smooth',
-      block: 'start'
-    });
-  };
 
   return (
     <section id="pre-order" className="py-32 bg-gradient-to-b from-surface to-background relative overflow-hidden">
@@ -93,13 +87,33 @@ const PreOrderSection = () => {
               <div className="mb-8">
                 <div className="text-3xl font-light tracking-tight">
                   $299 + 
-                  <button 
-                    onClick={handleServiceFeeClick}
-                    className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
-                  >
-                    service fee
-                    <HelpCircle size={12} />
-                  </button>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="text-sm text-primary hover:underline cursor-help ml-1 inline-flex items-center gap-1">
+                          service fee
+                          <HelpCircle size={12} />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        <div className="text-sm">
+                          <p className="font-medium mb-2">AI Provider Services</p>
+                          <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
+                          <div className="space-y-2">
+                            <div>
+                              <p className="font-medium">Provide Your Own API Keys</p>
+                              <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
+                            </div>
+                            <div>
+                              <p className="font-medium">Pay-as-You-Go Service</p>
+                              <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
+                            </div>
+                          </div>
+                          <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
+                        </div>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 </div>
               </div>
               
@@ -137,13 +151,33 @@ const PreOrderSection = () => {
               <div className="mb-8">
                 <div className="text-3xl font-light tracking-tight">
                   $199 + 
-                  <button 
-                    onClick={handleServiceFeeClick}
-                    className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
-                  >
-                    service fee
-                    <HelpCircle size={12} />
-                  </button>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="text-sm text-primary hover:underline cursor-help ml-1 inline-flex items-center gap-1">
+                          service fee
+                          <HelpCircle size={12} />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        <div className="text-sm">
+                          <p className="font-medium mb-2">AI Provider Services</p>
+                          <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
+                          <div className="space-y-2">
+                            <div>
+                              <p className="font-medium">Provide Your Own API Keys</p>
+                              <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
+                            </div>
+                            <div>
+                              <p className="font-medium">Pay-as-You-Go Service</p>
+                              <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
+                            </div>
+                          </div>
+                          <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
+                        </div>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 </div>
               </div>
               
