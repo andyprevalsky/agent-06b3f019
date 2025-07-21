@@ -7,6 +7,10 @@ const HeroSection = () => {
       <div className="border-right"></div>
       <div className="border-bottom"></div>
       <div className="border-left"></div>
+      <div className="corner-tl"></div>
+      <div className="corner-tr"></div>
+      <div className="corner-br"></div>
+      <div className="corner-bl"></div>
       <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-gradient-to-br from-background via-surface to-secondary/30" style={{ minHeight: 'calc(100vh - 64px)' }}>
       <FloatingParticles />
       
