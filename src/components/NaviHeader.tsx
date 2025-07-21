@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import naviEmblem from "@/assets/navi-emblem.png";
+import naviEmblem from "@/assets/navi-gradient-emblem.png";
 
 const NaviHeader = () => {
   return (
