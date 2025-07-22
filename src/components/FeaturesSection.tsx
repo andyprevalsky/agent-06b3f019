@@ -4,6 +4,7 @@ const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const [isClickScrolling, setIsClickScrolling] = useState(false);
+  const [clickedFeature, setClickedFeature] = useState<number | null>(null);
   const sectionRef = useRef<HTMLDivElement>(null);
 
   const features = [
@@ -68,7 +69,7 @@ const FeaturesSection = () => {
 
   useEffect(() => {
     const handleScroll = () => {
-      if (!sectionRef.current || isClickScrolling) return;
+      if (!sectionRef.current || clickedFeature !== null) return;
       
       const scrollPosition = window.scrollY + window.innerHeight / 2;
       const featureElements = sectionRef.current.querySelectorAll('.hidden.lg\\:block [data-index]');
@@ -127,10 +128,10 @@ const FeaturesSection = () => {
       if (rafId) cancelAnimationFrame(rafId);
       observer.disconnect();
     };
-  }, [isClickScrolling]);
+  }, [clickedFeature]);
 
   const handleFeatureClick = (index: number) => {
-    setIsClickScrolling(true);
+    setClickedFeature(index);
     setActiveFeature(index);
     
     const featureElement = sectionRef.current?.querySelector(`[data-index="${index}"]`);
@@ -140,14 +141,9 @@ const FeaturesSection = () => {
         block: 'center'
       });
       
-      // Wait much longer to ensure scroll animation fully completes
+      // Clear clicked feature after scroll completes
       setTimeout(() => {
-        // Force set the active feature to the clicked one again
-        setActiveFeature(index);
-        // Small delay before re-enabling scroll detection
-        setTimeout(() => {
-          setIsClickScrolling(false);
-        }, 300);
+        setClickedFeature(null);
       }, 2000);
     }
   };
