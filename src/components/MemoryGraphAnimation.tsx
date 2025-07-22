@@ -16,33 +16,37 @@ interface Link {
   target: string;
 }
 
-// Define tree structure for memory graph - bottom to top layout
+// Define tree structure for memory graph - center-out radial layout
 const treeStructure = {
   level0: [
-    { id: 'user-preferences', label: 'User Preferences', x: 400, y: 400, size: 16 } // Bottom center, largest
+    { id: 'user-preferences', label: 'User Preferences', x: 400, y: 250, size: 16 } // Center, largest
   ],
   level1: [
-    { id: 'relationship-info', label: 'Relationship Info', x: 200, y: 280, size: 12 },
-    { id: 'ai-meetup-summary', label: 'AI Meetup Summary', x: 350, y: 260, size: 12 },
-    { id: 'meal-prep-list', label: 'Meal Prep List', x: 450, y: 260, size: 12 },
-    { id: 'sep-20-checkin', label: 'Sep 20 Check-In', x: 600, y: 280, size: 12 }
+    { id: 'relationship-info', label: 'Relationship Info', x: 250, y: 150, size: 12 },      // Top-left
+    { id: 'ai-meetup-summary', label: 'AI Meetup Summary', x: 550, y: 150, size: 12 },    // Top-right
+    { id: 'meal-prep-list', label: 'Meal Prep List', x: 250, y: 350, size: 12 },          // Bottom-left
+    { id: 'sep-20-checkin', label: 'Sep 20 Check-In', x: 550, y: 350, size: 12 }         // Bottom-right
   ],
   level2: [
-    // From Relationship Info (2 nodes)
-    { id: 'partner-preferences', label: 'Partner Preferences', x: 150, y: 150, size: 8, parent: 'relationship-info' },
-    { id: 'date-history', label: 'Date History', x: 250, y: 150, size: 8, parent: 'relationship-info' },
+    // From Relationship Info (radiating top-left)
+    { id: 'partner-preferences', label: 'Partner Preferences', x: 150, y: 80, size: 8, parent: 'relationship-info' },
+    { id: 'date-history', label: 'Date History', x: 200, y: 50, size: 8, parent: 'relationship-info' },
+    { id: 'conflict-resolution', label: 'Conflict Resolution', x: 120, y: 120, size: 8, parent: 'relationship-info' },
     
-    // From AI Meetup Summary (2 nodes)
-    { id: 'key-insights', label: 'Key Insights', x: 300, y: 130, size: 8, parent: 'ai-meetup-summary' },
-    { id: 'action-items', label: 'Action Items', x: 400, y: 130, size: 8, parent: 'ai-meetup-summary' },
+    // From AI Meetup Summary (radiating top-right)
+    { id: 'key-insights', label: 'Key Insights', x: 650, y: 80, size: 8, parent: 'ai-meetup-summary' },
+    { id: 'action-items', label: 'Action Items', x: 600, y: 50, size: 8, parent: 'ai-meetup-summary' },
+    { id: 'follow-ups', label: 'Follow-ups', x: 680, y: 120, size: 8, parent: 'ai-meetup-summary' },
     
-    // From Meal Prep List (2 nodes)
-    { id: 'weekly-menu', label: 'Weekly Menu', x: 420, y: 130, size: 8, parent: 'meal-prep-list' },
-    { id: 'shopping-list', label: 'Shopping List', x: 480, y: 130, size: 8, parent: 'meal-prep-list' },
+    // From Meal Prep List (radiating bottom-left)
+    { id: 'weekly-menu', label: 'Weekly Menu', x: 150, y: 420, size: 8, parent: 'meal-prep-list' },
+    { id: 'shopping-list', label: 'Shopping List', x: 200, y: 450, size: 8, parent: 'meal-prep-list' },
+    { id: 'nutrition-goals', label: 'Nutrition Goals', x: 120, y: 380, size: 8, parent: 'meal-prep-list' },
     
-    // From Sep 20 Check-In (2 nodes)
-    { id: 'mood-tracking', label: 'Mood Tracking', x: 550, y: 150, size: 8, parent: 'sep-20-checkin' },
-    { id: 'goal-progress', label: 'Goal Progress', x: 650, y: 150, size: 8, parent: 'sep-20-checkin' }
+    // From Sep 20 Check-In (radiating bottom-right)
+    { id: 'mood-tracking', label: 'Mood Tracking', x: 650, y: 420, size: 8, parent: 'sep-20-checkin' },
+    { id: 'goal-progress', label: 'Goal Progress', x: 600, y: 450, size: 8, parent: 'sep-20-checkin' },
+    { id: 'health-metrics', label: 'Health Metrics', x: 680, y: 380, size: 8, parent: 'sep-20-checkin' }
   ]
 };
 
