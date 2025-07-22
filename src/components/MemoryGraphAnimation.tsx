@@ -8,6 +8,7 @@ interface Node {
   label: string;
   size: number;
   color: string;
+  parent?: string;
 }
 
 interface Link {
@@ -118,6 +119,8 @@ export const MemoryGraphAnimation = () => {
   const [hasTriggered, setHasTriggered] = useState(false);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
+  const [hoveredNode, setHoveredNode] = useState<string | null>(null);
+  const [draggedNode, setDraggedNode] = useState<string | null>(null);
 
   // Tree animation logic
   useEffect(() => {
@@ -151,7 +154,8 @@ export const MemoryGraphAnimation = () => {
         y: nodeData.y,
         label: nodeData.label,
         size: nodeData.size,
-        color: getGradientColor(currentGlobalIndex, totalNodes)
+        color: getGradientColor(currentGlobalIndex, totalNodes),
+        parent: (nodeData as any).parent
       };
       
       setNodes(prev => [...prev, newNode]);
@@ -170,27 +174,28 @@ export const MemoryGraphAnimation = () => {
     return () => clearTimeout(timer);
   }, [isAnimating, currentLevel, currentNodeInLevel, nodes]);
 
-  // Intersection Observer to trigger animation when in view and reset when out of view
+  // Intersection Observer - reset completely when out of view
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting && !hasTriggered) {
           setHasTriggered(true);
-          // Small delay to ensure smooth start
           setTimeout(() => {
             setIsAnimating(true);
           }, 500);
-        } else if (!entry.isIntersecting && hasTriggered) {
-          // Reset animation when out of view
+        } else if (!entry.isIntersecting) {
+          // Complete reset when out of view
           setNodes([]);
           setLinks([]);
           setCurrentLevel(0);
           setCurrentNodeInLevel(0);
           setIsAnimating(false);
           setHasTriggered(false);
+          setHoveredNode(null);
+          setDraggedNode(null);
         }
       },
-      { threshold: 0.3 } // Lower threshold for earlier trigger
+      { threshold: 0.1 }
     );
 
     if (containerRef.current) {
@@ -215,7 +220,28 @@ export const MemoryGraphAnimation = () => {
     }
   }, [currentLevel]);
 
-  // D3 rendering with proper z-index (edges behind nodes)
+  // Helper functions for interactivity
+  const getRelatedNodes = (nodeId: string): string[] => {
+    const related = new Set<string>([nodeId]);
+    
+    // Add parent and children using the current nodes state
+    const currentNode = nodes.find(n => n.id === nodeId);
+    if (currentNode?.parent) related.add(currentNode.parent);
+    
+    // Find children
+    nodes.forEach(n => {
+      if (n.parent === nodeId) related.add(n.id);
+    });
+    
+    return Array.from(related);
+  };
+
+  const getRelatedLinks = (nodeId: string): Link[] => {
+    return links.filter(link => 
+      link.source === nodeId || link.target === nodeId
+    );
+  };
+  // D3 rendering with interactivity
   useEffect(() => {
     if (!svgRef.current) return;
 
@@ -247,9 +273,33 @@ export const MemoryGraphAnimation = () => {
         const sourceNode = nodes.find(n => n.id === d.source);
         return sourceNode ? sourceNode.y : 0;
       })
-      .attr("stroke", "#A76CED")
-      .attr("stroke-width", 2)
-      .attr("stroke-opacity", 0.3)
+      .attr("stroke", d => {
+        if (!hoveredNode) return "#A76CED";
+        const relatedLinks = getRelatedLinks(hoveredNode);
+        const isRelated = relatedLinks.some(link => 
+          (link.source === d.source && link.target === d.target) ||
+          (link.source === d.target && link.target === d.source)
+        );
+        return isRelated ? "#E062CC" : "#A76CED";
+      })
+      .attr("stroke-width", d => {
+        if (!hoveredNode) return 2;
+        const relatedLinks = getRelatedLinks(hoveredNode);
+        const isRelated = relatedLinks.some(link => 
+          (link.source === d.source && link.target === d.target) ||
+          (link.source === d.target && link.target === d.source)
+        );
+        return isRelated ? 3 : 1;
+      })
+      .attr("stroke-opacity", d => {
+        if (!hoveredNode) return 0.3;
+        const relatedLinks = getRelatedLinks(hoveredNode);
+        const isRelated = relatedLinks.some(link => 
+          (link.source === d.source && link.target === d.target) ||
+          (link.source === d.target && link.target === d.source)
+        );
+        return isRelated ? 0.7 : 0.1;
+      })
       .style("z-index", "1")
       .transition()
       .duration(600)
@@ -262,7 +312,7 @@ export const MemoryGraphAnimation = () => {
         return targetNode ? targetNode.y : 0;
       });
 
-    // Create/update node groups AFTER links (so nodes appear on top)
+    // Create/update node groups with interactivity
     const nodeSelection = svg.selectAll(".node-group")
       .data(nodes, (d: any) => d.id);
 
@@ -271,23 +321,71 @@ export const MemoryGraphAnimation = () => {
       .append("g")
       .attr("class", "node-group")
       .attr("transform", d => `translate(${d.x}, ${d.y})`)
-      .style("z-index", "10");
+      .style("z-index", "10")
+      .style("cursor", "pointer");
 
-    // Add circles with animation - ensure they're on top
+    // Add circles with hover and drag functionality
     nodeEnter.append("circle")
       .attr("class", "node-circle")
       .attr("r", 0)
-      .attr("fill", d => d.color)
-      .attr("stroke", d => d.color)
-      .attr("stroke-width", 2)
-      .attr("opacity", 0)
+      .attr("fill", d => {
+        if (!hoveredNode) return d.color;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? d.color : d3.color(d.color)?.darker(1).toString() || d.color;
+      })
+      .attr("stroke", d => {
+        if (!hoveredNode) return d.color;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? "#FFF" : d.color;
+      })
+      .attr("stroke-width", d => {
+        if (!hoveredNode) return 2;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? 3 : 1;
+      })
+      .attr("opacity", d => {
+        if (!hoveredNode) return 1;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? 1 : 0.3;
+      })
       .style("z-index", "10")
       .transition()
       .duration(500)
-      .attr("r", d => d.size)
-      .attr("opacity", 1);
+      .attr("r", d => d.size);
 
-    // Add labels
+    // Add interactivity to node groups
+    const allNodeGroups = svg.selectAll(".node-group");
+    
+    allNodeGroups
+      .on("mouseenter", function(event, d: any) {
+        setHoveredNode(d.id);
+      })
+      .on("mouseleave", function() {
+        if (!draggedNode) setHoveredNode(null);
+      })
+      .call(
+        d3.drag<SVGGElement, Node>()
+          .on("start", function(event, d) {
+            setDraggedNode(d.id);
+            setHoveredNode(d.id);
+          })
+          .on("drag", function(event, d) {
+            // Update node position
+            setNodes(prevNodes => 
+              prevNodes.map(node => 
+                node.id === d.id 
+                  ? { ...node, x: event.x, y: event.y }
+                  : node
+              )
+            );
+          })
+          .on("end", function(event, d) {
+            setDraggedNode(null);
+            setHoveredNode(null);
+          })
+      );
+
+    // Add labels with hover effects
     nodeEnter.append("text")
       .attr("class", "node-label")
       .attr("dy", d => d.size + 18)
@@ -300,9 +398,65 @@ export const MemoryGraphAnimation = () => {
       .transition()
       .duration(500)
       .delay(200)
-      .attr("opacity", 0.8);
+      .attr("opacity", d => {
+        if (!hoveredNode) return 0.8;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? 1 : 0.4;
+      });
 
-  }, [nodes, links]);
+    // Update existing nodes and links on hover change
+    svg.selectAll(".node-circle")
+      .attr("fill", (d: any) => {
+        if (!hoveredNode) return d.color;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? d.color : d3.color(d.color)?.darker(1).toString() || d.color;
+      })
+      .attr("stroke", (d: any) => {
+        if (!hoveredNode) return d.color;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? "#FFF" : d.color;
+      })
+      .attr("stroke-width", (d: any) => {
+        if (!hoveredNode) return 2;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? 3 : 1;
+      })
+      .attr("opacity", (d: any) => {
+        if (!hoveredNode) return 1;
+        const relatedNodes = getRelatedNodes(hoveredNode);
+        return relatedNodes.includes(d.id) ? 1 : 0.3;
+      });
+
+    svg.selectAll(".link")
+      .attr("stroke", (d: any) => {
+        if (!hoveredNode) return "#A76CED";
+        const relatedLinks = getRelatedLinks(hoveredNode);
+        const isRelated = relatedLinks.some(link => 
+          (link.source === d.source && link.target === d.target) ||
+          (link.source === d.target && link.target === d.source)
+        );
+        return isRelated ? "#E062CC" : "#A76CED";
+      })
+      .attr("stroke-width", (d: any) => {
+        if (!hoveredNode) return 2;
+        const relatedLinks = getRelatedLinks(hoveredNode);
+        const isRelated = relatedLinks.some(link => 
+          (link.source === d.source && link.target === d.target) ||
+          (link.source === d.target && link.target === d.source)
+        );
+        return isRelated ? 3 : 1;
+      })
+      .attr("stroke-opacity", (d: any) => {
+        if (!hoveredNode) return 0.3;
+        const relatedLinks = getRelatedLinks(hoveredNode);
+        const isRelated = relatedLinks.some(link => 
+          (link.source === d.source && link.target === d.target) ||
+          (link.source === d.target && link.target === d.source)
+        );
+        return isRelated ? 0.7 : 0.1;
+      });
+
+  }, [nodes, links, hoveredNode, draggedNode]);
 
   return (
     <div 
@@ -314,7 +468,7 @@ export const MemoryGraphAnimation = () => {
         width={800}
         height={500}
         viewBox="0 0 800 500"
-        className="pointer-events-none"
+        className="pointer-events-auto"
         style={{ background: 'transparent' }}
       />
     </div>
