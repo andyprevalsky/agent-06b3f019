@@ -15,73 +15,66 @@ interface Link {
   target: string;
 }
 
-// Heart shape coordinates using your provided coordinates (scaled and centered)
-const heartCoords = [
-  [0, 5], [1.2, 6.4], [2.4, 7.3], [3.6, 7.7], [4.8, 7.5], [6, 6.8], [7, 5.7], [7.5, 4.2], [7.6, 2.7], [7.2, 1.3],
-  [6.4, 0.1], [5.3, -0.8], [4, -1.4], [2.6, -1.6], [1.2, -1.5], [0, -1.1], [-1.2, -1.5], [-2.6, -1.6], [-4, -1.4], [-5.3, -0.8],
-  [-6.4, 0.1], [-7.2, 1.3], [-7.6, 2.7], [-7.5, 4.2], [-7, 5.7], [-6, 6.8], [-4.8, 7.5], [-3.6, 7.7], [-2.4, 7.3], [-1.2, 6.4],
-  [0, 5] // Close the heart
+// Updated marble coordinates forming a heart shape
+const marbleCoords = [
+  [251.69, 259.99],
+  [252.17, 243.14],
+  [241.02, 244.09],
+  [250.75, 249.35],
+  [261.69, 250.48],
+  [244.53, 251.74],
+  [257.96, 240.82],
+  [254.49, 254.90],
+  [237.56, 246.98],
+  [256.87, 247.26],
+  [245.80, 257.10],
+  [247.24, 246.40],
+  [239.41, 252.21],
+  [259.28, 252.74],
+  [262.00, 244.01],
+  [253.54, 248.39],
+  [241.54, 250.60],
+  [244.10, 245.47],
+  [250.42, 254.28],
+  [237.65, 244.22],
+  [243.65, 240.50],
+  [243.92, 243.24],
+  [247.22, 254.19],
+  [250.82, 246.44],
+  [253.56, 257.72],
+  [247.86, 249.07],
+  [244.57, 254.78],
+  [259.11, 244.71],
+  [254.72, 241.19],
+  [263.41, 246.99],
+  [237.84, 249.64],
+  [257.27, 258.32],
+  [246.64, 243.40],
+  [249.49, 256.42],
+  [248.35, 241.97],
+  [249.14, 250.67],
+  [242.85, 247.33],
+  [255.68, 249.35],
+  [246.70, 240.18],
+  [253.04, 242.27],
+  [260.76, 248.15],
+  [252.37, 255.82],
+  [239.42, 248.65],
+  [259.49, 239.97],
+  [250.52, 241.53],
+  [256.93, 243.96],
+  [249.58, 244.72],
+  [248.13, 253.15],
+  [251.15, 251.58],
+  [250.13, 245.63]
 ];
 
-// Convert coordinates to screen space and arrange in concentric rings
-const heartNodes = [
-  // Center core (start here)
-  { x: 400, y: 250, size: 12 },
-  
-  // Ring 1: Inner nodes (6 nodes close to center)
-  { x: 400 + (heartCoords[0][0] * 15), y: 250 - (heartCoords[0][1] * 15), size: 10 },
-  { x: 400 + (heartCoords[5][0] * 15), y: 250 - (heartCoords[5][1] * 15), size: 10 },
-  { x: 400 + (heartCoords[10][0] * 15), y: 250 - (heartCoords[10][1] * 15), size: 10 },
-  { x: 400 + (heartCoords[15][0] * 15), y: 250 - (heartCoords[15][1] * 15), size: 10 },
-  { x: 400 + (heartCoords[20][0] * 15), y: 250 - (heartCoords[20][1] * 15), size: 10 },
-  { x: 400 + (heartCoords[25][0] * 15), y: 250 - (heartCoords[25][1] * 15), size: 10 },
-  
-  // Ring 2: Middle nodes (12 nodes at medium distance)
-  { x: 400 + (heartCoords[1][0] * 25), y: 250 - (heartCoords[1][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[3][0] * 25), y: 250 - (heartCoords[3][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[6][0] * 25), y: 250 - (heartCoords[6][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[8][0] * 25), y: 250 - (heartCoords[8][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[11][0] * 25), y: 250 - (heartCoords[11][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[13][0] * 25), y: 250 - (heartCoords[13][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[16][0] * 25), y: 250 - (heartCoords[16][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[18][0] * 25), y: 250 - (heartCoords[18][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[21][0] * 25), y: 250 - (heartCoords[21][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[23][0] * 25), y: 250 - (heartCoords[23][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[26][0] * 25), y: 250 - (heartCoords[26][1] * 25), size: 8 },
-  { x: 400 + (heartCoords[28][0] * 25), y: 250 - (heartCoords[28][1] * 25), size: 8 },
-  
-  // Ring 3: Outer nodes (full heart outline - 30 nodes)
-  { x: 400 + (heartCoords[0][0] * 35), y: 250 - (heartCoords[0][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[1][0] * 35), y: 250 - (heartCoords[1][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[2][0] * 35), y: 250 - (heartCoords[2][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[3][0] * 35), y: 250 - (heartCoords[3][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[4][0] * 35), y: 250 - (heartCoords[4][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[5][0] * 35), y: 250 - (heartCoords[5][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[6][0] * 35), y: 250 - (heartCoords[6][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[7][0] * 35), y: 250 - (heartCoords[7][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[8][0] * 35), y: 250 - (heartCoords[8][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[9][0] * 35), y: 250 - (heartCoords[9][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[10][0] * 35), y: 250 - (heartCoords[10][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[11][0] * 35), y: 250 - (heartCoords[11][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[12][0] * 35), y: 250 - (heartCoords[12][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[13][0] * 35), y: 250 - (heartCoords[13][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[14][0] * 35), y: 250 - (heartCoords[14][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[15][0] * 35), y: 250 - (heartCoords[15][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[16][0] * 35), y: 250 - (heartCoords[16][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[17][0] * 35), y: 250 - (heartCoords[17][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[18][0] * 35), y: 250 - (heartCoords[18][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[19][0] * 35), y: 250 - (heartCoords[19][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[20][0] * 35), y: 250 - (heartCoords[20][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[21][0] * 35), y: 250 - (heartCoords[21][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[22][0] * 35), y: 250 - (heartCoords[22][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[23][0] * 35), y: 250 - (heartCoords[23][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[24][0] * 35), y: 250 - (heartCoords[24][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[25][0] * 35), y: 250 - (heartCoords[25][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[26][0] * 35), y: 250 - (heartCoords[26][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[27][0] * 35), y: 250 - (heartCoords[27][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[28][0] * 35), y: 250 - (heartCoords[28][1] * 35), size: 6 },
-  { x: 400 + (heartCoords[29][0] * 35), y: 250 - (heartCoords[29][1] * 35), size: 6 },
-];
+// Convert coordinates to heart nodes using the provided coordinates
+const heartNodes = marbleCoords.map((coord, index) => ({
+  x: coord[0] + 150, // Offset to center in 800px width
+  y: coord[1] + 125, // Offset to center in 500px height  
+  size: index === 0 ? 12 : 8 - Math.floor(index / 12), // First node larger, then gradually smaller
+}));
 
 // Generate gradient colors based on position in the sequence
 const getGradientColor = (index: number, total: number): string => {
