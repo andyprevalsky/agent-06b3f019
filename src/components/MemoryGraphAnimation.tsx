@@ -15,55 +15,67 @@ interface Link {
   target: string;
 }
 
-// Heart shape coordinates starting from center - arranged in heart formation
+// Heart shape in concentric rings - center outward
 const heartNodes = [
-  // Center core
-  { x: 300, y: 200, label: "You", size: 12 },
+  // Ring 0: Center core
+  { x: 400, y: 250, size: 12 },
   
-  // Inner ring around center
-  { x: 280, y: 180, label: "Name", size: 9 },
-  { x: 320, y: 180, label: "Voice", size: 9 },
-  { x: 340, y: 210, label: "Preferences", size: 9 },
-  { x: 320, y: 240, label: "Schedule", size: 9 },
-  { x: 280, y: 240, label: "Goals", size: 9 },
-  { x: 260, y: 210, label: "Habits", size: 9 },
+  // Ring 1: Inner ring (6 nodes around center)
+  { x: 370, y: 230, size: 10 },
+  { x: 430, y: 230, size: 10 },
+  { x: 450, y: 260, size: 10 },
+  { x: 430, y: 290, size: 10 },
+  { x: 370, y: 290, size: 10 },
+  { x: 350, y: 260, size: 10 },
   
-  // Heart left side - upper curve
-  { x: 240, y: 160, label: "Family", size: 7 },
-  { x: 220, y: 140, label: "Childhood", size: 6 },
-  { x: 200, y: 120, label: "Past", size: 6 },
-  { x: 180, y: 110, label: "Education", size: 6 },
-  { x: 160, y: 115, label: "Learning", size: 6 },
-  { x: 145, y: 130, label: "Growth", size: 6 },
-  { x: 140, y: 150, label: "Skills", size: 6 },
-  { x: 150, y: 175, label: "Work", size: 7 },
-  { x: 170, y: 195, label: "Career", size: 7 },
-  { x: 190, y: 215, label: "Projects", size: 7 },
-  { x: 200, y: 240, label: "Ideas", size: 7 },
-  { x: 210, y: 265, label: "Dreams", size: 7 },
-  { x: 225, y: 285, label: "Hopes", size: 7 },
-  { x: 245, y: 300, label: "Love", size: 8 },
-  { x: 270, y: 310, label: "Joy", size: 8 },
+  // Ring 2: Middle ring forming heart shape
+  { x: 320, y: 200, size: 8 },
+  { x: 350, y: 180, size: 8 },
+  { x: 390, y: 170, size: 8 },
+  { x: 410, y: 170, size: 8 },
+  { x: 450, y: 180, size: 8 },
+  { x: 480, y: 200, size: 8 },
+  { x: 500, y: 230, size: 8 },
+  { x: 510, y: 270, size: 8 },
+  { x: 490, y: 310, size: 8 },
+  { x: 460, y: 340, size: 8 },
+  { x: 420, y: 360, size: 8 },
+  { x: 400, y: 370, size: 8 },
+  { x: 380, y: 360, size: 8 },
+  { x: 340, y: 340, size: 8 },
+  { x: 310, y: 310, size: 8 },
+  { x: 290, y: 270, size: 8 },
+  { x: 300, y: 230, size: 8 },
   
-  // Heart right side - upper curve
-  { x: 360, y: 160, label: "Friends", size: 7 },
-  { x: 380, y: 140, label: "Wisdom", size: 6 },
-  { x: 400, y: 120, label: "Future", size: 6 },
-  { x: 420, y: 110, label: "Vision", size: 6 },
-  { x: 440, y: 115, label: "Potential", size: 6 },
-  { x: 455, y: 130, label: "Purpose", size: 6 },
-  { x: 460, y: 150, label: "Values", size: 6 },
-  { x: 450, y: 175, label: "Beliefs", size: 7 },
-  { x: 430, y: 195, label: "Trust", size: 7 },
-  { x: 410, y: 215, label: "Bond", size: 7 },
-  { x: 400, y: 240, label: "Connection", size: 7 },
-  { x: 390, y: 265, label: "Care", size: 7 },
-  { x: 375, y: 285, label: "Support", size: 7 },
-  { x: 355, y: 300, label: "Heart", size: 8 },
-  { x: 330, y: 310, label: "Soul", size: 8 },
-  
-  // Bottom point of heart
-  { x: 300, y: 320, label: "Forever", size: 10 },
+  // Ring 3: Outer ring completing heart curves
+  { x: 280, y: 170, size: 6 },
+  { x: 260, y: 150, size: 6 },
+  { x: 290, y: 130, size: 6 },
+  { x: 330, y: 120, size: 6 },
+  { x: 370, y: 115, size: 6 },
+  { x: 400, y: 115, size: 6 },
+  { x: 430, y: 115, size: 6 },
+  { x: 470, y: 120, size: 6 },
+  { x: 510, y: 130, size: 6 },
+  { x: 540, y: 150, size: 6 },
+  { x: 520, y: 170, size: 6 },
+  { x: 550, y: 200, size: 6 },
+  { x: 570, y: 240, size: 6 },
+  { x: 580, y: 280, size: 6 },
+  { x: 570, y: 320, size: 6 },
+  { x: 540, y: 360, size: 6 },
+  { x: 500, y: 390, size: 6 },
+  { x: 460, y: 410, size: 6 },
+  { x: 420, y: 420, size: 6 },
+  { x: 400, y: 425, size: 6 },
+  { x: 380, y: 420, size: 6 },
+  { x: 340, y: 410, size: 6 },
+  { x: 300, y: 390, size: 6 },
+  { x: 260, y: 360, size: 6 },
+  { x: 230, y: 320, size: 6 },
+  { x: 220, y: 280, size: 6 },
+  { x: 230, y: 240, size: 6 },
+  { x: 250, y: 200, size: 6 },
 ];
 
 // Generate gradient colors based on position in the sequence
@@ -133,10 +145,10 @@ export const MemoryGraphAnimation = () => {
     if (isAnimating && currentIndex < heartNodes.length) {
       // Non-uniform delays - faster at start, then varying
       const getDelay = (index: number) => {
-        if (index === 0) return 100; // First node delay - faster start
-        if (index < 7) return 200 + Math.random() * 100; // Inner ring: 200-300ms
-        if (index < 17) return 150 + Math.random() * 150; // Middle ring: 150-300ms
-        return 100 + Math.random() * 200; // Outer ring: 100-300ms
+        if (index === 0) return 200; // Center node
+        if (index <= 6) return 150; // Ring 1: Inner ring - uniform timing
+        if (index <= 23) return 100; // Ring 2: Middle ring - faster
+        return 80; // Ring 3: Outer ring - fastest
       };
       
       const timer = setTimeout(() => {
@@ -144,7 +156,7 @@ export const MemoryGraphAnimation = () => {
           id: `node-${currentIndex}`,
           x: heartNodes[currentIndex].x,
           y: heartNodes[currentIndex].y,
-          label: heartNodes[currentIndex].label,
+          label: "", // No labels
           size: heartNodes[currentIndex].size,
           color: getGradientColor(currentIndex, heartNodes.length)
         };
@@ -182,7 +194,7 @@ export const MemoryGraphAnimation = () => {
     return () => observer.disconnect();
   }, [hasTriggered]);
 
-  // Reset animation periodically
+  // Reset animation after 1 second of completion
   useEffect(() => {
     if (currentIndex >= heartNodes.length) {
       const resetTimer = setTimeout(() => {
@@ -190,7 +202,7 @@ export const MemoryGraphAnimation = () => {
         setLinks([]);
         setCurrentIndex(0);
         setIsAnimating(true);
-      }, 10000); // Wait 10 seconds before restarting
+      }, 1000); // Wait 1 second before restarting
       
       return () => clearTimeout(resetTimer);
     }
@@ -265,33 +277,33 @@ export const MemoryGraphAnimation = () => {
       .attr("r", d => d.size)
       .attr("opacity", 1);
 
-    // Add labels
-    nodeEnter.append("text")
-      .attr("class", "node-label")
-      .attr("dy", d => d.size + 16)
-      .attr("text-anchor", "middle")
-      .attr("fill", "hsl(var(--foreground))")
-      .attr("font-size", "11px")
-      .attr("font-weight", "400")
-      .attr("opacity", 0)
-      .text(d => d.label)
-      .transition()
-      .duration(500)
-      .delay(200)
-      .attr("opacity", 0.9);
+    // Remove labels (commented out)
+    // nodeEnter.append("text")
+    //   .attr("class", "node-label")
+    //   .attr("dy", d => d.size + 16)
+    //   .attr("text-anchor", "middle")
+    //   .attr("fill", "hsl(var(--foreground))")
+    //   .attr("font-size", "11px")
+    //   .attr("font-weight", "400")
+    //   .attr("opacity", 0)
+    //   .text(d => d.label)
+    //   .transition()
+    //   .duration(500)
+    //   .delay(200)
+    //   .attr("opacity", 0.9);
 
   }, [nodes, links]);
 
   return (
     <div 
       ref={containerRef}
-      className="w-full h-[450px] relative overflow-hidden flex items-center justify-center"
+      className="w-full h-[500px] relative overflow-hidden flex items-center justify-center"
     >
       <svg
         ref={svgRef}
-        width={600}
-        height={450}
-        viewBox="0 0 600 450"
+        width={800}
+        height={500}
+        viewBox="0 0 800 500"
         className="pointer-events-none"
         style={{ background: 'transparent' }}
       />
