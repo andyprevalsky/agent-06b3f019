@@ -140,15 +140,15 @@ const FeaturesSection = () => {
         block: 'center'
       });
       
-      // Wait longer and ensure the clicked feature stays active
+      // Wait much longer to ensure scroll animation fully completes
       setTimeout(() => {
         // Force set the active feature to the clicked one again
         setActiveFeature(index);
         // Small delay before re-enabling scroll detection
         setTimeout(() => {
           setIsClickScrolling(false);
-        }, 200);
-      }, 1200);
+        }, 300);
+      }, 2000);
     }
   };
 
