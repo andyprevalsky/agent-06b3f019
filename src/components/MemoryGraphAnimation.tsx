@@ -15,65 +15,38 @@ interface Link {
   target: string;
 }
 
-// Updated marble coordinates forming a heart shape
-const marbleCoords = [
-  [283.87, 449.72],
-  [293.45, 112.87],
-  [70.49, 131.72],
-  [265.04, 236.99],
-  [483.85, 259.62],
-  [140.54, 284.8],
-  [409.21, 66.37],
-  [339.82, 347.99],
-  [1.1, 189.56],
-  [387.47, 195.11],
-  [166.0, 392.0],
-  [194.8, 177.99],
-  [38.17, 294.25],
-  [435.69, 304.86],
-  [490.09, 130.17],
-  [320.89, 217.87],
-  [80.86, 261.96],
-  [132.1, 159.36],
-  [258.48, 335.69],
-  [2.98, 134.34],
-  [122.9, 59.92],
-  [128.49, 114.85],
-  [194.43, 333.79],
-  [266.49, 178.78],
-  [321.13, 404.3],
-  [207.14, 231.32],
-  [141.33, 345.54],
-  [432.29, 144.24],
-  [344.34, 73.89],
-  [518.16, 189.86],
-  [6.87, 242.82],
-  [395.33, 341.11],
-  [184.84, 115.95],
-  [238.9, 408.38],
-  [216.97, 83.1],
-  [233.92, 263.44],
-  [113.09, 199.38],
-  [352.69, 236.93],
-  [186.01, 60.45],
-  [308.04, 79.55],
-  [465.11, 213.06],
-  [297.45, 407.3],
-  [38.44, 199.35],
-  [438.62, 59.97],
-  [251.72, 83.56],
-  [337.68, 120.77],
-  [240.84, 105.55],
-  [215.65, 304.99],
-  [282.92, 293.69],
-  [250.13, 87.73]
+// Heart shape coordinates - 45 points forming a filled heart
+const heartCoords = [
+  // Center point
+  [400, 250],
+  
+  // Inner heart shape
+  [400, 200], [380, 180], [420, 180],
+  [360, 170], [440, 170], [350, 180], [450, 180],
+  [340, 200], [460, 200], [340, 220], [460, 220],
+  [350, 240], [450, 240], [360, 260], [440, 260],
+  [380, 280], [420, 280], [400, 300],
+  
+  // Middle layer
+  [320, 160], [480, 160], [300, 180], [500, 180],
+  [290, 210], [510, 210], [290, 240], [510, 240],
+  [300, 270], [500, 270], [320, 300], [480, 300],
+  [360, 320], [440, 320], [400, 340],
+  
+  // Outer layer
+  [280, 200], [520, 200], [270, 230], [530, 230],
+  [280, 260], [520, 260], [300, 290], [500, 290],
+  [340, 340], [460, 340], [400, 360],
+  
+  // Fill points
+  [400, 220], [400, 240], [400, 260], [400, 280]
 ];
 
-// Convert coordinates to heart nodes using the provided coordinates
-const heartNodes = marbleCoords.map((coord, index) => ({
-  x: coord[0] * 0.7 + 200, // Scale down and center in 800px width
-  y: coord[1] * 0.7 + 150, // Scale down and center in 500px height  
-  size: index === 0 ? 12 : 8 - Math.floor(index / 12), // First node larger, then gradually smaller
+// Convert coordinates to heart nodes
+const heartNodes = heartCoords.map((coord, index) => ({
+  x: coord[0],
+  y: coord[1],
+  size: index === 0 ? 10 : Math.random() * 4 + 3, // Center larger, others varied
 }));
 
 // Generate gradient colors based on position in the sequence
@@ -113,29 +86,9 @@ export const MemoryGraphAnimation = () => {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
 
-  // Generate connections to adjacent nodes (last 2-4 nodes)
+  // No connections for now - just nodes
   const generateConnections = (nodeIndex: number): Link[] => {
-    const connections: Link[] = [];
-    
-    if (nodeIndex === 0) return connections; // First node has no connections
-    
-    // For first few nodes, connect to previous 1-2 nodes
-    // For later nodes, connect to previous 2-4 nodes based on proximity
-    const lookBack = Math.min(nodeIndex, nodeIndex < 5 ? 2 : 4);
-    const startIndex = Math.max(0, nodeIndex - lookBack);
-    
-    // Connect to recent nodes with some randomness
-    for (let i = startIndex; i < nodeIndex; i++) {
-      const shouldConnect = Math.random() > 0.4; // 60% chance
-      if (shouldConnect || i === nodeIndex - 1) { // Always connect to previous node
-        connections.push({
-          source: `node-${i}`,
-          target: `node-${nodeIndex}`,
-        });
-      }
-    }
-    
-    return connections;
+    return []; // Remove all edges
   };
 
   // Animate nodes with non-uniform timing
