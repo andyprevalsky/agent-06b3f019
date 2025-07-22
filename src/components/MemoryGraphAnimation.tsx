@@ -15,27 +15,35 @@ interface Link {
   target: string;
 }
 
-// Generate evenly distributed heart shape coordinates
+// Generate filled heart shape with dense coordinates
 const generateHeartCoords = () => {
   const coords: [number, number][] = [];
-  const centerX = 400;
-  const centerY = 250;
-  const scale = 60; // Heart size scale
+  const centerX = 50; // Use percentage of container
+  const centerY = 50;
+  const scale = 15; // Larger heart size
   
-  // Generate points using parametric heart equation
-  // Heart equation: x = 16sin³(t), y = 13cos(t) - 5cos(2t) - 2cos(3t) - cos(4t)
-  for (let i = 0; i < 50; i++) {
-    const t = (i / 49) * 2 * Math.PI; // Evenly distribute parameter t from 0 to 2π
-    
-    const x = 16 * Math.pow(Math.sin(t), 3);
-    const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
-    
-    // Scale and center the coordinates
-    coords.push([
-      centerX + x * scale / 16, // Scale to fit container
-      centerY + y * scale / 16
-    ]);
-  }
+  // Create multiple layers for a filled heart
+  const layers = [
+    { scale: 1.0, points: 16 },    // Outer edge
+    { scale: 0.8, points: 14 },    // Second layer
+    { scale: 0.6, points: 12 },    // Third layer
+    { scale: 0.4, points: 8 }      // Inner core
+  ];
+  
+  layers.forEach(layer => {
+    for (let i = 0; i < layer.points; i++) {
+      const t = (i / layer.points) * 2 * Math.PI;
+      
+      const x = 16 * Math.pow(Math.sin(t), 3);
+      const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+      
+      // Scale and center as percentages
+      coords.push([
+        centerX + (x * scale * layer.scale) / 16,
+        centerY + (y * scale * layer.scale) / 16
+      ]);
+    }
+  });
   
   return coords;
 };
@@ -44,9 +52,9 @@ const heartCoords = generateHeartCoords();
 
 // Convert coordinates to heart nodes - all same size
 const heartNodes = heartCoords.map((coord, index) => ({
-  x: coord[0],
+  x: coord[0], // Will be converted to actual pixels in render
   y: coord[1],
-  size: 6, // All nodes same size
+  size: 5, // All nodes same size
 }));
 
 // Generate gradient colors based on position in the sequence
@@ -166,53 +174,19 @@ export const MemoryGraphAnimation = () => {
     }
   }, [currentIndex]);
 
-  // D3 rendering with proper z-index (edges behind nodes)
+  // D3 rendering with responsive sizing
   useEffect(() => {
-    if (!svgRef.current) return;
+    if (!svgRef.current || !containerRef.current) return;
 
     const svg = d3.select(svgRef.current);
-    const width = 800;
-    const height = 500;
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const width = containerRect.width;
+    const height = containerRect.height;
 
-    // Create/update links FIRST (so they appear behind nodes)
-    const linkSelection = svg.selectAll(".link")
-      .data(links, (d: any) => `${d.source}-${d.target}`);
+    // Clear previous content
+    svg.selectAll("*").remove();
 
-    // Enter new links
-    linkSelection.enter()
-      .append("line")
-      .attr("class", "link")
-      .attr("x1", d => {
-        const sourceNode = nodes.find(n => n.id === d.source);
-        return sourceNode ? sourceNode.x : 0;
-      })
-      .attr("y1", d => {
-        const sourceNode = nodes.find(n => n.id === d.source);
-        return sourceNode ? sourceNode.y : 0;
-      })
-      .attr("x2", d => {
-        const sourceNode = nodes.find(n => n.id === d.source);
-        return sourceNode ? sourceNode.x : 0;
-      })
-      .attr("y2", d => {
-        const sourceNode = nodes.find(n => n.id === d.source);
-        return sourceNode ? sourceNode.y : 0;
-      })
-      .attr("stroke", "#7c3aed")
-      .attr("stroke-width", 1.5)
-      .attr("stroke-opacity", 0.4)
-      .transition()
-      .duration(400)
-      .attr("x2", d => {
-        const targetNode = nodes.find(n => n.id === d.target);
-        return targetNode ? targetNode.x : 0;
-      })
-      .attr("y2", d => {
-        const targetNode = nodes.find(n => n.id === d.target);
-        return targetNode ? targetNode.y : 0;
-      });
-
-    // Create/update node groups AFTER links (so nodes appear on top)
+    // Create/update node groups
     const nodeSelection = svg.selectAll(".node-group")
       .data(nodes, (d: any) => d.id);
 
@@ -220,37 +194,27 @@ export const MemoryGraphAnimation = () => {
     const nodeEnter = nodeSelection.enter()
       .append("g")
       .attr("class", "node-group")
-      .attr("transform", d => `translate(${d.x}, ${d.y})`);
+      .attr("transform", d => {
+        // Convert percentage coordinates to actual pixels
+        const actualX = (d.x / 100) * width;
+        const actualY = (d.y / 100) * height;
+        return `translate(${actualX}, ${actualY})`;
+      });
 
-    // Add circles with animation - these will be on top of links
+    // Add circles with animation
     nodeEnter.append("circle")
       .attr("class", "node-circle")
       .attr("r", 0)
       .attr("fill", d => d.color)
       .attr("stroke", d => d.color)
-      .attr("stroke-width", 2)
+      .attr("stroke-width", 1)
       .attr("opacity", 0)
       .transition()
       .duration(500)
       .attr("r", d => d.size)
       .attr("opacity", 1);
 
-    // Remove labels (commented out)
-    // nodeEnter.append("text")
-    //   .attr("class", "node-label")
-    //   .attr("dy", d => d.size + 16)
-    //   .attr("text-anchor", "middle")
-    //   .attr("fill", "hsl(var(--foreground))")
-    //   .attr("font-size", "11px")
-    //   .attr("font-weight", "400")
-    //   .attr("opacity", 0)
-    //   .text(d => d.label)
-    //   .transition()
-    //   .duration(500)
-    //   .delay(200)
-    //   .attr("opacity", 0.9);
-
-  }, [nodes, links]);
+  }, [nodes]);
 
   return (
     <div 
@@ -259,10 +223,7 @@ export const MemoryGraphAnimation = () => {
     >
       <svg
         ref={svgRef}
-        width={800}
-        height={500}
-        viewBox="0 0 800 500"
-        className="pointer-events-none"
+        className="w-full h-full pointer-events-none"
         style={{ background: 'transparent' }}
       />
     </div>
