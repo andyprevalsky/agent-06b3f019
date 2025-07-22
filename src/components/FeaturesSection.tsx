@@ -82,7 +82,7 @@ const FeaturesSection = () => {
           }
         });
       },
-      { threshold: 0.7, rootMargin: '-30% 0px' }
+      { threshold: 0.3, rootMargin: '-40% 0px -40% 0px' }
     );
 
     // Observe mobile and desktop feature cards
@@ -97,6 +97,15 @@ const FeaturesSection = () => {
 
   const handleFeatureClick = (index: number) => {
     setActiveFeature(index);
+    
+    // Scroll to the corresponding feature animation/description
+    const featureElement = sectionRef.current?.querySelector(`[data-index="${index}"]`);
+    if (featureElement) {
+      featureElement.scrollIntoView({ 
+        behavior: 'smooth', 
+        block: 'center'
+      });
+    }
   };
 
 
