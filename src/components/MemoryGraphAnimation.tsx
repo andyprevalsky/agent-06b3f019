@@ -154,7 +154,7 @@ export const MemoryGraphAnimation = () => {
   }, [currentIndex, setNodes, setEdges]);
 
   return (
-    <div className="w-full h-[500px] bg-surface/30 rounded-2xl overflow-hidden border border-border/20">
+    <div className="w-full h-[400px] relative overflow-hidden">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -170,6 +170,7 @@ export const MemoryGraphAnimation = () => {
         elementsSelectable={false}
         defaultViewport={{ x: -80, y: -30, zoom: 1.4 }}
         style={{ background: 'transparent' }}
+        proOptions={{ hideAttribution: true }}
       >
         <Background 
           gap={20} 
@@ -181,11 +182,8 @@ export const MemoryGraphAnimation = () => {
       
       {/* Info overlay */}
       <div className="absolute bottom-4 left-4 right-4">
-        <div className="bg-background/80 backdrop-blur-sm rounded-lg p-4 border border-border/20">
-          <h3 className="text-sm font-medium text-foreground mb-1">
-            Navi's Memory Formation
-          </h3>
-          <p className="text-xs text-muted-foreground">
+        <div className="bg-background/80 backdrop-blur-sm rounded-lg p-3 border border-border/20">
+          <p className="text-xs text-muted-foreground text-center">
             {currentIndex < heartShape.length 
               ? `Building memories... ${currentIndex}/${heartShape.length}`
               : "Memory network complete - each connection represents learned relationships"

@@ -184,16 +184,15 @@ const FeaturesSection = () => {
                     data-index={index}
                     className="space-y-6"
                   >
-                    {/* Fixed-size Animation Area */}
-                    <div className={`bg-muted/20 rounded-2xl p-12 h-[400px] flex items-center justify-center border transition-all duration-300 ${
-                      activeFeature === index ? 'border-primary/20 bg-primary/5' : 'border-border/20'
-                    }`}>
-                      {/* Show memory animation for "Navi Grows With You" feature */}
-                      {index === 4 ? (
-                        <div className="w-full h-full">
-                          <MemoryGraphAnimation />
-                        </div>
-                      ) : (
+                    {/* Animation Area */}
+                    {index === 4 ? (
+                      <div className="w-full h-[400px] flex items-center justify-center">
+                        <MemoryGraphAnimation />
+                      </div>
+                    ) : (
+                      <div className={`bg-muted/20 rounded-2xl p-12 h-[400px] flex items-center justify-center border transition-all duration-300 ${
+                        activeFeature === index ? 'border-primary/20 bg-primary/5' : 'border-border/20'
+                      }`}>
                         <div className="text-center">
                           <div className={`w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center transition-colors ${
                             activeFeature === index ? 'bg-primary/30' : 'bg-primary/20'
@@ -204,8 +203,8 @@ const FeaturesSection = () => {
                           </div>
                           <p className="text-muted-foreground text-sm">Animation for {feature.title}</p>
                         </div>
-                      )}
-                    </div>
+                      </div>
+                    )}
                     
                     {/* Description */}
                     <div className="space-y-4">
