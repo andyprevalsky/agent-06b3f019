@@ -228,16 +228,18 @@ const FeaturesSection = () => {
                   <button
                     key={feature.title}
                     onClick={() => handleFeatureClick(index)}
-                    className={`w-full text-left p-4 rounded-lg transition-all duration-300 ${
+                    className={`relative w-full text-left p-4 rounded-lg transition-all duration-300 ${
                       activeFeature === index
-                        ? 'bg-primary/10 text-foreground border-2 border-transparent bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-clip-border'
+                        ? 'bg-primary/10 text-foreground'
                         : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground border-2 border-transparent'
                     }`}
-                    style={activeFeature === index ? {
-                      background: 'linear-gradient(white, white) padding-box, linear-gradient(90deg, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC) border-box'
-                    } : {}}
                   >
-                    <h4 className="font-medium text-sm leading-tight">{feature.title}</h4>
+                    {activeFeature === index && (
+                      <div className="absolute inset-0 rounded-lg p-[2px] bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] animate-spin-slow">
+                        <div className="w-full h-full bg-background rounded-lg"></div>
+                      </div>
+                    )}
+                    <h4 className="relative font-medium text-sm leading-tight">{feature.title}</h4>
                   </button>
                 ))}
               </div>
