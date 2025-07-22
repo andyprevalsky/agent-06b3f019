@@ -1,31 +1,17 @@
-import { useEffect, useState, useCallback } from "react";
-import { 
-  ReactFlow, 
-  Node, 
-  Edge, 
-  useNodesState, 
-  useEdgesState,
-  Background,
-  NodeProps
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
+import { useEffect, useRef, useState } from "react";
+import * as d3 from "d3";
 
-// Custom node component for memory nodes
-const MemoryNode = ({ data }: NodeProps) => {
-  return (
-    <div className={`
-      w-2.5 h-2.5 rounded-full transition-all duration-500 transform
-      bg-primary shadow-md shadow-primary/30
-      animate-scale-in opacity-100
-    `}>
-      <div className="absolute -inset-0.5 rounded-full bg-primary/20 animate-pulse"></div>
-    </div>
-  );
-};
+interface Node {
+  id: string;
+  x: number;
+  y: number;
+  label: string;
+}
 
-const nodeTypes = {
-  memory: MemoryNode,
-};
+interface Link {
+  source: string;
+  target: string;
+}
 
 // Heart shape coordinates (scaled and positioned) - ordered from bottom to top
 const heartShape = [
@@ -55,14 +41,15 @@ const memoryLabels = [
 ];
 
 export const MemoryGraphAnimation = () => {
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const svgRef = useRef<SVGSVGElement>(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isAnimating, setIsAnimating] = useState(false);
+  const [nodes, setNodes] = useState<Node[]>([]);
+  const [links, setLinks] = useState<Link[]>([]);
 
   // Generate random connections to previous nodes
-  const generateConnections = useCallback((nodeIndex: number): Edge[] => {
-    const connections: Edge[] = [];
+  const generateConnections = (nodeIndex: number, existingNodes: Node[]): Link[] => {
+    const connections: Link[] = [];
     
     if (nodeIndex === 0) return connections; // First node has no previous nodes
     
@@ -72,7 +59,7 @@ export const MemoryGraphAnimation = () => {
       nodeIndex // Can't connect to more nodes than exist
     );
     
-    const availableNodes = Array.from({ length: nodeIndex }, (_, i) => i);
+    const availableNodes = existingNodes.slice(0, nodeIndex);
     const selectedNodes = [];
     
     // Randomly select nodes to connect to
@@ -85,22 +72,15 @@ export const MemoryGraphAnimation = () => {
     }
     
     // Create connections
-    selectedNodes.forEach(targetIndex => {
+    selectedNodes.forEach(targetNode => {
       connections.push({
-        id: `e-${targetIndex}-${nodeIndex}`,
-        source: `node-${targetIndex}`,
+        source: targetNode.id,
         target: `node-${nodeIndex}`,
-        style: { 
-          stroke: 'hsl(var(--primary))', 
-          strokeWidth: 1,
-          opacity: 0.6 
-        },
-        animated: Math.random() > 0.8, // 20% chance of animation
       });
     });
     
     return connections;
-  }, []);
+  };
 
   // Animate nodes appearing one by one
   useEffect(() => {
@@ -108,27 +88,27 @@ export const MemoryGraphAnimation = () => {
       const timer = setTimeout(() => {
         const newNode: Node = {
           id: `node-${currentIndex}`,
-          type: 'memory',
-          position: heartShape[currentIndex],
-          data: { 
-            label: memoryLabels[currentIndex]
-          },
-          draggable: false,
-          selectable: false,
+          x: heartShape[currentIndex].x,
+          y: heartShape[currentIndex].y,
+          label: memoryLabels[currentIndex]
         };
         
-        setNodes(prev => [...prev, newNode]);
-        
-        // Add connections for this node
-        const newConnections = generateConnections(currentIndex);
-        setEdges(prev => [...prev, ...newConnections]);
+        setNodes(prev => {
+          const updatedNodes = [...prev, newNode];
+          
+          // Generate connections for this node
+          const newConnections = generateConnections(currentIndex, updatedNodes);
+          setLinks(prevLinks => [...prevLinks, ...newConnections]);
+          
+          return updatedNodes;
+        });
         
         setCurrentIndex(prev => prev + 1);
       }, currentIndex === 0 ? 500 : 200); // Faster animation
       
       return () => clearTimeout(timer);
     }
-  }, [isAnimating, currentIndex, setNodes, setEdges, generateConnections]);
+  }, [isAnimating, currentIndex]);
 
   // Start animation when component mounts
   useEffect(() => {
@@ -144,41 +124,104 @@ export const MemoryGraphAnimation = () => {
     if (currentIndex >= heartShape.length) {
       const resetTimer = setTimeout(() => {
         setNodes([]);
-        setEdges([]);
+        setLinks([]);
         setCurrentIndex(0);
         setIsAnimating(true);
       }, 8000); // Wait 8 seconds before restarting
       
       return () => clearTimeout(resetTimer);
     }
-  }, [currentIndex, setNodes, setEdges]);
+  }, [currentIndex]);
+
+  // D3 rendering
+  useEffect(() => {
+    if (!svgRef.current) return;
+
+    const svg = d3.select(svgRef.current);
+    svg.selectAll("*").remove(); // Clear previous content
+
+    const width = 400;
+    const height = 320;
+
+    // Create links
+    const linkSelection = svg.selectAll(".link")
+      .data(links)
+      .enter()
+      .append("line")
+      .attr("class", "link")
+      .attr("x1", d => {
+        const sourceNode = nodes.find(n => n.id === d.source);
+        return sourceNode ? sourceNode.x : 0;
+      })
+      .attr("y1", d => {
+        const sourceNode = nodes.find(n => n.id === d.source);
+        return sourceNode ? sourceNode.y : 0;
+      })
+      .attr("x2", d => {
+        const targetNode = nodes.find(n => n.id === d.target);
+        return targetNode ? targetNode.x : 0;
+      })
+      .attr("y2", d => {
+        const targetNode = nodes.find(n => n.id === d.target);
+        return targetNode ? targetNode.y : 0;
+      })
+      .attr("stroke", "hsl(var(--primary))")
+      .attr("stroke-width", 1)
+      .attr("stroke-opacity", 0.6)
+      .attr("stroke-dasharray", "0,1000")
+      .transition()
+      .duration(500)
+      .attr("stroke-dasharray", "1000,0");
+
+    // Create nodes
+    const nodeGroups = svg.selectAll(".node")
+      .data(nodes)
+      .enter()
+      .append("g")
+      .attr("class", "node")
+      .attr("transform", d => `translate(${d.x}, ${d.y})`);
+
+    // Add node circles with animation
+    nodeGroups.append("circle")
+      .attr("r", 0)
+      .attr("fill", "hsl(var(--primary))")
+      .attr("stroke", "hsl(var(--primary))")
+      .attr("stroke-width", 2)
+      .attr("opacity", 0)
+      .transition()
+      .duration(300)
+      .attr("r", 5)
+      .attr("opacity", 1);
+
+    // Add glow effect
+    nodeGroups.append("circle")
+      .attr("r", 0)
+      .attr("fill", "none")
+      .attr("stroke", "hsl(var(--primary))")
+      .attr("stroke-width", 1)
+      .attr("opacity", 0)
+      .transition()
+      .duration(300)
+      .delay(150)
+      .attr("r", 8)
+      .attr("opacity", 0.3)
+      .transition()
+      .duration(1000)
+      .attr("r", 12)
+      .attr("opacity", 0);
+
+  }, [nodes, links]);
 
   return (
-    <div className="w-full h-[400px] relative overflow-hidden">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        nodeTypes={nodeTypes}
-        fitView={false}
-        zoomOnScroll={false}
-        zoomOnPinch={false}
-        panOnDrag={false}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        defaultViewport={{ x: -80, y: -30, zoom: 1.4 }}
+    <div className="w-full h-[400px] relative overflow-hidden flex items-center justify-center">
+      <svg
+        ref={svgRef}
+        width={400}
+        height={320}
+        viewBox="0 0 400 320"
+        className="pointer-events-none"
         style={{ background: 'transparent' }}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background 
-          gap={20} 
-          size={1}
-          color="hsl(var(--muted-foreground))"
-          style={{ opacity: 0.1 }}
-        />
-      </ReactFlow>
+      />
       
       {/* Info overlay */}
       <div className="absolute bottom-4 left-4 right-4">
