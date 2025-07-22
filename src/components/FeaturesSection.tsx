@@ -74,15 +74,31 @@ const FeaturesSection = () => {
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
+        // Find the entry with the highest intersection ratio that's actually intersecting
+        const intersectingEntries = entries.filter(entry => entry.isIntersecting);
+        
+        if (intersectingEntries.length > 0) {
+          // Sort by intersection ratio and take the most visible one
+          const mostVisible = intersectingEntries.reduce((prev, current) => 
+            current.intersectionRatio > prev.intersectionRatio ? current : prev
+          );
+          
+          const index = parseInt(mostVisible.target.getAttribute('data-index') || '0');
+          setActiveFeature(index);
+        }
+        
+        // Update visible items for mobile
         entries.forEach((entry) => {
           const index = parseInt(entry.target.getAttribute('data-index') || '0');
           if (entry.isIntersecting) {
             setVisibleItems(prev => new Set([...prev, index]));
-            setActiveFeature(index);
           }
         });
       },
-      { threshold: 0.3, rootMargin: '-40% 0px -40% 0px' }
+      { 
+        threshold: [0.1, 0.3, 0.5, 0.7, 0.9], 
+        rootMargin: '-20% 0px -20% 0px' 
+      }
     );
 
     // Observe mobile and desktop feature cards
