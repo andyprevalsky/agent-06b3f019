@@ -82,15 +82,15 @@ const FeaturesSection = () => {
           }
         });
       },
-      { threshold: 0.6, rootMargin: '-20% 0px' }
+      { threshold: 0.7, rootMargin: '-30% 0px' }
     );
 
-    // Observe mobile feature cards and desktop scroll triggers
+    // Observe mobile and desktop feature cards
     const mobileCards = sectionRef.current?.querySelectorAll('.lg\\:hidden [data-index]');
-    const desktopTriggers = sectionRef.current?.querySelectorAll('.hidden.lg\\:block [data-index]');
+    const desktopCards = sectionRef.current?.querySelectorAll('.hidden.lg\\:block [data-index]');
     
     mobileCards?.forEach(card => observer.observe(card));
-    desktopTriggers?.forEach(trigger => observer.observe(trigger));
+    desktopCards?.forEach(card => observer.observe(card));
 
     return () => observer.disconnect();
   }, []);
@@ -115,11 +115,11 @@ const FeaturesSection = () => {
         {/* Desktop Layout */}
         <div className="hidden lg:block max-w-7xl mx-auto">
           <div className="flex gap-12">
-            {/* Main Content Area - Left Side */}
-            <div className="flex-1">
-              <div className="sticky top-24 min-h-[600px] flex flex-col justify-center">
-                {/* Animation Placeholder */}
-                <div className="bg-muted/20 rounded-2xl p-12 mb-8 min-h-[400px] flex items-center justify-center border border-border/20">
+            {/* Fixed Animation Area - Left Side */}
+            <div className="w-1/2 flex-shrink-0">
+              <div className="sticky top-24">
+                {/* Fixed-size Animation Placeholder */}
+                <div className="bg-muted/20 rounded-2xl p-12 h-[400px] flex items-center justify-center border border-border/20">
                   <div className="text-center">
                     <div className="w-24 h-24 bg-primary/20 rounded-full mx-auto mb-4 flex items-center justify-center">
                       <div className="w-12 h-12 bg-primary/40 rounded-full"></div>
@@ -128,57 +128,49 @@ const FeaturesSection = () => {
                   </div>
                 </div>
                 
-                {/* Description and Details */}
-                <div className="space-y-6">
-                  <div>
-                    <h3 className="text-3xl font-semibold mb-4 text-foreground">{features[activeFeature].title}</h3>
-                    <p className="text-lg text-muted-foreground mb-6">{features[activeFeature].description}</p>
-                  </div>
-                  
-                  {features[activeFeature].details.length > 0 && (
-                    <ul className="space-y-4">
-                      {features[activeFeature].details.map((detail, detailIndex) => (
-                        <li key={detailIndex} className="flex items-start space-x-3">
-                          <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0"></div>
-                          <span className="text-foreground/80 leading-relaxed">{detail}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                {/* Smaller Description */}
+                <div className="mt-6">
+                  <p className="text-sm text-muted-foreground leading-relaxed">{features[activeFeature].description}</p>
                 </div>
               </div>
             </div>
 
-            {/* Sticky Navigation - Right Side */}
-            <div className="w-80">
-              <div className="sticky top-24 space-y-2">
+            {/* Features List - Right Side */}
+            <div className="flex-1">
+              <div className="space-y-8">
                 {features.map((feature, index) => (
-                  <button
+                  <div
                     key={feature.title}
-                    onClick={() => handleFeatureClick(index)}
-                    className={`w-full text-left p-4 rounded-lg transition-all duration-300 ${
+                    data-index={index}
+                    className={`p-6 rounded-xl border transition-all duration-300 ${
                       activeFeature === index
-                        ? 'bg-primary/10 border-l-4 border-primary text-foreground'
-                        : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground'
+                        ? 'bg-primary/5 border-primary/20 shadow-sm'
+                        : 'border-border/40 hover:border-border/60'
                     }`}
+                    onClick={() => handleFeatureClick(index)}
                   >
-                    <h4 className="font-medium text-sm leading-tight">{feature.title}</h4>
-                  </button>
+                    <h3 className={`text-xl font-semibold mb-4 transition-colors ${
+                      activeFeature === index ? 'text-primary' : 'text-foreground'
+                    }`}>
+                      {feature.title}
+                    </h3>
+                    
+                    {feature.details.length > 0 && (
+                      <ul className="space-y-3">
+                        {feature.details.map((detail, detailIndex) => (
+                          <li key={detailIndex} className="flex items-start space-x-3">
+                            <div className={`w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 transition-colors ${
+                              activeFeature === index ? 'bg-primary' : 'bg-muted-foreground/40'
+                            }`}></div>
+                            <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
-          </div>
-          
-          {/* Invisible scroll triggers for desktop */}
-          <div className="relative">
-            {features.map((_, index) => (
-              <div
-                key={`trigger-${index}`}
-                data-index={index}
-                className="h-96 w-1 opacity-0 pointer-events-none"
-                style={{ marginTop: index === 0 ? '200px' : '0' }}
-              />
-            ))}
           </div>
         </div>
 
