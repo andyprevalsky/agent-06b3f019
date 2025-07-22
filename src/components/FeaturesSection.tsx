@@ -230,7 +230,7 @@ const FeaturesSection = () => {
                     onClick={() => handleFeatureClick(index)}
                     className={`relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden ${
                       activeFeature === index
-                        ? 'bg-primary/10 text-foreground border-2 border-transparent'
+                        ? 'text-foreground border-2 border-transparent'
                         : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground border-2 border-transparent'
                     }`}
                   >
