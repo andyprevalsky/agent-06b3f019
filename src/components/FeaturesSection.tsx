@@ -68,8 +68,18 @@ const FeaturesSection = () => {
   ];
 
   useEffect(() => {
+    let scrollTimeout: NodeJS.Timeout;
+    
     const handleScroll = () => {
-      if (!sectionRef.current || clickedFeature !== null) return;
+      if (!sectionRef.current) return;
+      
+      // Clear the clicked feature override when scrolling stops
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        setClickedFeature(null);
+      }, 150);
+      
+      if (clickedFeature !== null) return;
       
       const scrollPosition = window.scrollY + window.innerHeight / 2;
       const featureElements = sectionRef.current.querySelectorAll('.hidden.lg\\:block [data-index]');
