@@ -5,6 +5,7 @@ const FeaturesSection = () => {
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const [isClickScrolling, setIsClickScrolling] = useState(false);
   const [clickedFeature, setClickedFeature] = useState<number | null>(null);
+  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const sectionRef = useRef<HTMLDivElement>(null);
 
   const features = [
@@ -69,7 +70,16 @@ const FeaturesSection = () => {
 
   useEffect(() => {
     const handleScroll = () => {
-      if (!sectionRef.current || clickedFeature !== null) return;
+      if (!sectionRef.current) return;
+      
+      // Clear any existing timeout and clicked feature if user manually scrolls
+      if (clickedFeature !== null) {
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current);
+          scrollTimeoutRef.current = null;
+        }
+        setClickedFeature(null);
+      }
       
       const scrollPosition = window.scrollY + window.innerHeight / 2;
       const featureElements = sectionRef.current.querySelectorAll('.hidden.lg\\:block [data-index]');
@@ -142,9 +152,10 @@ const FeaturesSection = () => {
       });
       
       // Clear clicked feature after scroll completes
-      setTimeout(() => {
+      scrollTimeoutRef.current = setTimeout(() => {
         setClickedFeature(null);
-      }, 2000);
+        scrollTimeoutRef.current = null;
+      }, 1500);
     }
   };
 
