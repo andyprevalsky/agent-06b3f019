@@ -4,7 +4,7 @@ const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const sectionRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const featureRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const features = [
     {
@@ -67,20 +67,30 @@ const FeaturesSection = () => {
   ];
 
   useEffect(() => {
+    // Initialize refs array
+    featureRefs.current = featureRefs.current.slice(0, features.length);
+  }, [features.length]);
+
+  useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
           const index = parseInt(entry.target.getAttribute('data-index') || '0');
           if (entry.isIntersecting) {
             setVisibleItems(prev => new Set([...prev, index]));
+            setActiveFeature(index);
           }
         });
       },
-      { threshold: 0.3, rootMargin: '-50px' }
+      { threshold: 0.6, rootMargin: '-20% 0px' }
     );
 
-    const cards = sectionRef.current?.querySelectorAll('[data-index]');
-    cards?.forEach(card => observer.observe(card));
+    // Observe mobile feature cards and desktop scroll triggers
+    const mobileCards = sectionRef.current?.querySelectorAll('.lg\\:hidden [data-index]');
+    const desktopTriggers = sectionRef.current?.querySelectorAll('.hidden.lg\\:block [data-index]');
+    
+    mobileCards?.forEach(card => observer.observe(card));
+    desktopTriggers?.forEach(trigger => observer.observe(trigger));
 
     return () => observer.disconnect();
   }, []);
@@ -103,58 +113,72 @@ const FeaturesSection = () => {
         </div>
         
         {/* Desktop Layout */}
-        <div className="hidden lg:flex max-w-7xl mx-auto gap-12">
-          {/* Main Content Area - Left Side */}
-          <div className="flex-1" ref={contentRef}>
-            <div className="sticky top-24 min-h-[600px] flex flex-col justify-center">
-              {/* Animation Placeholder */}
-              <div className="bg-muted/20 rounded-2xl p-12 mb-8 min-h-[400px] flex items-center justify-center border border-border/20">
-                <div className="text-center">
-                  <div className="w-24 h-24 bg-primary/20 rounded-full mx-auto mb-4 flex items-center justify-center">
-                    <div className="w-12 h-12 bg-primary/40 rounded-full"></div>
+        <div className="hidden lg:block max-w-7xl mx-auto">
+          <div className="flex gap-12">
+            {/* Main Content Area - Left Side */}
+            <div className="flex-1">
+              <div className="sticky top-24 min-h-[600px] flex flex-col justify-center">
+                {/* Animation Placeholder */}
+                <div className="bg-muted/20 rounded-2xl p-12 mb-8 min-h-[400px] flex items-center justify-center border border-border/20">
+                  <div className="text-center">
+                    <div className="w-24 h-24 bg-primary/20 rounded-full mx-auto mb-4 flex items-center justify-center">
+                      <div className="w-12 h-12 bg-primary/40 rounded-full"></div>
+                    </div>
+                    <p className="text-muted-foreground text-sm">Animation for {features[activeFeature].title}</p>
                   </div>
-                  <p className="text-muted-foreground text-sm">Animation for {features[activeFeature].title}</p>
-                </div>
-              </div>
-              
-              {/* Description and Details */}
-              <div className="space-y-6">
-                <div>
-                  <h3 className="text-3xl font-semibold mb-4 text-foreground">{features[activeFeature].title}</h3>
-                  <p className="text-lg text-muted-foreground mb-6">{features[activeFeature].description}</p>
                 </div>
                 
-                {features[activeFeature].details.length > 0 && (
-                  <ul className="space-y-4">
-                    {features[activeFeature].details.map((detail, detailIndex) => (
-                      <li key={detailIndex} className="flex items-start space-x-3">
-                        <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0"></div>
-                        <span className="text-foreground/80 leading-relaxed">{detail}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                {/* Description and Details */}
+                <div className="space-y-6">
+                  <div>
+                    <h3 className="text-3xl font-semibold mb-4 text-foreground">{features[activeFeature].title}</h3>
+                    <p className="text-lg text-muted-foreground mb-6">{features[activeFeature].description}</p>
+                  </div>
+                  
+                  {features[activeFeature].details.length > 0 && (
+                    <ul className="space-y-4">
+                      {features[activeFeature].details.map((detail, detailIndex) => (
+                        <li key={detailIndex} className="flex items-start space-x-3">
+                          <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0"></div>
+                          <span className="text-foreground/80 leading-relaxed">{detail}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Sticky Navigation - Right Side */}
+            <div className="w-80">
+              <div className="sticky top-24 space-y-2">
+                {features.map((feature, index) => (
+                  <button
+                    key={feature.title}
+                    onClick={() => handleFeatureClick(index)}
+                    className={`w-full text-left p-4 rounded-lg transition-all duration-300 ${
+                      activeFeature === index
+                        ? 'bg-primary/10 border-l-4 border-primary text-foreground'
+                        : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    <h4 className="font-medium text-sm leading-tight">{feature.title}</h4>
+                  </button>
+                ))}
               </div>
             </div>
           </div>
-
-          {/* Sticky Navigation - Right Side */}
-          <div className="w-80">
-            <div className="sticky top-24 space-y-2">
-              {features.map((feature, index) => (
-                <button
-                  key={feature.title}
-                  onClick={() => handleFeatureClick(index)}
-                  className={`w-full text-left p-4 rounded-lg transition-all duration-300 ${
-                    activeFeature === index
-                      ? 'bg-primary/10 border-l-4 border-primary text-foreground'
-                      : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  <h4 className="font-medium text-sm leading-tight">{feature.title}</h4>
-                </button>
-              ))}
-            </div>
+          
+          {/* Invisible scroll triggers for desktop */}
+          <div className="relative">
+            {features.map((_, index) => (
+              <div
+                key={`trigger-${index}`}
+                data-index={index}
+                className="h-96 w-1 opacity-0 pointer-events-none"
+                style={{ marginTop: index === 0 ? '200px' : '0' }}
+              />
+            ))}
           </div>
         </div>
 
