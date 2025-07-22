@@ -37,7 +37,7 @@ const PreOrderSection = () => {
   const handlePreOrder = (variant: 'black' | 'white') => {
     // Real Stripe Payment Links - create these in your Stripe dashboard
     const checkoutUrls = {
-      black: 'https://buy.stripe.com/6oU9AT1je3rn9nPgJv5kk01', // Midnight Black payment link
+      black: 'https://buy.stripe.com/5kQ5kD6Dy4vr2Zr1OB5kk03', // Midnight Black payment link
       white: 'https://buy.stripe.com/8x2dR9aTO6Dz6bD0Kx5kk02'  // Pearl White payment link
     };
 
