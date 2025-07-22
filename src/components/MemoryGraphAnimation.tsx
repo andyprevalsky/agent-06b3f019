@@ -28,25 +28,21 @@ const treeStructure = {
     { id: 'sep-20-checkin', label: 'Sep 20 Check-In', x: 600, y: 280, size: 12 }
   ],
   level2: [
-    // From Relationship Info
-    { id: 'partner-preferences', label: 'Partner Preferences', x: 120, y: 150, size: 8, parent: 'relationship-info' },
-    { id: 'date-history', label: 'Date History', x: 200, y: 120, size: 8, parent: 'relationship-info' },
-    { id: 'conflict-resolution', label: 'Conflict Resolution', x: 280, y: 150, size: 8, parent: 'relationship-info' },
+    // From Relationship Info (2 nodes)
+    { id: 'partner-preferences', label: 'Partner Preferences', x: 150, y: 150, size: 8, parent: 'relationship-info' },
+    { id: 'date-history', label: 'Date History', x: 250, y: 150, size: 8, parent: 'relationship-info' },
     
-    // From AI Meetup Summary
+    // From AI Meetup Summary (2 nodes)
     { id: 'key-insights', label: 'Key Insights', x: 300, y: 130, size: 8, parent: 'ai-meetup-summary' },
-    { id: 'action-items', label: 'Action Items', x: 350, y: 100, size: 8, parent: 'ai-meetup-summary' },
-    { id: 'follow-ups', label: 'Follow-ups', x: 400, y: 130, size: 8, parent: 'ai-meetup-summary' },
+    { id: 'action-items', label: 'Action Items', x: 400, y: 130, size: 8, parent: 'ai-meetup-summary' },
     
-    // From Meal Prep List
-    { id: 'weekly-menu', label: 'Weekly Menu', x: 420, y: 100, size: 8, parent: 'meal-prep-list' },
-    { id: 'shopping-list', label: 'Shopping List', x: 450, y: 130, size: 8, parent: 'meal-prep-list' },
-    { id: 'nutrition-goals', label: 'Nutrition Goals', x: 480, y: 100, size: 8, parent: 'meal-prep-list' },
+    // From Meal Prep List (2 nodes)
+    { id: 'weekly-menu', label: 'Weekly Menu', x: 420, y: 130, size: 8, parent: 'meal-prep-list' },
+    { id: 'shopping-list', label: 'Shopping List', x: 480, y: 130, size: 8, parent: 'meal-prep-list' },
     
-    // From Sep 20 Check-In
+    // From Sep 20 Check-In (2 nodes)
     { id: 'mood-tracking', label: 'Mood Tracking', x: 550, y: 150, size: 8, parent: 'sep-20-checkin' },
-    { id: 'goal-progress', label: 'Goal Progress', x: 600, y: 120, size: 8, parent: 'sep-20-checkin' },
-    { id: 'health-metrics', label: 'Health Metrics', x: 650, y: 150, size: 8, parent: 'sep-20-checkin' }
+    { id: 'goal-progress', label: 'Goal Progress', x: 650, y: 150, size: 8, parent: 'sep-20-checkin' }
   ]
 };
 
@@ -174,7 +170,7 @@ export const MemoryGraphAnimation = () => {
     return () => clearTimeout(timer);
   }, [isAnimating, currentLevel, currentNodeInLevel, nodes]);
 
-  // Intersection Observer - reset completely when out of view
+  // Intersection Observer - complete reset when out of view
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -184,7 +180,7 @@ export const MemoryGraphAnimation = () => {
             setIsAnimating(true);
           }, 500);
         } else if (!entry.isIntersecting) {
-          // Complete reset when out of view
+          // Complete reset - clear everything immediately
           setNodes([]);
           setLinks([]);
           setCurrentLevel(0);
@@ -193,6 +189,11 @@ export const MemoryGraphAnimation = () => {
           setHasTriggered(false);
           setHoveredNode(null);
           setDraggedNode(null);
+          
+          // Clear SVG to ensure complete reset
+          if (svgRef.current) {
+            d3.select(svgRef.current).selectAll("*").remove();
+          }
         }
       },
       { threshold: 0.1 }
