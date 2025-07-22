@@ -15,37 +15,37 @@ interface Link {
   target: string;
 }
 
-// Define tree structure for memory graph
+// Define tree structure for memory graph - bottom to top layout
 const treeStructure = {
   level0: [
-    { id: 'user-preferences', label: 'User Preferences', x: 400, y: 250, size: 12 }
+    { id: 'user-preferences', label: 'User Preferences', x: 400, y: 400, size: 16 } // Bottom center, largest
   ],
   level1: [
-    { id: 'relationship-info', label: 'Relationship Info', x: 200, y: 150, size: 10 },
-    { id: 'ai-meetup-summary', label: 'AI Meetup Summary', x: 300, y: 100, size: 10 },
-    { id: 'meal-prep-list', label: 'Meal Prep List', x: 500, y: 100, size: 10 },
-    { id: 'sep-20-checkin', label: 'Sep 20 Check-In', x: 600, y: 150, size: 10 }
+    { id: 'relationship-info', label: 'Relationship Info', x: 200, y: 280, size: 12 },
+    { id: 'ai-meetup-summary', label: 'AI Meetup Summary', x: 350, y: 260, size: 12 },
+    { id: 'meal-prep-list', label: 'Meal Prep List', x: 450, y: 260, size: 12 },
+    { id: 'sep-20-checkin', label: 'Sep 20 Check-In', x: 600, y: 280, size: 12 }
   ],
   level2: [
     // From Relationship Info
-    { id: 'partner-preferences', label: 'Partner Preferences', x: 100, y: 80, size: 8, parent: 'relationship-info' },
-    { id: 'date-history', label: 'Date History', x: 150, y: 50, size: 8, parent: 'relationship-info' },
-    { id: 'conflict-resolution', label: 'Conflict Resolution', x: 250, y: 50, size: 8, parent: 'relationship-info' },
+    { id: 'partner-preferences', label: 'Partner Preferences', x: 120, y: 150, size: 8, parent: 'relationship-info' },
+    { id: 'date-history', label: 'Date History', x: 200, y: 120, size: 8, parent: 'relationship-info' },
+    { id: 'conflict-resolution', label: 'Conflict Resolution', x: 280, y: 150, size: 8, parent: 'relationship-info' },
     
     // From AI Meetup Summary
-    { id: 'key-insights', label: 'Key Insights', x: 250, y: 30, size: 8, parent: 'ai-meetup-summary' },
-    { id: 'action-items', label: 'Action Items', x: 300, y: 20, size: 8, parent: 'ai-meetup-summary' },
-    { id: 'follow-ups', label: 'Follow-ups', x: 350, y: 30, size: 8, parent: 'ai-meetup-summary' },
+    { id: 'key-insights', label: 'Key Insights', x: 300, y: 130, size: 8, parent: 'ai-meetup-summary' },
+    { id: 'action-items', label: 'Action Items', x: 350, y: 100, size: 8, parent: 'ai-meetup-summary' },
+    { id: 'follow-ups', label: 'Follow-ups', x: 400, y: 130, size: 8, parent: 'ai-meetup-summary' },
     
     // From Meal Prep List
-    { id: 'weekly-menu', label: 'Weekly Menu', x: 450, y: 20, size: 8, parent: 'meal-prep-list' },
-    { id: 'shopping-list', label: 'Shopping List', x: 500, y: 30, size: 8, parent: 'meal-prep-list' },
-    { id: 'nutrition-goals', label: 'Nutrition Goals', x: 550, y: 20, size: 8, parent: 'meal-prep-list' },
+    { id: 'weekly-menu', label: 'Weekly Menu', x: 420, y: 100, size: 8, parent: 'meal-prep-list' },
+    { id: 'shopping-list', label: 'Shopping List', x: 450, y: 130, size: 8, parent: 'meal-prep-list' },
+    { id: 'nutrition-goals', label: 'Nutrition Goals', x: 480, y: 100, size: 8, parent: 'meal-prep-list' },
     
     // From Sep 20 Check-In
-    { id: 'mood-tracking', label: 'Mood Tracking', x: 550, y: 80, size: 8, parent: 'sep-20-checkin' },
-    { id: 'goal-progress', label: 'Goal Progress', x: 600, y: 50, size: 8, parent: 'sep-20-checkin' },
-    { id: 'health-metrics', label: 'Health Metrics', x: 650, y: 80, size: 8, parent: 'sep-20-checkin' }
+    { id: 'mood-tracking', label: 'Mood Tracking', x: 550, y: 150, size: 8, parent: 'sep-20-checkin' },
+    { id: 'goal-progress', label: 'Goal Progress', x: 600, y: 120, size: 8, parent: 'sep-20-checkin' },
+    { id: 'health-metrics', label: 'Health Metrics', x: 650, y: 150, size: 8, parent: 'sep-20-checkin' }
   ]
 };
 
@@ -227,7 +227,7 @@ export const MemoryGraphAnimation = () => {
     const linkSelection = svg.selectAll(".link")
       .data(links, (d: any) => `${d.source}-${d.target}`);
 
-    // Enter new links
+    // Enter new links with proper z-index
     linkSelection.enter()
       .append("line")
       .attr("class", "link")
@@ -247,11 +247,12 @@ export const MemoryGraphAnimation = () => {
         const sourceNode = nodes.find(n => n.id === d.source);
         return sourceNode ? sourceNode.y : 0;
       })
-      .attr("stroke", "#7c3aed")
-      .attr("stroke-width", 1.5)
-      .attr("stroke-opacity", 0.4)
+      .attr("stroke", "#A76CED")
+      .attr("stroke-width", 2)
+      .attr("stroke-opacity", 0.3)
+      .style("z-index", "1")
       .transition()
-      .duration(400)
+      .duration(600)
       .attr("x2", d => {
         const targetNode = nodes.find(n => n.id === d.target);
         return targetNode ? targetNode.x : 0;
@@ -269,9 +270,10 @@ export const MemoryGraphAnimation = () => {
     const nodeEnter = nodeSelection.enter()
       .append("g")
       .attr("class", "node-group")
-      .attr("transform", d => `translate(${d.x}, ${d.y})`);
+      .attr("transform", d => `translate(${d.x}, ${d.y})`)
+      .style("z-index", "10");
 
-    // Add circles with animation - these will be on top of links
+    // Add circles with animation - ensure they're on top
     nodeEnter.append("circle")
       .attr("class", "node-circle")
       .attr("r", 0)
@@ -279,6 +281,7 @@ export const MemoryGraphAnimation = () => {
       .attr("stroke", d => d.color)
       .attr("stroke-width", 2)
       .attr("opacity", 0)
+      .style("z-index", "10")
       .transition()
       .duration(500)
       .attr("r", d => d.size)
