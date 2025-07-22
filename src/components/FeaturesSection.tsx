@@ -235,7 +235,7 @@ const FeaturesSection = () => {
                     }`}
                   >
                     {activeFeature === index && (
-                      <div className="absolute inset-0 rounded-lg before:absolute before:inset-0 before:p-[2px] before:bg-gradient-to-r before:from-[#FE7503] before:via-[#FC585C] before:via-[#FD5776] before:via-[#E062CC] before:via-[#A76CED] before:to-[#7A6BEC] before:animate-gradient-rotate before:rounded-lg before:-z-10" style={{ '--tw-gradient-size': '200% 200%' } as any}>
+                      <div className="absolute inset-0 rounded-lg before:absolute before:inset-0 before:p-[2px] before:bg-gradient-to-r before:from-[#FE7503] before:via-[#FC585C] before:via-[#FD5776] before:via-[#E062CC] before:via-[#A76CED] before:to-[#7A6BEC] before:bg-[length:200%_200%] before:animate-gradient-rotate before:rounded-lg before:-z-10">
                         <div className="absolute inset-[2px] bg-background rounded-lg"></div>
                       </div>
                     )}
