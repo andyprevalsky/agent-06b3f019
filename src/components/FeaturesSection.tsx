@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
 const FeaturesSection = () => {
+  const [activeFeature, setActiveFeature] = useState(0);
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const sectionRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   const features = [
     {
@@ -83,6 +85,10 @@ const FeaturesSection = () => {
     return () => observer.disconnect();
   }, []);
 
+  const handleFeatureClick = (index: number) => {
+    setActiveFeature(index);
+  };
+
 
   return (
     <section id="features" className="py-24 bg-surface relative" ref={sectionRef}>
@@ -96,7 +102,64 @@ const FeaturesSection = () => {
           </p>
         </div>
         
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-12 max-w-6xl mx-auto">
+        {/* Desktop Layout */}
+        <div className="hidden lg:flex max-w-7xl mx-auto gap-12">
+          {/* Main Content Area - Left Side */}
+          <div className="flex-1" ref={contentRef}>
+            <div className="sticky top-24 min-h-[600px] flex flex-col justify-center">
+              {/* Animation Placeholder */}
+              <div className="bg-muted/20 rounded-2xl p-12 mb-8 min-h-[400px] flex items-center justify-center border border-border/20">
+                <div className="text-center">
+                  <div className="w-24 h-24 bg-primary/20 rounded-full mx-auto mb-4 flex items-center justify-center">
+                    <div className="w-12 h-12 bg-primary/40 rounded-full"></div>
+                  </div>
+                  <p className="text-muted-foreground text-sm">Animation for {features[activeFeature].title}</p>
+                </div>
+              </div>
+              
+              {/* Description and Details */}
+              <div className="space-y-6">
+                <div>
+                  <h3 className="text-3xl font-semibold mb-4 text-foreground">{features[activeFeature].title}</h3>
+                  <p className="text-lg text-muted-foreground mb-6">{features[activeFeature].description}</p>
+                </div>
+                
+                {features[activeFeature].details.length > 0 && (
+                  <ul className="space-y-4">
+                    {features[activeFeature].details.map((detail, detailIndex) => (
+                      <li key={detailIndex} className="flex items-start space-x-3">
+                        <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0"></div>
+                        <span className="text-foreground/80 leading-relaxed">{detail}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Sticky Navigation - Right Side */}
+          <div className="w-80">
+            <div className="sticky top-24 space-y-2">
+              {features.map((feature, index) => (
+                <button
+                  key={feature.title}
+                  onClick={() => handleFeatureClick(index)}
+                  className={`w-full text-left p-4 rounded-lg transition-all duration-300 ${
+                    activeFeature === index
+                      ? 'bg-primary/10 border-l-4 border-primary text-foreground'
+                      : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  <h4 className="font-medium text-sm leading-tight">{feature.title}</h4>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Mobile Layout */}
+        <div className="lg:hidden space-y-8">
           {features.map((feature, index) => (
             <div 
               key={feature.title}
