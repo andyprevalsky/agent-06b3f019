@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
+  const [isManualScroll, setIsManualScroll] = useState(false);
   const sectionRef = useRef<HTMLDivElement>(null);
   const featureRefs = useRef<(HTMLDivElement | null)[]>([]);
 
@@ -77,7 +78,7 @@ const FeaturesSection = () => {
         // Find the entry with the highest intersection ratio that's actually intersecting
         const intersectingEntries = entries.filter(entry => entry.isIntersecting);
         
-        if (intersectingEntries.length > 0) {
+        if (intersectingEntries.length > 0 && !isManualScroll) {
           // Sort by intersection ratio and take the most visible one
           const mostVisible = intersectingEntries.reduce((prev, current) => 
             current.intersectionRatio > prev.intersectionRatio ? current : prev
@@ -112,6 +113,7 @@ const FeaturesSection = () => {
   }, []);
 
   const handleFeatureClick = (index: number) => {
+    setIsManualScroll(true);
     setActiveFeature(index);
     
     // Scroll to the corresponding feature animation/description
@@ -121,6 +123,11 @@ const FeaturesSection = () => {
         behavior: 'smooth', 
         block: 'center'
       });
+      
+      // Re-enable automatic scroll detection after a delay
+      setTimeout(() => {
+        setIsManualScroll(false);
+      }, 1000);
     }
   };
 
