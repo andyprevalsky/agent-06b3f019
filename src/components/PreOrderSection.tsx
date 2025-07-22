@@ -14,16 +14,36 @@ const PreOrderSection = () => {
     const syncVideos = async () => {
       if (blackVideoRef.current && whiteVideoRef.current) {
         try {
-          // Ensure both videos are ready
+          const blackVideo = blackVideoRef.current;
+          const whiteVideo = whiteVideoRef.current;
+          
+          // Reset both videos to start
+          blackVideo.currentTime = 0;
+          whiteVideo.currentTime = 0;
+          
+          // Ensure both videos are loaded
           await Promise.all([
-            blackVideoRef.current.load(),
-            whiteVideoRef.current.load()
+            new Promise((resolve) => {
+              if (blackVideo.readyState >= 3) resolve(null);
+              else blackVideo.addEventListener('canplay', () => resolve(null), { once: true });
+            }),
+            new Promise((resolve) => {
+              if (whiteVideo.readyState >= 3) resolve(null);
+              else whiteVideo.addEventListener('canplay', () => resolve(null), { once: true });
+            })
           ]);
           
-          // Start both videos at the same time
+          // Pause both first to ensure clean start
+          blackVideo.pause();
+          whiteVideo.pause();
+          
+          // Reset time again and play simultaneously
+          blackVideo.currentTime = 0;
+          whiteVideo.currentTime = 0;
+          
           await Promise.all([
-            blackVideoRef.current.play(),
-            whiteVideoRef.current.play()
+            blackVideo.play(),
+            whiteVideo.play()
           ]);
         } catch (error) {
           console.log('Video sync failed:', error);
