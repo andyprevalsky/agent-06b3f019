@@ -133,10 +133,10 @@ export const MemoryGraphAnimation = () => {
     if (isAnimating && currentIndex < heartNodes.length) {
       // Non-uniform delays - faster at start, then varying
       const getDelay = (index: number) => {
-        if (index === 0) return 500; // First node delay
-        if (index < 7) return 300 + Math.random() * 200; // Inner ring: 300-500ms
-        if (index < 17) return 200 + Math.random() * 300; // Middle ring: 200-500ms
-        return 150 + Math.random() * 250; // Outer ring: 150-400ms
+        if (index === 0) return 100; // First node delay - faster start
+        if (index < 7) return 200 + Math.random() * 100; // Inner ring: 200-300ms
+        if (index < 17) return 150 + Math.random() * 150; // Middle ring: 150-300ms
+        return 100 + Math.random() * 200; // Outer ring: 100-300ms
       };
       
       const timer = setTimeout(() => {
@@ -166,10 +166,13 @@ export const MemoryGraphAnimation = () => {
       ([entry]) => {
         if (entry.isIntersecting && !hasTriggered) {
           setHasTriggered(true);
-          setIsAnimating(true);
+          // Small delay to ensure smooth start
+          setTimeout(() => {
+            setIsAnimating(true);
+          }, 500);
         }
       },
-      { threshold: 0.5 }
+      { threshold: 0.3 } // Lower threshold for earlier trigger
     );
 
     if (containerRef.current) {
