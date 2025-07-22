@@ -15,33 +15,38 @@ interface Link {
   target: string;
 }
 
-// Create a proper heart shape with mathematical precision
-const heartCoords: [number, number][] = [
-  // Bottom point
-  [50, 85],
+// Heart shape coordinates - 45 points forming a filled heart
+const heartCoords = [
+  // Center point
+  [400, 250],
   
-  // Left side of heart going up
-  [45, 80], [40, 75], [35, 70], [32, 65], [30, 60], [29, 55], [30, 50], [32, 45], [35, 40], [40, 37], [45, 36],
+  // Inner heart shape
+  [400, 200], [380, 180], [420, 180],
+  [360, 170], [440, 170], [350, 180], [450, 180],
+  [340, 200], [460, 200], [340, 220], [460, 220],
+  [350, 240], [450, 240], [360, 260], [440, 260],
+  [380, 280], [420, 280], [400, 300],
   
-  // Left top curve
-  [48, 35], [50, 34], [52, 35],
+  // Middle layer
+  [320, 160], [480, 160], [300, 180], [500, 180],
+  [290, 210], [510, 210], [290, 240], [510, 240],
+  [300, 270], [500, 270], [320, 300], [480, 300],
+  [360, 320], [440, 320], [400, 340],
   
-  // Right top curve  
-  [55, 36], [60, 37], [65, 40], [68, 45], [70, 50], [71, 55], [70, 60], [68, 65], [65, 70], [60, 75], [55, 80],
+  // Outer layer
+  [280, 200], [520, 200], [270, 230], [530, 230],
+  [280, 260], [520, 260], [300, 290], [500, 290],
+  [340, 340], [460, 340], [400, 360],
   
-  // Fill the heart interior
-  [50, 75], [48, 70], [52, 70], [46, 65], [54, 65], [44, 60], [56, 60], [42, 55], [58, 55], [43, 50], [57, 50],
-  [45, 45], [55, 45], [47, 42], [53, 42], [49, 40], [51, 40],
-  
-  // Additional fill points for density
-  [50, 65], [50, 55], [50, 45], [48, 60], [52, 60], [48, 50], [52, 50]
+  // Fill points
+  [400, 220], [400, 240], [400, 260], [400, 280]
 ];
 
 // Convert coordinates to heart nodes
 const heartNodes = heartCoords.map((coord, index) => ({
-  x: coord[0], // Percentage coordinates
+  x: coord[0],
   y: coord[1],
-  size: 5,
+  size: index === 0 ? 10 : Math.random() * 4 + 3, // Center larger, others varied
 }));
 
 // Generate gradient colors based on position in the sequence
@@ -86,22 +91,33 @@ export const MemoryGraphAnimation = () => {
     return []; // Remove all edges
   };
 
-  // Animate nodes one at a time with proper timing
+  // Animate nodes with non-uniform timing
   useEffect(() => {
     if (isAnimating && currentIndex < heartNodes.length) {
+      // Non-uniform delays - faster at start, then varying
+      const getDelay = (index: number) => {
+        if (index === 0) return 200; // Center node
+        if (index <= 6) return 150; // Ring 1: Inner ring - uniform timing
+        if (index <= 23) return 100; // Ring 2: Middle ring - faster
+        return 80; // Ring 3: Outer ring - fastest
+      };
+      
       const timer = setTimeout(() => {
         const newNode: Node = {
           id: `node-${currentIndex}`,
           x: heartNodes[currentIndex].x,
           y: heartNodes[currentIndex].y,
-          label: "",
+          label: "", // No labels
           size: heartNodes[currentIndex].size,
           color: getGradientColor(currentIndex, heartNodes.length)
         };
         
+        const newConnections = generateConnections(currentIndex);
+        
         setNodes(prev => [...prev, newNode]);
+        setLinks(prev => [...prev, ...newConnections]);
         setCurrentIndex(prev => prev + 1);
-      }, 100); // Fixed timing for all nodes
+      }, getDelay(currentIndex));
       
       return () => clearTimeout(timer);
     }
@@ -136,33 +152,67 @@ export const MemoryGraphAnimation = () => {
     return () => observer.disconnect();
   }, [hasTriggered]);
 
-  // Reset animation after completion (fix flashing)
+  // Reset animation after 1 second of completion
   useEffect(() => {
-    if (currentIndex >= heartNodes.length && isAnimating) {
-      setIsAnimating(false); // Stop animation completely
+    if (currentIndex >= heartNodes.length) {
       const resetTimer = setTimeout(() => {
         setNodes([]);
+        setLinks([]);
         setCurrentIndex(0);
-        setIsAnimating(true); // Restart animation
-      }, 3000); // Wait 3 seconds before restarting
+        setIsAnimating(true);
+      }, 1000); // Wait 1 second before restarting
       
       return () => clearTimeout(resetTimer);
     }
-  }, [currentIndex, isAnimating]);
+  }, [currentIndex]);
 
-  // D3 rendering with responsive sizing
+  // D3 rendering with proper z-index (edges behind nodes)
   useEffect(() => {
-    if (!svgRef.current || !containerRef.current) return;
+    if (!svgRef.current) return;
 
     const svg = d3.select(svgRef.current);
-    const containerRect = containerRef.current.getBoundingClientRect();
-    const width = containerRect.width;
-    const height = containerRect.height;
+    const width = 800;
+    const height = 500;
 
-    // Clear previous content
-    svg.selectAll("*").remove();
+    // Create/update links FIRST (so they appear behind nodes)
+    const linkSelection = svg.selectAll(".link")
+      .data(links, (d: any) => `${d.source}-${d.target}`);
 
-    // Create/update node groups
+    // Enter new links
+    linkSelection.enter()
+      .append("line")
+      .attr("class", "link")
+      .attr("x1", d => {
+        const sourceNode = nodes.find(n => n.id === d.source);
+        return sourceNode ? sourceNode.x : 0;
+      })
+      .attr("y1", d => {
+        const sourceNode = nodes.find(n => n.id === d.source);
+        return sourceNode ? sourceNode.y : 0;
+      })
+      .attr("x2", d => {
+        const sourceNode = nodes.find(n => n.id === d.source);
+        return sourceNode ? sourceNode.x : 0;
+      })
+      .attr("y2", d => {
+        const sourceNode = nodes.find(n => n.id === d.source);
+        return sourceNode ? sourceNode.y : 0;
+      })
+      .attr("stroke", "#7c3aed")
+      .attr("stroke-width", 1.5)
+      .attr("stroke-opacity", 0.4)
+      .transition()
+      .duration(400)
+      .attr("x2", d => {
+        const targetNode = nodes.find(n => n.id === d.target);
+        return targetNode ? targetNode.x : 0;
+      })
+      .attr("y2", d => {
+        const targetNode = nodes.find(n => n.id === d.target);
+        return targetNode ? targetNode.y : 0;
+      });
+
+    // Create/update node groups AFTER links (so nodes appear on top)
     const nodeSelection = svg.selectAll(".node-group")
       .data(nodes, (d: any) => d.id);
 
@@ -170,27 +220,37 @@ export const MemoryGraphAnimation = () => {
     const nodeEnter = nodeSelection.enter()
       .append("g")
       .attr("class", "node-group")
-      .attr("transform", d => {
-        // Convert percentage coordinates to actual pixels
-        const actualX = (d.x / 100) * width;
-        const actualY = (d.y / 100) * height;
-        return `translate(${actualX}, ${actualY})`;
-      });
+      .attr("transform", d => `translate(${d.x}, ${d.y})`);
 
-    // Add circles with animation
+    // Add circles with animation - these will be on top of links
     nodeEnter.append("circle")
       .attr("class", "node-circle")
       .attr("r", 0)
       .attr("fill", d => d.color)
       .attr("stroke", d => d.color)
-      .attr("stroke-width", 1)
+      .attr("stroke-width", 2)
       .attr("opacity", 0)
       .transition()
       .duration(500)
       .attr("r", d => d.size)
       .attr("opacity", 1);
 
-  }, [nodes]);
+    // Remove labels (commented out)
+    // nodeEnter.append("text")
+    //   .attr("class", "node-label")
+    //   .attr("dy", d => d.size + 16)
+    //   .attr("text-anchor", "middle")
+    //   .attr("fill", "hsl(var(--foreground))")
+    //   .attr("font-size", "11px")
+    //   .attr("font-weight", "400")
+    //   .attr("opacity", 0)
+    //   .text(d => d.label)
+    //   .transition()
+    //   .duration(500)
+    //   .delay(200)
+    //   .attr("opacity", 0.9);
+
+  }, [nodes, links]);
 
   return (
     <div 
@@ -199,7 +259,10 @@ export const MemoryGraphAnimation = () => {
     >
       <svg
         ref={svgRef}
-        className="w-full h-full pointer-events-none"
+        width={800}
+        height={500}
+        viewBox="0 0 800 500"
+        className="pointer-events-none"
         style={{ background: 'transparent' }}
       />
     </div>
