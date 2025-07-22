@@ -177,7 +177,7 @@ export const MemoryGraphAnimation = () => {
     }
   }, [isAnimating, currentIndex]);
 
-  // Intersection Observer to trigger animation when in view
+  // Intersection Observer to trigger animation when in view and reset when out of view
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -187,6 +187,13 @@ export const MemoryGraphAnimation = () => {
           setTimeout(() => {
             setIsAnimating(true);
           }, 500);
+        } else if (!entry.isIntersecting && hasTriggered) {
+          // Reset animation when out of view
+          setNodes([]);
+          setLinks([]);
+          setCurrentIndex(0);
+          setIsAnimating(false);
+          setHasTriggered(false);
         }
       },
       { threshold: 0.3 } // Lower threshold for earlier trigger
