@@ -89,14 +89,17 @@ const FeaturesSection = () => {
       setActiveFeature(closestIndex);
     };
 
-    // Throttle scroll events
-    let timeoutId: NodeJS.Timeout;
+    // Update immediately on scroll, but throttle for performance
+    let rafId: number;
     const throttledScroll = () => {
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(handleScroll, 100);
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        handleScroll();
+        rafId = 0;
+      });
     };
 
-    window.addEventListener('scroll', throttledScroll);
+    window.addEventListener('scroll', throttledScroll, { passive: true });
     
     // Mobile intersection observer (simpler, just for visibility)
     const observer = new IntersectionObserver(
@@ -120,7 +123,7 @@ const FeaturesSection = () => {
 
     return () => {
       window.removeEventListener('scroll', throttledScroll);
-      clearTimeout(timeoutId);
+      if (rafId) cancelAnimationFrame(rafId);
       observer.disconnect();
     };
   }, []);
