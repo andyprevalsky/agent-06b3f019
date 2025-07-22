@@ -71,16 +71,19 @@ const PreOrderSection = () => {
           <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
             <CardContent className="p-8 text-center">
               <div className="mb-6">
-                <video 
-                  ref={blackVideoRef}
-                  className="w-48 h-48 rounded-3xl mx-auto mb-4 object-cover object-center"
-                  loop
-                  muted
-                  playsInline
-                  style={{ backgroundColor: 'transparent' }}
-                >
-                  <source src="/navi-black-demo.webm" type="video/webm" />
-                </video>
+                <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden bg-gradient-to-br from-background to-surface">
+                  <video 
+                    ref={blackVideoRef}
+                    className="w-full h-full object-cover"
+                    loop
+                    muted
+                    playsInline
+                    preload="metadata"
+                  >
+                    <source src="/navi-black-demo.webm" type="video/webm" />
+                    <img src="/navi-black.png" alt="Navi Black" className="w-full h-full object-cover" />
+                  </video>
+                </div>
                 <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
                 <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
               </div>
@@ -134,16 +137,19 @@ const PreOrderSection = () => {
           <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
             <CardContent className="p-8 text-center">
               <div className="mb-6">
-                <video 
-                  ref={whiteVideoRef}
-                  className="w-48 h-48 rounded-3xl mx-auto mb-4 object-cover object-center"
-                  loop
-                  muted
-                  playsInline
-                  style={{ backgroundColor: 'transparent' }}
-                >
-                  <source src="/navi-white-demo.webm" type="video/webm" />
-                </video>
+                <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden bg-gradient-to-br from-background to-surface">
+                  <video 
+                    ref={whiteVideoRef}
+                    className="w-full h-full object-cover"
+                    loop
+                    muted
+                    playsInline
+                    preload="metadata"
+                  >
+                    <source src="/navi-white-demo.webm" type="video/webm" />
+                    <img src="/navi-white.png" alt="Navi White" className="w-full h-full object-cover" />
+                  </video>
+                </div>
                 <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
                 <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
               </div>
