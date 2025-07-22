@@ -15,76 +15,81 @@ interface Link {
   target: string;
 }
 
-// Generate evenly distributed heart shape coordinates
-const heartCoords = [
-  [412.29, 262.20],
-  [359.16, 215.92],
-  [444.29, 231.00],
-  [370.14, 258.01],
-  [388.48, 239.00],
-  [428.38, 267.71],
-  [381.66, 274.96],
-  [419.63, 283.56],
-  [405.03, 272.41],
-  [400.25, 261.57],
-  [420.55, 241.64],
-  [437.23, 245.13],
-  [393.38, 249.04],
-  [416.86, 223.51],
-  [376.42, 250.23],
-  [432.09, 228.43],
-  [379.45, 231.84],
-  [403.43, 225.13],
-  [393.58, 261.71],
-  [406.11, 240.43],
-  [351.39, 231.65],
-  [447.84, 217.9],
-  [422.79, 258.85],
-  [434.63, 255.51],
-  [392.97, 235.63],
-  [400.83, 282.91],
-  [382.79, 222.48],
-  [409.98, 250.65],
-  [423.49, 273.03],
-  [367.1, 242.24],
-  [375.52, 217.28],
-  [391.84, 281.51],
-  [384.31, 261.18],
-  [447.25, 247.34],
-  [358.69, 225.03],
-  [369.44, 266.91],
-  [426.89, 215.92],
-  [408.27, 282.31],
-  [364.53, 258.93],
-  [440.44, 238.58],
-  [365.27, 249.32],
-  [374.12, 274.1],
-  [418.3, 198.84],
-  [384.41, 245.87],
-  [387.23, 254.0],
-  [432.77, 240.12],
-  [396.15, 242.57],
-  [404.73, 263.85],
-  [408.88, 233.19],
-  [411.23, 247.88]
+// Define tree structure for memory graph
+const treeStructure = {
+  level0: [
+    { id: 'user-preferences', label: 'User Preferences', x: 400, y: 250, size: 12 }
+  ],
+  level1: [
+    { id: 'relationship-info', label: 'Relationship Info', x: 200, y: 150, size: 10 },
+    { id: 'ai-meetup-summary', label: 'AI Meetup Summary', x: 300, y: 100, size: 10 },
+    { id: 'meal-prep-list', label: 'Meal Prep List', x: 500, y: 100, size: 10 },
+    { id: 'sep-20-checkin', label: 'Sep 20 Check-In', x: 600, y: 150, size: 10 }
+  ],
+  level2: [
+    // From Relationship Info
+    { id: 'partner-preferences', label: 'Partner Preferences', x: 100, y: 80, size: 8, parent: 'relationship-info' },
+    { id: 'date-history', label: 'Date History', x: 150, y: 50, size: 8, parent: 'relationship-info' },
+    { id: 'conflict-resolution', label: 'Conflict Resolution', x: 250, y: 50, size: 8, parent: 'relationship-info' },
+    
+    // From AI Meetup Summary
+    { id: 'key-insights', label: 'Key Insights', x: 250, y: 30, size: 8, parent: 'ai-meetup-summary' },
+    { id: 'action-items', label: 'Action Items', x: 300, y: 20, size: 8, parent: 'ai-meetup-summary' },
+    { id: 'follow-ups', label: 'Follow-ups', x: 350, y: 30, size: 8, parent: 'ai-meetup-summary' },
+    
+    // From Meal Prep List
+    { id: 'weekly-menu', label: 'Weekly Menu', x: 450, y: 20, size: 8, parent: 'meal-prep-list' },
+    { id: 'shopping-list', label: 'Shopping List', x: 500, y: 30, size: 8, parent: 'meal-prep-list' },
+    { id: 'nutrition-goals', label: 'Nutrition Goals', x: 550, y: 20, size: 8, parent: 'meal-prep-list' },
+    
+    // From Sep 20 Check-In
+    { id: 'mood-tracking', label: 'Mood Tracking', x: 550, y: 80, size: 8, parent: 'sep-20-checkin' },
+    { id: 'goal-progress', label: 'Goal Progress', x: 600, y: 50, size: 8, parent: 'sep-20-checkin' },
+    { id: 'health-metrics', label: 'Health Metrics', x: 650, y: 80, size: 8, parent: 'sep-20-checkin' }
+  ]
+};
+
+// Flatten all nodes in order of appearance
+const allTreeNodes = [
+  ...treeStructure.level0,
+  ...treeStructure.level1,
+  ...treeStructure.level2
 ];
 
-// Convert coordinates to heart nodes - all same size
-const heartNodes = heartCoords.map((coord, index) => ({
-  x: coord[0],
-  y: coord[1],
-  size: 6, // All nodes same size
-}));
+// Generate connections between levels
+const generateTreeConnections = (): Link[] => {
+  const connections: Link[] = [];
+  
+  // Connect level 0 to level 1
+  treeStructure.level1.forEach(node => {
+    connections.push({
+      source: 'user-preferences',
+      target: node.id
+    });
+  });
+  
+  // Connect level 1 to level 2
+  treeStructure.level2.forEach(node => {
+    if (node.parent) {
+      connections.push({
+        source: node.parent,
+        target: node.id
+      });
+    }
+  });
+  
+  return connections;
+};
 
-// Generate gradient colors based on position in the sequence
+// Generate gradient colors starting with purple logo color
 const getGradientColor = (index: number, total: number): string => {
   const gradientColors = [
-    "#FE7503", // Orange start
-    "#FC585C", // Red-orange
-    "#FD5776", // Pink-red
+    "#A76CED", // Purple start (logo color)
+    "#7A6BEC", // Blue-purple
     "#E062CC", // Pink-purple
-    "#A76CED", // Purple
-    "#7A6BEC"  // Blue-purple end
+    "#FD5776", // Pink-red
+    "#FC585C", // Red-orange
+    "#FE7503"  // Orange end
   ];
   
   const position = index / (total - 1); // 0 to 1
@@ -107,48 +112,63 @@ const getGradientColor = (index: number, total: number): string => {
 export const MemoryGraphAnimation = () => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentLevel, setCurrentLevel] = useState(0);
+  const [currentNodeInLevel, setCurrentNodeInLevel] = useState(0);
   const [isAnimating, setIsAnimating] = useState(false);
   const [hasTriggered, setHasTriggered] = useState(false);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
 
-  // No connections for now - just nodes
-  const generateConnections = (nodeIndex: number): Link[] => {
-    return []; // Remove all edges
-  };
-
-  // Animate nodes with non-uniform timing
+  // Tree animation logic
   useEffect(() => {
-    if (isAnimating && currentIndex < heartNodes.length) {
-      // Non-uniform delays - faster at start, then varying
-      const getDelay = (index: number) => {
-        if (index === 0) return 200; // Center node
-        if (index <= 6) return 150; // Ring 1: Inner ring - uniform timing
-        if (index <= 23) return 100; // Ring 2: Middle ring - faster
-        return 80; // Ring 3: Outer ring - fastest
-      };
-      
+    if (!isAnimating) return;
+
+    const levels = [treeStructure.level0, treeStructure.level1, treeStructure.level2];
+    
+    if (currentLevel >= levels.length) return;
+    
+    const currentLevelNodes = levels[currentLevel];
+    
+    if (currentNodeInLevel >= currentLevelNodes.length) {
+      // Move to next level after 1 second pause
       const timer = setTimeout(() => {
-        const newNode: Node = {
-          id: `node-${currentIndex}`,
-          x: heartNodes[currentIndex].x,
-          y: heartNodes[currentIndex].y,
-          label: "", // No labels
-          size: heartNodes[currentIndex].size,
-          color: getGradientColor(currentIndex, heartNodes.length)
-        };
-        
-        const newConnections = generateConnections(currentIndex);
-        
-        setNodes(prev => [...prev, newNode]);
-        setLinks(prev => [...prev, ...newConnections]);
-        setCurrentIndex(prev => prev + 1);
-      }, getDelay(currentIndex));
+        setCurrentLevel(prev => prev + 1);
+        setCurrentNodeInLevel(0);
+      }, 1000);
       
       return () => clearTimeout(timer);
     }
-  }, [isAnimating, currentIndex]);
+
+    // Add current node
+    const timer = setTimeout(() => {
+      const nodeData = currentLevelNodes[currentNodeInLevel];
+      const totalNodes = allTreeNodes.length;
+      const currentGlobalIndex = levels.slice(0, currentLevel).flat().length + currentNodeInLevel;
+      
+      const newNode: Node = {
+        id: nodeData.id,
+        x: nodeData.x,
+        y: nodeData.y,
+        label: nodeData.label,
+        size: nodeData.size,
+        color: getGradientColor(currentGlobalIndex, totalNodes)
+      };
+      
+      setNodes(prev => [...prev, newNode]);
+      
+      // Add connections if this is not the first level
+      if (currentLevel > 0) {
+        const newConnections = generateTreeConnections().filter(link => 
+          link.target === nodeData.id && nodes.some(n => n.id === link.source)
+        );
+        setLinks(prev => [...prev, ...newConnections]);
+      }
+      
+      setCurrentNodeInLevel(prev => prev + 1);
+    }, currentLevel === 0 ? 500 : 200); // Longer delay for first node
+    
+    return () => clearTimeout(timer);
+  }, [isAnimating, currentLevel, currentNodeInLevel, nodes]);
 
   // Intersection Observer to trigger animation when in view and reset when out of view
   useEffect(() => {
@@ -164,7 +184,8 @@ export const MemoryGraphAnimation = () => {
           // Reset animation when out of view
           setNodes([]);
           setLinks([]);
-          setCurrentIndex(0);
+          setCurrentLevel(0);
+          setCurrentNodeInLevel(0);
           setIsAnimating(false);
           setHasTriggered(false);
         }
@@ -179,19 +200,20 @@ export const MemoryGraphAnimation = () => {
     return () => observer.disconnect();
   }, [hasTriggered]);
 
-  // Reset animation after 1 second of completion
+  // Reset animation after completion
   useEffect(() => {
-    if (currentIndex >= heartNodes.length) {
+    if (currentLevel >= 3) {
       const resetTimer = setTimeout(() => {
         setNodes([]);
         setLinks([]);
-        setCurrentIndex(0);
+        setCurrentLevel(0);
+        setCurrentNodeInLevel(0);
         setIsAnimating(true);
-      }, 1000); // Wait 1 second before restarting
+      }, 3000); // Wait 3 seconds before restarting
       
       return () => clearTimeout(resetTimer);
     }
-  }, [currentIndex]);
+  }, [currentLevel]);
 
   // D3 rendering with proper z-index (edges behind nodes)
   useEffect(() => {
@@ -262,20 +284,20 @@ export const MemoryGraphAnimation = () => {
       .attr("r", d => d.size)
       .attr("opacity", 1);
 
-    // Remove labels (commented out)
-    // nodeEnter.append("text")
-    //   .attr("class", "node-label")
-    //   .attr("dy", d => d.size + 16)
-    //   .attr("text-anchor", "middle")
-    //   .attr("fill", "hsl(var(--foreground))")
-    //   .attr("font-size", "11px")
-    //   .attr("font-weight", "400")
-    //   .attr("opacity", 0)
-    //   .text(d => d.label)
-    //   .transition()
-    //   .duration(500)
-    //   .delay(200)
-    //   .attr("opacity", 0.9);
+    // Add labels
+    nodeEnter.append("text")
+      .attr("class", "node-label")
+      .attr("dy", d => d.size + 18)
+      .attr("text-anchor", "middle")
+      .attr("fill", "hsl(var(--foreground))")
+      .attr("font-size", "10px")
+      .attr("font-weight", "500")
+      .attr("opacity", 0)
+      .text(d => d.label)
+      .transition()
+      .duration(500)
+      .delay(200)
+      .attr("opacity", 0.8);
 
   }, [nodes, links]);
 
