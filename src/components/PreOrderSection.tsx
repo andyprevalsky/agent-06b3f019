@@ -71,7 +71,7 @@ const PreOrderSection = () => {
           <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
             <CardContent className="p-8 text-center">
               <div className="mb-6">
-                <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden bg-gradient-to-br from-background to-surface">
+                <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden">
                   <video 
                     ref={blackVideoRef}
                     className="w-full h-full object-cover"
@@ -137,7 +137,7 @@ const PreOrderSection = () => {
           <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
             <CardContent className="p-8 text-center">
               <div className="mb-6">
-                <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden bg-gradient-to-br from-background to-surface">
+                <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden">
                   <video 
                     ref={whiteVideoRef}
                     className="w-full h-full object-cover"
