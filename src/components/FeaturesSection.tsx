@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
+  const [isClickScrolling, setIsClickScrolling] = useState(false);
   const sectionRef = useRef<HTMLDivElement>(null);
 
   const features = [
@@ -67,7 +68,7 @@ const FeaturesSection = () => {
 
   useEffect(() => {
     const handleScroll = () => {
-      if (!sectionRef.current) return;
+      if (!sectionRef.current || isClickScrolling) return;
       
       const scrollPosition = window.scrollY + window.innerHeight / 2;
       const featureElements = sectionRef.current.querySelectorAll('.hidden.lg\\:block [data-index]');
@@ -129,6 +130,7 @@ const FeaturesSection = () => {
   }, []);
 
   const handleFeatureClick = (index: number) => {
+    setIsClickScrolling(true);
     setActiveFeature(index);
     
     const featureElement = sectionRef.current?.querySelector(`[data-index="${index}"]`);
@@ -137,6 +139,11 @@ const FeaturesSection = () => {
         behavior: 'smooth', 
         block: 'center'
       });
+      
+      // Re-enable scroll detection after animation completes
+      setTimeout(() => {
+        setIsClickScrolling(false);
+      }, 1000);
     }
   };
 
