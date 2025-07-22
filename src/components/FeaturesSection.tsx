@@ -228,15 +228,16 @@ const FeaturesSection = () => {
                   <button
                     key={feature.title}
                     onClick={() => handleFeatureClick(index)}
-                    className={`relative w-full text-left p-4 rounded-lg transition-all duration-300 ${
+                    className={`relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden ${
                       activeFeature === index
-                        ? 'bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] animate-gradient-rotate border-2 border-transparent text-foreground'
+                        ? 'bg-primary/10 text-foreground border-2 border-transparent'
                         : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground border-2 border-transparent'
                     }`}
-                    style={activeFeature === index ? { backgroundSize: '200% 200%' } : {}}
                   >
                     {activeFeature === index && (
-                      <div className="absolute inset-[2px] bg-primary/10 rounded-lg"></div>
+                      <div className="absolute inset-0 rounded-lg before:absolute before:inset-0 before:p-[2px] before:bg-gradient-to-r before:from-[#FE7503] before:via-[#FC585C] before:via-[#FD5776] before:via-[#E062CC] before:via-[#A76CED] before:to-[#7A6BEC] before:animate-gradient-rotate before:rounded-lg before:-z-10" style={{ '--tw-gradient-size': '200% 200%' } as any}>
+                        <div className="absolute inset-[2px] bg-background rounded-lg"></div>
+                      </div>
                     )}
                     <h4 className="relative font-medium text-sm leading-tight">{feature.title}</h4>
                   </button>
