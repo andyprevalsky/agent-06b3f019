@@ -16,31 +16,58 @@ interface Link {
 }
 
 // Generate evenly distributed heart shape coordinates
-const generateHeartCoords = () => {
-  const coords: [number, number][] = [];
-  const centerX = 400;
-  const centerY = 250;
-  const scale = 60; // Heart size scale
-  
-  // Generate points using parametric heart equation
-  // Heart equation: x = 16sin³(t), y = 13cos(t) - 5cos(2t) - 2cos(3t) - cos(4t)
-  for (let i = 0; i < 50; i++) {
-    const t = (i / 49) * 2 * Math.PI; // Evenly distribute parameter t from 0 to 2π
-    
-    const x = 16 * Math.pow(Math.sin(t), 3);
-    const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
-    
-    // Scale and center the coordinates
-    coords.push([
-      centerX + x * scale / 16, // Scale to fit container
-      centerY + y * scale / 16
-    ]);
-  }
-  
-  return coords;
-};
-
-const heartCoords = generateHeartCoords();
+const heartCoords = [
+  [400.0, 231.25],
+  [400.13, 230.01],
+  [400.98, 226.51],
+  [403.17, 221.44],
+  [407.09, 215.75],
+  [412.84, 210.53],
+  [420.20, 206.80],
+  [428.67, 205.30],
+  [437.52, 206.43],
+  [445.88, 210.18],
+  [452.86, 216.22],
+  [457.72, 223.96],
+  [459.91, 232.73],
+  [459.17, 241.89],
+  [455.60, 250.97],
+  [449.59, 259.69],
+  [441.82, 267.96],
+  [433.10, 275.81],
+  [424.34, 283.30],
+  [416.34, 290.44],
+  [409.74, 297.12],
+  [404.90, 303.11],
+  [401.88, 308.07],
+  [400.42, 311.64],
+  [400.02, 313.51],
+  [399.98, 313.51],
+  [399.58, 311.64],
+  [398.12, 308.07],
+  [395.10, 303.11],
+  [390.26, 297.12],
+  [383.66, 290.44],
+  [375.66, 283.30],
+  [366.90, 275.81],
+  [358.18, 267.96],
+  [350.41, 259.69],
+  [344.40, 250.97],
+  [340.83, 241.89],
+  [340.09, 232.73],
+  [342.28, 223.96],
+  [347.14, 216.22],
+  [354.12, 210.18],
+  [362.48, 206.43],
+  [371.33, 205.30],
+  [379.80, 206.80],
+  [387.16, 210.53],
+  [392.91, 215.75],
+  [396.83, 221.44],
+  [399.02, 226.51],
+  [399.87, 230.01],
+  [400.0, 231.25]
+]
 
 // Convert coordinates to heart nodes - all same size
 const heartNodes = heartCoords.map((coord, index) => ({
