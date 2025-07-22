@@ -70,7 +70,7 @@ const filledHeartCoords = [
 ];
 
 // Convert coordinates to heart nodes - all same size
-const heartNodes = heartCoords.map((coord, index) => ({
+const heartNodes = filledHeartCoords.map((coord, index) => ({
   x: coord[0],
   y: coord[1],
   size: 6, // All nodes same size
