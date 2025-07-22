@@ -3,16 +3,28 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { HelpCircle } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 const PreOrderSection = () => {
   const blackVideoRef = useRef<HTMLVideoElement>(null);
   const whiteVideoRef = useRef<HTMLVideoElement>(null);
+  const [isSafari, setIsSafari] = useState(false);
+
+  useEffect(() => {
+    // Detect Safari browser
+    const detectSafari = () => {
+      const userAgent = navigator.userAgent.toLowerCase();
+      return userAgent.includes('safari') && !userAgent.includes('chrome') && !userAgent.includes('firefox');
+    };
+    
+    setIsSafari(detectSafari());
+  }, []);
 
   useEffect(() => {
     const syncVideos = async () => {
-      if (blackVideoRef.current && whiteVideoRef.current) {
+      // Only sync videos if not Safari (Safari users get static images)
+      if (!isSafari && blackVideoRef.current && whiteVideoRef.current) {
         try {
           const blackVideo = blackVideoRef.current;
           const whiteVideo = whiteVideoRef.current;
@@ -52,7 +64,7 @@ const PreOrderSection = () => {
     };
 
     syncVideos();
-  }, []);
+  }, [isSafari]);
 
   const handlePreOrder = (variant: 'black' | 'white') => {
     // Real Stripe Payment Links - create these in your Stripe dashboard
@@ -92,17 +104,25 @@ const PreOrderSection = () => {
             <CardContent className="p-8 text-center">
               <div className="mb-6">
                 <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden">
-                  <video 
-                    ref={blackVideoRef}
-                    className="w-full h-full object-cover"
-                    loop
-                    muted
-                    playsInline
-                    preload="metadata"
-                  >
-                    <source src="/navi-black-demo.webm" type="video/webm" />
-                    <img src="/navi-black.png" alt="Navi Black" className="w-full h-full object-cover" />
-                  </video>
+                  {isSafari ? (
+                    <img 
+                      src="/navi-black.png" 
+                      alt="Navi Black" 
+                      className="w-full h-full object-cover" 
+                    />
+                  ) : (
+                    <video 
+                      ref={blackVideoRef}
+                      className="w-full h-full object-cover"
+                      loop
+                      muted
+                      playsInline
+                      preload="metadata"
+                    >
+                      <source src="/navi-black-demo.webm" type="video/webm" />
+                      <img src="/navi-black.png" alt="Navi Black" className="w-full h-full object-cover" />
+                    </video>
+                  )}
                 </div>
                 <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
                 <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
@@ -158,17 +178,25 @@ const PreOrderSection = () => {
             <CardContent className="p-8 text-center">
               <div className="mb-6">
                 <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden">
-                  <video 
-                    ref={whiteVideoRef}
-                    className="w-full h-full object-cover"
-                    loop
-                    muted
-                    playsInline
-                    preload="metadata"
-                  >
-                    <source src="/navi-white-demo.webm" type="video/webm" />
-                    <img src="/navi-white.png" alt="Navi White" className="w-full h-full object-cover" />
-                  </video>
+                  {isSafari ? (
+                    <img 
+                      src="/navi-white.png" 
+                      alt="Navi White" 
+                      className="w-full h-full object-cover" 
+                    />
+                  ) : (
+                    <video 
+                      ref={whiteVideoRef}
+                      className="w-full h-full object-cover"
+                      loop
+                      muted
+                      playsInline
+                      preload="metadata"
+                    >
+                      <source src="/navi-white-demo.webm" type="video/webm" />
+                      <img src="/navi-white.png" alt="Navi White" className="w-full h-full object-cover" />
+                    </video>
+                  )}
                 </div>
                 <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
                 <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>

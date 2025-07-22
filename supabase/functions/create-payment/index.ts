@@ -21,7 +21,7 @@ serve(async (req) => {
 
     const prices = {
       white: 19900, // $199.00 in cents
-      black: 29900, // $299.00 in cents
+      black: 19900, // $199.00 in cents
     };
 
     const productNames = {
