@@ -3,9 +3,7 @@ import { useEffect, useRef, useState } from "react";
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
-  const [isManualScroll, setIsManualScroll] = useState(false);
   const sectionRef = useRef<HTMLDivElement>(null);
-  const featureRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const features = [
     {
@@ -68,66 +66,74 @@ const FeaturesSection = () => {
   ];
 
   useEffect(() => {
-    // Initialize refs array
-    featureRefs.current = featureRefs.current.slice(0, features.length);
-  }, [features.length]);
+    const handleScroll = () => {
+      if (!sectionRef.current) return;
+      
+      const scrollPosition = window.scrollY + window.innerHeight / 2;
+      const featureElements = sectionRef.current.querySelectorAll('.hidden.lg\\:block [data-index]');
+      
+      let closestIndex = 0;
+      let closestDistance = Infinity;
+      
+      featureElements.forEach((element, index) => {
+        const rect = element.getBoundingClientRect();
+        const elementTop = rect.top + window.scrollY;
+        const distance = Math.abs(elementTop - scrollPosition);
+        
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestIndex = index;
+        }
+      });
+      
+      setActiveFeature(closestIndex);
+    };
 
-  useEffect(() => {
+    // Throttle scroll events
+    let timeoutId: NodeJS.Timeout;
+    const throttledScroll = () => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(handleScroll, 100);
+    };
+
+    window.addEventListener('scroll', throttledScroll);
+    
+    // Mobile intersection observer (simpler, just for visibility)
     const observer = new IntersectionObserver(
       (entries) => {
-        // Find the entry with the highest intersection ratio that's actually intersecting
-        const intersectingEntries = entries.filter(entry => entry.isIntersecting);
-        
-        if (intersectingEntries.length > 0 && !isManualScroll) {
-          // Sort by intersection ratio and take the most visible one
-          const mostVisible = intersectingEntries.reduce((prev, current) => 
-            current.intersectionRatio > prev.intersectionRatio ? current : prev
-          );
-          
-          const index = parseInt(mostVisible.target.getAttribute('data-index') || '0');
-          setActiveFeature(index);
-        }
-        
-        // Update visible items for mobile
         entries.forEach((entry) => {
           const index = parseInt(entry.target.getAttribute('data-index') || '0');
           if (entry.isIntersecting) {
             setVisibleItems(prev => new Set([...prev, index]));
+            // For mobile, also set active feature
+            if (window.innerWidth < 1024) {
+              setActiveFeature(index);
+            }
           }
         });
       },
-      { 
-        threshold: [0.1, 0.3, 0.5, 0.7, 0.9], 
-        rootMargin: '-20% 0px -20% 0px' 
-      }
+      { threshold: 0.5 }
     );
 
-    // Observe mobile and desktop feature cards
     const mobileCards = sectionRef.current?.querySelectorAll('.lg\\:hidden [data-index]');
-    const desktopCards = sectionRef.current?.querySelectorAll('.hidden.lg\\:block [data-index]');
-    
     mobileCards?.forEach(card => observer.observe(card));
-    desktopCards?.forEach(card => observer.observe(card));
 
-    return () => observer.disconnect();
+    return () => {
+      window.removeEventListener('scroll', throttledScroll);
+      clearTimeout(timeoutId);
+      observer.disconnect();
+    };
   }, []);
 
   const handleFeatureClick = (index: number) => {
-    setIsManualScroll(true);
     setActiveFeature(index);
     
-    // Scroll to the corresponding feature animation/description
     const featureElement = sectionRef.current?.querySelector(`[data-index="${index}"]`);
     if (featureElement) {
       featureElement.scrollIntoView({ 
         behavior: 'smooth', 
         block: 'center'
       });
-      
-      // Re-enable automatic scroll detection after a delay
-      setTimeout(() => {
-        setIsManualScroll(false);
-      }, 1000);
     }
   };
 
