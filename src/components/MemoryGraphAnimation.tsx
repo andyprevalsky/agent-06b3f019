@@ -15,46 +15,43 @@ interface Link {
   target: string;
 }
 
-// Generate filled heart shape with dense coordinates
-const generateHeartCoords = () => {
-  const coords: [number, number][] = [];
-  const centerX = 50; // Use percentage of container
-  const centerY = 50;
-  const scale = 15; // Larger heart size
+// Create a proper filled heart shape with non-overlapping coordinates
+const heartCoords: [number, number][] = [
+  // Outline first - main heart shape
+  [50, 40], [45, 35], [55, 35], // Top left curve
+  [40, 40], [60, 40], // Top curves
+  [35, 45], [65, 45], // Wider top
+  [32, 52], [68, 52], // Even wider
+  [30, 60], [70, 60], // Max width
+  [32, 68], [68, 68], // Start narrowing
+  [35, 75], [65, 75], // Narrower
+  [40, 80], [60, 80], // Getting narrow
+  [45, 85], [55, 85], // Almost to point
+  [50, 90], // Bottom point
   
-  // Create multiple layers for a filled heart
-  const layers = [
-    { scale: 1.0, points: 16 },    // Outer edge
-    { scale: 0.8, points: 14 },    // Second layer
-    { scale: 0.6, points: 12 },    // Third layer
-    { scale: 0.4, points: 8 }      // Inner core
-  ];
+  // Fill the heart - inner points
+  [50, 45], [47, 42], [53, 42], // Inner top
+  [44, 47], [56, 47], // Inner curves
+  [41, 52], [59, 52], // Inner middle-top
+  [39, 58], [61, 58], // Inner middle
+  [41, 64], [59, 64], // Inner middle-bottom
+  [44, 70], [56, 70], // Inner lower
+  [47, 75], [53, 75], // Inner bottom area
+  [50, 80], // Inner bottom
   
-  layers.forEach(layer => {
-    for (let i = 0; i < layer.points; i++) {
-      const t = (i / layer.points) * 2 * Math.PI;
-      
-      const x = 16 * Math.pow(Math.sin(t), 3);
-      const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
-      
-      // Scale and center as percentages
-      coords.push([
-        centerX + (x * scale * layer.scale) / 16,
-        centerY + (y * scale * layer.scale) / 16
-      ]);
-    }
-  });
-  
-  return coords;
-};
-
-const heartCoords = generateHeartCoords();
+  // Additional fill points
+  [50, 50], [48, 48], [52, 48], // Center area
+  [46, 55], [54, 55], // More fill
+  [48, 60], [52, 60], // Center fill
+  [48, 65], [52, 65], // Lower center
+  [50, 70], // Center bottom
+];
 
 // Convert coordinates to heart nodes - all same size
 const heartNodes = heartCoords.map((coord, index) => ({
-  x: coord[0], // Will be converted to actual pixels in render
+  x: coord[0], // Percentage coordinates
   y: coord[1],
-  size: 5, // All nodes same size
+  size: 4, // Smaller nodes to avoid overlap
 }));
 
 // Generate gradient colors based on position in the sequence
@@ -99,33 +96,22 @@ export const MemoryGraphAnimation = () => {
     return []; // Remove all edges
   };
 
-  // Animate nodes with non-uniform timing
+  // Animate nodes one at a time with proper timing
   useEffect(() => {
     if (isAnimating && currentIndex < heartNodes.length) {
-      // Non-uniform delays - faster at start, then varying
-      const getDelay = (index: number) => {
-        if (index === 0) return 200; // Center node
-        if (index <= 6) return 150; // Ring 1: Inner ring - uniform timing
-        if (index <= 23) return 100; // Ring 2: Middle ring - faster
-        return 80; // Ring 3: Outer ring - fastest
-      };
-      
       const timer = setTimeout(() => {
         const newNode: Node = {
           id: `node-${currentIndex}`,
           x: heartNodes[currentIndex].x,
           y: heartNodes[currentIndex].y,
-          label: "", // No labels
+          label: "",
           size: heartNodes[currentIndex].size,
           color: getGradientColor(currentIndex, heartNodes.length)
         };
         
-        const newConnections = generateConnections(currentIndex);
-        
         setNodes(prev => [...prev, newNode]);
-        setLinks(prev => [...prev, ...newConnections]);
         setCurrentIndex(prev => prev + 1);
-      }, getDelay(currentIndex));
+      }, 100); // Fixed timing for all nodes
       
       return () => clearTimeout(timer);
     }
