@@ -15,38 +15,38 @@ interface Link {
   target: string;
 }
 
-// Heart shape coordinates - 45 points forming a filled heart
-const heartCoords = [
-  // Center point
-  [400, 250],
+// Generate evenly distributed heart shape coordinates
+const generateHeartCoords = () => {
+  const coords: [number, number][] = [];
+  const centerX = 400;
+  const centerY = 250;
+  const scale = 60; // Heart size scale
   
-  // Inner heart shape
-  [400, 200], [380, 180], [420, 180],
-  [360, 170], [440, 170], [350, 180], [450, 180],
-  [340, 200], [460, 200], [340, 220], [460, 220],
-  [350, 240], [450, 240], [360, 260], [440, 260],
-  [380, 280], [420, 280], [400, 300],
+  // Generate points using parametric heart equation
+  // Heart equation: x = 16sin³(t), y = 13cos(t) - 5cos(2t) - 2cos(3t) - cos(4t)
+  for (let i = 0; i < 50; i++) {
+    const t = (i / 49) * 2 * Math.PI; // Evenly distribute parameter t from 0 to 2π
+    
+    const x = 16 * Math.pow(Math.sin(t), 3);
+    const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+    
+    // Scale and center the coordinates
+    coords.push([
+      centerX + x * scale / 16, // Scale to fit container
+      centerY + y * scale / 16
+    ]);
+  }
   
-  // Middle layer
-  [320, 160], [480, 160], [300, 180], [500, 180],
-  [290, 210], [510, 210], [290, 240], [510, 240],
-  [300, 270], [500, 270], [320, 300], [480, 300],
-  [360, 320], [440, 320], [400, 340],
-  
-  // Outer layer
-  [280, 200], [520, 200], [270, 230], [530, 230],
-  [280, 260], [520, 260], [300, 290], [500, 290],
-  [340, 340], [460, 340], [400, 360],
-  
-  // Fill points
-  [400, 220], [400, 240], [400, 260], [400, 280]
-];
+  return coords;
+};
 
-// Convert coordinates to heart nodes
+const heartCoords = generateHeartCoords();
+
+// Convert coordinates to heart nodes - all same size
 const heartNodes = heartCoords.map((coord, index) => ({
   x: coord[0],
   y: coord[1],
-  size: index === 0 ? 10 : Math.random() * 4 + 3, // Center larger, others varied
+  size: 6, // All nodes same size
 }));
 
 // Generate gradient colors based on position in the sequence
