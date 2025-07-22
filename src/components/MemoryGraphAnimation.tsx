@@ -15,43 +15,33 @@ interface Link {
   target: string;
 }
 
-// Create a proper filled heart shape with non-overlapping coordinates
+// Create a proper heart shape with mathematical precision
 const heartCoords: [number, number][] = [
-  // Outline first - main heart shape
-  [50, 40], [45, 35], [55, 35], // Top left curve
-  [40, 40], [60, 40], // Top curves
-  [35, 45], [65, 45], // Wider top
-  [32, 52], [68, 52], // Even wider
-  [30, 60], [70, 60], // Max width
-  [32, 68], [68, 68], // Start narrowing
-  [35, 75], [65, 75], // Narrower
-  [40, 80], [60, 80], // Getting narrow
-  [45, 85], [55, 85], // Almost to point
-  [50, 90], // Bottom point
+  // Bottom point
+  [50, 85],
   
-  // Fill the heart - inner points
-  [50, 45], [47, 42], [53, 42], // Inner top
-  [44, 47], [56, 47], // Inner curves
-  [41, 52], [59, 52], // Inner middle-top
-  [39, 58], [61, 58], // Inner middle
-  [41, 64], [59, 64], // Inner middle-bottom
-  [44, 70], [56, 70], // Inner lower
-  [47, 75], [53, 75], // Inner bottom area
-  [50, 80], // Inner bottom
+  // Left side of heart going up
+  [45, 80], [40, 75], [35, 70], [32, 65], [30, 60], [29, 55], [30, 50], [32, 45], [35, 40], [40, 37], [45, 36],
   
-  // Additional fill points
-  [50, 50], [48, 48], [52, 48], // Center area
-  [46, 55], [54, 55], // More fill
-  [48, 60], [52, 60], // Center fill
-  [48, 65], [52, 65], // Lower center
-  [50, 70], // Center bottom
+  // Left top curve
+  [48, 35], [50, 34], [52, 35],
+  
+  // Right top curve  
+  [55, 36], [60, 37], [65, 40], [68, 45], [70, 50], [71, 55], [70, 60], [68, 65], [65, 70], [60, 75], [55, 80],
+  
+  // Fill the heart interior
+  [50, 75], [48, 70], [52, 70], [46, 65], [54, 65], [44, 60], [56, 60], [42, 55], [58, 55], [43, 50], [57, 50],
+  [45, 45], [55, 45], [47, 42], [53, 42], [49, 40], [51, 40],
+  
+  // Additional fill points for density
+  [50, 65], [50, 55], [50, 45], [48, 60], [52, 60], [48, 50], [52, 50]
 ];
 
-// Convert coordinates to heart nodes - all same size
+// Convert coordinates to heart nodes
 const heartNodes = heartCoords.map((coord, index) => ({
   x: coord[0], // Percentage coordinates
   y: coord[1],
-  size: 4, // Smaller nodes to avoid overlap
+  size: 5,
 }));
 
 // Generate gradient colors based on position in the sequence
@@ -146,19 +136,19 @@ export const MemoryGraphAnimation = () => {
     return () => observer.disconnect();
   }, [hasTriggered]);
 
-  // Reset animation after 1 second of completion
+  // Reset animation after completion (fix flashing)
   useEffect(() => {
-    if (currentIndex >= heartNodes.length) {
+    if (currentIndex >= heartNodes.length && isAnimating) {
+      setIsAnimating(false); // Stop animation completely
       const resetTimer = setTimeout(() => {
         setNodes([]);
-        setLinks([]);
         setCurrentIndex(0);
-        setIsAnimating(true);
-      }, 1000); // Wait 1 second before restarting
+        setIsAnimating(true); // Restart animation
+      }, 3000); // Wait 3 seconds before restarting
       
       return () => clearTimeout(resetTimer);
     }
-  }, [currentIndex]);
+  }, [currentIndex, isAnimating]);
 
   // D3 rendering with responsive sizing
   useEffect(() => {
