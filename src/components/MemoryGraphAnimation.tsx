@@ -16,7 +16,7 @@ interface Link {
 }
 
 // Generate evenly distributed heart shape coordinates
-const filledHeartCoords = [
+const heartCoords = [
   [412.29, 262.20],
   [359.16, 215.92],
   [444.29, 231.00],
@@ -70,7 +70,7 @@ const filledHeartCoords = [
 ];
 
 // Convert coordinates to heart nodes - all same size
-const heartNodes = filledHeartCoords.map((coord, index) => ({
+const heartNodes = heartCoords.map((coord, index) => ({
   x: coord[0],
   y: coord[1],
   size: 6, // All nodes same size
