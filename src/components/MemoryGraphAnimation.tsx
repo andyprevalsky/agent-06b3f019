@@ -7,7 +7,7 @@ interface Node {
   y: number;
   label: string;
   size: number;
-  isCore?: boolean;
+  color: string;
 }
 
 interface Link {
@@ -15,62 +15,91 @@ interface Link {
   target: string;
 }
 
-// Heart shape coordinates starting from center - more organic layout
+// Heart shape coordinates starting from center - arranged in heart formation
 const heartNodes = [
   // Center core
-  { x: 300, y: 200, label: "You", size: 12, isCore: true },
+  { x: 300, y: 200, label: "You", size: 12 },
   
-  // Inner ring
-  { x: 280, y: 180, label: "Your Name", size: 8 },
-  { x: 320, y: 180, label: "Voice", size: 8 },
-  { x: 340, y: 210, label: "Preferences", size: 8 },
-  { x: 320, y: 240, label: "Schedule", size: 8 },
-  { x: 280, y: 240, label: "Goals", size: 8 },
-  { x: 260, y: 210, label: "Habits", size: 8 },
+  // Inner ring around center
+  { x: 280, y: 180, label: "Name", size: 9 },
+  { x: 320, y: 180, label: "Voice", size: 9 },
+  { x: 340, y: 210, label: "Preferences", size: 9 },
+  { x: 320, y: 240, label: "Schedule", size: 9 },
+  { x: 280, y: 240, label: "Goals", size: 9 },
+  { x: 260, y: 210, label: "Habits", size: 9 },
   
-  // Middle ring - left side of heart
-  { x: 220, y: 160, label: "Family", size: 6 },
-  { x: 200, y: 190, label: "Work", size: 6 },
-  { x: 190, y: 230, label: "Health", size: 6 },
-  { x: 210, y: 270, label: "Hobbies", size: 6 },
-  { x: 240, y: 290, label: "Dreams", size: 6 },
+  // Heart left side - upper curve
+  { x: 240, y: 160, label: "Family", size: 7 },
+  { x: 220, y: 140, label: "Childhood", size: 6 },
+  { x: 200, y: 120, label: "Past", size: 6 },
+  { x: 180, y: 110, label: "Education", size: 6 },
+  { x: 160, y: 115, label: "Learning", size: 6 },
+  { x: 145, y: 130, label: "Growth", size: 6 },
+  { x: 140, y: 150, label: "Skills", size: 6 },
+  { x: 150, y: 175, label: "Work", size: 7 },
+  { x: 170, y: 195, label: "Career", size: 7 },
+  { x: 190, y: 215, label: "Projects", size: 7 },
+  { x: 200, y: 240, label: "Ideas", size: 7 },
+  { x: 210, y: 265, label: "Dreams", size: 7 },
+  { x: 225, y: 285, label: "Hopes", size: 7 },
+  { x: 245, y: 300, label: "Love", size: 8 },
+  { x: 270, y: 310, label: "Joy", size: 8 },
   
-  // Middle ring - right side of heart
-  { x: 380, y: 160, label: "Friends", size: 6 },
-  { x: 400, y: 190, label: "Skills", size: 6 },
-  { x: 410, y: 230, label: "Values", size: 6 },
-  { x: 390, y: 270, label: "Memories", size: 6 },
-  { x: 360, y: 290, label: "Growth", size: 6 },
+  // Heart right side - upper curve
+  { x: 360, y: 160, label: "Friends", size: 7 },
+  { x: 380, y: 140, label: "Wisdom", size: 6 },
+  { x: 400, y: 120, label: "Future", size: 6 },
+  { x: 420, y: 110, label: "Vision", size: 6 },
+  { x: 440, y: 115, label: "Potential", size: 6 },
+  { x: 455, y: 130, label: "Purpose", size: 6 },
+  { x: 460, y: 150, label: "Values", size: 6 },
+  { x: 450, y: 175, label: "Beliefs", size: 7 },
+  { x: 430, y: 195, label: "Trust", size: 7 },
+  { x: 410, y: 215, label: "Bond", size: 7 },
+  { x: 400, y: 240, label: "Connection", size: 7 },
+  { x: 390, y: 265, label: "Care", size: 7 },
+  { x: 375, y: 285, label: "Support", size: 7 },
+  { x: 355, y: 300, label: "Heart", size: 8 },
+  { x: 330, y: 310, label: "Soul", size: 8 },
   
-  // Outer ring - left curve
-  { x: 160, y: 130, label: "Childhood", size: 5 },
-  { x: 140, y: 170, label: "Education", size: 5 },
-  { x: 130, y: 220, label: "Career", size: 5 },
-  { x: 150, y: 270, label: "Travel", size: 5 },
-  { x: 180, y: 310, label: "Passion", size: 5 },
-  { x: 220, y: 330, label: "Love", size: 5 },
-  { x: 270, y: 340, label: "Joy", size: 5 },
-  
-  // Outer ring - right curve
-  { x: 440, y: 130, label: "Wisdom", size: 5 },
-  { x: 460, y: 170, label: "Experience", size: 5 },
-  { x: 470, y: 220, label: "Knowledge", size: 5 },
-  { x: 450, y: 270, label: "Adventure", size: 5 },
-  { x: 420, y: 310, label: "Discovery", size: 5 },
-  { x: 380, y: 330, label: "Hope", size: 5 },
-  { x: 330, y: 340, label: "Trust", size: 5 },
-  
-  // Top curves
-  { x: 200, y: 100, label: "Past", size: 4 },
-  { x: 250, y: 80, label: "Present", size: 4 },
-  { x: 350, y: 80, label: "Future", size: 4 },
-  { x: 400, y: 100, label: "Potential", size: 4 },
+  // Bottom point of heart
+  { x: 300, y: 320, label: "Forever", size: 10 },
 ];
+
+// Generate gradient colors based on position in the sequence
+const getGradientColor = (index: number, total: number): string => {
+  const gradientColors = [
+    "#FE7503", // Orange start
+    "#FC585C", // Red-orange
+    "#FD5776", // Pink-red
+    "#E062CC", // Pink-purple
+    "#A76CED", // Purple
+    "#7A6BEC"  // Blue-purple end
+  ];
+  
+  const position = index / (total - 1); // 0 to 1
+  const colorIndex = position * (gradientColors.length - 1);
+  const lowerIndex = Math.floor(colorIndex);
+  const upperIndex = Math.ceil(colorIndex);
+  const factor = colorIndex - lowerIndex;
+  
+  if (lowerIndex === upperIndex) {
+    return gradientColors[lowerIndex];
+  }
+  
+  // Simple color interpolation
+  const lower = gradientColors[lowerIndex];
+  const upper = gradientColors[upperIndex];
+  
+  return factor < 0.5 ? lower : upper;
+};
 
 export const MemoryGraphAnimation = () => {
   const svgRef = useRef<SVGSVGElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isAnimating, setIsAnimating] = useState(false);
+  const [hasTriggered, setHasTriggered] = useState(false);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
 
@@ -117,7 +146,7 @@ export const MemoryGraphAnimation = () => {
           y: heartNodes[currentIndex].y,
           label: heartNodes[currentIndex].label,
           size: heartNodes[currentIndex].size,
-          isCore: heartNodes[currentIndex].isCore
+          color: getGradientColor(currentIndex, heartNodes.length)
         };
         
         const newConnections = generateConnections(currentIndex);
@@ -131,14 +160,24 @@ export const MemoryGraphAnimation = () => {
     }
   }, [isAnimating, currentIndex]);
 
-  // Start animation when component mounts
+  // Intersection Observer to trigger animation when in view
   useEffect(() => {
-    const startTimer = setTimeout(() => {
-      setIsAnimating(true);
-    }, 1000);
-    
-    return () => clearTimeout(startTimer);
-  }, []);
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !hasTriggered) {
+          setHasTriggered(true);
+          setIsAnimating(true);
+        }
+      },
+      { threshold: 0.5 }
+    );
+
+    if (containerRef.current) {
+      observer.observe(containerRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, [hasTriggered]);
 
   // Reset animation periodically
   useEffect(() => {
@@ -214,8 +253,8 @@ export const MemoryGraphAnimation = () => {
     nodeEnter.append("circle")
       .attr("class", "node-circle")
       .attr("r", 0)
-      .attr("fill", d => d.isCore ? "#f59e0b" : "#7c3aed")
-      .attr("stroke", d => d.isCore ? "#f59e0b" : "#7c3aed")
+      .attr("fill", d => d.color)
+      .attr("stroke", d => d.color)
       .attr("stroke-width", 2)
       .attr("opacity", 0)
       .transition()
@@ -230,7 +269,7 @@ export const MemoryGraphAnimation = () => {
       .attr("text-anchor", "middle")
       .attr("fill", "hsl(var(--foreground))")
       .attr("font-size", "11px")
-      .attr("font-weight", d => d.isCore ? "600" : "400")
+      .attr("font-weight", "400")
       .attr("opacity", 0)
       .text(d => d.label)
       .transition()
@@ -241,7 +280,10 @@ export const MemoryGraphAnimation = () => {
   }, [nodes, links]);
 
   return (
-    <div className="w-full h-[450px] relative overflow-hidden flex items-center justify-center">
+    <div 
+      ref={containerRef}
+      className="w-full h-[450px] relative overflow-hidden flex items-center justify-center"
+    >
       <svg
         ref={svgRef}
         width={600}
