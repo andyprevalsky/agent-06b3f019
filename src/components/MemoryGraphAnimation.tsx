@@ -15,67 +15,72 @@ interface Link {
   target: string;
 }
 
-// Heart shape in concentric rings - center outward
+// Heart shape coordinates using your provided coordinates (scaled and centered)
+const heartCoords = [
+  [0, 5], [1.2, 6.4], [2.4, 7.3], [3.6, 7.7], [4.8, 7.5], [6, 6.8], [7, 5.7], [7.5, 4.2], [7.6, 2.7], [7.2, 1.3],
+  [6.4, 0.1], [5.3, -0.8], [4, -1.4], [2.6, -1.6], [1.2, -1.5], [0, -1.1], [-1.2, -1.5], [-2.6, -1.6], [-4, -1.4], [-5.3, -0.8],
+  [-6.4, 0.1], [-7.2, 1.3], [-7.6, 2.7], [-7.5, 4.2], [-7, 5.7], [-6, 6.8], [-4.8, 7.5], [-3.6, 7.7], [-2.4, 7.3], [-1.2, 6.4],
+  [0, 5] // Close the heart
+];
+
+// Convert coordinates to screen space and arrange in concentric rings
 const heartNodes = [
-  // Ring 0: Center core
+  // Center core (start here)
   { x: 400, y: 250, size: 12 },
   
-  // Ring 1: Inner ring (6 nodes around center)
-  { x: 370, y: 230, size: 10 },
-  { x: 430, y: 230, size: 10 },
-  { x: 450, y: 260, size: 10 },
-  { x: 430, y: 290, size: 10 },
-  { x: 370, y: 290, size: 10 },
-  { x: 350, y: 260, size: 10 },
+  // Ring 1: Inner nodes (6 nodes close to center)
+  { x: 400 + (heartCoords[0][0] * 15), y: 250 - (heartCoords[0][1] * 15), size: 10 },
+  { x: 400 + (heartCoords[5][0] * 15), y: 250 - (heartCoords[5][1] * 15), size: 10 },
+  { x: 400 + (heartCoords[10][0] * 15), y: 250 - (heartCoords[10][1] * 15), size: 10 },
+  { x: 400 + (heartCoords[15][0] * 15), y: 250 - (heartCoords[15][1] * 15), size: 10 },
+  { x: 400 + (heartCoords[20][0] * 15), y: 250 - (heartCoords[20][1] * 15), size: 10 },
+  { x: 400 + (heartCoords[25][0] * 15), y: 250 - (heartCoords[25][1] * 15), size: 10 },
   
-  // Ring 2: Middle ring forming heart shape
-  { x: 320, y: 200, size: 8 },
-  { x: 350, y: 180, size: 8 },
-  { x: 390, y: 170, size: 8 },
-  { x: 410, y: 170, size: 8 },
-  { x: 450, y: 180, size: 8 },
-  { x: 480, y: 200, size: 8 },
-  { x: 500, y: 230, size: 8 },
-  { x: 510, y: 270, size: 8 },
-  { x: 490, y: 310, size: 8 },
-  { x: 460, y: 340, size: 8 },
-  { x: 420, y: 360, size: 8 },
-  { x: 400, y: 370, size: 8 },
-  { x: 380, y: 360, size: 8 },
-  { x: 340, y: 340, size: 8 },
-  { x: 310, y: 310, size: 8 },
-  { x: 290, y: 270, size: 8 },
-  { x: 300, y: 230, size: 8 },
+  // Ring 2: Middle nodes (12 nodes at medium distance)
+  { x: 400 + (heartCoords[1][0] * 25), y: 250 - (heartCoords[1][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[3][0] * 25), y: 250 - (heartCoords[3][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[6][0] * 25), y: 250 - (heartCoords[6][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[8][0] * 25), y: 250 - (heartCoords[8][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[11][0] * 25), y: 250 - (heartCoords[11][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[13][0] * 25), y: 250 - (heartCoords[13][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[16][0] * 25), y: 250 - (heartCoords[16][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[18][0] * 25), y: 250 - (heartCoords[18][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[21][0] * 25), y: 250 - (heartCoords[21][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[23][0] * 25), y: 250 - (heartCoords[23][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[26][0] * 25), y: 250 - (heartCoords[26][1] * 25), size: 8 },
+  { x: 400 + (heartCoords[28][0] * 25), y: 250 - (heartCoords[28][1] * 25), size: 8 },
   
-  // Ring 3: Outer ring completing heart curves
-  { x: 280, y: 170, size: 6 },
-  { x: 260, y: 150, size: 6 },
-  { x: 290, y: 130, size: 6 },
-  { x: 330, y: 120, size: 6 },
-  { x: 370, y: 115, size: 6 },
-  { x: 400, y: 115, size: 6 },
-  { x: 430, y: 115, size: 6 },
-  { x: 470, y: 120, size: 6 },
-  { x: 510, y: 130, size: 6 },
-  { x: 540, y: 150, size: 6 },
-  { x: 520, y: 170, size: 6 },
-  { x: 550, y: 200, size: 6 },
-  { x: 570, y: 240, size: 6 },
-  { x: 580, y: 280, size: 6 },
-  { x: 570, y: 320, size: 6 },
-  { x: 540, y: 360, size: 6 },
-  { x: 500, y: 390, size: 6 },
-  { x: 460, y: 410, size: 6 },
-  { x: 420, y: 420, size: 6 },
-  { x: 400, y: 425, size: 6 },
-  { x: 380, y: 420, size: 6 },
-  { x: 340, y: 410, size: 6 },
-  { x: 300, y: 390, size: 6 },
-  { x: 260, y: 360, size: 6 },
-  { x: 230, y: 320, size: 6 },
-  { x: 220, y: 280, size: 6 },
-  { x: 230, y: 240, size: 6 },
-  { x: 250, y: 200, size: 6 },
+  // Ring 3: Outer nodes (full heart outline - 30 nodes)
+  { x: 400 + (heartCoords[0][0] * 35), y: 250 - (heartCoords[0][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[1][0] * 35), y: 250 - (heartCoords[1][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[2][0] * 35), y: 250 - (heartCoords[2][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[3][0] * 35), y: 250 - (heartCoords[3][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[4][0] * 35), y: 250 - (heartCoords[4][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[5][0] * 35), y: 250 - (heartCoords[5][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[6][0] * 35), y: 250 - (heartCoords[6][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[7][0] * 35), y: 250 - (heartCoords[7][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[8][0] * 35), y: 250 - (heartCoords[8][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[9][0] * 35), y: 250 - (heartCoords[9][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[10][0] * 35), y: 250 - (heartCoords[10][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[11][0] * 35), y: 250 - (heartCoords[11][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[12][0] * 35), y: 250 - (heartCoords[12][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[13][0] * 35), y: 250 - (heartCoords[13][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[14][0] * 35), y: 250 - (heartCoords[14][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[15][0] * 35), y: 250 - (heartCoords[15][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[16][0] * 35), y: 250 - (heartCoords[16][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[17][0] * 35), y: 250 - (heartCoords[17][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[18][0] * 35), y: 250 - (heartCoords[18][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[19][0] * 35), y: 250 - (heartCoords[19][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[20][0] * 35), y: 250 - (heartCoords[20][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[21][0] * 35), y: 250 - (heartCoords[21][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[22][0] * 35), y: 250 - (heartCoords[22][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[23][0] * 35), y: 250 - (heartCoords[23][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[24][0] * 35), y: 250 - (heartCoords[24][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[25][0] * 35), y: 250 - (heartCoords[25][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[26][0] * 35), y: 250 - (heartCoords[26][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[27][0] * 35), y: 250 - (heartCoords[27][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[28][0] * 35), y: 250 - (heartCoords[28][1] * 35), size: 6 },
+  { x: 400 + (heartCoords[29][0] * 35), y: 250 - (heartCoords[29][1] * 35), size: 6 },
 ];
 
 // Generate gradient colors based on position in the sequence
@@ -208,15 +213,15 @@ export const MemoryGraphAnimation = () => {
     }
   }, [currentIndex]);
 
-  // D3 rendering with stable updates
+  // D3 rendering with proper z-index (edges behind nodes)
   useEffect(() => {
     if (!svgRef.current) return;
 
     const svg = d3.select(svgRef.current);
-    const width = 600;
-    const height = 450;
+    const width = 800;
+    const height = 500;
 
-    // Update links without flickering
+    // Create/update links FIRST (so they appear behind nodes)
     const linkSelection = svg.selectAll(".link")
       .data(links, (d: any) => `${d.source}-${d.target}`);
 
@@ -242,7 +247,7 @@ export const MemoryGraphAnimation = () => {
       })
       .attr("stroke", "#7c3aed")
       .attr("stroke-width", 1.5)
-      .attr("stroke-opacity", 0.6)
+      .attr("stroke-opacity", 0.4)
       .transition()
       .duration(400)
       .attr("x2", d => {
@@ -254,7 +259,7 @@ export const MemoryGraphAnimation = () => {
         return targetNode ? targetNode.y : 0;
       });
 
-    // Update node groups
+    // Create/update node groups AFTER links (so nodes appear on top)
     const nodeSelection = svg.selectAll(".node-group")
       .data(nodes, (d: any) => d.id);
 
@@ -264,7 +269,7 @@ export const MemoryGraphAnimation = () => {
       .attr("class", "node-group")
       .attr("transform", d => `translate(${d.x}, ${d.y})`);
 
-    // Add circles with animation
+    // Add circles with animation - these will be on top of links
     nodeEnter.append("circle")
       .attr("class", "node-circle")
       .attr("r", 0)
