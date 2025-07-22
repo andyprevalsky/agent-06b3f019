@@ -127,7 +127,7 @@ const FeaturesSection = () => {
       if (rafId) cancelAnimationFrame(rafId);
       observer.disconnect();
     };
-  }, []);
+  }, [isClickScrolling]);
 
   const handleFeatureClick = (index: number) => {
     setIsClickScrolling(true);
