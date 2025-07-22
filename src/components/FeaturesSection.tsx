@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { MemoryGraphAnimation } from "./MemoryGraphAnimation";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
@@ -187,16 +188,23 @@ const FeaturesSection = () => {
                     <div className={`bg-muted/20 rounded-2xl p-12 h-[400px] flex items-center justify-center border transition-all duration-300 ${
                       activeFeature === index ? 'border-primary/20 bg-primary/5' : 'border-border/20'
                     }`}>
-                      <div className="text-center">
-                        <div className={`w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center transition-colors ${
-                          activeFeature === index ? 'bg-primary/30' : 'bg-primary/20'
-                        }`}>
-                          <div className={`w-12 h-12 rounded-full transition-colors ${
-                            activeFeature === index ? 'bg-primary/60' : 'bg-primary/40'
-                          }`}></div>
+                      {/* Show memory animation for "Navi Grows With You" feature */}
+                      {index === 4 ? (
+                        <div className="w-full h-full">
+                          <MemoryGraphAnimation />
                         </div>
-                        <p className="text-muted-foreground text-sm">Animation for {feature.title}</p>
-                      </div>
+                      ) : (
+                        <div className="text-center">
+                          <div className={`w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center transition-colors ${
+                            activeFeature === index ? 'bg-primary/30' : 'bg-primary/20'
+                          }`}>
+                            <div className={`w-12 h-12 rounded-full transition-colors ${
+                              activeFeature === index ? 'bg-primary/60' : 'bg-primary/40'
+                            }`}></div>
+                          </div>
+                          <p className="text-muted-foreground text-sm">Animation for {feature.title}</p>
+                        </div>
+                      )}
                     </div>
                     
                     {/* Description */}
