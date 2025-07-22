@@ -7,7 +7,7 @@ const ProductShowcase = () => {
           {/* Black Navi */}
           <div className="relative reveal-up">
             <img 
-              src="/lovable-uploads/91e751a7-115a-416b-b7b3-9e7cee11584b.png" 
+              src="/navi-black.png" 
               alt="Navi in Midnight Black"
               className="w-3/4 h-auto mx-auto"
             />
@@ -20,7 +20,7 @@ const ProductShowcase = () => {
           {/* White Navi */}
           <div className="relative reveal-up reveal-delay-1">
             <img 
-              src="/lovable-uploads/08d900d5-b4c6-43d7-8e90-87a13069cd14.png" 
+              src="/navi-white.png" 
               alt="Navi in Pearl White"
               className="w-3/4 h-auto mx-auto"
             />
