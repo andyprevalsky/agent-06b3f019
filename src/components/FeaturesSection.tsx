@@ -140,8 +140,9 @@ const FeaturesSection = () => {
         block: 'center'
       });
       
-      // Re-enable scroll detection after animation completes
+      // Keep the clicked feature active and re-enable scroll detection after animation
       setTimeout(() => {
+        setActiveFeature(index); // Ensure it stays on the clicked feature
         setIsClickScrolling(false);
       }, 1000);
     }
