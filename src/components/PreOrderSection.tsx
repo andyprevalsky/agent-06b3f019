@@ -130,7 +130,7 @@ const PreOrderSection = () => {
               
               <div className="mb-8">
                 <div className="text-3xl font-light tracking-tight">
-                  $299 + 
+                  $199 +
                   <Popover>
                     <PopoverTrigger asChild>
                       <span className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1">
