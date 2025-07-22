@@ -236,7 +236,7 @@ const FeaturesSection = () => {
                   >
                     {activeFeature === index && (
                       <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg p-[2px]">
-                        <div className="w-full h-full bg-background rounded-[6px]"></div>
+                        <div className="w-full h-full bg-background rounded-md"></div>
                       </div>
                     )}
                     <h4 className="relative font-medium text-sm leading-tight">{feature.title}</h4>
