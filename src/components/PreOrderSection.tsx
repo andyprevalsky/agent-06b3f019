@@ -73,10 +73,11 @@ const PreOrderSection = () => {
               <div className="mb-6">
                 <video 
                   ref={blackVideoRef}
-                  className="w-48 h-48 rounded-3xl mx-auto mb-4 object-cover"
+                  className="w-48 h-48 rounded-3xl mx-auto mb-4 object-cover bg-transparent"
                   loop
                   muted
                   playsInline
+                  poster="/navi-black.png"
                 >
                   <source src="/navi-black-demo.webm" type="video/webm" />
                 </video>
@@ -135,10 +136,11 @@ const PreOrderSection = () => {
               <div className="mb-6">
                 <video 
                   ref={whiteVideoRef}
-                  className="w-48 h-48 rounded-3xl mx-auto mb-4 object-cover"
+                  className="w-48 h-48 rounded-3xl mx-auto mb-4 object-cover bg-transparent"
                   loop
                   muted
                   playsInline
+                  poster="/navi-white.png"
                 >
                   <source src="/navi-white-demo.webm" type="video/webm" />
                 </video>
