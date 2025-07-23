@@ -159,15 +159,16 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
 
         {/* Encircling object that moves left to right */}
         <g stroke="url(#animatedGradient)" strokeWidth="4" fill="none" opacity="0">
-          <animate attributeName="opacity" values="0;1;1;0" dur="2s" begin="1.2s" fill="freeze" />
+          <animate attributeName="opacity" values="0;1;1;0" dur="2s" begin="2s" fill="freeze" />
           
           {/* Circle that moves from left to right across all three columns */}
-          <circle r="35" stroke="url(#animatedGradient)" strokeWidth="4" fill="none" cx="16.67%" cy="50%">
-            <animate 
-              attributeName="cx" 
-              values="16.67%;50%;83.33%"
+          <circle r="35" stroke="url(#animatedGradient)" strokeWidth="4" fill="none">
+            <animateTransform 
+              attributeName="transform" 
+              type="translate"
+              values="calc(16.67vw) calc(50vh); calc(50vw) calc(50vh); calc(83.33vw) calc(50vh)"
               dur="1.5s" 
-              begin="1.2s" 
+              begin="2s" 
               fill="freeze" />
           </circle>
         </g>
