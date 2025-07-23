@@ -138,6 +138,14 @@ const PreOrderSection = () => {
             Be among the first to experience the future of voice AI. 
             Choose your preferred finish and secure your place in line.
           </p>
+          
+          <div className="text-center mt-8 mb-8 reveal-up reveal-delay-2">
+            <p className="text-sm text-muted-foreground mb-3">Available in 2 colors</p>
+            <div className="flex justify-center space-x-3">
+              <div className="w-3 h-3 bg-gray-900 rounded-full" title="Midnight Black"></div>
+              <div className="w-3 h-3 bg-gray-100 border border-gray-300 rounded-full" title="Pearl White"></div>
+            </div>
+          </div>
         </div>
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
