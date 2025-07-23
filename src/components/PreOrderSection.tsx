@@ -168,7 +168,7 @@ const PreOrderSection = () => {
               </Button>
               
               <p className="text-xs text-muted-foreground mt-4">
-                Free shipping • 30-day returns • 2-year warranty
+                Free shipping • 30-day returns
               </p>
             </CardContent>
           </Card>
@@ -242,7 +242,7 @@ const PreOrderSection = () => {
               </Button>
               
               <p className="text-xs text-muted-foreground mt-4">
-                Free shipping • 30-day returns • 2-year warranty
+                Free shipping • 30-day returns
               </p>
             </CardContent>
           </Card>

@@ -72,11 +72,13 @@ const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
 interface CircleConnectionProps {
   show: boolean;
   slideReveal: boolean;
+  overlayPosition: number;
+  overlayOpacity: number;
 }
 
-const CircleConnection = ({ show, slideReveal }: CircleConnectionProps) => {
+const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity }: CircleConnectionProps) => {
   return (
-    <div className="absolute inset-0 z-10 pointer-events-none">
+    <div className="absolute inset-0 z-0 pointer-events-none">
       <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
         <defs>
           <linearGradient id="naviGradient" x1="0%" y1="0%" x2="100%" y2="0%">
@@ -90,6 +92,11 @@ const CircleConnection = ({ show, slideReveal }: CircleConnectionProps) => {
           <linearGradient id="fadeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="hsl(var(--surface))" stopOpacity="0" />
             <stop offset="15%" stopColor="hsl(var(--surface))" stopOpacity="1" />
+            <stop offset="100%" stopColor="hsl(var(--surface))" stopOpacity="1" />
+          </linearGradient>
+          <linearGradient id="whiteLeftFade" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="hsl(var(--surface))" stopOpacity="0" />
+            <stop offset="10%" stopColor="hsl(var(--surface))" stopOpacity="1" />
             <stop offset="100%" stopColor="hsl(var(--surface))" stopOpacity="1" />
           </linearGradient>
         </defs>
@@ -133,50 +140,25 @@ const CircleConnection = ({ show, slideReveal }: CircleConnectionProps) => {
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
           fill="none"
+          style={{}}
         />
         
-        {/* White overlay chain with left fade - exact same structure as gradient */}
-        <path 
-          d="M 8.67 42
-             L 24.67 42
-             Q 26.67 42 26.67 44
-             L 26.67 52
-             Q 26.67 54 24.67 54
-             L 8.67 54
-             Q 6.67 54 6.67 52
-             L 6.67 44
-             Q 6.67 42 8.67 42
-             Z
-             M 26.67 48
-             L 40 48
-             M 42 42
-             L 58 42
-             Q 60 42 60 44
-             L 60 52
-             Q 60 54 58 54
-             L 42 54
-             Q 40 54 40 52
-             L 40 44
-             Q 40 42 42 42
-             Z
-             M 60 48
-             L 73.33 48
-             M 75.33 42
-             L 91.33 42
-             Q 93.33 42 93.33 44
-             L 93.33 52
-             Q 93.33 54 91.33 54
-             L 75.33 54
-             Q 73.33 54 73.33 52
-             L 73.33 44
-             Q 73.33 42 75.33 42
-             Z"
-          stroke="hsl(var(--surface))" 
-          strokeWidth="4" 
-          fill="hsl(var(--surface))"
-          opacity={show ? 1 : 0}
+                {/* Solid white rectangle overlay */}
+        <rect
+          x="-32.66"
+          y="40"
+          width="136.4"
+          height="16"
+          rx="2"
+          fill="url(#whiteLeftFade)"
           style={{
-            transform: slideReveal ? 'translateX(120%)' : 'translateX(0%)'
+                        transform: `translateX(${overlayPosition}%)`,
+            opacity: overlayOpacity,
+            transition: overlayPosition === 120 
+              ? 'transform 1.6s ease-in-out, opacity 0s'
+              : overlayPosition === 0 && overlayOpacity === 1 
+              ? 'transform 0s, opacity 0.3s ease-in-out'
+              : 'transform 0s, opacity 0s'
           }}
         />
       </svg>
@@ -189,6 +171,8 @@ export const CustomizableAnimation = () => {
   const [centerIndices, setCenterIndices] = useState([0, 0, 0]); // Track which emblem is in center for each column
   const [showConnections, setShowConnections] = useState(false);
   const [slideReveal, setSlideReveal] = useState(false);
+  const [overlayOpacity, setOverlayOpacity] = useState(1);
+  const [overlayPosition, setOverlayPosition] = useState(0); // 0 = translateX(0%), 120 = translateX(120%)
   const [isAnimating, setIsAnimating] = useState(false);
   const [hasTriggered, setHasTriggered] = useState(false);
 
@@ -224,30 +208,32 @@ export const CustomizableAnimation = () => {
     if (!isAnimating) return;
 
     const animationCycle = () => {
-      // Rotate: column 1 down 1, column 2 up 2, column 3 down 2
+      // Step 1: Rotation happens (elements move)
       setCenterIndices(prev => [
         (prev[0] + 1) % llmProviders.length, // Column 1: move down 1 emblem
         (prev[1] - 2 + placeholderEmblems.length) % placeholderEmblems.length, // Column 2: move up 2 emblems  
         (prev[2] + 2) % placeholderEmblems.length  // Column 3: move down 2 emblems
       ]);
 
-      // Show connections after rotation
+      // Step 2: After rotation ends, slide overlay to 120% with ease (800ms)
       setTimeout(() => {
-        setShowConnections(true);
-        // Reset slide position before starting reveal
-        setSlideReveal(false);
+        setOverlayPosition(120);
       }, 1000);
 
-      // Start slide reveal animation
+      // Step 3: Set opacity to 0 instantly after slide completes
       setTimeout(() => {
-        setSlideReveal(true);
-      }, 1500);
+        setOverlayOpacity(0);
+      }, 2600);
 
-      // Hide connections and prepare for next cycle
+      // Step 4: Snap back to translate 0% instantly 
       setTimeout(() => {
-        setShowConnections(false);
-        setSlideReveal(false);
-      }, 3000);
+        setOverlayPosition(0);
+      }, 2650);
+
+      // Step 5: Ease opacity back to 1 (right before next rotation)
+      setTimeout(() => {
+        setOverlayOpacity(1);
+      }, 4800);
     };
 
     // Start first cycle
@@ -267,7 +253,13 @@ export const CustomizableAnimation = () => {
       ref={containerRef}
       className="w-full h-[450px] relative overflow-hidden flex items-center justify-center isolate"
     >
-      <div className="w-full h-full flex relative">
+      <CircleConnection 
+        show={showConnections} 
+        slideReveal={slideReveal}
+        overlayPosition={overlayPosition}
+        overlayOpacity={overlayOpacity}
+      />
+      <div className="w-full h-full flex relative z-10">
         <Column 
           emblems={llmProviders} 
           centerIndex={centerIndices[0]} 
@@ -284,8 +276,6 @@ export const CustomizableAnimation = () => {
           columnIndex={2}
         />
       </div>
-      
-      <CircleConnection show={showConnections} slideReveal={slideReveal} />
     </div>
   );
 };
