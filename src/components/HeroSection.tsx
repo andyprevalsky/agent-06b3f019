@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import FloatingParticles from "./FloatingParticles";
 import ProgressiveImage from "./ProgressiveImage";
 import { useState, useEffect, useRef } from "react";
+import { MessageCircle } from "lucide-react";
 
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
@@ -131,11 +132,24 @@ const HeroSection = () => {
               </div>
             </div>
           
-          <p className="text-2xl md:text-3xl text-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1 min-h-[6rem] text-center">
-            <span className="inline">
-              {typedText}<span className="animate-pulse">|</span>
-            </span>
-          </p>
+          <div className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1">
+            <div className="bg-surface border border-border rounded-2xl p-6 shadow-lg">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0">
+                  <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center">
+                    <MessageCircle className="w-4 h-4 text-primary-foreground animate-pulse" />
+                  </div>
+                </div>
+                <div className="flex-1 min-h-[4rem] flex items-center">
+                  <p className="text-xl md:text-2xl text-foreground leading-relaxed">
+                    <span className="inline">
+                      {typedText}<span className="animate-pulse">|</span>
+                    </span>
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
           
           <div className="flex flex-col sm:flex-row gap-4 justify-center reveal-up reveal-delay-2">
             <Button 
