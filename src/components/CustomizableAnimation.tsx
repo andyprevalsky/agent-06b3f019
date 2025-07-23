@@ -88,103 +88,26 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
             <stop offset="66.67%" stopColor="#A76CED" />
             <stop offset="100%" stopColor="#7A6BEC" />
           </linearGradient>
-          
-          <linearGradient id="animatedGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#FE7503" stopOpacity="1">
-              <animate attributeName="stop-opacity" 
-                values="0;1" 
-                dur="1.2s" 
-                begin="0.6s" 
-                fill="freeze" />
-            </stop>
-            <stop offset="16.67%" stopColor="#FC585C" stopOpacity="0">
-              <animate attributeName="stop-opacity" 
-                values="0;1" 
-                dur="1.2s" 
-                begin="0.7s" 
-                fill="freeze" />
-            </stop>
-            <stop offset="33.33%" stopColor="#FD5776" stopOpacity="0">
-              <animate attributeName="stop-opacity" 
-                values="0;1" 
-                dur="1.2s" 
-                begin="0.8s" 
-                fill="freeze" />
-            </stop>
-            <stop offset="50%" stopColor="#E062CC" stopOpacity="0">
-              <animate attributeName="stop-opacity" 
-                values="0;1" 
-                dur="1.2s" 
-                begin="0.9s" 
-                fill="freeze" />
-            </stop>
-            <stop offset="66.67%" stopColor="#A76CED" stopOpacity="0">
-              <animate attributeName="stop-opacity" 
-                values="0;1" 
-                dur="1.2s" 
-                begin="1.0s" 
-                fill="freeze" />
-            </stop>
-            <stop offset="100%" stopColor="#7A6BEC" stopOpacity="0">
-              <animate attributeName="stop-opacity" 
-                values="0;1" 
-                dur="1.2s" 
-                begin="1.1s" 
-                fill="freeze" />
-            </stop>
-          </linearGradient>
         </defs>
         
-        {/* Single connected path with circles and lines */}
-        <g stroke="url(#animatedGradient)" strokeWidth="3" fill="none" opacity="0">
-          <animate attributeName="opacity" values="0;1" dur="0.1s" begin="0.6s" fill="freeze" />
+        {/* Connected circles and lines */}
+        <g stroke="url(#naviGradient)" strokeWidth="3" fill="none" opacity="0">
+          <animate attributeName="opacity" values="0;1" dur="0.3s" begin="0.5s" fill="freeze" />
           
-          {/* One continuous path: left circle + line + middle circle + line + right circle */}
-          <path d="
-            M calc(16.67% - 55px) 50%
-            A 55 55 0 1 0 calc(16.67% + 55px) 50%
-            A 55 55 0 1 0 calc(16.67% - 55px) 50%
-            M calc(16.67% + 55px) 50%
-            L calc(50% - 55px) 50%
-            M calc(50% - 55px) 50%
-            A 55 55 0 1 0 calc(50% + 55px) 50%
-            A 55 55 0 1 0 calc(50% - 55px) 50%
-            M calc(50% + 55px) 50%
-            L calc(83.33% - 55px) 50%
-            M calc(83.33% - 55px) 50%
-            A 55 55 0 1 0 calc(83.33% + 55px) 50%
-            A 55 55 0 1 0 calc(83.33% - 55px) 50%
-          " className="animate-scale-in" />
-        </g>
-
-        {/* Sequential encircling animation */}
-        <g stroke="url(#animatedGradient)" strokeWidth="4" fill="none">
           {/* Left circle */}
-          <circle r="35" cx="16.67%" cy="50%" opacity="0">
-            <animate attributeName="opacity" values="0;1" dur="0.3s" begin="2s" fill="freeze" />
-          </circle>
+          <circle cx="16.67%" cy="50%" r="55" />
           
           {/* Left to middle line */}
-          <line x1="20%" y1="50%" x2="20%" y2="50%" opacity="0" strokeWidth="4" stroke="url(#animatedGradient)">
-            <animate attributeName="x2" values="20%;46%" dur="0.4s" begin="2.3s" fill="freeze" />
-            <animate attributeName="opacity" values="0;1" dur="0.1s" begin="2.3s" fill="freeze" />
-          </line>
+          <line x1="23%" y1="50%" x2="44%" y2="50%" />
           
           {/* Middle circle */}
-          <circle r="35" cx="50%" cy="50%" opacity="0">
-            <animate attributeName="opacity" values="0;1" dur="0.3s" begin="2.7s" fill="freeze" />
-          </circle>
+          <circle cx="50%" cy="50%" r="55" />
           
           {/* Middle to right line */}
-          <line x1="54%" y1="50%" x2="54%" y2="50%" opacity="0" strokeWidth="4" stroke="url(#animatedGradient)">
-            <animate attributeName="x2" values="54%;79%" dur="0.4s" begin="3s" fill="freeze" />
-            <animate attributeName="opacity" values="0;1" dur="0.1s" begin="3s" fill="freeze" />
-          </line>
+          <line x1="56%" y1="50%" x2="77%" y2="50%" />
           
           {/* Right circle */}
-          <circle r="35" cx="83.33%" cy="50%" opacity="0">
-            <animate attributeName="opacity" values="0;1" dur="0.3s" begin="3.4s" fill="freeze" />
-          </circle>
+          <circle cx="83.33%" cy="50%" r="55" />
         </g>
       </svg>
     </div>
