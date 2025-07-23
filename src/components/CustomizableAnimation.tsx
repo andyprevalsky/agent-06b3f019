@@ -45,7 +45,7 @@ const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
           const emblemIndex = i % emblems.length;
           const emblem = emblems[emblemIndex];
           const position = i - emblems.length - centerIndex; // Position relative to center
-          const opacity = Math.abs(position) >= 2 ? 0.3 : Math.abs(position) === 1 ? 0.8 : 1;
+          const opacity = Math.abs(position) >= 2 ? 0.3 : 1;
           
           return (
             <div
