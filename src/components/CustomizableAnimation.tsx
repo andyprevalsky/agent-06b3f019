@@ -45,7 +45,7 @@ const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
           const emblemIndex = i % emblems.length;
           const emblem = emblems[emblemIndex];
           const position = i - emblems.length - centerIndex; // Position relative to center
-          const opacity = Math.abs(position) >= 2 ? 0.3 : 1;
+          const opacity = Math.abs(position) >= 3 ? 0.2 : 1;
           
           return (
             <div
@@ -233,7 +233,7 @@ export const CustomizableAnimation = () => {
   return (
     <div 
       ref={containerRef}
-      className="w-full h-[400px] relative overflow-hidden flex items-center justify-center isolate"
+      className="w-full h-[450px] relative overflow-hidden flex items-center justify-center isolate"
     >
       <div className="w-full h-full flex relative">
         <Column 
