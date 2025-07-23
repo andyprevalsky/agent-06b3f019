@@ -82,7 +82,7 @@ const HeroSection = () => {
               className="w-64 h-64 md:w-80 md:h-80 mx-auto object-cover rounded-full"
               poster="/navi-black.png"
             >
-              <source src="/navi-black-demo.webm" type="video/webm" />
+              <source src="/navi-black-v4-hero-background.webm" type="video/webm" />
               <img src="/navi-black.png" alt="Navi" className="w-full h-full object-cover" />
             </video>
           </div>
