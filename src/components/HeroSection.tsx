@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
-  const baseText = "I'm Navi, your voice AI ";
+  const baseText = "Hi! I'm Navi, your ";
   const words = ["companion.", "daemon.", "assistant."];
   
   useEffect(() => {
