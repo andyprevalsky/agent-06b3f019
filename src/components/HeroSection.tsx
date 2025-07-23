@@ -61,7 +61,7 @@ const HeroSection = () => {
             if (baseIndex <= baseText.length) {
               setTypedText(baseText.slice(0, baseIndex));
               baseIndex++;
-              setTimeout(typeBase, 120);
+              setTimeout(typeBase, 96);
             } else {
               isFirstType = false;
               typeText();
@@ -74,7 +74,7 @@ const HeroSection = () => {
         if (currentCharIndex < currentWord.length) {
           setTypedText(baseText + currentWord.slice(0, currentCharIndex + 1));
           currentCharIndex++;
-          timeoutId = setTimeout(typeText, 100);
+          timeoutId = setTimeout(typeText, 80);
         } else {
           // Finished typing word, wait then start deleting
           timeoutId = setTimeout(() => {
@@ -87,7 +87,7 @@ const HeroSection = () => {
         if (currentCharIndex > 0) {
           setTypedText(baseText + currentWord.slice(0, currentCharIndex - 1));
           currentCharIndex--;
-          timeoutId = setTimeout(typeText, 50);
+          timeoutId = setTimeout(typeText, 40);
         } else {
           // Finished deleting, move to next word
           isDeleting = false;
@@ -133,15 +133,15 @@ const HeroSection = () => {
             </div>
           
           <div className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1">
-            <div className="bg-surface border border-border rounded-2xl p-6 shadow-lg">
-              <div className="flex items-start gap-4">
+            <div className="bg-[#010204] border border-[#2a2e35] rounded-2xl p-6 shadow-lg">
+              <div className="flex items-center gap-4">
                 <div className="flex-shrink-0">
-                  <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center">
-                    <MessageCircle className="w-4 h-4 text-primary-foreground animate-pulse" />
+                  <div className="w-8 h-8 bg-muted/20 rounded-full flex items-center justify-center">
+                    <MessageCircle className="w-4 h-4 text-muted-foreground animate-pulse" />
                   </div>
                 </div>
                 <div className="flex-1 min-h-[4rem] flex items-center">
-                  <p className="text-xl md:text-2xl text-foreground leading-relaxed">
+                  <p className="text-xl md:text-2xl text-white leading-relaxed">
                     <span className="inline">
                       {typedText}<span className="animate-pulse">|</span>
                     </span>
