@@ -30,14 +30,14 @@ const Column = ({ emblems, rotation, columnIndex }: ColumnProps) => {
   return (
     <div className="relative h-full w-1/3 flex flex-col items-center justify-center overflow-hidden">
       {/* Gradient fade overlays */}
-      <div className="absolute top-0 left-0 right-0 h-20 bg-gradient-to-b from-background to-transparent z-10 pointer-events-none" />
-      <div className="absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-background to-transparent z-10 pointer-events-none" />
+      <div className="absolute top-0 left-0 right-0 h-20 bg-gradient-to-b from-surface to-transparent z-10 pointer-events-none" />
+      <div className="absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-surface to-transparent z-10 pointer-events-none" />
       
       {/* Emblems container */}
       <div 
-        className="flex flex-col items-center space-y-6 transition-transform duration-1000 ease-in-out"
+        className="flex flex-col items-center transition-transform duration-1000 ease-in-out"
         style={{ 
-          transform: `translateY(${rotation * -60}px)` // Each emblem is ~60px apart
+          transform: `translateY(${rotation * -80}px)` // Fixed spacing for larger emblems
         }}
       >
         {[...emblems, ...emblems, ...emblems].map((emblem, index) => {
@@ -47,13 +47,16 @@ const Column = ({ emblems, rotation, columnIndex }: ColumnProps) => {
           return (
             <div
               key={`${emblem.id}-${index}`}
-              className="w-12 h-12 flex items-center justify-center transition-opacity duration-500"
-              style={{ opacity }}
+              className="w-20 h-20 flex items-center justify-center transition-opacity duration-500"
+              style={{ 
+                opacity,
+                marginBottom: '20px' // Fixed spacing between emblems
+              }}
             >
               <img 
                 src={emblem.src} 
                 alt={emblem.alt}
-                className="w-10 h-10 object-contain"
+                className="w-20 h-20 object-contain" // Doubled size
               />
             </div>
           );
@@ -75,46 +78,95 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
       <svg width="100%" height="100%" className="absolute inset-0">
         {/* Circles around center emblems */}
         <circle
-          cx="16.67%" cy="50%" r="25"
+          cx="16.67%" cy="50%" r="40"
           fill="none"
-          stroke="hsl(var(--primary))"
-          strokeWidth="2"
+          stroke="url(#naviGradient)"
+          strokeWidth="3"
           className="animate-scale-in"
         />
         <circle
-          cx="50%" cy="50%" r="25"
+          cx="50%" cy="50%" r="40"
           fill="none"
-          stroke="hsl(var(--primary))"
-          strokeWidth="2"
+          stroke="url(#naviGradient)"
+          strokeWidth="3"
           className="animate-scale-in"
           style={{ animationDelay: '0.2s' }}
         />
         <circle
-          cx="83.33%" cy="50%" r="25"
+          cx="83.33%" cy="50%" r="40"
           fill="none"
-          stroke="hsl(var(--primary))"
-          strokeWidth="2"
+          stroke="url(#naviGradient)"
+          strokeWidth="3"
           className="animate-scale-in"
           style={{ animationDelay: '0.4s' }}
         />
         
-        {/* Connecting lines */}
+        {/* Animated connecting lines that fill from left to right */}
+        <defs>
+          <linearGradient id="naviGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#FE7503" />
+            <stop offset="16.67%" stopColor="#FC585C" />
+            <stop offset="33.33%" stopColor="#FD5776" />
+            <stop offset="50%" stopColor="#E062CC" />
+            <stop offset="66.67%" stopColor="#A76CED" />
+            <stop offset="100%" stopColor="#7A6BEC" />
+          </linearGradient>
+          
+          <linearGradient id="animatedLine1" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="url(#naviGradient)" stopOpacity="1">
+              <animate attributeName="offset" 
+                values="0%;100%" 
+                dur="0.8s" 
+                begin="0.6s" 
+                fill="freeze" />
+            </stop>
+            <stop offset="0%" stopColor="url(#naviGradient)" stopOpacity="0">
+              <animate attributeName="offset" 
+                values="0%;100%" 
+                dur="0.8s" 
+                begin="0.6s" 
+                fill="freeze" />
+            </stop>
+          </linearGradient>
+          
+          <linearGradient id="animatedLine2" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="url(#naviGradient)" stopOpacity="1">
+              <animate attributeName="offset" 
+                values="0%;100%" 
+                dur="0.8s" 
+                begin="0.8s" 
+                fill="freeze" />
+            </stop>
+            <stop offset="0%" stopColor="url(#naviGradient)" stopOpacity="0">
+              <animate attributeName="offset" 
+                values="0%;100%" 
+                dur="0.8s" 
+                begin="0.8s" 
+                fill="freeze" />
+            </stop>
+          </linearGradient>
+        </defs>
+        
         <line
-          x1="calc(16.67% + 25px)" y1="50%"
-          x2="calc(50% - 25px)" y2="50%"
-          stroke="hsl(var(--primary))"
-          strokeWidth="2"
-          className="animate-fade-in"
+          x1="calc(16.67% + 40px)" y1="50%"
+          x2="calc(50% - 40px)" y2="50%"
+          stroke="url(#animatedLine1)"
+          strokeWidth="3"
+          opacity="0"
           style={{ animationDelay: '0.6s' }}
-        />
+        >
+          <animate attributeName="opacity" values="0;1" dur="0.1s" begin="0.6s" fill="freeze" />
+        </line>
         <line
-          x1="calc(50% + 25px)" y1="50%"
-          x2="calc(83.33% - 25px)" y2="50%"
-          stroke="hsl(var(--primary))"
-          strokeWidth="2"
-          className="animate-fade-in"
+          x1="calc(50% + 40px)" y1="50%"
+          x2="calc(83.33% - 40px)" y2="50%"
+          stroke="url(#animatedLine2)"
+          strokeWidth="3"
+          opacity="0"
           style={{ animationDelay: '0.8s' }}
-        />
+        >
+          <animate attributeName="opacity" values="0;1" dur="0.1s" begin="0.8s" fill="freeze" />
+        </line>
       </svg>
     </div>
   );
@@ -192,7 +244,7 @@ export const CustomizableAnimation = () => {
   return (
     <div 
       ref={containerRef}
-      className="w-full h-[500px] relative overflow-hidden flex items-center justify-center bg-background"
+      className="w-full h-[500px] relative overflow-hidden flex items-center justify-center"
     >
       <div className="w-full h-full flex">
         <Column 
