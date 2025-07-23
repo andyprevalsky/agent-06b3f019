@@ -74,11 +74,9 @@ interface CircleConnectionProps {
 }
 
 const CircleConnection = ({ show }: CircleConnectionProps) => {
-  // Always render for testing
-
   return (
-    <div className="absolute inset-0 pointer-events-none z-50" style={{ zIndex: 9999 }}>
-      <svg width="100%" height="100%" className="absolute inset-0">
+    <div className="absolute inset-0 z-50">
+      <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
         <defs>
           <linearGradient id="naviGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="#FE7503" />
@@ -90,25 +88,24 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           </linearGradient>
         </defs>
         
-        {/* One continuous path: circle + line + circle + line + circle */}
+        {/* One continuous path */}
         <path 
-          d="M 16.67% 45%
-             A 45 45 0 1 1 16.67% 55%
-             A 45 45 0 1 1 16.67% 45%
-             M 22% 50%
-             L 44% 50%
-             M 50% 45%
-             A 45 45 0 1 1 50% 55%
-             A 45 45 0 1 1 50% 45%
-             M 56% 50%
-             L 77% 50%
-             M 83.33% 45%
-             A 45 45 0 1 1 83.33% 55%
-             A 45 45 0 1 1 83.33% 45%"
+          d="M 16.67 47
+             A 3 3 0 1 1 16.67 53
+             A 3 3 0 1 1 16.67 47
+             M 20 50
+             L 47 50
+             M 50 47
+             A 3 3 0 1 1 50 53
+             A 3 3 0 1 1 50 47
+             M 53 50
+             L 80 50
+             M 83.33 47
+             A 3 3 0 1 1 83.33 53
+             A 3 3 0 1 1 83.33 47"
           stroke="url(#naviGradient)" 
-          strokeWidth="4" 
+          strokeWidth="0.5" 
           fill="none"
-          opacity="1"
         />
       </svg>
     </div>
