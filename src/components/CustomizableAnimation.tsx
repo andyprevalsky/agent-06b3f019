@@ -29,7 +29,7 @@ interface ColumnProps {
 const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
   return (
     <div className="relative h-full w-1/3 flex flex-col items-center justify-center overflow-hidden">
-      {/* Gradient fade overlays - intense blur at top and bottom */}
+      {/* Gradient fade overlays - contained within column */}
       <div className="absolute top-0 left-0 right-0 h-24 bg-gradient-to-b from-surface via-surface/80 to-transparent z-10 pointer-events-none" />
       <div className="absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-surface via-surface/80 to-transparent z-10 pointer-events-none" />
       
