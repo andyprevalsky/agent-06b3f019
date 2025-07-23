@@ -15,30 +15,62 @@ const HeroSection = () => {
     const video = videoRef.current;
     if (!video) return;
 
-    // Handle page visibility changes for Safari iOS
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        // Page is hidden, pause video
-        if (video && !video.paused) {
-          video.pause();
-        }
-      } else {
-        // Page is visible again, try to play video
-        if (video && video.paused) {
-          // Small delay to ensure page is fully visible
-          setTimeout(() => {
-            video.play().catch(() => {
-              // If autoplay fails, that's okay
-            });
-          }, 100);
-        }
+    const playVideo = () => {
+      if (video && video.paused) {
+        // Force reload the video source to fix freezing
+        const currentTime = video.currentTime;
+        video.load();
+        video.currentTime = currentTime;
+        
+        setTimeout(() => {
+          video.play().catch(() => {
+            // If autoplay fails, that's okay
+          });
+        }, 100);
       }
     };
 
+    const pauseVideo = () => {
+      if (video && !video.paused) {
+        video.pause();
+      }
+    };
+
+    // Handle multiple iOS Safari events
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        pauseVideo();
+      } else {
+        playVideo();
+      }
+    };
+
+    const handleFocus = () => {
+      playVideo();
+    };
+
+    const handleBlur = () => {
+      pauseVideo();
+    };
+
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        // Page was restored from cache
+        playVideo();
+      }
+    };
+
+    // Add all the event listeners for comprehensive iOS Safari support
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+    window.addEventListener('pageshow', handlePageShow);
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('pageshow', handlePageShow);
     };
   }, []);
 
@@ -164,7 +196,7 @@ const HeroSection = () => {
       </div>
       
       {/* Scroll down arrow - positioned right above the fold */}
-      <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-20">
+      <div className="absolute left-1/2 transform -translate-x-1/2 z-20" style={{ bottom: 'max(1rem, min(4dvh, 2rem))' }}>
         <button 
           className="p-3 rounded-full bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 hover:bg-gradient-to-br hover:from-[#323230] hover:to-[#252523] transition-all duration-300 shadow-lg animate-slow-bounce"
           onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
