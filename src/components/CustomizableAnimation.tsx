@@ -139,20 +139,22 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
         <g stroke="url(#animatedGradient)" strokeWidth="3" fill="none" opacity="0">
           <animate attributeName="opacity" values="0;1" dur="0.1s" begin="0.6s" fill="freeze" />
           
-          {/* Left circle */}
-          <circle cx="16.67%" cy="50%" r="55" className="animate-scale-in" />
-          
-          {/* First connecting line */}
-          <line x1="calc(16.67% + 55px)" y1="50%" x2="calc(50% - 55px)" y2="50%" />
-          
-          {/* Middle circle */}
-          <circle cx="50%" cy="50%" r="55" className="animate-scale-in" style={{ animationDelay: '0.2s' }} />
-          
-          {/* Second connecting line */}
-          <line x1="calc(50% + 55px)" y1="50%" x2="calc(83.33% - 55px)" y2="50%" />
-          
-          {/* Right circle */}
-          <circle cx="83.33%" cy="50%" r="55" className="animate-scale-in" style={{ animationDelay: '0.4s' }} />
+          {/* One continuous path: left circle + line + middle circle + line + right circle */}
+          <path d="
+            M calc(16.67% - 55px) 50%
+            A 55 55 0 1 0 calc(16.67% + 55px) 50%
+            A 55 55 0 1 0 calc(16.67% - 55px) 50%
+            M calc(16.67% + 55px) 50%
+            L calc(50% - 55px) 50%
+            M calc(50% - 55px) 50%
+            A 55 55 0 1 0 calc(50% + 55px) 50%
+            A 55 55 0 1 0 calc(50% - 55px) 50%
+            M calc(50% + 55px) 50%
+            L calc(83.33% - 55px) 50%
+            M calc(83.33% - 55px) 50%
+            A 55 55 0 1 0 calc(83.33% + 55px) 50%
+            A 55 55 0 1 0 calc(83.33% - 55px) 50%
+          " className="animate-scale-in" />
         </g>
       </svg>
     </div>
