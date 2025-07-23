@@ -27,39 +27,33 @@ interface ColumnProps {
 }
 
 const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
-  // Get 5 emblems around the center index (circular)
-  const getVisibleEmblems = () => {
-    const visible = [];
-    for (let i = -2; i <= 2; i++) {
-      const index = (centerIndex + i + emblems.length) % emblems.length;
-      visible.push({
-        ...emblems[index],
-        position: i // -2 = top, -1 = top-mid, 0 = center, 1 = bottom-mid, 2 = bottom
-      });
-    }
-    return visible;
-  };
-
-  const visibleEmblems = getVisibleEmblems();
-
   return (
     <div className="relative h-full w-1/3 flex flex-col items-center justify-center overflow-hidden">
       {/* Gradient fade overlays */}
       <div className="absolute top-0 left-0 right-0 h-20 bg-gradient-to-b from-surface to-transparent z-10 pointer-events-none" />
       <div className="absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-surface to-transparent z-10 pointer-events-none" />
       
-      {/* Emblems container - always centered */}
-      <div className="flex flex-col items-center transition-all duration-1000 ease-in-out">
-        {visibleEmblems.map((emblem, index) => {
-          const opacity = Math.abs(emblem.position) === 2 ? 0.5 : 1; // Top and bottom faded
+      {/* Emblems container with smooth transform */}
+      <div 
+        className="flex flex-col items-center transition-transform duration-1000 ease-in-out"
+        style={{ 
+          transform: `translateY(${-centerIndex * 100}px)` // Smooth translation based on center index
+        }}
+      >
+        {/* Create extended array for smooth transitions */}
+        {Array.from({ length: emblems.length * 3 }, (_, i) => {
+          const emblemIndex = i % emblems.length;
+          const emblem = emblems[emblemIndex];
+          const position = i - emblems.length - centerIndex; // Position relative to center
+          const opacity = Math.abs(position) >= 2 ? 0.3 : Math.abs(position) === 1 ? 0.8 : 1;
           
           return (
             <div
-              key={`${emblem.id}-${centerIndex}-${index}`}
+              key={`${emblem.id}-${i}`}
               className="w-20 h-20 flex items-center justify-center transition-opacity duration-500"
               style={{ 
                 opacity,
-                marginBottom: index < visibleEmblems.length - 1 ? '20px' : '0'
+                marginBottom: '20px'
               }}
             >
               <img 
@@ -146,19 +140,19 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           <animate attributeName="opacity" values="0;1" dur="0.1s" begin="0.6s" fill="freeze" />
           
           {/* Left circle */}
-          <circle cx="16.67%" cy="50%" r="40" className="animate-scale-in" />
+          <circle cx="16.67%" cy="50%" r="55" className="animate-scale-in" />
           
           {/* First connecting line */}
-          <line x1="calc(16.67% + 40px)" y1="50%" x2="calc(50% - 40px)" y2="50%" />
+          <line x1="calc(16.67% + 55px)" y1="50%" x2="calc(50% - 55px)" y2="50%" />
           
           {/* Middle circle */}
-          <circle cx="50%" cy="50%" r="40" className="animate-scale-in" style={{ animationDelay: '0.2s' }} />
+          <circle cx="50%" cy="50%" r="55" className="animate-scale-in" style={{ animationDelay: '0.2s' }} />
           
           {/* Second connecting line */}
-          <line x1="calc(50% + 40px)" y1="50%" x2="calc(83.33% - 40px)" y2="50%" />
+          <line x1="calc(50% + 55px)" y1="50%" x2="calc(83.33% - 55px)" y2="50%" />
           
           {/* Right circle */}
-          <circle cx="83.33%" cy="50%" r="40" className="animate-scale-in" style={{ animationDelay: '0.4s' }} />
+          <circle cx="83.33%" cy="50%" r="55" className="animate-scale-in" style={{ animationDelay: '0.4s' }} />
         </g>
       </svg>
     </div>
