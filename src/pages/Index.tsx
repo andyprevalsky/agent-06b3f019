@@ -13,7 +13,6 @@ const Index = () => {
       <NaviHeader />
       <HeroSection />
       <PoweredByTicker />
-      <ProductShowcase />
       <FeaturesSection />
       <PreOrderSection />
       <CustomDesignForm />
