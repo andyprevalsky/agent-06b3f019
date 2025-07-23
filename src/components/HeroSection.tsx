@@ -2,7 +2,7 @@ import { Button } from "@/components/ui/button";
 import FloatingParticles from "./FloatingParticles";
 import ProgressiveImage from "./ProgressiveImage";
 import { useState, useEffect, useRef } from "react";
-import { MessageCircle } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
@@ -146,7 +146,7 @@ const HeroSection = () => {
                   </div>
                 </div>
                 <div className="flex-1 min-h-[2rem]">
-                  <p className="text-lg md:text-xl text-white leading-relaxed text-left drop-shadow-sm">
+                  <p className="text-base md:text-xl text-white leading-relaxed text-left drop-shadow-sm">
                     <span className="inline">
                       {typedText}<span className="animate-pulse">|</span>
                     </span>
@@ -156,22 +156,13 @@ const HeroSection = () => {
             </div>
           </div>
           
-          <div className="flex flex-col sm:flex-row gap-4 justify-center reveal-up reveal-delay-2">
-            <Button 
-              size="lg" 
-              className="btn-luxury text-lg px-12 py-6"
-              onClick={() => document.getElementById('pre-order')?.scrollIntoView({ behavior: 'smooth' })}
-            >
-              Pre-order Now
-            </Button>
-            <Button 
-              variant="outline" 
-              size="lg" 
-              className="btn-pearl text-lg px-12 py-6"
+          <div className="flex justify-center reveal-up reveal-delay-2">
+            <button 
+              className="p-3 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 hover:bg-white/20 transition-all duration-300 animate-bounce"
               onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
             >
-              Explore Features
-            </Button>
+              <ChevronDown className="w-6 h-6 text-white" />
+            </button>
           </div>
           
         </div>
