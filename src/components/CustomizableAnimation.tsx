@@ -90,19 +90,26 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           </linearGradient>
         </defs>
         
-        {/* Single moving circle */}
-        <circle 
-          r="45" 
-          cx="16.67%" 
-          cy="50%" 
+        {/* One continuous path: circle + line + circle + line + circle */}
+        <path 
+          d="M 16.67% calc(50% - 45px)
+             A 45 45 0 1 1 16.67% calc(50% + 45px)
+             A 45 45 0 1 1 16.67% calc(50% - 45px)
+             M calc(16.67% + 45px) 50%
+             L calc(50% - 45px) 50%
+             M 50% calc(50% - 45px)
+             A 45 45 0 1 1 50% calc(50% + 45px)
+             A 45 45 0 1 1 50% calc(50% - 45px)
+             M calc(50% + 45px) 50%
+             L calc(83.33% - 45px) 50%
+             M 83.33% calc(50% - 45px)
+             A 45 45 0 1 1 83.33% calc(50% + 45px)
+             A 45 45 0 1 1 83.33% calc(50% - 45px)"
           stroke="url(#naviGradient)" 
           strokeWidth="4" 
           fill="none"
-          opacity="0"
-        >
-          <animate attributeName="opacity" values="0;1;1;0" dur="2s" begin="1.5s" fill="freeze" />
-          <animate attributeName="cx" values="16.67%;50%;83.33%" dur="1.5s" begin="1.5s" fill="freeze" />
-        </circle>
+          opacity="1"
+        />
       </svg>
     </div>
   );
