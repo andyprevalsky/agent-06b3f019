@@ -28,7 +28,7 @@ interface ColumnProps {
 
 const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
   return (
-    <div className="relative h-full w-2/5 flex flex-col items-center justify-center overflow-hidden">
+    <div className="relative h-full w-[200px] flex flex-col items-center justify-center overflow-hidden">
       {/* Gradient fade overlays - contained within column */}
       <div className="absolute top-0 left-0 right-0 h-24 bg-gradient-to-b from-surface via-surface/80 to-transparent z-10 pointer-events-none" />
       <div className="absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-surface via-surface/80 to-transparent z-10 pointer-events-none" />
@@ -271,7 +271,7 @@ export const CustomizableAnimation = () => {
         overlayOpacity={overlayOpacity}
         hasTriggered={hasTriggered}
       />
-      <div className="w-full h-full flex relative z-10 justify-center gap-0">
+      <div className="w-full h-full flex relative z-10 justify-center items-center gap-8">
         <Column 
           emblems={llmProviders} 
           centerIndex={centerIndices[0]} 
