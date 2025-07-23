@@ -133,8 +133,8 @@ const HeroSection = () => {
             </div>
           
           <div className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1">
-            <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg max-w-lg">
-              <div className="flex items-start gap-3">
+            <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg max-w-96">
+              <div className="flex items-center gap-3">
                 <div className="flex-shrink-0 mt-1">
                   <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center relative">
                     <div className="flex items-center gap-0.5">
