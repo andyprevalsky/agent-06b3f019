@@ -165,8 +165,8 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           </circle>
           
           {/* Left to middle line */}
-          <line x1="calc(16.67% + 35px)" y1="50%" x2="calc(16.67% + 35px)" y2="50%" opacity="0">
-            <animate attributeName="x2" values="calc(16.67% + 35px);calc(50% - 35px)" dur="0.4s" begin="2.3s" fill="freeze" />
+          <line x1="20%" y1="50%" x2="20%" y2="50%" opacity="0" strokeWidth="4" stroke="url(#animatedGradient)">
+            <animate attributeName="x2" values="20%;46%" dur="0.4s" begin="2.3s" fill="freeze" />
             <animate attributeName="opacity" values="0;1" dur="0.1s" begin="2.3s" fill="freeze" />
           </line>
           
@@ -176,8 +176,8 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           </circle>
           
           {/* Middle to right line */}
-          <line x1="calc(50% + 35px)" y1="50%" x2="calc(50% + 35px)" y2="50%" opacity="0">
-            <animate attributeName="x2" values="calc(50% + 35px);calc(83.33% - 35px)" dur="0.4s" begin="3s" fill="freeze" />
+          <line x1="54%" y1="50%" x2="54%" y2="50%" opacity="0" strokeWidth="4" stroke="url(#animatedGradient)">
+            <animate attributeName="x2" values="54%;79%" dur="0.4s" begin="3s" fill="freeze" />
             <animate attributeName="opacity" values="0;1" dur="0.1s" begin="3s" fill="freeze" />
           </line>
           
