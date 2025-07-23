@@ -88,21 +88,42 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           </linearGradient>
         </defs>
         
-        {/* One continuous path */}
+        {/* One continuous path with rounded rectangles */}
         <path 
-          d="M 16.67 40
-             A 8 8 0 1 1 16.67 56
-             A 8 8 0 1 1 16.67 40
-             M 25 48
+          d="M 10 42
+             L 23.34 42
+             Q 25.34 42 25.34 44
+             L 25.34 52
+             Q 25.34 54 23.34 54
+             L 10 54
+             Q 8 54 8 52
+             L 8 44
+             Q 8 42 10 42
+             Z
+             M 25.34 48
              L 42 48
-             M 50 40
-             A 8 8 0 1 1 50 56
-             A 8 8 0 1 1 50 40
-             M 58 48
+             M 42 42
+             L 58 42
+             Q 60 42 60 44
+             L 60 52
+             Q 60 54 58 54
+             L 42 54
+             Q 40 54 40 52
+             L 40 44
+             Q 40 42 42 42
+             Z
+             M 60 48
              L 75 48
-             M 83.33 40
-             A 8 8 0 1 1 83.33 56
-             A 8 8 0 1 1 83.33 40"
+             M 75 42
+             L 91.66 42
+             Q 93.66 42 93.66 44
+             L 93.66 52
+             Q 93.66 54 91.66 54
+             L 75 54
+             Q 73 54 73 52
+             L 73 44
+             Q 73 42 75 42
+             Z"
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
           fill="none"
