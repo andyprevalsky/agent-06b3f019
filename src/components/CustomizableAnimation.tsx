@@ -28,7 +28,7 @@ interface ColumnProps {
 
 const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
   return (
-    <div className="relative h-full w-1/3 flex flex-col items-center justify-center overflow-hidden">
+    <div className="relative h-full w-2/5 flex flex-col items-center justify-center overflow-hidden">
       {/* Gradient fade overlays - contained within column */}
       <div className="absolute top-0 left-0 right-0 h-24 bg-gradient-to-b from-surface via-surface/80 to-transparent z-10 pointer-events-none" />
       <div className="absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-surface via-surface/80 to-transparent z-10 pointer-events-none" />
@@ -104,39 +104,39 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
         
         {/* Gradient path */}
         <path 
-          d="M 8.67 42
-             L 24.67 42
-             Q 26.67 42 26.67 44
-             L 26.67 52
-             Q 26.67 54 24.67 54
-             L 8.67 54
-             Q 6.67 54 6.67 52
-             L 6.67 44
-             Q 6.67 42 8.67 42
+          d="M 15 42
+             L 25 42
+             Q 27 42 27 44
+             L 27 52
+             Q 27 54 25 54
+             L 15 54
+             Q 13 54 13 52
+             L 13 44
+             Q 13 42 15 42
              Z
-             M 26.67 48
-             L 40 48
-             M 42 42
-             L 58 42
-             Q 60 42 60 44
-             L 60 52
-             Q 60 54 58 54
-             L 42 54
-             Q 40 54 40 52
-             L 40 44
-             Q 40 42 42 42
+             M 27 48
+             L 38 48
+             M 40 42
+             L 50 42
+             Q 52 42 52 44
+             L 52 52
+             Q 52 54 50 54
+             L 40 54
+             Q 38 54 38 52
+             L 38 44
+             Q 38 42 40 42
              Z
-             M 60 48
-             L 73.33 48
-             M 75.33 42
-             L 91.33 42
-             Q 93.33 42 93.33 44
-             L 93.33 52
-             Q 93.33 54 91.33 54
-             L 75.33 54
-             Q 73.33 54 73.33 52
-             L 73.33 44
-             Q 73.33 42 75.33 42
+             M 52 48
+             L 63 48
+             M 65 42
+             L 75 42
+             Q 77 42 77 44
+             L 77 52
+             Q 77 54 75 54
+             L 65 54
+             Q 63 54 63 52
+             L 63 44
+             Q 63 42 65 42
              Z"
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
@@ -144,11 +144,11 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
           style={{ opacity: hasTriggered ? 1 : 0 }}
         />
         
-                {/* Solid white rectangle overlay */}
+        {/* Solid white rectangle overlay */}
         <rect
-          x="-32.66"
+          x="-20"
           y="40"
-          width="136.4"
+          width="110"
           height="16"
           rx="2"
           fill="url(#whiteLeftFade)"
@@ -271,7 +271,7 @@ export const CustomizableAnimation = () => {
         overlayOpacity={overlayOpacity}
         hasTriggered={hasTriggered}
       />
-      <div className="w-full h-full flex relative z-10">
+      <div className="w-full h-full flex relative z-10 justify-center gap-0">
         <Column 
           emblems={llmProviders} 
           centerIndex={centerIndices[0]} 
