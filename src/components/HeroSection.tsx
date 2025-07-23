@@ -9,14 +9,13 @@ const HeroSection = () => {
       <div className="container mx-auto px-6 relative z-10">
         <div className="max-w-4xl mx-auto text-center">
           <h1 className="text-6xl md:text-8xl font-light tracking-tight mb-8 reveal-up">
-            <span className="gradient-text">Your Voice.</span>
+            <span className="gradient-text">Hi! I'm Navi.</span>
             <br />
-            <span className="text-foreground">Unlimited Power.</span>
+            <span className="text-foreground">Your Ai Daemon.</span>
           </h1>
           
           <p className="text-xl md:text-2xl text-muted-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1">
-            Navi transforms voice commands into infinite possibilities. 
-            The first truly customizable AI hardware companion.
+            Your hardware voice interface to the AI world.
           </p>
           
           <div className="flex flex-col sm:flex-row gap-4 justify-center reveal-up reveal-delay-2">
