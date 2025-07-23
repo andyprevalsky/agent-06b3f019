@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MemoryGraphAnimation } from "./MemoryGraphAnimation";
+import { CustomizableAnimation } from "./CustomizableAnimation";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
@@ -185,9 +185,9 @@ const FeaturesSection = () => {
                     className="space-y-6"
                   >
                     {/* Animation Area */}
-                    {index === 4 ? (
+                     {index === 1 ? (
                       <div className="w-full h-[400px] flex items-center justify-center">
-                        <MemoryGraphAnimation />
+                        <CustomizableAnimation />
                       </div>
                     ) : (
                       <div className={`bg-muted/20 rounded-2xl p-12 h-[400px] flex items-center justify-center border transition-all duration-300 ${
