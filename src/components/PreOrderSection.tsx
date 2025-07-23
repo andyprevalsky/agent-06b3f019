@@ -10,6 +10,8 @@ const PreOrderSection = () => {
   const blackVideoRef = useRef<HTMLVideoElement>(null);
   const whiteVideoRef = useRef<HTMLVideoElement>(null);
   const [isSafari, setIsSafari] = useState(false);
+  const [blackPopoverOpen, setBlackPopoverOpen] = useState(false);
+  const [whitePopoverOpen, setWhitePopoverOpen] = useState(false);
 
   useEffect(() => {
     // Detect Safari browser
@@ -198,14 +200,22 @@ const PreOrderSection = () => {
               <div className="mb-8">
                 <div className="text-3xl font-light tracking-tight">
                   $199 +
-                  <Popover>
+                  <Popover open={blackPopoverOpen} onOpenChange={setBlackPopoverOpen}>
                     <PopoverTrigger asChild>
-                      <span className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1">
+                      <span 
+                        className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                        onMouseEnter={() => setBlackPopoverOpen(true)}
+                        onMouseLeave={() => setBlackPopoverOpen(false)}
+                      >
                         service fee
                         <HelpCircle size={12} />
                       </span>
                     </PopoverTrigger>
-                    <PopoverContent className="max-w-xs bg-background border shadow-md">
+                    <PopoverContent 
+                      className="max-w-xs bg-background border shadow-md"
+                      onMouseEnter={() => setBlackPopoverOpen(true)}
+                      onMouseLeave={() => setBlackPopoverOpen(false)}
+                    >
                       <div className="text-sm">
                         <p className="font-medium mb-2">AI Provider Services</p>
                         <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
@@ -270,14 +280,22 @@ const PreOrderSection = () => {
               <div className="mb-8">
                 <div className="text-3xl font-light tracking-tight">
                   $199 + 
-                  <Popover>
+                  <Popover open={whitePopoverOpen} onOpenChange={setWhitePopoverOpen}>
                     <PopoverTrigger asChild>
-                      <span className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1">
+                      <span 
+                        className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                        onMouseEnter={() => setWhitePopoverOpen(true)}
+                        onMouseLeave={() => setWhitePopoverOpen(false)}
+                      >
                         service fee
                         <HelpCircle size={12} />
                       </span>
                     </PopoverTrigger>
-                    <PopoverContent className="max-w-xs bg-background border shadow-md">
+                    <PopoverContent 
+                      className="max-w-xs bg-background border shadow-md"
+                      onMouseEnter={() => setWhitePopoverOpen(true)}
+                      onMouseLeave={() => setWhitePopoverOpen(false)}
+                    >
                       <div className="text-sm">
                         <p className="font-medium mb-2">AI Provider Services</p>
                         <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
