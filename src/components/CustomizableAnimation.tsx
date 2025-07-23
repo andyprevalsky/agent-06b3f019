@@ -233,7 +233,7 @@ export const CustomizableAnimation = () => {
   return (
     <div 
       ref={containerRef}
-      className="w-full h-[500px] relative overflow-hidden flex items-center justify-center isolate"
+      className="w-full h-[400px] relative overflow-hidden flex items-center justify-center isolate"
     >
       <div className="w-full h-full flex relative">
         <Column 
