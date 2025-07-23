@@ -171,11 +171,10 @@ const CircleConnection = ({ show, slideReveal }: CircleConnectionProps) => {
              L 73.33 44
              Q 73.33 42 75.33 42
              Z"
-          stroke="url(#fadeGradient)" 
-          strokeWidth="0.5" 
-          fill="none"
+          stroke="hsl(var(--surface))" 
+          strokeWidth="4" 
+          fill="hsl(var(--surface))"
           opacity={show ? 1 : 0}
-          className="transition-all duration-1000 ease-in-out"
           style={{
             transform: slideReveal ? 'translateX(120%)' : 'translateX(0%)'
           }}
