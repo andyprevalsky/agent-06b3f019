@@ -129,9 +129,9 @@
   }
   
   .btn-pearl {
-    @apply bg-card text-card-foreground border border-border px-8 py-4 rounded-xl font-medium;
+    @apply bg-gradient-to-br from-[#272725] to-[#1f1f1d] text-white border border-border/30 px-8 py-4 rounded-xl font-medium;
     @apply transition-all duration-300 hover:scale-105 hover:shadow-[var(--shadow-elegant)];
-    @apply hover:bg-secondary/50;
+    @apply hover:bg-opacity-90;
   }
   
   /* Floating particle animation */
