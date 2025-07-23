@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
-  const baseText = "Hi I'm Navi your voice-enabled AI ";
+  const baseText = "Hi! I'm Navi your voice-enabled AI ";
   const words = ["companion", "daemon", "assistant"];
   
   useEffect(() => {
@@ -87,8 +87,8 @@ const HeroSection = () => {
             </video>
           </div>
           
-          <p className="text-2xl md:text-3xl text-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1 min-h-[4rem] flex items-center justify-center">
-            {typedText}<span className="animate-pulse">|</span>
+          <p className="text-2xl md:text-3xl text-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1 min-h-[6rem] flex items-center justify-center text-center">
+            <span>{typedText}</span><span className="animate-pulse ml-1">|</span>
           </p>
           
           <div className="flex flex-col sm:flex-row gap-4 justify-center reveal-up reveal-delay-2">
