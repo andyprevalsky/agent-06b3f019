@@ -6,6 +6,7 @@ import googleAiLogo from "@/assets/google-ai-logo.png";
 import metaLogo from "@/assets/meta-logo.png";
 import deepgramLogo from "@/assets/deepgram-logo.png";
 import hedraLogo from "@/assets/hedra-logo.png";
+import ycombinatorLogo from "@/assets/ycombinator-logo.png";
 
 const PoweredByTicker = () => {
   return (
@@ -25,6 +26,7 @@ const PoweredByTicker = () => {
               <img src={metaLogo} alt="Meta" className="provider-logo" />
               <img src={deepgramLogo} alt="Deepgram" className="provider-logo" />
               <img src={hedraLogo} alt="Hedra" className="provider-logo" />
+              <img src={ycombinatorLogo} alt="Y Combinator" className="provider-logo" />
               <img src={openaiLogo} alt="OpenAI" className="provider-logo" />
               <img src={anthropicLogo} alt="Anthropic" className="provider-logo" />
               <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" />
@@ -33,6 +35,7 @@ const PoweredByTicker = () => {
               <img src={metaLogo} alt="Meta" className="provider-logo" />
               <img src={deepgramLogo} alt="Deepgram" className="provider-logo" />
               <img src={hedraLogo} alt="Hedra" className="provider-logo" />
+              <img src={ycombinatorLogo} alt="Y Combinator" className="provider-logo" />
             </div>
           </div>
         </div>
