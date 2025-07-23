@@ -716,7 +716,7 @@
   .ticker-track {
     display: flex;
     align-items: center;
-    gap: 2rem;
+    gap: calc(2rem + 12px);
     width: max-content;
     animation: none;
   }
