@@ -135,25 +135,13 @@ const CircleConnection = ({ show, slideReveal }: CircleConnectionProps) => {
           fill="none"
         />
         
-        {/* White overlay that slides to reveal gradient */}
-        <path 
-          d="M -5 42
-             L 91.33 42
-             Q 93.33 42 93.33 44
-             L 93.33 52
-             Q 93.33 54 91.33 54
-             L -5 54
-             Q -7 54 -7 52
-             L -7 44
-             Q -7 42 -5 42
-             Z
-             M 26.67 48
-             L 40 48
-             M 60 48
-             L 73.33 48"
-          stroke="url(#fadeGradient)" 
-          strokeWidth="0.5" 
-          fill="none"
+        {/* Simple white rectangle that covers the gradient */}
+        <rect 
+          x="-5" 
+          y="42" 
+          width="105" 
+          height="12"
+          fill="hsl(var(--surface))"
           opacity={show ? 1 : 0}
           className="transition-all duration-1000 ease-in-out"
           style={{
