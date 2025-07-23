@@ -77,7 +77,7 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
   if (!show) return null;
 
   return (
-    <div className="absolute inset-0 pointer-events-none z-20">
+    <div className="absolute inset-0 pointer-events-none z-50" style={{ zIndex: 9999 }}>
       <svg width="100%" height="100%" className="absolute inset-0">
         <defs>
           <linearGradient id="naviGradient" x1="0%" y1="0%" x2="100%" y2="0%">
