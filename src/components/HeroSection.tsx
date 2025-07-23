@@ -107,7 +107,7 @@ const HeroSection = () => {
       
       <div className="container mx-auto px-6 relative z-10">
                   <div className="max-w-4xl mx-auto text-center">
-            <div className="mb-8 reveal-up">
+            <div className="mb-8 md:mt-3 reveal-up">
               <div className="w-96 h-96 md:w-120 md:h-120 mx-auto rounded-full overflow-hidden bg-surface">
                 <video 
                   ref={videoRef}
