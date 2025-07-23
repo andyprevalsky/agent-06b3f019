@@ -162,11 +162,10 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           <animate attributeName="opacity" values="0;1;1;0" dur="2s" begin="1.2s" fill="freeze" />
           
           {/* Circle that moves from left to right across all three columns */}
-          <circle r="35" stroke="url(#animatedGradient)" strokeWidth="4" fill="none">
-            <animateTransform 
-              attributeName="transform" 
-              type="translate"
-              values="16.67% 50%; 50% 50%; 83.33% 50%"
+          <circle r="35" stroke="url(#animatedGradient)" strokeWidth="4" fill="none" cx="16.67%" cy="50%">
+            <animate 
+              attributeName="cx" 
+              values="16.67%;50%;83.33%"
               dur="1.5s" 
               begin="1.2s" 
               fill="freeze" />
