@@ -104,17 +104,17 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
         
         {/* Gradient path */}
         <path 
-          d="M 25 42
-             L 35 42
-             Q 37 42 37 44
-             L 37 52
-             Q 37 54 35 54
-             L 25 54
-             Q 23 54 23 52
-             L 23 44
-             Q 23 42 25 42
+          d="M 15 42
+             L 25 42
+             Q 27 42 27 44
+             L 27 52
+             Q 27 54 25 54
+             L 15 54
+             Q 13 54 13 52
+             L 13 44
+             Q 13 42 15 42
              Z
-             M 37 48
+             M 27 48
              L 43 48
              M 45 42
              L 55 42
@@ -127,7 +127,7 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
              Q 43 42 45 42
              Z
              M 57 48
-             L 63 48
+             L 71 48
              M 73 42
              L 83 42
              Q 85 42 85 44
