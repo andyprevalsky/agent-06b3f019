@@ -233,9 +233,9 @@ export const CustomizableAnimation = () => {
   return (
     <div 
       ref={containerRef}
-      className="w-full h-[500px] relative overflow-hidden flex items-center justify-center"
+      className="w-full h-[500px] relative overflow-hidden flex items-center justify-center isolate"
     >
-      <div className="w-full h-full flex">
+      <div className="w-full h-full flex relative">
         <Column 
           emblems={llmProviders} 
           centerIndex={centerIndices[0]} 
