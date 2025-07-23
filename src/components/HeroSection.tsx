@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
-  const baseText = "Hi I'm Navi your ai ";
+  const baseText = "Hi I'm Navi your voice-enabled AI ";
   const words = ["companion", "daemon", "assistant"];
   
   useEffect(() => {
@@ -26,7 +26,7 @@ const HeroSection = () => {
             if (baseIndex <= baseText.length) {
               setTypedText(baseText.slice(0, baseIndex));
               baseIndex++;
-              setTimeout(typeBase, 150);
+              setTimeout(typeBase, 120);
             } else {
               isFirstType = false;
               typeText();
