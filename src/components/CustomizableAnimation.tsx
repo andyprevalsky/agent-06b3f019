@@ -90,17 +90,17 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
         
         {/* One continuous path with rounded rectangles */}
         <path 
-          d="M 10 42
-             L 23.34 42
-             Q 25.34 42 25.34 44
-             L 25.34 52
-             Q 25.34 54 23.34 54
-             L 10 54
-             Q 8 54 8 52
-             L 8 44
-             Q 8 42 10 42
+          d="M 8.67 42
+             L 24.67 42
+             Q 26.67 42 26.67 44
+             L 26.67 52
+             Q 26.67 54 24.67 54
+             L 8.67 54
+             Q 6.67 54 6.67 52
+             L 6.67 44
+             Q 6.67 42 8.67 42
              Z
-             M 25.34 48
+             M 26.67 48
              L 40 48
              M 42 42
              L 58 42
@@ -113,16 +113,16 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
              Q 40 42 42 42
              Z
              M 60 48
-             L 73 48
-             M 75 42
-             L 91.66 42
-             Q 93.66 42 93.66 44
-             L 93.66 52
-             Q 93.66 54 91.66 54
-             L 75 54
-             Q 73 54 73 52
-             L 73 44
-             Q 73 42 75 42
+             L 73.33 48
+             M 75.33 42
+             L 91.33 42
+             Q 93.33 42 93.33 44
+             L 93.33 52
+             Q 93.33 54 91.33 54
+             L 75.33 54
+             Q 73.33 54 73.33 52
+             L 73.33 44
+             Q 73.33 42 75.33 42
              Z"
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
