@@ -136,7 +136,7 @@ const HeroSection = () => {
             <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg max-w-xl">
               <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 mt-1">
-                  <div className="w-6 h-6 bg-white rounded-full flex items-center justify-center relative">
+                  <div className="w-7 h-7 bg-white rounded-full flex items-center justify-center relative">
                     <div className="flex items-center gap-0.5">
                       <div className="w-0.5 bg-primary rounded-full animate-[voice-bar-1_1.5s_ease-in-out_infinite]"></div>
                       <div className="w-0.5 bg-primary rounded-full animate-[voice-bar-2_1.3s_ease-in-out_infinite]"></div>

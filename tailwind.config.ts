@@ -95,20 +95,20 @@ export default {
 					}
 				},
 				'voice-bar-1': {
+					'0%, 100%': { height: '0.375rem' },
+					'50%': { height: '0.5rem' }
+				},
+				'voice-bar-2': {
 					'0%, 100%': { height: '0.5rem' },
 					'50%': { height: '0.75rem' }
 				},
-				'voice-bar-2': {
-					'0%, 100%': { height: '0.75rem' },
+				'voice-bar-3': {
+					'0%, 100%': { height: '0.5rem' },
 					'50%': { height: '1rem' }
 				},
-				'voice-bar-3': {
-					'0%, 100%': { height: '0.625rem' },
-					'50%': { height: '1.25rem' }
-				},
 				'voice-bar-4': {
-					'0%, 100%': { height: '0.5rem' },
-					'50%': { height: '0.875rem' }
+					'0%, 100%': { height: '0.375rem' },
+					'50%': { height: '0.625rem' }
 				}
 			},
 			animation: {
