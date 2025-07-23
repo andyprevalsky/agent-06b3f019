@@ -90,19 +90,19 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
         
         {/* One continuous path */}
         <path 
-          d="M 16.67 47
-             A 3 3 0 1 1 16.67 53
-             A 3 3 0 1 1 16.67 47
-             M 20 50
-             L 47 50
-             M 50 47
-             A 3 3 0 1 1 50 53
-             A 3 3 0 1 1 50 47
-             M 53 50
-             L 80 50
-             M 83.33 47
-             A 3 3 0 1 1 83.33 53
-             A 3 3 0 1 1 83.33 47"
+          d="M 16.67 38
+             A 8 8 0 1 1 16.67 54
+             A 8 8 0 1 1 16.67 38
+             M 25 46
+             L 42 46
+             M 50 38
+             A 8 8 0 1 1 50 54
+             A 8 8 0 1 1 50 38
+             M 58 46
+             L 75 46
+             M 83.33 38
+             A 8 8 0 1 1 83.33 54
+             A 8 8 0 1 1 83.33 38"
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
           fill="none"
