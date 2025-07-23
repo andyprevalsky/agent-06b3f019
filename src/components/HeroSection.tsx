@@ -133,15 +133,15 @@ const HeroSection = () => {
             </div>
           
           <div className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1">
-            <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-2xl p-4 shadow-lg max-w-xl">
+            <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg max-w-xl">
               <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 mt-1">
                   <div className="w-6 h-6 bg-white rounded-full flex items-center justify-center relative">
-                    <div className="flex items-center gap-0.5">
-                      <div className="w-0.5 h-2 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0s', animationDuration: '1.5s' }}></div>
-                      <div className="w-0.5 h-3 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.2s', animationDuration: '1.3s' }}></div>
-                      <div className="w-0.5 h-2.5 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.4s', animationDuration: '1.7s' }}></div>
-                      <div className="w-0.5 h-2 bg-primary rounded-full animate-pulse" style={{ animationDelay: '0.6s', animationDuration: '1.4s' }}></div>
+                    <div className="flex items-end gap-0.5">
+                      <div className="w-0.5 bg-primary rounded-full animate-[voice-bar-1_1.5s_ease-in-out_infinite]"></div>
+                      <div className="w-0.5 bg-primary rounded-full animate-[voice-bar-2_1.3s_ease-in-out_infinite]"></div>
+                      <div className="w-0.5 bg-primary rounded-full animate-[voice-bar-3_1.7s_ease-in-out_infinite]"></div>
+                      <div className="w-0.5 bg-primary rounded-full animate-[voice-bar-4_1.4s_ease-in-out_infinite]"></div>
                     </div>
                   </div>
                 </div>
