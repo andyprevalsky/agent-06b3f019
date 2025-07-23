@@ -5,12 +5,13 @@ import { useState, useEffect } from "react";
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
   const baseText = "Hi I'm Navi your ai ";
-  const words = ["daemon", "companion", "assistant"];
+  const words = ["companion", "daemon", "assistant"];
   
   useEffect(() => {
     let currentWordIndex = 0;
     let currentCharIndex = 0;
     let isDeleting = false;
+    let isFirstType = true;
     let timeoutId: NodeJS.Timeout;
     
     const typeText = () => {
@@ -18,9 +19,23 @@ const HeroSection = () => {
       
       if (!isDeleting) {
         // Typing
-        if (currentCharIndex === 0) {
-          setTypedText(baseText);
+        if (currentCharIndex === 0 && isFirstType) {
+          // Type the base text first
+          let baseIndex = 0;
+          const typeBase = () => {
+            if (baseIndex <= baseText.length) {
+              setTypedText(baseText.slice(0, baseIndex));
+              baseIndex++;
+              setTimeout(typeBase, 150);
+            } else {
+              isFirstType = false;
+              typeText();
+            }
+          };
+          typeBase();
+          return;
         }
+        
         if (currentCharIndex < currentWord.length) {
           setTypedText(baseText + currentWord.slice(0, currentCharIndex + 1));
           currentCharIndex++;
