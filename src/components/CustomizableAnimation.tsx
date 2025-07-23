@@ -29,9 +29,9 @@ interface ColumnProps {
 const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
   return (
     <div className="relative h-full w-1/3 flex flex-col items-center justify-center overflow-hidden">
-      {/* Gradient fade overlays */}
-      <div className="absolute top-0 left-0 right-0 h-20 bg-gradient-to-b from-surface to-transparent z-10 pointer-events-none" />
-      <div className="absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-surface to-transparent z-10 pointer-events-none" />
+      {/* Gradient fade overlays - shorter to let faded elements peek out */}
+      <div className="absolute top-0 left-0 right-0 h-16 bg-gradient-to-b from-surface to-transparent z-10 pointer-events-none" />
+      <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-surface to-transparent z-10 pointer-events-none" />
       
       {/* Emblems container with smooth transform */}
       <div 
@@ -45,7 +45,7 @@ const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
           const emblemIndex = i % emblems.length;
           const emblem = emblems[emblemIndex];
           const position = i - emblems.length - centerIndex; // Position relative to center
-          const opacity = Math.abs(position) >= 2 ? 0.3 : Math.abs(position) === 1 ? 0.8 : 1;
+          const opacity = Math.abs(position) >= 2 ? 0 : Math.abs(position) === 1 ? 0.6 : 1;
           
           return (
             <div
