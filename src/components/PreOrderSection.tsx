@@ -141,9 +141,27 @@ const PreOrderSection = () => {
           
           <div className="text-center mt-8 mb-8 reveal-up reveal-delay-2">
             <p className="text-sm text-muted-foreground mb-3">Available in 2 colors</p>
-            <div className="flex justify-center space-x-3">
-              <div className="w-3 h-3 bg-gray-900 rounded-full" title="Midnight Black"></div>
-              <div className="w-3 h-3 bg-gray-100 border border-gray-300 rounded-full" title="Pearl White"></div>
+            <div className="flex justify-center space-x-6">
+              <div className="group relative flex flex-col items-center">
+                <div 
+                  className="w-3 h-3 rounded-full transition-transform duration-200 hover:scale-140 cursor-pointer" 
+                  style={{ backgroundColor: '#010203' }}
+                  title="Midnight Black"
+                ></div>
+                <span className="absolute top-6 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
+                  Midnight Black
+                </span>
+              </div>
+              <div className="group relative flex flex-col items-center">
+                <div 
+                  className="w-3 h-3 rounded-full border border-gray-300 transition-transform duration-200 hover:scale-140 cursor-pointer" 
+                  style={{ backgroundColor: '#F0F0FF' }}
+                  title="Pearl White"
+                ></div>
+                <span className="absolute top-6 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
+                  Pearl White
+                </span>
+              </div>
             </div>
           </div>
         </div>
