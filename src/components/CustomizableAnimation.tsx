@@ -74,9 +74,10 @@ interface CircleConnectionProps {
   slideReveal: boolean;
   overlayPosition: number;
   overlayOpacity: number;
+  hasTriggered: boolean;
 }
 
-const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity }: CircleConnectionProps) => {
+const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, hasTriggered }: CircleConnectionProps) => {
   return (
     <div className="absolute inset-0 z-0 pointer-events-none">
       <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
@@ -140,7 +141,7 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity }
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
           fill="none"
-          style={{}}
+          style={{ opacity: hasTriggered ? 1 : 0 }}
         />
         
                 {/* Solid white rectangle overlay */}
@@ -175,6 +176,12 @@ export const CustomizableAnimation = () => {
   const [overlayPosition, setOverlayPosition] = useState(0); // 0 = translateX(0%), 120 = translateX(120%)
   const [isAnimating, setIsAnimating] = useState(false);
   const [hasTriggered, setHasTriggered] = useState(false);
+
+  // Ensure overlay covers on initial render
+  useEffect(() => {
+    setOverlayOpacity(1);
+    setOverlayPosition(0);
+  }, []);
 
   // Intersection Observer
   useEffect(() => {
@@ -236,8 +243,12 @@ export const CustomizableAnimation = () => {
       }, 4800);
     };
 
-    // Start first cycle
-    const initialTimer = setTimeout(animationCycle, 1000);
+    // Ensure overlay is ready for first rotation
+    setOverlayOpacity(1);
+    setOverlayPosition(0);
+    
+    // Start first cycle immediately 
+    const initialTimer = setTimeout(animationCycle, 0);
 
     // Continue cycling
     const interval = setInterval(animationCycle, 5000);
@@ -258,6 +269,7 @@ export const CustomizableAnimation = () => {
         slideReveal={slideReveal}
         overlayPosition={overlayPosition}
         overlayOpacity={overlayOpacity}
+        hasTriggered={hasTriggered}
       />
       <div className="w-full h-full flex relative z-10">
         <Column 
