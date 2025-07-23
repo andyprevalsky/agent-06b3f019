@@ -92,19 +92,19 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
         
         {/* One continuous path: circle + line + circle + line + circle */}
         <path 
-          d="M 16.67% calc(50% - 45px)
-             A 45 45 0 1 1 16.67% calc(50% + 45px)
-             A 45 45 0 1 1 16.67% calc(50% - 45px)
-             M calc(16.67% + 45px) 50%
-             L calc(50% - 45px) 50%
-             M 50% calc(50% - 45px)
-             A 45 45 0 1 1 50% calc(50% + 45px)
-             A 45 45 0 1 1 50% calc(50% - 45px)
-             M calc(50% + 45px) 50%
-             L calc(83.33% - 45px) 50%
-             M 83.33% calc(50% - 45px)
-             A 45 45 0 1 1 83.33% calc(50% + 45px)
-             A 45 45 0 1 1 83.33% calc(50% - 45px)"
+          d="M 16.67% 45%
+             A 45 45 0 1 1 16.67% 55%
+             A 45 45 0 1 1 16.67% 45%
+             M 22% 50%
+             L 44% 50%
+             M 50% 45%
+             A 45 45 0 1 1 50% 55%
+             A 45 45 0 1 1 50% 45%
+             M 56% 50%
+             L 77% 50%
+             M 83.33% 45%
+             A 45 45 0 1 1 83.33% 55%
+             A 45 45 0 1 1 83.33% 45%"
           stroke="url(#naviGradient)" 
           strokeWidth="4" 
           fill="none"
