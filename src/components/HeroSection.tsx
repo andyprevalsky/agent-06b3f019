@@ -107,23 +107,21 @@ const HeroSection = () => {
       <div className="container mx-auto px-6 relative z-10">
         <div className="max-w-4xl mx-auto text-center">
           <div className="mb-8 reveal-up">
-            <video 
-              ref={videoRef}
-              autoPlay 
-              loop 
-              muted 
-              playsInline
-              preload="metadata"
-              className="w-64 h-64 md:w-80 md:h-80 mx-auto object-cover rounded-full"
-              poster="/navi-midnight-black-hero-background.png"
-              style={{ 
-                maxWidth: '100%', 
-                height: 'auto'
-              }}
-            >
-              <source src="/navi-black-v4-hero-background.webm" type="video/webm" />
-              <img src="/navi-midnight-black-hero-background.png" alt="Navi" className="w-full h-full object-cover" />
-            </video>
+            <div className="w-96 h-96 md:w-120 md:h-120 mx-auto rounded-full overflow-hidden bg-surface">
+              <video 
+                ref={videoRef}
+                autoPlay 
+                loop 
+                muted 
+                playsInline
+                preload="metadata"
+                className="w-full h-full object-cover"
+                poster="/navi-midnight-black-hero-background.png"
+              >
+                <source src="/navi-black-v4-hero-background.webm" type="video/webm" />
+                <img src="/navi-midnight-black-hero-background.png" alt="Navi" className="w-full h-full object-cover" />
+              </video>
+            </div>
           </div>
           
           <p className="text-2xl md:text-3xl text-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1 min-h-[6rem] text-center">

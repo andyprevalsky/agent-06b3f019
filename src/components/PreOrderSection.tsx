@@ -173,8 +173,8 @@ const PreOrderSection = () => {
           {/* Midnight Black */}
           <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
             <CardContent className="p-8 text-center">
-              <div className="mb-6">
-                <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden">
+               <div className="mb-6">
+                <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
                   <video 
                     ref={blackVideoRef}
                     autoPlay
@@ -184,10 +184,6 @@ const PreOrderSection = () => {
                     playsInline
                     preload="metadata"
                     poster="/navi-midnight-black-white-background.png"
-                    style={{ 
-                      maxWidth: '100%', 
-                      height: 'auto'
-                    }}
                   >
                     <source src="/navi-black-v4-white-background.webm" type="video/webm" />
                     <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
@@ -253,8 +249,8 @@ const PreOrderSection = () => {
           {/* Pearl White */}
           <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
             <CardContent className="p-8 text-center">
-              <div className="mb-6">
-                <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden">
+               <div className="mb-6">
+                <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
                   <video 
                     ref={whiteVideoRef}
                     autoPlay
@@ -264,10 +260,6 @@ const PreOrderSection = () => {
                     playsInline
                     preload="metadata"
                     poster="/navi-pearl-white-white-background.png"
-                    style={{ 
-                      maxWidth: '100%', 
-                      height: 'auto'
-                    }}
                   >
                     <source src="/navi-white-v4-white-background.webm" type="video/webm" />
                     <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
