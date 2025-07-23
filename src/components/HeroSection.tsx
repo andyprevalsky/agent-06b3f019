@@ -1,7 +1,25 @@
 import { Button } from "@/components/ui/button";
 import FloatingParticles from "./FloatingParticles";
+import { useState, useEffect } from "react";
 
 const HeroSection = () => {
+  const [typedText, setTypedText] = useState("");
+  const fullText = "Hi I'm Navi your ai daemon";
+  
+  useEffect(() => {
+    let currentIndex = 0;
+    const interval = setInterval(() => {
+      if (currentIndex <= fullText.length) {
+        setTypedText(fullText.slice(0, currentIndex));
+        currentIndex++;
+      } else {
+        clearInterval(interval);
+      }
+    }, 100);
+    
+    return () => clearInterval(interval);
+  }, []);
+
   return (
     <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-gradient-to-br from-background via-surface to-secondary/30">
       <FloatingParticles />
@@ -9,15 +27,11 @@ const HeroSection = () => {
       <div className="container mx-auto px-6 relative z-10">
         <div className="max-w-4xl mx-auto text-center">
           <h1 className="text-6xl md:text-8xl font-light tracking-tight mb-8 reveal-up">
-            <span className="text-foreground">Let me introduce myself,</span>
-            <br />
-            <span className="gradient-text">I'm Navi</span>
-            <br />
-            <span className="text-foreground">your AI assistant, companion, & Dameon.</span>
+            <span className="gradient-text">Navi</span>
           </h1>
           
-          <p className="text-xl md:text-2xl text-muted-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1">
-            Your hardware voice interface to the AI world.
+          <p className="text-2xl md:text-3xl text-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1 min-h-[4rem] flex items-center justify-center">
+            {typedText}<span className="animate-pulse">|</span>
           </p>
           
           <div className="flex flex-col sm:flex-row gap-4 justify-center reveal-up reveal-delay-2">
