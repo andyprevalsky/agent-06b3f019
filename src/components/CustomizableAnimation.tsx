@@ -71,9 +71,10 @@ const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
 
 interface CircleConnectionProps {
   show: boolean;
+  slideReveal: boolean;
 }
 
-const CircleConnection = ({ show }: CircleConnectionProps) => {
+const CircleConnection = ({ show, slideReveal }: CircleConnectionProps) => {
   return (
     <div className="absolute inset-0 z-50">
       <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -86,9 +87,14 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
             <stop offset="66.67%" stopColor="#A76CED" />
             <stop offset="100%" stopColor="#7A6BEC" />
           </linearGradient>
+          <linearGradient id="fadeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="hsl(var(--surface))" stopOpacity="0" />
+            <stop offset="15%" stopColor="hsl(var(--surface))" stopOpacity="1" />
+            <stop offset="100%" stopColor="hsl(var(--surface))" stopOpacity="1" />
+          </linearGradient>
         </defs>
         
-        {/* One continuous path with rounded rectangles */}
+        {/* Gradient path */}
         <path 
           d="M 8.67 42
              L 24.67 42
@@ -127,6 +133,54 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
           fill="none"
+          opacity={show ? 1 : 0}
+          className="transition-opacity duration-500"
+        />
+        
+        {/* White overlay that slides to reveal gradient */}
+        <path 
+          d="M -5 42
+             L 24.67 42
+             Q 26.67 42 26.67 44
+             L 26.67 52
+             Q 26.67 54 24.67 54
+             L -5 54
+             Q -7 54 -7 52
+             L -7 44
+             Q -7 42 -5 42
+             Z
+             M 26.67 48
+             L 40 48
+             M 42 42
+             L 58 42
+             Q 60 42 60 44
+             L 60 52
+             Q 60 54 58 54
+             L 42 54
+             Q 40 54 40 52
+             L 40 44
+             Q 40 42 42 42
+             Z
+             M 60 48
+             L 73.33 48
+             M 75.33 42
+             L 91.33 42
+             Q 93.33 42 93.33 44
+             L 93.33 52
+             Q 93.33 54 91.33 54
+             L 75.33 54
+             Q 73.33 54 73.33 52
+             L 73.33 44
+             Q 73.33 42 75.33 42
+             Z"
+          stroke="url(#fadeGradient)" 
+          strokeWidth="0.5" 
+          fill="none"
+          opacity={show ? 1 : 0}
+          className="transition-all duration-1000 ease-in-out"
+          style={{
+            transform: slideReveal ? 'translateX(120%)' : 'translateX(0%)'
+          }}
         />
       </svg>
     </div>
@@ -137,6 +191,7 @@ export const CustomizableAnimation = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [centerIndices, setCenterIndices] = useState([0, 0, 0]); // Track which emblem is in center for each column
   const [showConnections, setShowConnections] = useState(false);
+  const [slideReveal, setSlideReveal] = useState(false);
   const [isAnimating, setIsAnimating] = useState(false);
   const [hasTriggered, setHasTriggered] = useState(false);
 
@@ -182,11 +237,19 @@ export const CustomizableAnimation = () => {
       // Show connections after rotation
       setTimeout(() => {
         setShowConnections(true);
+        // Reset slide position before starting reveal
+        setSlideReveal(false);
       }, 1000);
+
+      // Start slide reveal animation
+      setTimeout(() => {
+        setSlideReveal(true);
+      }, 1500);
 
       // Hide connections and prepare for next cycle
       setTimeout(() => {
         setShowConnections(false);
+        setSlideReveal(false);
       }, 3000);
     };
 
@@ -225,7 +288,7 @@ export const CustomizableAnimation = () => {
         />
       </div>
       
-      <CircleConnection show={showConnections} />
+      <CircleConnection show={showConnections} slideReveal={slideReveal} />
     </div>
   );
 };
