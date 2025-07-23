@@ -76,8 +76,8 @@ interface CircleConnectionProps {
 
 const CircleConnection = ({ show, slideReveal }: CircleConnectionProps) => {
   return (
-    <div className="absolute inset-0 z-50">
-      <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
+    <div className="absolute inset-0 z-10 pointer-events-none">
+      <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
         <defs>
           <linearGradient id="naviGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="#FE7503" />
