@@ -157,19 +157,33 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
           " className="animate-scale-in" />
         </g>
 
-        {/* Encircling object that moves left to right */}
-        <g stroke="url(#animatedGradient)" strokeWidth="4" fill="none" opacity="0">
-          <animate attributeName="opacity" values="0;1;1;0" dur="2s" begin="2s" fill="freeze" />
+        {/* Sequential encircling animation */}
+        <g stroke="url(#animatedGradient)" strokeWidth="4" fill="none">
+          {/* Left circle */}
+          <circle r="35" cx="16.67%" cy="50%" opacity="0">
+            <animate attributeName="opacity" values="0;1" dur="0.3s" begin="2s" fill="freeze" />
+          </circle>
           
-          {/* Circle that moves from left to right across all three columns */}
-          <circle r="35" stroke="url(#animatedGradient)" strokeWidth="4" fill="none">
-            <animateTransform 
-              attributeName="transform" 
-              type="translate"
-              values="calc(16.67vw) calc(50vh); calc(50vw) calc(50vh); calc(83.33vw) calc(50vh)"
-              dur="1.5s" 
-              begin="2s" 
-              fill="freeze" />
+          {/* Left to middle line */}
+          <line x1="calc(16.67% + 35px)" y1="50%" x2="calc(16.67% + 35px)" y2="50%" opacity="0">
+            <animate attributeName="x2" values="calc(16.67% + 35px);calc(50% - 35px)" dur="0.4s" begin="2.3s" fill="freeze" />
+            <animate attributeName="opacity" values="0;1" dur="0.1s" begin="2.3s" fill="freeze" />
+          </line>
+          
+          {/* Middle circle */}
+          <circle r="35" cx="50%" cy="50%" opacity="0">
+            <animate attributeName="opacity" values="0;1" dur="0.3s" begin="2.7s" fill="freeze" />
+          </circle>
+          
+          {/* Middle to right line */}
+          <line x1="calc(50% + 35px)" y1="50%" x2="calc(50% + 35px)" y2="50%" opacity="0">
+            <animate attributeName="x2" values="calc(50% + 35px);calc(83.33% - 35px)" dur="0.4s" begin="3s" fill="freeze" />
+            <animate attributeName="opacity" values="0;1" dur="0.1s" begin="3s" fill="freeze" />
+          </line>
+          
+          {/* Right circle */}
+          <circle r="35" cx="83.33%" cy="50%" opacity="0">
+            <animate attributeName="opacity" values="0;1" dur="0.3s" begin="3.4s" fill="freeze" />
           </circle>
         </g>
       </svg>
