@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Download Favicon</title>
+</head>
+<body>
+  <div id="favicon" style="
+    width: 64px;
+    height: 64px;
+    border-radius: 24px;
+    background: linear-gradient(to bottom left,
+      #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC);
+  "></div>
+
+  <button id="downloadBtn">Download PNG</button>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script>
+    document.getElementById("downloadBtn").addEventListener("click", () => {
+      const element = document.getElementById("favicon");
+      html2canvas(element, { backgroundColor: null }).then(canvas => {
+        const link = document.createElement('a');
+        link.download = 'favicon.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+      });
+    });
+  </script>
+</body>
+</html>
