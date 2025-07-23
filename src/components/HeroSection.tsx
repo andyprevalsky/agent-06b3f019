@@ -133,14 +133,14 @@ const HeroSection = () => {
             </div>
           
           <div className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1">
-            <div className="bg-[#010204] border border-[#2a2e35] rounded-2xl p-6 shadow-lg">
-              <div className="flex items-center gap-4">
-                <div className="flex-shrink-0">
-                  <div className="w-8 h-8 bg-muted/20 rounded-full flex items-center justify-center">
-                    <MessageCircle className="w-4 h-4 text-muted-foreground animate-pulse" />
+            <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-2xl p-4 shadow-lg">
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 mt-1">
+                  <div className="w-6 h-6 bg-muted/20 rounded-full flex items-center justify-center">
+                    <MessageCircle className="w-3 h-3 text-muted-foreground animate-pulse" />
                   </div>
                 </div>
-                <div className="flex-1 min-h-[4rem] flex items-center">
+                <div className="flex-1 min-h-[2rem]">
                   <p className="text-xl md:text-2xl text-white leading-relaxed">
                     <span className="inline">
                       {typedText}<span className="animate-pulse">|</span>
