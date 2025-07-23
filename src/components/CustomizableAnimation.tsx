@@ -115,7 +115,7 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
              Q 14.5 41.4 16.5 41.4
              Z
              M 29.5 48
-             L 44.5 48
+             L 42.5 48
              M 44.5 41.4
              L 55.5 41.4
              Q 57.5 41.4 57.5 43.4
@@ -127,7 +127,7 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
              Q 42.5 41.4 44.5 41.4
              Z
              M 57.5 48
-             L 72.5 48
+             L 70.5 48
              M 72.5 41.4
              L 83.5 41.4
              Q 85.5 41.4 85.5 43.4
