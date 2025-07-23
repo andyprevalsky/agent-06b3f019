@@ -133,8 +133,6 @@ const CircleConnection = ({ show, slideReveal }: CircleConnectionProps) => {
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
           fill="none"
-          opacity={show ? 1 : 0}
-          className="transition-opacity duration-500"
         />
         
         {/* White overlay that slides to reveal gradient */}
