@@ -104,25 +104,19 @@ const PreOrderSection = () => {
             <CardContent className="p-8 text-center">
               <div className="mb-6">
                 <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden">
-                  {isSafari ? (
-                    <img 
-                      src="/navi-black.png" 
-                      alt="Navi Black" 
-                      className="w-full h-full object-cover" 
-                    />
-                  ) : (
-                    <video 
-                      ref={blackVideoRef}
-                      className="w-full h-full object-cover"
-                      loop
-                      muted
-                      playsInline
-                      preload="metadata"
-                    >
-                      <source src="/navi-black-demo.webm" type="video/webm" />
-                      <img src="/navi-black.png" alt="Navi Black" className="w-full h-full object-cover" />
-                    </video>
-                  )}
+                  <video 
+                    ref={blackVideoRef}
+                    autoPlay
+                    className="w-full h-full object-cover"
+                    loop
+                    muted
+                    playsInline
+                    preload="metadata"
+                    poster="/navi-midnight-black-w-background.png"
+                  >
+                    <source src="/navi-black-v4-white-background.webm" type="video/webm" />
+                    <img src="/navi-midnight-black-w-background.png" alt="Navi Black" className="w-full h-full object-cover" />
+                  </video>
                 </div>
                 <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
                 <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
@@ -178,25 +172,19 @@ const PreOrderSection = () => {
             <CardContent className="p-8 text-center">
               <div className="mb-6">
                 <div className="w-48 h-48 rounded-3xl mx-auto mb-4 overflow-hidden">
-                  {isSafari ? (
-                    <img 
-                      src="/navi-white.png" 
-                      alt="Navi White" 
-                      className="w-full h-full object-cover" 
-                    />
-                  ) : (
-                    <video 
-                      ref={whiteVideoRef}
-                      className="w-full h-full object-cover"
-                      loop
-                      muted
-                      playsInline
-                      preload="metadata"
-                    >
-                      <source src="/navi-white-demo.webm" type="video/webm" />
-                      <img src="/navi-white.png" alt="Navi White" className="w-full h-full object-cover" />
-                    </video>
-                  )}
+                  <video 
+                    ref={whiteVideoRef}
+                    autoPlay
+                    className="w-full h-full object-cover"
+                    loop
+                    muted
+                    playsInline
+                    preload="metadata"
+                    poster="/navi-pearl-white-w-background.png"
+                  >
+                    <source src="/navi-white-v4-white-background.webm" type="video/webm" />
+                    <img src="/navi-pearl-white-w-background.png" alt="Navi White" className="w-full h-full object-cover" />
+                  </video>
                 </div>
                 <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
                 <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
