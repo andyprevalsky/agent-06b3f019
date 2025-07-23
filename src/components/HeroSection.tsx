@@ -108,8 +108,8 @@ const HeroSection = () => {
       
       <div className="container mx-auto px-6 relative z-10">
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center">
-            <div className="mb-8 md:mt-3 reveal-up">
-              <div className="w-96 h-96 md:w-120 md:h-120 mx-auto rounded-full overflow-hidden bg-surface">
+            <div className="mb-8 md:mt-3 reveal-up flex justify-center">
+              <div className="w-96 h-96 md:w-120 md:h-120 rounded-full overflow-hidden bg-surface">
                 <video 
                   ref={videoRef}
                   autoPlay 
@@ -118,6 +118,7 @@ const HeroSection = () => {
                   playsInline
                   preload="metadata"
                   className="w-full h-full object-cover"
+                  style={{ objectPosition: 'center center' }}
                   poster="/navi-midnight-black-hero-background-low.png"
                 >
                   <source src="/navi-black-v4-hero-background.webm" type="video/webm" />
@@ -127,6 +128,7 @@ const HeroSection = () => {
                     highSrc="/navi-midnight-black-hero-background.png"
                     alt="Navi"
                     className="w-full h-full object-cover"
+                    style={{ objectPosition: 'center center' }}
                   />
                 </video>
               </div>
@@ -145,7 +147,7 @@ const HeroSection = () => {
                     </div>
                   </div>
                 </div>
-                <div className="flex-1 min-h-[2rem]">
+                <div className="flex-1 min-h-[2rem] flex items-center">
                   <p className="text-base md:text-xl text-white leading-relaxed text-left drop-shadow-sm">
                     <span className="inline">
                       {typedText}<span className="animate-pulse">|</span>
