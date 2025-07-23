@@ -22,41 +22,50 @@ const placeholderEmblems: EmblemData[] = Array(5).fill(null).map((_, i) => ({
 
 interface ColumnProps {
   emblems: EmblemData[];
-  rotation: number;
+  centerIndex: number; // Which emblem should be in the center
   columnIndex: number;
 }
 
-const Column = ({ emblems, rotation, columnIndex }: ColumnProps) => {
+const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
+  // Get 5 emblems around the center index (circular)
+  const getVisibleEmblems = () => {
+    const visible = [];
+    for (let i = -2; i <= 2; i++) {
+      const index = (centerIndex + i + emblems.length) % emblems.length;
+      visible.push({
+        ...emblems[index],
+        position: i // -2 = top, -1 = top-mid, 0 = center, 1 = bottom-mid, 2 = bottom
+      });
+    }
+    return visible;
+  };
+
+  const visibleEmblems = getVisibleEmblems();
+
   return (
     <div className="relative h-full w-1/3 flex flex-col items-center justify-center overflow-hidden">
       {/* Gradient fade overlays */}
       <div className="absolute top-0 left-0 right-0 h-20 bg-gradient-to-b from-surface to-transparent z-10 pointer-events-none" />
       <div className="absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-surface to-transparent z-10 pointer-events-none" />
       
-      {/* Emblems container */}
-      <div 
-        className="flex flex-col items-center transition-transform duration-1000 ease-in-out"
-        style={{ 
-          transform: `translateY(${rotation * -80}px)` // Fixed spacing for larger emblems
-        }}
-      >
-        {[...emblems, ...emblems, ...emblems].map((emblem, index) => {
-          const position = index % 5; // Position within the 5-emblem cycle
-          const opacity = position === 0 || position === 4 ? 0.5 : 1; // Top and bottom faded
+      {/* Emblems container - always centered */}
+      <div className="flex flex-col items-center transition-all duration-1000 ease-in-out">
+        {visibleEmblems.map((emblem, index) => {
+          const opacity = Math.abs(emblem.position) === 2 ? 0.5 : 1; // Top and bottom faded
           
           return (
             <div
-              key={`${emblem.id}-${index}`}
+              key={`${emblem.id}-${centerIndex}-${index}`}
               className="w-20 h-20 flex items-center justify-center transition-opacity duration-500"
               style={{ 
                 opacity,
-                marginBottom: '20px' // Fixed spacing between emblems
+                marginBottom: index < visibleEmblems.length - 1 ? '20px' : '0'
               }}
             >
               <img 
                 src={emblem.src} 
                 alt={emblem.alt}
-                className="w-20 h-20 object-contain" // Doubled size
+                className="w-20 h-20 object-contain"
               />
             </div>
           );
@@ -158,7 +167,7 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
 
 export const CustomizableAnimation = () => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [rotations, setRotations] = useState([0, 0, 0]);
+  const [centerIndices, setCenterIndices] = useState([0, 0, 0]); // Track which emblem is in center for each column
   const [showConnections, setShowConnections] = useState(false);
   const [isAnimating, setIsAnimating] = useState(false);
   const [hasTriggered, setHasTriggered] = useState(false);
@@ -174,7 +183,7 @@ export const CustomizableAnimation = () => {
           }, 500);
         } else if (!entry.isIntersecting) {
           // Reset when out of view
-          setRotations([0, 0, 0]);
+          setCenterIndices([0, 0, 0]);
           setShowConnections(false);
           setIsAnimating(false);
           setHasTriggered(false);
@@ -196,10 +205,10 @@ export const CustomizableAnimation = () => {
 
     const animationCycle = () => {
       // Rotate: column 1 down 1, column 2 up 2, column 3 down 2
-      setRotations(prev => [
-        prev[0] + 1, // Column 1: move down 1 emblem
-        prev[1] - 2, // Column 2: move up 2 emblems  
-        prev[2] + 2  // Column 3: move down 2 emblems
+      setCenterIndices(prev => [
+        (prev[0] + 1) % llmProviders.length, // Column 1: move down 1 emblem
+        (prev[1] - 2 + placeholderEmblems.length) % placeholderEmblems.length, // Column 2: move up 2 emblems  
+        (prev[2] + 2) % placeholderEmblems.length  // Column 3: move down 2 emblems
       ]);
 
       // Show connections after rotation
@@ -233,17 +242,17 @@ export const CustomizableAnimation = () => {
       <div className="w-full h-full flex">
         <Column 
           emblems={llmProviders} 
-          rotation={rotations[0]} 
+          centerIndex={centerIndices[0]} 
           columnIndex={0}
         />
         <Column 
           emblems={placeholderEmblems} 
-          rotation={rotations[1]} 
+          centerIndex={centerIndices[1]} 
           columnIndex={1}
         />
         <Column 
           emblems={placeholderEmblems} 
-          rotation={rotations[2]} 
+          centerIndex={centerIndices[2]} 
           columnIndex={2}
         />
       </div>
