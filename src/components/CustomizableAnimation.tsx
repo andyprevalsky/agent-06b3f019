@@ -104,39 +104,39 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
         
         {/* Gradient path */}
         <path 
-          d="M 15 42
-             L 25 42
-             Q 27 42 27 44
-             L 27 52
-             Q 27 54 25 54
-             L 15 54
-             Q 13 54 13 52
-             L 13 44
-             Q 13 42 15 42
+          d="M 20 46
+             L 28 46
+             Q 30 46 30 48
+             L 30 52
+             Q 30 54 28 54
+             L 20 54
+             Q 18 54 18 52
+             L 18 48
+             Q 18 46 20 46
              Z
-             M 27 48
-             L 38 48
-             M 40 42
-             L 50 42
-             Q 52 42 52 44
-             L 52 52
-             Q 52 54 50 54
-             L 40 54
-             Q 38 54 38 52
-             L 38 44
-             Q 38 42 40 42
+             M 30 50
+             L 42 50
+             M 44 46
+             L 52 46
+             Q 54 46 54 48
+             L 54 52
+             Q 54 54 52 54
+             L 44 54
+             Q 42 54 42 52
+             L 42 48
+             Q 42 46 44 46
              Z
-             M 52 48
-             L 63 48
-             M 65 42
-             L 75 42
-             Q 77 42 77 44
-             L 77 52
-             Q 77 54 75 54
-             L 65 54
-             Q 63 54 63 52
-             L 63 44
-             Q 63 42 65 42
+             M 54 50
+             L 66 50
+             M 68 46
+             L 76 46
+             Q 78 46 78 48
+             L 78 52
+             Q 78 54 76 54
+             L 68 54
+             Q 66 54 66 52
+             L 66 48
+             Q 66 46 68 46
              Z"
           stroke="url(#naviGradient)" 
           strokeWidth="0.5" 
@@ -147,9 +147,9 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
         {/* Solid white rectangle overlay */}
         <rect
           x="-20"
-          y="40"
-          width="110"
-          height="16"
+          y="44"
+          width="116"
+          height="12"
           rx="2"
           fill="url(#whiteLeftFade)"
           style={{
