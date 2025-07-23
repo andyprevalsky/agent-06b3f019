@@ -74,7 +74,7 @@ interface CircleConnectionProps {
 }
 
 const CircleConnection = ({ show }: CircleConnectionProps) => {
-  if (!show) return null;
+  // Always render for testing
 
   return (
     <div className="absolute inset-0 pointer-events-none z-50" style={{ zIndex: 9999 }}>
