@@ -247,7 +247,7 @@ const PreOrderSection = () => {
           </Card>
           
           {/* Pearl White */}
-          <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
+          <Card className="group bg-gradient-to-br from-[#272725] to-[#1f1f1d] border-border/30 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
             <CardContent className="p-8 text-center">
                <div className="mb-6">
                 <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
