@@ -101,7 +101,7 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
              Q 8 42 10 42
              Z
              M 25.34 48
-             L 42 48
+             L 40 48
              M 42 42
              L 58 42
              Q 60 42 60 44
@@ -113,7 +113,7 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
              Q 40 42 42 42
              Z
              M 60 48
-             L 75 48
+             L 73 48
              M 75 42
              L 91.66 42
              Q 93.66 42 93.66 44
