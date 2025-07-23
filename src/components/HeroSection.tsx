@@ -87,8 +87,10 @@ const HeroSection = () => {
             </video>
           </div>
           
-          <p className="text-2xl md:text-3xl text-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1 min-h-[6rem] flex items-center justify-center text-center">
-            {typedText}<span className="animate-pulse">|</span>
+          <p className="text-2xl md:text-3xl text-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1 min-h-[6rem] text-center">
+            <span className="inline">
+              {typedText}<span className="animate-pulse">|</span>
+            </span>
           </p>
           
           <div className="flex flex-col sm:flex-row gap-4 justify-center reveal-up reveal-delay-2">
