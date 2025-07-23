@@ -112,10 +112,10 @@ const PreOrderSection = () => {
                     muted
                     playsInline
                     preload="metadata"
-                    poster="/navi-midnight-black-w-background.png"
+                    poster="/navi-midnight-black-white-background.png"
                   >
                     <source src="/navi-black-v4-white-background.webm" type="video/webm" />
-                    <img src="/navi-midnight-black-w-background.png" alt="Navi Black" className="w-full h-full object-cover" />
+                    <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
                   </video>
                 </div>
                 <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
@@ -180,10 +180,10 @@ const PreOrderSection = () => {
                     muted
                     playsInline
                     preload="metadata"
-                    poster="/navi-pearl-white-w-background.png"
+                    poster="/navi-pearl-white-white-background.png"
                   >
                     <source src="/navi-white-v4-white-background.webm" type="video/webm" />
-                    <img src="/navi-pearl-white-w-background.png" alt="Navi White" className="w-full h-full object-cover" />
+                    <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
                   </video>
                 </div>
                 <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>

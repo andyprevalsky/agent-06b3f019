@@ -80,10 +80,10 @@ const HeroSection = () => {
               muted 
               playsInline
               className="w-64 h-64 md:w-80 md:h-80 mx-auto object-cover rounded-full"
-              poster="/navi-midnight-black-w-background.png"
+              poster="/navi-midnight-black-hero-background.png"
             >
               <source src="/navi-black-v4-hero-background.webm" type="video/webm" />
-              <img src="/navi-midnight-black-w-background.png" alt="Navi" className="w-full h-full object-cover" />
+              <img src="/navi-midnight-black-hero-background.png" alt="Navi" className="w-full h-full object-cover" />
             </video>
           </div>
           
