@@ -6,7 +6,7 @@ import googleAiLogo from "@/assets/google-ai-logo.png";
 import metaLogo from "@/assets/meta-logo.png";
 import deepgramLogo from "@/assets/deepgram-logo.png";
 import hedraLogo from "@/assets/hedra-logo.png";
-import ycombinatorLogo from "@/assets/ycombinator-logo.png";
+import ycombinatorLogo from "@/assets/ycombinator-logo.jpg";
 
 const PoweredByTicker = () => {
   return (
