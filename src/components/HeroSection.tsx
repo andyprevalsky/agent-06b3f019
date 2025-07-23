@@ -9,9 +9,11 @@ const HeroSection = () => {
       <div className="container mx-auto px-6 relative z-10">
         <div className="max-w-4xl mx-auto text-center">
           <h1 className="text-6xl md:text-8xl font-light tracking-tight mb-8 reveal-up">
-            <span className="gradient-text">Hi! I'm Navi.</span>
+            <span className="text-foreground">Let me introduce myself,</span>
             <br />
-            <span className="text-foreground">Your Ai Daemon.</span>
+            <span className="gradient-text">I'm Navi</span>
+            <br />
+            <span className="text-foreground">your AI assistant, companion, & Dameon.</span>
           </h1>
           
           <p className="text-xl md:text-2xl text-muted-foreground max-w-2xl mx-auto mb-12 leading-relaxed reveal-up reveal-delay-1">
