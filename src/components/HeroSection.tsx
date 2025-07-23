@@ -156,16 +156,19 @@ const HeroSection = () => {
             </div>
           </div>
           
-          <div className="flex justify-center reveal-up reveal-delay-2">
-            <button 
-              className="p-3 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 hover:bg-white/20 transition-all duration-300 animate-bounce"
-              onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
-            >
-              <ChevronDown className="w-6 h-6 text-white" />
-            </button>
-          </div>
+
           
         </div>
+      </div>
+      
+      {/* Scroll down arrow - positioned right above the fold */}
+      <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-20">
+        <button 
+          className="p-3 rounded-full bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 hover:bg-gradient-to-br hover:from-[#323230] hover:to-[#252523] transition-all duration-300 shadow-lg animate-slow-bounce"
+          onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
+        >
+          <ChevronDown className="w-6 h-6 text-white" />
+        </button>
       </div>
       
       {/* Gradient overlay for depth */}
