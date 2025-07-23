@@ -76,32 +76,6 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
   return (
     <div className="absolute inset-0 pointer-events-none z-20">
       <svg width="100%" height="100%" className="absolute inset-0">
-        {/* Circles around center emblems */}
-        <circle
-          cx="16.67%" cy="50%" r="40"
-          fill="none"
-          stroke="url(#naviGradient)"
-          strokeWidth="3"
-          className="animate-scale-in"
-        />
-        <circle
-          cx="50%" cy="50%" r="40"
-          fill="none"
-          stroke="url(#naviGradient)"
-          strokeWidth="3"
-          className="animate-scale-in"
-          style={{ animationDelay: '0.2s' }}
-        />
-        <circle
-          cx="83.33%" cy="50%" r="40"
-          fill="none"
-          stroke="url(#naviGradient)"
-          strokeWidth="3"
-          className="animate-scale-in"
-          style={{ animationDelay: '0.4s' }}
-        />
-        
-        {/* Animated connecting lines that fill from left to right */}
         <defs>
           <linearGradient id="naviGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="#FE7503" />
@@ -112,61 +86,71 @@ const CircleConnection = ({ show }: CircleConnectionProps) => {
             <stop offset="100%" stopColor="#7A6BEC" />
           </linearGradient>
           
-          <linearGradient id="animatedLine1" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="url(#naviGradient)" stopOpacity="1">
-              <animate attributeName="offset" 
-                values="0%;100%" 
-                dur="0.8s" 
+          <linearGradient id="animatedGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#FE7503" stopOpacity="1">
+              <animate attributeName="stop-opacity" 
+                values="0;1" 
+                dur="1.2s" 
                 begin="0.6s" 
                 fill="freeze" />
             </stop>
-            <stop offset="0%" stopColor="url(#naviGradient)" stopOpacity="0">
-              <animate attributeName="offset" 
-                values="0%;100%" 
-                dur="0.8s" 
-                begin="0.6s" 
+            <stop offset="16.67%" stopColor="#FC585C" stopOpacity="0">
+              <animate attributeName="stop-opacity" 
+                values="0;1" 
+                dur="1.2s" 
+                begin="0.7s" 
                 fill="freeze" />
             </stop>
-          </linearGradient>
-          
-          <linearGradient id="animatedLine2" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="url(#naviGradient)" stopOpacity="1">
-              <animate attributeName="offset" 
-                values="0%;100%" 
-                dur="0.8s" 
+            <stop offset="33.33%" stopColor="#FD5776" stopOpacity="0">
+              <animate attributeName="stop-opacity" 
+                values="0;1" 
+                dur="1.2s" 
                 begin="0.8s" 
                 fill="freeze" />
             </stop>
-            <stop offset="0%" stopColor="url(#naviGradient)" stopOpacity="0">
-              <animate attributeName="offset" 
-                values="0%;100%" 
-                dur="0.8s" 
-                begin="0.8s" 
+            <stop offset="50%" stopColor="#E062CC" stopOpacity="0">
+              <animate attributeName="stop-opacity" 
+                values="0;1" 
+                dur="1.2s" 
+                begin="0.9s" 
+                fill="freeze" />
+            </stop>
+            <stop offset="66.67%" stopColor="#A76CED" stopOpacity="0">
+              <animate attributeName="stop-opacity" 
+                values="0;1" 
+                dur="1.2s" 
+                begin="1.0s" 
+                fill="freeze" />
+            </stop>
+            <stop offset="100%" stopColor="#7A6BEC" stopOpacity="0">
+              <animate attributeName="stop-opacity" 
+                values="0;1" 
+                dur="1.2s" 
+                begin="1.1s" 
                 fill="freeze" />
             </stop>
           </linearGradient>
         </defs>
         
-        <line
-          x1="calc(16.67% + 40px)" y1="50%"
-          x2="calc(50% - 40px)" y2="50%"
-          stroke="url(#animatedLine1)"
-          strokeWidth="3"
-          opacity="0"
-          style={{ animationDelay: '0.6s' }}
-        >
+        {/* Single connected path with circles and lines */}
+        <g stroke="url(#animatedGradient)" strokeWidth="3" fill="none" opacity="0">
           <animate attributeName="opacity" values="0;1" dur="0.1s" begin="0.6s" fill="freeze" />
-        </line>
-        <line
-          x1="calc(50% + 40px)" y1="50%"
-          x2="calc(83.33% - 40px)" y2="50%"
-          stroke="url(#animatedLine2)"
-          strokeWidth="3"
-          opacity="0"
-          style={{ animationDelay: '0.8s' }}
-        >
-          <animate attributeName="opacity" values="0;1" dur="0.1s" begin="0.8s" fill="freeze" />
-        </line>
+          
+          {/* Left circle */}
+          <circle cx="16.67%" cy="50%" r="40" className="animate-scale-in" />
+          
+          {/* First connecting line */}
+          <line x1="calc(16.67% + 40px)" y1="50%" x2="calc(50% - 40px)" y2="50%" />
+          
+          {/* Middle circle */}
+          <circle cx="50%" cy="50%" r="40" className="animate-scale-in" style={{ animationDelay: '0.2s' }} />
+          
+          {/* Second connecting line */}
+          <line x1="calc(50% + 40px)" y1="50%" x2="calc(83.33% - 40px)" y2="50%" />
+          
+          {/* Right circle */}
+          <circle cx="83.33%" cy="50%" r="40" className="animate-scale-in" style={{ animationDelay: '0.4s' }} />
+        </g>
       </svg>
     </div>
   );
@@ -213,9 +197,9 @@ export const CustomizableAnimation = () => {
     const animationCycle = () => {
       // Rotate: column 1 down 1, column 2 up 2, column 3 down 2
       setRotations(prev => [
-        (prev[0] + 1) % 5,
-        (prev[1] - 2 + 5) % 5,
-        (prev[2] + 2) % 5
+        prev[0] + 1, // Column 1: move down 1 emblem
+        prev[1] - 2, // Column 2: move up 2 emblems  
+        prev[2] + 2  // Column 3: move down 2 emblems
       ]);
 
       // Show connections after rotation
