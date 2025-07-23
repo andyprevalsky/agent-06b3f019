@@ -66,6 +66,49 @@ const PreOrderSection = () => {
     syncVideos();
   }, [isSafari]);
 
+  // Handle Safari iOS video issues for both videos
+  useEffect(() => {
+    const blackVideo = blackVideoRef.current;
+    const whiteVideo = whiteVideoRef.current;
+    
+    if (!blackVideo || !whiteVideo) return;
+
+    // Handle page visibility changes for Safari iOS
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Page is hidden, pause videos
+        if (blackVideo && !blackVideo.paused) {
+          blackVideo.pause();
+        }
+        if (whiteVideo && !whiteVideo.paused) {
+          whiteVideo.pause();
+        }
+      } else {
+        // Page is visible again, try to play videos
+        if (blackVideo && blackVideo.paused) {
+          setTimeout(() => {
+            blackVideo.play().catch(() => {
+              // If autoplay fails, that's okay
+            });
+          }, 100);
+        }
+        if (whiteVideo && whiteVideo.paused) {
+          setTimeout(() => {
+            whiteVideo.play().catch(() => {
+              // If autoplay fails, that's okay
+            });
+          }, 100);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
   const handlePreOrder = (variant: 'black' | 'white') => {
     // Real Stripe Payment Links - create these in your Stripe dashboard
     const checkoutUrls = {
@@ -113,6 +156,10 @@ const PreOrderSection = () => {
                     playsInline
                     preload="metadata"
                     poster="/navi-midnight-black-white-background.png"
+                    style={{ 
+                      maxWidth: '100%', 
+                      height: 'auto'
+                    }}
                   >
                     <source src="/navi-black-v4-white-background.webm" type="video/webm" />
                     <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
@@ -181,6 +228,10 @@ const PreOrderSection = () => {
                     playsInline
                     preload="metadata"
                     poster="/navi-pearl-white-white-background.png"
+                    style={{ 
+                      maxWidth: '100%', 
+                      height: 'auto'
+                    }}
                   >
                     <source src="/navi-white-v4-white-background.webm" type="video/webm" />
                     <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
