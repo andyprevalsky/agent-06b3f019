@@ -4,20 +4,52 @@ import { useState, useEffect } from "react";
 
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
-  const fullText = "Hi I'm Navi your ai daemon";
+  const baseText = "Hi I'm Navi your ai ";
+  const words = ["daemon", "companion", "assistant"];
   
   useEffect(() => {
-    let currentIndex = 0;
-    const interval = setInterval(() => {
-      if (currentIndex <= fullText.length) {
-        setTypedText(fullText.slice(0, currentIndex));
-        currentIndex++;
-      } else {
-        clearInterval(interval);
-      }
-    }, 100);
+    let currentWordIndex = 0;
+    let currentCharIndex = 0;
+    let isDeleting = false;
+    let timeoutId: NodeJS.Timeout;
     
-    return () => clearInterval(interval);
+    const typeText = () => {
+      const currentWord = words[currentWordIndex];
+      
+      if (!isDeleting) {
+        // Typing
+        if (currentCharIndex === 0) {
+          setTypedText(baseText);
+        }
+        if (currentCharIndex < currentWord.length) {
+          setTypedText(baseText + currentWord.slice(0, currentCharIndex + 1));
+          currentCharIndex++;
+          timeoutId = setTimeout(typeText, 100);
+        } else {
+          // Finished typing word, wait then start deleting
+          timeoutId = setTimeout(() => {
+            isDeleting = true;
+            typeText();
+          }, 1500);
+        }
+      } else {
+        // Deleting
+        if (currentCharIndex > 0) {
+          setTypedText(baseText + currentWord.slice(0, currentCharIndex - 1));
+          currentCharIndex--;
+          timeoutId = setTimeout(typeText, 50);
+        } else {
+          // Finished deleting, move to next word
+          isDeleting = false;
+          currentWordIndex = (currentWordIndex + 1) % words.length;
+          timeoutId = setTimeout(typeText, 200);
+        }
+      }
+    };
+    
+    typeText();
+    
+    return () => clearTimeout(timeoutId);
   }, []);
 
   return (
