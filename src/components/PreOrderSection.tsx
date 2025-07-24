@@ -75,39 +75,78 @@ const PreOrderSection = () => {
     
     if (!blackVideo || !whiteVideo) return;
 
-    // Handle page visibility changes for Safari iOS
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        // Page is hidden, pause videos
-        if (blackVideo && !blackVideo.paused) {
-          blackVideo.pause();
-        }
-        if (whiteVideo && !whiteVideo.paused) {
-          whiteVideo.pause();
-        }
-      } else {
-        // Page is visible again, try to play videos
-        if (blackVideo && blackVideo.paused) {
-          setTimeout(() => {
-            blackVideo.play().catch(() => {
-              // If autoplay fails, that's okay
-            });
-          }, 100);
-        }
-        if (whiteVideo && whiteVideo.paused) {
-          setTimeout(() => {
-            whiteVideo.play().catch(() => {
-              // If autoplay fails, that's okay
-            });
-          }, 100);
-        }
+    const playVideos = () => {
+      if (blackVideo && blackVideo.paused) {
+        // Force reload the video source to fix freezing
+        const currentTime = blackVideo.currentTime;
+        blackVideo.load();
+        blackVideo.currentTime = currentTime;
+        
+        setTimeout(() => {
+          blackVideo.play().catch(() => {
+            // If autoplay fails, that's okay
+          });
+        }, 100);
+      }
+      
+      if (whiteVideo && whiteVideo.paused) {
+        // Force reload the video source to fix freezing
+        const currentTime = whiteVideo.currentTime;
+        whiteVideo.load();
+        whiteVideo.currentTime = currentTime;
+        
+        setTimeout(() => {
+          whiteVideo.play().catch(() => {
+            // If autoplay fails, that's okay
+          });
+        }, 100);
       }
     };
 
+    const pauseVideos = () => {
+      if (blackVideo && !blackVideo.paused) {
+        blackVideo.pause();
+      }
+      if (whiteVideo && !whiteVideo.paused) {
+        whiteVideo.pause();
+      }
+    };
+
+    // Handle multiple iOS Safari events
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        pauseVideos();
+      } else {
+        playVideos();
+      }
+    };
+
+    const handleFocus = () => {
+      playVideos();
+    };
+
+    const handleBlur = () => {
+      pauseVideos();
+    };
+
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        // Page was restored from cache
+        playVideos();
+      }
+    };
+
+    // Add all the event listeners for comprehensive iOS Safari support
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+    window.addEventListener('pageshow', handlePageShow);
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('pageshow', handlePageShow);
     };
   }, []);
 

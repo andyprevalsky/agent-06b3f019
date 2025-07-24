@@ -7,6 +7,7 @@ import { ChevronDown } from "lucide-react";
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [arrowBottomOffset, setArrowBottomOffset] = useState("1rem");
   const baseText = "Hi! I'm Navi, your voice AI ";
   const words = ["companion.", "assistant.", "daemon."];
   
@@ -93,7 +94,7 @@ const HeroSection = () => {
             if (baseIndex <= baseText.length) {
               setTypedText(baseText.slice(0, baseIndex));
               baseIndex++;
-              setTimeout(typeBase, 96);
+              setTimeout(typeBase, 64);
             } else {
               isFirstType = false;
               typeText();
@@ -106,25 +107,25 @@ const HeroSection = () => {
         if (currentCharIndex < currentWord.length) {
           setTypedText(baseText + currentWord.slice(0, currentCharIndex + 1));
           currentCharIndex++;
-          timeoutId = setTimeout(typeText, 80);
+          timeoutId = setTimeout(typeText, 53);
         } else {
           // Finished typing word, wait then start deleting
           timeoutId = setTimeout(() => {
             isDeleting = true;
             typeText();
-          }, 1500);
+          }, 1000);
         }
       } else {
         // Deleting
         if (currentCharIndex > 0) {
           setTypedText(baseText + currentWord.slice(0, currentCharIndex - 1));
           currentCharIndex--;
-          timeoutId = setTimeout(typeText, 40);
+          timeoutId = setTimeout(typeText, 27);
         } else {
           // Finished deleting, move to next word
           isDeleting = false;
           currentWordIndex = (currentWordIndex + 1) % words.length;
-          timeoutId = setTimeout(typeText, 200);
+          timeoutId = setTimeout(typeText, 133);
         }
       }
     };
@@ -132,6 +133,78 @@ const HeroSection = () => {
     typeText();
     
     return () => clearTimeout(timeoutId);
+  }, []);
+
+  // Handle Safari UI overlay detection and arrow positioning
+  useEffect(() => {
+    const updateArrowPosition = () => {
+      // Check if we're on iOS Safari
+      const isIOSSafari = /iPad|iPhone|iPod/.test(navigator.userAgent) && 
+                         /Safari/.test(navigator.userAgent) && 
+                         !/Chrome|CriOS|FxiOS|EdgiOS/.test(navigator.userAgent);
+      
+      if (!isIOSSafari) {
+        setArrowBottomOffset("1rem");
+        return;
+      }
+
+      // Use visualViewport API if available (modern Safari)
+      if (window.visualViewport) {
+        const viewportHeight = window.visualViewport.height;
+        const windowHeight = window.innerHeight;
+        const uiHeight = windowHeight - viewportHeight;
+        
+        // If UI is present (height difference > 20px), position above it
+        if (uiHeight > 20) {
+          setArrowBottomOffset(`${Math.max(uiHeight + 16, 60)}px`);
+        } else {
+          setArrowBottomOffset("1rem");
+        }
+      } else {
+        // Fallback for older Safari: detect if viewport has changed significantly
+        const initialHeight = window.innerHeight;
+        const currentHeight = document.documentElement.clientHeight;
+        const heightDiff = initialHeight - currentHeight;
+        
+        if (heightDiff > 20) {
+          setArrowBottomOffset(`${Math.max(heightDiff + 16, 60)}px`);
+        } else {
+          setArrowBottomOffset("1rem");
+        }
+      }
+    };
+
+    // Initial positioning
+    updateArrowPosition();
+
+    // Listen for viewport changes
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', updateArrowPosition);
+    }
+    
+    // Listen for orientation and resize changes
+    window.addEventListener('resize', updateArrowPosition);
+    window.addEventListener('orientationchange', () => {
+      setTimeout(updateArrowPosition, 100);
+    });
+
+    // Listen for scroll events that might trigger Safari UI changes
+    let scrollTimeout: NodeJS.Timeout;
+    const handleScroll = () => {
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(updateArrowPosition, 100);
+    };
+    window.addEventListener('scroll', handleScroll);
+
+    return () => {
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', updateArrowPosition);
+      }
+      window.removeEventListener('resize', updateArrowPosition);
+      window.removeEventListener('orientationchange', updateArrowPosition);
+      window.removeEventListener('scroll', handleScroll);
+      clearTimeout(scrollTimeout);
+    };
   }, []);
 
   return (
@@ -196,7 +269,7 @@ const HeroSection = () => {
       </div>
       
       {/* Scroll down arrow - positioned right above the fold */}
-      <div className="absolute left-1/2 transform -translate-x-1/2 z-20" style={{ bottom: 'max(1rem, min(4dvh, 2rem))' }}>
+      <div className="absolute left-1/2 transform -translate-x-1/2 z-20" style={{ bottom: arrowBottomOffset }}>
         <button 
           className="p-3 rounded-full bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 hover:bg-gradient-to-br hover:from-[#323230] hover:to-[#252523] transition-all duration-300 shadow-lg animate-slow-bounce"
           onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
