@@ -138,71 +138,124 @@ const HeroSection = () => {
   // Handle Safari UI overlay detection and arrow positioning
   useEffect(() => {
     const updateArrowPosition = () => {
-      // Check if we're on iOS Safari
+      // More robust iOS Safari detection
       const isIOSSafari = /iPad|iPhone|iPod/.test(navigator.userAgent) && 
                          /Safari/.test(navigator.userAgent) && 
-                         !/Chrome|CriOS|FxiOS|EdgiOS/.test(navigator.userAgent);
+                         !/Chrome|CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent);
       
+      // For non-iOS Safari, use CSS safe area with fallback
       if (!isIOSSafari) {
-        setArrowBottomOffset("1rem");
+        // Try to use CSS safe area inset, fallback to 1rem
+        const safeAreaBottom = getComputedStyle(document.documentElement)
+          .getPropertyValue('--safe-area-inset-bottom') || '1rem';
+        setArrowBottomOffset(`calc(${safeAreaBottom} + 1rem)`);
         return;
       }
 
-      // Use visualViewport API if available (modern Safari)
+      // Enhanced iOS Safari handling
+      let calculatedOffset = '1rem';
+
+      // Primary method: visualViewport API (iOS 13+)
       if (window.visualViewport) {
         const viewportHeight = window.visualViewport.height;
         const windowHeight = window.innerHeight;
+        const screenHeight = window.screen.height;
+        
+        // Calculate UI height more accurately
         const uiHeight = windowHeight - viewportHeight;
         
-        // If UI is present (height difference > 20px), position above it
-        if (uiHeight > 20) {
-          setArrowBottomOffset(`${Math.max(uiHeight + 16, 60)}px`);
+        // Additional check for when Safari is in compact mode
+        const isCompactMode = screenHeight > windowHeight + 100;
+        
+        if (uiHeight > 10 || isCompactMode) {
+          // Safari UI is showing, position above it with extra buffer
+          const safeOffset = Math.max(uiHeight + 24, 80);
+          calculatedOffset = `${safeOffset}px`;
         } else {
-          setArrowBottomOffset("1rem");
+          // UI is hidden, use safe area + small buffer
+          calculatedOffset = 'calc(env(safe-area-inset-bottom, 1rem) + 1rem)';
         }
       } else {
-        // Fallback for older Safari: detect if viewport has changed significantly
-        const initialHeight = window.innerHeight;
-        const currentHeight = document.documentElement.clientHeight;
-        const heightDiff = initialHeight - currentHeight;
+        // Fallback for older iOS Safari
+        const documentHeight = document.documentElement.clientHeight;
+        const windowHeight = window.innerHeight;
+        const heightDiff = windowHeight - documentHeight;
         
-        if (heightDiff > 20) {
-          setArrowBottomOffset(`${Math.max(heightDiff + 16, 60)}px`);
+        if (heightDiff > 10) {
+          calculatedOffset = `${Math.max(heightDiff + 24, 80)}px`;
         } else {
-          setArrowBottomOffset("1rem");
+          calculatedOffset = 'calc(env(safe-area-inset-bottom, 1rem) + 1rem)';
         }
       }
+
+      setArrowBottomOffset(calculatedOffset);
     };
 
-    // Initial positioning
-    updateArrowPosition();
+    // More aggressive initial positioning with delays
+    const initializePosition = () => {
+      updateArrowPosition();
+      
+      // Safari sometimes needs multiple updates as it settles
+      setTimeout(updateArrowPosition, 100);
+      setTimeout(updateArrowPosition, 300);
+      setTimeout(updateArrowPosition, 500);
+    };
 
-    // Listen for viewport changes
+    // Initialize
+    initializePosition();
+
+    // Enhanced event listeners
+    const eventOptions = { passive: true };
+    
     if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', updateArrowPosition);
+      window.visualViewport.addEventListener('resize', updateArrowPosition, eventOptions);
+      window.visualViewport.addEventListener('scroll', updateArrowPosition, eventOptions);
     }
     
-    // Listen for orientation and resize changes
-    window.addEventListener('resize', updateArrowPosition);
-    window.addEventListener('orientationchange', () => {
-      setTimeout(updateArrowPosition, 100);
-    });
+    window.addEventListener('resize', updateArrowPosition, eventOptions);
+    
+    // Handle orientation changes with longer delay
+    const handleOrientationChange = () => {
+      setTimeout(updateArrowPosition, 200);
+      setTimeout(updateArrowPosition, 500);
+      setTimeout(updateArrowPosition, 1000);
+    };
+    window.addEventListener('orientationchange', handleOrientationChange, eventOptions);
 
-    // Listen for scroll events that might trigger Safari UI changes
+    // Handle scroll with debouncing for better performance
     let scrollTimeout: NodeJS.Timeout;
     const handleScroll = () => {
       clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(updateArrowPosition, 100);
+      scrollTimeout = setTimeout(updateArrowPosition, 50);
     };
-    window.addEventListener('scroll', handleScroll);
+    window.addEventListener('scroll', handleScroll, eventOptions);
+
+    // Handle focus/blur for tab switching
+    const handleFocus = () => setTimeout(updateArrowPosition, 100);
+    const handleBlur = () => setTimeout(updateArrowPosition, 100);
+    
+    window.addEventListener('focus', handleFocus, eventOptions);
+    window.addEventListener('blur', handleBlur, eventOptions);
+
+    // Handle page visibility changes
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        setTimeout(updateArrowPosition, 100);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange, eventOptions);
 
     return () => {
       if (window.visualViewport) {
         window.visualViewport.removeEventListener('resize', updateArrowPosition);
+        window.visualViewport.removeEventListener('scroll', updateArrowPosition);
       }
       window.removeEventListener('resize', updateArrowPosition);
-      window.removeEventListener('orientationchange', updateArrowPosition);
+      window.removeEventListener('orientationchange', handleOrientationChange);
       window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       clearTimeout(scrollTimeout);
     };
   }, []);

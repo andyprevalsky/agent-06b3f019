@@ -47,6 +47,12 @@
     --shadow-elegant: 0 10px 30px -10px hsl(240 15% 8% / 0.1);
     --shadow-subtle: 0 4px 20px -4px hsl(240 8% 60% / 0.1);
     
+    /* Safari iOS safe area support */
+    --safe-area-inset-top: env(safe-area-inset-top, 0px);
+    --safe-area-inset-right: env(safe-area-inset-right, 0px);
+    --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-area-inset-left: env(safe-area-inset-left, 0px);
+    
     /* Smooth transitions */
     --transition-luxury: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
     --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -846,4 +852,29 @@
 
   .animate-slow-bounce {
     animation: slow-bounce 2s ease-in-out infinite;
+  }
+
+  /* Safari iOS overlay utilities */
+  .safari-safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 1rem);
+  }
+  
+  .safari-safe-area-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  
+  .safari-overlay-aware {
+    /* Positions element above Safari overlay on iOS */
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 1rem);
+  }
+  
+  /* iOS Safari viewport height fixes */
+  .min-h-screen-safe {
+    min-height: 100vh;
+    min-height: calc(var(--vh, 1vh) * 100);
+  }
+  
+  .h-screen-safe {
+    height: 100vh;
+    height: calc(var(--vh, 1vh) * 100);
   }
