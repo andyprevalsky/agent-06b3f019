@@ -218,7 +218,7 @@ const FeaturesSection = () => {
                             muted 
                             playsInline
                             preload="metadata"
-                            className="w-full h-full object-cover"
+                            className="w-full h-full object-contain"
                             style={{ objectPosition: 'center center' }}
                           >
                             <source src="/navi-privacy-animation.webm" type="video/webm" />
