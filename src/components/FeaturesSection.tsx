@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { CustomizableAnimation } from "./CustomizableAnimation";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
@@ -43,7 +42,8 @@ const FeaturesSection = () => {
         "Agents can interface with the internet, hook into socials, and poll real-world oracles",
         "Iterate towards any future outcome, whether you want to never miss a meal again or get your dream job",
         "Continuously measure, learn, and build its way to any of your life goals",
-        "As AI gets better, the level of abstraction of problems that can be solved increases"
+        "As AI gets better, the level of abstraction of problems that can be solved increases",
+        "Navi isn't just a smart speaker, it's also an engine for getting things done."
       ]
     },
     {
@@ -187,7 +187,27 @@ const FeaturesSection = () => {
                     {/* Animation Area */}
                      {index === 1 ? (
                       <div className="w-full h-[400px] flex items-center justify-center">
-                        <CustomizableAnimation />
+                        <div className="w-full max-w-md h-full rounded-2xl overflow-hidden bg-surface">
+                          <video 
+                            autoPlay 
+                            loop 
+                            muted 
+                            playsInline
+                            preload="metadata"
+                            className="w-full h-full object-cover"
+                            style={{ objectPosition: 'center center' }}
+                          >
+                            <source src="/navi-customization-animation.webm" type="video/webm" />
+                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                              <div className="text-center">
+                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                                </div>
+                                <p className="text-muted-foreground text-sm">Customization Animation</p>
+                              </div>
+                            </div>
+                          </video>
+                        </div>
                       </div>
                     ) : (
                       <div className={`bg-muted/20 rounded-2xl p-12 h-[400px] flex items-center justify-center border transition-all duration-300 ${

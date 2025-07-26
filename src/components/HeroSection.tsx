@@ -9,7 +9,7 @@ const HeroSection = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const baseText = "Hi! I'm Navi, your voice AI ";
-  const words = ["companion.", "assistant.", "daemon."];
+  const words = ["companion.", "assistant.", "daemon.", "computer."];
   
   // Handle Safari iOS video issues
   useEffect(() => {
