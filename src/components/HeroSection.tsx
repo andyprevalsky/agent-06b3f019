@@ -6,13 +6,26 @@ import { ChevronDown } from "lucide-react";
 
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
+  const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const baseText = "Hi! I'm Navi, your voice AI ";
   const words = ["companion.", "assistant.", "daemon.", "computer."];
   
-  // Handle Safari iOS video issues
+  // Delay video loading to prioritize hero images
   useEffect(() => {
+    // Wait for initial render and give images time to start loading
+    const timer = setTimeout(() => {
+      setShouldLoadVideo(true);
+    }, 1500); // 1.5 second delay to let images load first
+    
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Handle Safari iOS video issues - only after video should load
+  useEffect(() => {
+    if (!shouldLoadVideo) return;
+    
     const video = videoRef.current;
     if (!video) return;
 
@@ -73,7 +86,7 @@ const HeroSection = () => {
       window.removeEventListener('blur', handleBlur);
       window.removeEventListener('pageshow', handlePageShow);
     };
-  }, []);
+  }, [shouldLoadVideo]);
 
   useEffect(() => {
     let currentWordIndex = 0;
@@ -145,18 +158,30 @@ const HeroSection = () => {
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
               <div className="w-96 h-96 md:w-120 md:h-120 rounded-full overflow-hidden bg-surface">
-                <video 
-                  ref={videoRef}
-                  autoPlay 
-                  loop 
-                  muted 
-                  playsInline
-                  preload="metadata"
-                  className="w-full h-full object-cover"
-                  style={{ objectPosition: 'center center' }}
-                  poster="/navi-midnight-black-hero-background-low.png"
-                >
-                  <source src="/navi-black-v4-hero-background.webm" type="video/webm" />
+                {shouldLoadVideo ? (
+                  <video 
+                    ref={videoRef}
+                    autoPlay 
+                    loop 
+                    muted 
+                    playsInline
+                    preload="none"
+                    className="w-full h-full object-cover"
+                    style={{ objectPosition: 'center center' }}
+                    poster="/navi-midnight-black-hero-background-low.png"
+                  >
+                    <source src="/navi-black-v4-hero-background.webm" type="video/webm" />
+                    <ProgressiveImage
+                      lowSrc="/navi-midnight-black-hero-background-low.png"
+                      medSrc="/navi-midnight-black-hero-background-med.png"
+                      highSrc="/navi-midnight-black-hero-background.png"
+                      alt="Navi"
+                      className="w-full h-full object-cover"
+                      style={{ objectPosition: 'center center' }}
+                      fetchPriority="high"
+                    />
+                  </video>
+                ) : (
                   <ProgressiveImage
                     lowSrc="/navi-midnight-black-hero-background-low.png"
                     medSrc="/navi-midnight-black-hero-background-med.png"
@@ -164,8 +189,9 @@ const HeroSection = () => {
                     alt="Navi"
                     className="w-full h-full object-cover"
                     style={{ objectPosition: 'center center' }}
+                    fetchPriority="high"
                   />
-                </video>
+                )}
               </div>
             </div>
           
