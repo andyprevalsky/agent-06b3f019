@@ -12,14 +12,13 @@ const HeroSection = () => {
   const baseText = "Hi! I'm Navi, your voice AI ";
   const words = ["companion.", "assistant.", "daemon.", "computer."];
   
-  // Delay video loading to prioritize hero images
+  // Prioritize image loading, then allow video loading
   useEffect(() => {
-    // Wait for initial render and give images time to start loading
-    const timer = setTimeout(() => {
+    // Use requestAnimationFrame to ensure images start loading first
+    // This gives images priority without artificial delays
+    requestAnimationFrame(() => {
       setShouldLoadVideo(true);
-    }, 1500); // 1.5 second delay to let images load first
-    
-    return () => clearTimeout(timer);
+    });
   }, []);
 
   // Handle Safari iOS video issues - only after video should load
