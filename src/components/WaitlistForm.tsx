@@ -6,6 +6,12 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { ChevronDown, Mail, User, Check } from "lucide-react";
 
+declare global {
+  interface Window {
+    _vl?: any;
+  }
+}
+
 interface WaitlistFormInput {
   onSuccess?: () => void;
 }
@@ -37,16 +43,38 @@ function WaitlistForm({ onSuccess }: WaitlistFormInput) {
 
     setIsLoading(true);
 
-    // Simulate form submission
     try {
-      // Simple delay to simulate processing
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      console.log('Form submitted:', formData);
+      // Wait for Viral Loops to be ready
+      let attempts = 0;
+      while (!window._vl && attempts < 50) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+      }
+
+      if (!window._vl) {
+        throw new Error('Viral Loops SDK not loaded');
+      }
+
+      // Split name into first and last for Viral Loops
+      const nameParts = formData.name.trim().split(' ');
+      const firstName = nameParts[0] || '';
+      const lastName = nameParts.slice(1).join(' ') || '';
+
+      // Submit to Viral Loops
+      await window._vl.register({
+        user: {
+          firstname: firstName,
+          lastname: lastName,
+          email: formData.email
+        }
+      });
+
+      console.log('Successfully submitted to Viral Loops:', formData);
       setIsSubmitted(true);
       onSuccess?.();
     } catch (error) {
-      console.error('Error submitting form:', error);
+      console.error('Error submitting to Viral Loops:', error);
+      setEmailError('Failed to join waitlist. Please try again.');
     } finally {
       setIsLoading(false);
     }

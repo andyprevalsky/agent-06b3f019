@@ -18,13 +18,30 @@ const NaviHeader = () => {
           </a>
         </nav>
         
-        <Button 
-          variant="outline" 
-          size="sm"
-          className="hidden md:flex border-border/50 hover:bg-secondary/50"
-        >
-          Contact
-        </Button>
+        <div className="flex items-center space-x-3">
+          {/* Mobile Join Waitlist Button */}
+          <Button 
+            variant="default" 
+            size="sm"
+            className="md:hidden"
+            onClick={() => {
+              document.getElementById('waitlist')?.scrollIntoView({ 
+                behavior: 'smooth' 
+              });
+            }}
+          >
+            Join Waitlist
+          </Button>
+          
+          {/* Desktop Contact Button */}
+          <Button 
+            variant="outline" 
+            size="sm"
+            className="hidden md:flex border-border/50 hover:bg-secondary/50"
+          >
+            Contact
+          </Button>
+        </div>
       </div>
     </header>
   );
