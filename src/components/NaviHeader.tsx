@@ -1,6 +1,34 @@
 import { Button } from "@/components/ui/button";
+import { useState, useEffect } from "react";
 
 const NaviHeader = () => {
+  const [showMobileButton, setShowMobileButton] = useState(false);
+
+  useEffect(() => {
+    const featuresSection = document.getElementById('features');
+    if (!featuresSection) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.target.id === 'features') {
+            setShowMobileButton(entry.isIntersecting);
+          }
+        });
+      },
+      {
+        threshold: 0.1, // Trigger when 10% of the features section is visible
+        rootMargin: '-50px 0px' // Account for the fixed header height
+      }
+    );
+
+    observer.observe(featuresSection);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border/50">
       <div className="container mx-auto px-6 h-16 flex items-center justify-between">
@@ -19,19 +47,21 @@ const NaviHeader = () => {
         </nav>
         
         <div className="flex items-center space-x-3">
-          {/* Mobile Join Waitlist Button */}
-          <Button 
-            variant="default" 
-            size="sm"
-            className="md:hidden"
-            onClick={() => {
-              document.getElementById('waitlist')?.scrollIntoView({ 
-                behavior: 'smooth' 
-              });
-            }}
-          >
-            Join Waitlist
-          </Button>
+          {/* Mobile Join Waitlist Button - Only show in features section */}
+          {showMobileButton && (
+            <Button 
+              variant="outline" 
+              size="sm"
+              className="md:hidden bg-white/90 text-foreground border-gray-200 hover:bg-white hover:shadow-md transition-all duration-200"
+              onClick={() => {
+                document.getElementById('waitlist')?.scrollIntoView({ 
+                  behavior: 'smooth' 
+                });
+              }}
+            >
+              Join Waitlist
+            </Button>
+          )}
           
           {/* Desktop Contact Button */}
           <Button 

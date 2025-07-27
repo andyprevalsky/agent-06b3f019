@@ -17,7 +17,7 @@ interface WaitlistFormInput {
 }
 
 function WaitlistForm({ onSuccess }: WaitlistFormInput) {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [formData, setFormData] = useState({
