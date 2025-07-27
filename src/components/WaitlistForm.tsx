@@ -11,9 +11,8 @@ interface WaitlistFormInput {
 }
 
 function WaitlistForm({ onSuccess }: WaitlistFormInput) {
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [isSubmitted, setIsSubmitted] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     email: ''
@@ -28,30 +27,24 @@ function WaitlistForm({ onSuccess }: WaitlistFormInput) {
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+    // Only prevent default if validation fails
     setEmailError('');
 
-    // Validate email
+    // Validate email before submission
     if (!validateEmail(formData.email)) {
+      e.preventDefault();
       setEmailError('Please enter a valid email address');
       return;
     }
 
     setIsLoading(true);
 
-    try {
-      // Simple delay to simulate processing
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      console.log('Form submitted:', formData);
-      setIsSubmitted(true);
-      onSuccess?.();
-    } catch (error) {
-      console.error('Error submitting form:', error);
-      setEmailError('Failed to join waitlist. Please try again.');
-    } finally {
+    // Let Viral Loops handle the submission
+    setTimeout(() => {
+      console.log('Form submitted to Viral Loops:', formData);
       setIsLoading(false);
-    }
+      onSuccess?.();
+    }, 1000);
   };
 
   const handleInputChange = (field: keyof typeof formData) => (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -61,90 +54,103 @@ function WaitlistForm({ onSuccess }: WaitlistFormInput) {
     }));
   };
 
-  if (isSubmitted) {
-    return (
-      <Card className="w-full max-w-md mx-auto">
-        <CardContent className="p-6 text-center">
-          <div className="mb-4">
-            <Check className="w-12 h-12 text-green-500 mx-auto" />
-          </div>
-          <h3 className="text-lg font-semibold mb-2">You're on the list!</h3>
-          <p className="text-muted-foreground">
-            We'll notify you when Navi becomes available. Keep an eye on your inbox!
-          </p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (!isExpanded) {
-    return (
-      <div className="text-center">
-        <Button 
-          onClick={() => setIsExpanded(true)}
-          size="lg"
-          className="px-16"
-        >
-          Join Waitlist
-          <ChevronDown className="w-4 h-4 ml-2" />
-        </Button>
-      </div>
-    );
-  }
-
   return (
-    <div className="w-full max-w-md mx-auto animate-in slide-in-from-top-2 duration-300">
-      <Card className="w-full overflow-hidden">
-        <CardContent className="px-0 py-0">
-          <form onSubmit={handleSubmit} className="space-y-0">
-            <div className="px-6 py-6 space-y-4">
-              <div className="space-y-2 text-left">
-                <Label htmlFor="name" className="block text-left">Name</Label>
-                <div className="relative">
-                  <User className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" />
-                  <Input
-                    id="name"
-                    type="text"
-                    placeholder="John Doe"
-                    value={formData.name}
-                    onChange={handleInputChange('name')}
-                    className="pl-10"
-                    required
-                  />
-                </div>
-              </div>
-              
-              <div className="space-y-2 text-left">
-                <Label htmlFor="email" className="block text-left">Email</Label>
-                <div className="relative">
-                  <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" />
-                  <Input
-                    id="email"
-                    type="email"
-                    placeholder="john@example.com"
-                    value={formData.email}
-                    onChange={handleInputChange('email')}
-                    className="pl-10"
-                    required
-                  />
-                </div>
-                {emailError && (
-                  <p className="text-sm text-red-500">{emailError}</p>
-                )}
-              </div>
-            </div>
-            
-            <Button 
-              type="submit" 
-              className="w-full rounded-none" 
-              disabled={isLoading}
-            >
-              {isLoading ? 'Joining...' : 'Join Waitlist'}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
-    </div>
+    <>
+      {/* Collapsed state - Button sits outside any card */}
+      {!isExpanded && (
+        <div className="w-full">
+          <Button 
+            onClick={() => setIsExpanded(true)}
+            size="lg"
+            className="w-full"
+          >
+            Join Waitlist
+          </Button>
+        </div>
+      )}
+      
+      {/* Expanded state - Form inside card with animation */}
+      {isExpanded && (
+        <div className="w-full animate-in slide-in-from-top-2 duration-300 mt-6">
+          {/* Join Stage - Viral Loops will hide this after participation */}
+          <div 
+            data-vl-campaign-id="cpdWm9oR9IFjRr3SNkkR59rxXiE" 
+            data-vl-container="join-stage"
+          >
+            <Card className="w-full overflow-hidden">
+              <CardContent className="px-0 py-0">
+                <form 
+                  data-vl-action="join-stage#join" 
+                  onSubmit={handleSubmit} 
+                  className="space-y-0"
+                >
+                  <div className="px-6 py-6 space-y-4">
+                    <div className="space-y-2 text-left">
+                      <Label htmlFor="name" className="block text-left">Name</Label>
+                      <div className="relative">
+                        <User className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" />
+                        <Input
+                          id="name"
+                          type="text"
+                          placeholder="John Doe"
+                          value={formData.name}
+                          onChange={handleInputChange('name')}
+                          data-vl-join-stage-target="input.firstname"
+                          className="pl-10"
+                          required
+                        />
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-2 text-left">
+                      <Label htmlFor="email" className="block text-left">Email</Label>
+                      <div className="relative">
+                        <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" />
+                        <Input
+                          id="email"
+                          type="email"
+                          placeholder="john@example.com"
+                          value={formData.email}
+                          onChange={handleInputChange('email')}
+                          data-vl-join-stage-target="input.email"
+                          className="pl-10"
+                          required
+                        />
+                      </div>
+                      {emailError && (
+                        <p className="text-sm text-red-500">{emailError}</p>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <Button 
+                    type="submit" 
+                    className="w-full rounded-none" 
+                    disabled={isLoading}
+                  >
+                    {isLoading ? 'Joining...' : 'Join Waitlist'}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Sharing Stage - Viral Loops will show this after participation */}
+          <div 
+            data-vl-campaign-id="cpdWm9oR9IFjRr3SNkkR59rxXiE" 
+            data-vl-container="sharing-stage"
+          >
+            <Card className="w-full overflow-hidden">
+              <CardContent className="px-0 py-0">
+                {React.createElement('form-widget', {
+                  ucid: 'cpdWm9oR9IFjRr3SNkkR59rxXiE'
+                })}
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

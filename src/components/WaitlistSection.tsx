@@ -163,81 +163,79 @@ const WaitlistSection = () => {
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
           
-          {/* Midnight Black */}
-          <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
-            <CardContent className="p-8 text-center">
-               <div className="mb-6">
-                <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
-                  <video 
-                    ref={blackVideoRef}
-                    autoPlay
-                    className="w-full h-full object-cover"
-                    loop
-                    muted
-                    playsInline
-                    preload="metadata"
-                    poster="/navi-midnight-black-white-background.png"
-                  >
-                    <source src="/navi-black-v4-white-background.webm" type="video/webm" />
-                    <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
-                  </video>
+          {/* Midnight Black with Waitlist */}
+          <div className="w-full">
+            <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
+              <CardContent className="p-8 text-center">
+                 <div className="mb-6">
+                  <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
+                    <video 
+                      ref={blackVideoRef}
+                      autoPlay
+                      className="w-full h-full object-cover"
+                      loop
+                      muted
+                      playsInline
+                      preload="metadata"
+                      poster="/navi-midnight-black-white-background.png"
+                    >
+                      <source src="/navi-black-v4-white-background.webm" type="video/webm" />
+                      <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
+                    </video>
+                  </div>
+                  <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
+                  <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
                 </div>
-                <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
-                <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
-              </div>
-              
-
-              
-              {/* Custom Expandable Waitlist Form */}
-              <div className="w-full">
-                <WaitlistForm 
-                  onSuccess={() => console.log('User joined waitlist successfully!')}
-                />
-              </div>
-              
-              <p className="text-xs text-muted-foreground mt-4">
+              </CardContent>
+            </Card>
+            
+            {/* Waitlist Form for Midnight Black */}
+            <div className="mt-6">
+              <WaitlistForm 
+                onSuccess={() => console.log('User joined waitlist successfully!')}
+              />
+              <p className="text-xs text-muted-foreground mt-4 text-center">
                 No commitment • Early access updates
               </p>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
           
-          {/* Pearl White */}
-          <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
-            <CardContent className="p-8 text-center">
-               <div className="mb-6">
-                <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
-                  <video 
-                    ref={whiteVideoRef}
-                    autoPlay
-                    className="w-full h-full object-cover"
-                    loop
-                    muted
-                    playsInline
-                    preload="metadata"
-                    poster="/navi-pearl-white-white-background.png"
-                  >
-                    <source src="/navi-white-v4-white-background.webm" type="video/webm" />
-                    <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
-                  </video>
+          {/* Pearl White with Waitlist */}
+          <div className="w-full">
+            <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
+              <CardContent className="p-8 text-center">
+                 <div className="mb-6">
+                  <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
+                    <video 
+                      ref={whiteVideoRef}
+                      autoPlay
+                      className="w-full h-full object-cover"
+                      loop
+                      muted
+                      playsInline
+                      preload="metadata"
+                      poster="/navi-pearl-white-white-background.png"
+                    >
+                      <source src="/navi-white-v4-white-background.webm" type="video/webm" />
+                      <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
+                    </video>
+                  </div>
+                  <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
+                  <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
                 </div>
-                <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
-                <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
-              </div>
-              
-
-              
-              {/* Custom Expandable Waitlist Form */}
-              <div className="w-full">
-                <WaitlistForm 
-                  onSuccess={() => console.log('User joined waitlist successfully!')}
-                />
-              </div>
-              
-              <p className="text-xs text-muted-foreground mt-4">
+              </CardContent>
+            </Card>
+            
+            {/* Waitlist Form for Pearl White */}
+            <div className="mt-6">
+              <WaitlistForm 
+                onSuccess={() => console.log('User joined waitlist successfully!')}
+              />
+              <p className="text-xs text-muted-foreground mt-4 text-center">
                 No commitment • Early access updates
               </p>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
           
         </div>
         
