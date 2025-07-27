@@ -47,21 +47,21 @@ const NaviHeader = () => {
         </nav>
         
         <div className="flex items-center space-x-3">
-          {/* Mobile Join Waitlist Button - Only show in features section */}
-          {showMobileButton && (
-            <Button 
-              variant="outline" 
-              size="sm"
-              className="md:hidden bg-white/90 text-foreground border-gray-200 hover:bg-white hover:shadow-md transition-all duration-200"
-              onClick={() => {
-                document.getElementById('waitlist')?.scrollIntoView({ 
-                  behavior: 'smooth' 
-                });
-              }}
-            >
-              Join Waitlist
-            </Button>
-          )}
+          {/* Mobile Join Waitlist Button - Reserve space to prevent layout shift */}
+          <Button 
+            variant="outline" 
+            size="sm"
+            className={`md:hidden bg-white/90 text-foreground border-gray-200 hover:bg-white hover:shadow-md transition-all duration-200 ${
+              showMobileButton ? 'opacity-100 visible' : 'opacity-0 invisible'
+            }`}
+            onClick={() => {
+              document.getElementById('waitlist')?.scrollIntoView({ 
+                behavior: 'smooth' 
+              });
+            }}
+          >
+            Join Waitlist
+          </Button>
           
           {/* Desktop Contact Button */}
           <Button 

@@ -22,11 +22,13 @@ serve(async (req) => {
     const prices = {
       white: 19900, // $199.00 in cents
       black: 19900, // $199.00 in cents
+      custom: 29900, // $299.00 in cents - premium for custom design
     };
 
     const productNames = {
       white: "Navi - Pearl White",
       black: "Navi - Midnight Black",
+      custom: "Navi - Custom Design",
     };
 
     const session = await stripe.checkout.sessions.create({

@@ -85,54 +85,60 @@ const CustomDesignForm = () => {
   return (
     <section className="py-24 bg-gradient-to-b from-surface to-background">
       <div className="container mx-auto px-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center max-w-6xl mx-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 max-w-6xl mx-auto">
           
-          {/* Custom Design Form */}
-          <div className="reveal-up">
-            <Card className="bg-card/50 backdrop-blur-sm border-border/50">
+          {/* Custom Design Form - Matching waitlist card structure */}
+          <div className="w-full">
+            <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up">
+              <CardContent className="p-8 text-center">
+                <div className="mb-6">
+                  <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-gradient-to-br from-purple-100 to-orange-100 flex items-center justify-center">
+                    <img 
+                      src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=288&h=288&fit=crop&crop=center" 
+                      alt="Custom Design Navi"
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <h3 className="text-2xl font-semibold mb-2">Custom Design</h3>
+                  <p className="text-muted-foreground">Starting at $299. Bring your unique vision to life</p>
+                </div>
+              </CardContent>
+            </Card>
+            
+            {/* Custom Design Request Button */}
+            <div className="mt-6">
+              <Button 
+                onClick={() => {
+                  // Create mailto link with custom design request
+                  const subject = encodeURIComponent("Custom Design Request");
+                  const body = encodeURIComponent(
+                    "Hi, I'm interested in a custom Navi design!\n\n" +
+                    "Please include:\n" +
+                    "• Your name\n" +
+                    "• Email address\n" +
+                    "• Phone number\n" +
+                    "• Detailed description of your custom design vision\n\n" +
+                    "We'll respond within 24 hours with a custom quote."
+                  );
+                  window.location.href = `mailto:andyprevalsky@fastmail.com?subject=${subject}&body=${body}`;
+                }}
+                className="w-full"
+              >
+                Request Custom Design
+              </Button>
+              <p className="text-xs text-muted-foreground mt-4 text-center">
+                We'll respond within 24 hours with a custom quote
+              </p>
+            </div>
+          </div>
+          
+          {/* Full Form in Second Column */}
+          <div className="lg:col-span-2 reveal-up">
+            <Card className="bg-card/50 backdrop-blur-sm border-border/50 h-full">
               <CardHeader>
-                <CardTitle className="text-2xl text-center">Request Custom Design</CardTitle>
+                <CardTitle className="text-2xl text-center">Custom Design Details</CardTitle>
               </CardHeader>
             <CardContent>
-              {/* Image and Description */}
-              <div className="text-center mb-6 pb-6 border-b border-border/20">
-                <img 
-                  src="https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=300&h=200&fit=crop&crop=center" 
-                  alt="Custom Design Navi"
-                  className="w-2/3 h-auto mx-auto rounded-lg mb-3"
-                />
-                <p className="text-sm text-muted-foreground">
-                  Starting at $299 + 
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="text-xs text-primary hover:underline cursor-help ml-1 inline-flex items-center gap-1">
-                          service fee
-                          <HelpCircle size={10} />
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent className="max-w-xs">
-                        <div className="text-sm">
-                          <p className="font-medium mb-2">AI Provider Services</p>
-                          <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
-                          <div className="space-y-2">
-                            <div>
-                              <p className="font-medium">Provide Your Own API Keys</p>
-                              <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
-                            </div>
-                            <div>
-                              <p className="font-medium">Pay-as-You-Go Service</p>
-                              <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
-                            </div>
-                          </div>
-                          <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
-                        </div>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </p>
-                <p className="text-sm text-muted-foreground mt-1">Bring your unique vision to life with a personalized Navi device.</p>
-              </div>
               <Form {...form}>
                 <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
                   <FormField
@@ -229,9 +235,6 @@ const CustomDesignForm = () => {
              </CardContent>
             </Card>
           </div>
-          
-          {/* Empty second column for spacing */}
-          <div></div>
           
         </div>
      </div>

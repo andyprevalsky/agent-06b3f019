@@ -135,7 +135,7 @@ const WaitlistSection = () => {
           </p>
           
           <div className="text-center mt-8 mb-8 reveal-up reveal-delay-2">
-            <p className="text-sm text-muted-foreground mb-3">Available in 2 colors</p>
+            <p className="text-sm text-muted-foreground mb-3">Available in 3 variations</p>
             <div className="flex justify-center space-x-6">
               <div className="group relative flex flex-col items-center">
                 <div 
@@ -157,11 +157,21 @@ const WaitlistSection = () => {
                   Pearl White
                 </span>
               </div>
+              <div className="group relative flex flex-col items-center">
+                <div 
+                  className="w-3 h-3 rounded-full transition-transform duration-200 hover:scale-140 cursor-pointer" 
+                  style={{ background: 'linear-gradient(135deg, #A76CED, #E062CC, #FD5776, #FE7503)' }}
+                  title="Custom"
+                ></div>
+                <span className="absolute top-6 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-300 whitespace-nowrap">
+                  Custom
+                </span>
+              </div>
             </div>
           </div>
         </div>
         
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-6xl mx-auto">
           
           {/* Midnight Black with Waitlist */}
           <div className="w-full">
@@ -227,6 +237,33 @@ const WaitlistSection = () => {
             </Card>
             
             {/* Waitlist Form for Pearl White */}
+            <div className="mt-6">
+              <WaitlistForm 
+                onSuccess={() => console.log('User joined waitlist successfully!')}
+              />
+              <p className="text-xs text-muted-foreground mt-4 text-center">
+                No commitment • Early access updates
+              </p>
+            </div>
+          </div>
+          
+          {/* Custom with Waitlist */}
+          <div className="w-full">
+            <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-3">
+              <CardContent className="p-8 text-center">
+                 <div className="mb-6">
+                  <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-gradient-to-br from-purple-100 to-orange-100 flex items-center justify-center">
+                    <div className="text-6xl font-light text-transparent bg-gradient-to-br from-[#A76CED] via-[#E062CC] to-[#FE7503] bg-clip-text">
+                      ?
+                    </div>
+                  </div>
+                  <h3 className="text-2xl font-semibold mb-2">Custom</h3>
+                  <p className="text-muted-foreground">Bring your favorite character to life with a custom design, voice, & personality</p>
+                </div>
+              </CardContent>
+            </Card>
+            
+            {/* Waitlist Form for Custom */}
             <div className="mt-6">
               <WaitlistForm 
                 onSuccess={() => console.log('User joined waitlist successfully!')}
