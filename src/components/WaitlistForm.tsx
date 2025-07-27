@@ -27,12 +27,11 @@ function WaitlistForm({ onSuccess }: WaitlistFormInput) {
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
-    // Only prevent default if validation fails
+    e.preventDefault(); // Always prevent default to avoid page jumps
     setEmailError('');
 
     // Validate email before submission
     if (!validateEmail(formData.email)) {
-      e.preventDefault();
       setEmailError('Please enter a valid email address');
       return;
     }
@@ -60,18 +59,22 @@ function WaitlistForm({ onSuccess }: WaitlistFormInput) {
       {!isExpanded && (
         <div className="w-full">
           <Button 
-            onClick={() => setIsExpanded(true)}
+            onClick={(e) => {
+              e.preventDefault();
+              setIsExpanded(true);
+            }}
             size="lg"
             className="w-full"
+            disabled={isLoading}
           >
-            Join Waitlist
+            {isLoading ? 'Loading...' : 'Join Waitlist'}
           </Button>
         </div>
       )}
       
       {/* Expanded state - Form inside card with animation */}
       {isExpanded && (
-        <div className="w-full animate-in slide-in-from-top-2 duration-300 mt-6">
+        <div className="w-full animate-in slide-in-from-top-2 duration-300">
           {/* Join Stage - Viral Loops will hide this after participation */}
           <div 
             data-vl-campaign-id="cpdWm9oR9IFjRr3SNkkR59rxXiE" 
