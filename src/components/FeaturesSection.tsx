@@ -304,11 +304,69 @@ const FeaturesSection = () => {
             <div 
               key={feature.title}
               data-index={index}
-              className={`feature-card-no-bg reveal-up reveal-delay-${index + 1} ${
-                visibleItems.has(index) ? 'feature-visible' : ''
-              }`}
+              className={`feature-card-no-bg reveal-up reveal-delay-${index + 1} feature-visible`}
             >
               <div className="feature-content-no-bg">
+                {/* Video/Animation Area for mobile */}
+                {index === 1 ? (
+                  <div className="w-full h-[280px] flex items-center justify-center mb-6">
+                    <div className="w-full max-w-sm h-full rounded-2xl overflow-hidden bg-surface">
+                      <video 
+                        autoPlay 
+                        loop 
+                        muted 
+                        playsInline
+                        preload="metadata"
+                        className="w-full h-full object-cover"
+                        style={{ objectPosition: 'center center' }}
+                      >
+                        <source src="/navi-customization-animation.webm" type="video/webm" />
+                        <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                          <div className="text-center">
+                            <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                              <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                            </div>
+                            <p className="text-muted-foreground text-xs">Customization Animation</p>
+                          </div>
+                        </div>
+                      </video>
+                    </div>
+                  </div>
+                ) : index === 5 ? (
+                  <div className="w-full h-[280px] flex items-center justify-center mb-6">
+                    <div className="w-full max-w-sm h-full rounded-2xl overflow-hidden bg-surface">
+                      <video 
+                        autoPlay 
+                        loop 
+                        muted 
+                        playsInline
+                        preload="metadata"
+                        className="w-full h-full object-contain"
+                        style={{ objectPosition: 'center center' }}
+                      >
+                        <source src="/navi-privacy-animation-2.webm" type="video/webm" />
+                        <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                          <div className="text-center">
+                            <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                              <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                            </div>
+                            <p className="text-muted-foreground text-xs">Privacy Animation</p>
+                          </div>
+                        </div>
+                      </video>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-muted/20 rounded-2xl p-8 h-[200px] flex items-center justify-center border border-border/20 mb-6">
+                    <div className="text-center">
+                      <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                        <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                      </div>
+                      <p className="text-muted-foreground text-xs">Animation for {feature.title}</p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="feature-text">
                   <h3 className="text-2xl font-semibold mb-4 text-foreground">{feature.title}</h3>
                   <p className="text-muted-foreground mb-6">{feature.description}</p>

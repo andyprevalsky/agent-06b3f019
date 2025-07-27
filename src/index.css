@@ -188,13 +188,57 @@
     opacity: 0;
     transform: translateY(30px);
     animation: revealUp 0.8s ease-out forwards;
+    /* Ensure animations work on mobile */
+    -webkit-transform: translateY(30px);
+    -webkit-animation: revealUp 0.8s ease-out forwards;
   }
   
   @keyframes revealUp {
     to {
       opacity: 1;
       transform: translateY(0);
+      -webkit-transform: translateY(0);
     }
+  }
+  
+  @-webkit-keyframes revealUp {
+    to {
+      opacity: 1;
+      transform: translateY(0);
+      -webkit-transform: translateY(0);
+    }
+  }
+  
+  /* Mobile-optimized animations - smaller movement, faster timing */
+  @media (max-width: 768px) {
+    .reveal-up {
+      transform: translateY(20px);
+      -webkit-transform: translateY(20px);
+      animation: revealUpMobile 0.6s ease-out forwards;
+      -webkit-animation: revealUpMobile 0.6s ease-out forwards;
+    }
+    
+    @keyframes revealUpMobile {
+      to {
+        opacity: 1;
+        transform: translateY(0);
+        -webkit-transform: translateY(0);
+      }
+    }
+    
+    @-webkit-keyframes revealUpMobile {
+      to {
+        opacity: 1;
+        transform: translateY(0);
+        -webkit-transform: translateY(0);
+      }
+    }
+    
+    /* Faster delays for mobile */
+    .reveal-delay-1 { animation-delay: 0.05s; }
+    .reveal-delay-2 { animation-delay: 0.1s; }
+    .reveal-delay-3 { animation-delay: 0.15s; }
+    .reveal-delay-4 { animation-delay: 0.2s; }
   }
   
   /* Stagger delays for sequential animations */
@@ -208,18 +252,74 @@
     @apply bg-card border border-border/50 rounded-2xl p-8 transition-all duration-500;
     @apply hover:shadow-[var(--shadow-elegant)] hover:border-primary/20;
     transform: translateY(20px);
+    -webkit-transform: translateY(20px);
     opacity: 0;
   }
 
   .feature-card-no-bg {
     @apply p-8 transition-all duration-500;
     transform: translateY(20px);
+    -webkit-transform: translateY(20px);
     opacity: 0;
   }
 
   .feature-visible {
     transform: translateY(0);
+    -webkit-transform: translateY(0);
     opacity: 1;
+  }
+
+  /* Mobile optimization for feature cards */
+  @media (max-width: 768px) {
+    .feature-card {
+      transform: translateY(15px);
+      -webkit-transform: translateY(15px);
+    }
+    
+    .feature-card-no-bg {
+      transform: translateY(15px);
+      -webkit-transform: translateY(15px);
+    }
+  }
+
+  /* Ensure Tailwind animations work on mobile */
+  .animate-in {
+    -webkit-animation-fill-mode: both;
+    animation-fill-mode: both;
+  }
+
+  /* Force hardware acceleration on mobile for smooth animations */
+  .reveal-up,
+  .feature-card,
+  .feature-card-no-bg,
+  .animate-in {
+    -webkit-backface-visibility: hidden;
+    backface-visibility: hidden;
+    will-change: transform, opacity;
+  }
+
+  /* Additional mobile performance optimizations */
+  @media (max-width: 768px) {
+    .reveal-up,
+    .feature-card,
+    .feature-card-no-bg,
+    .animate-in {
+      -webkit-transform: translate3d(0,0,0);
+    }
+  }
+
+  /* Respect user's motion preferences */
+  @media (prefers-reduced-motion: reduce) {
+    .reveal-up,
+    .feature-card,
+    .feature-card-no-bg,
+    .animate-in {
+      animation: none !important;
+      -webkit-animation: none !important;
+      transform: none !important;
+      -webkit-transform: none !important;
+      opacity: 1 !important;
+    }
   }
 
   .feature-content {

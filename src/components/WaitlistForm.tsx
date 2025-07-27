@@ -74,7 +74,7 @@ function WaitlistForm({ onSuccess }: WaitlistFormInput) {
       
       {/* Expanded state - Form inside card with animation */}
       {isExpanded && (
-        <div className="w-full animate-in slide-in-from-top-2 duration-300">
+        <div className="w-full animate-in slide-in-from-top-2 duration-200 md:duration-300">
           {/* Join Stage - Viral Loops will hide this after participation */}
           <div 
             data-vl-campaign-id="cpdWm9oR9IFjRr3SNkkR59rxXiE" 
