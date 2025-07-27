@@ -243,17 +243,6 @@ const WaitlistSection = () => {
           <p className="text-sm text-muted-foreground mb-4">
             Expected launch: Q2 2024 • Join early for exclusive updates
           </p>
-          <div className="flex justify-center space-x-8">
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">No commitment</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">Exclusive access</span>
-            </div>
-
-          </div>
         </div>
       </div>
 

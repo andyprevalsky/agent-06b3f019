@@ -5,7 +5,6 @@ import PoweredByTicker from "@/components/PoweredByTicker";
 import FeaturesSection from "@/components/FeaturesSection";
 import WaitlistSection from "@/components/WaitlistSection";
 import ProductShowcase from "@/components/ProductShowcase";
-import ServiceFeeSection from "@/components/ServiceFeeSection";
 import NaviFooter from "@/components/NaviFooter";
 
 const Index = () => {
@@ -17,7 +16,6 @@ const Index = () => {
       <FeaturesSection />
       <WaitlistSection />
       <ProductShowcase />
-      <ServiceFeeSection />
       <NaviFooter />
       <Toaster />
     </div>

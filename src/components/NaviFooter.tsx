@@ -21,7 +21,7 @@ const NaviFooter = () => {
               <li><a href="#features" className="hover:text-primary-foreground transition-colors">Features</a></li>
               <li><a href="#waitlist" className="hover:text-primary-foreground transition-colors">Join Waitlist</a></li>
               <li><a href="#" className="hover:text-primary-foreground transition-colors">Specifications</a></li>
-              <li><a href="#" className="hover:text-primary-foreground transition-colors">Support</a></li>
+              <li><a href="mailto:andy@hinavi.ai" className="hover:text-primary-foreground transition-colors">Support</a></li>
             </ul>
           </div>
           
@@ -31,7 +31,7 @@ const NaviFooter = () => {
               <li><a href="#" className="hover:text-primary-foreground transition-colors">About</a></li>
               <li><a href="#" className="hover:text-primary-foreground transition-colors">Privacy</a></li>
               <li><a href="#" className="hover:text-primary-foreground transition-colors">Terms</a></li>
-              <li><a href="#" className="hover:text-primary-foreground transition-colors">Contact</a></li>
+              <li><a href="mailto:andy@hinavi.ai" className="hover:text-primary-foreground transition-colors">Contact</a></li>
             </ul>
           </div>
           

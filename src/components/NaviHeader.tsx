@@ -68,6 +68,7 @@ const NaviHeader = () => {
             variant="outline" 
             size="sm"
             className="hidden md:flex border-border/50 hover:bg-secondary/50"
+            onClick={() => window.location.href = 'mailto:andy@hinavi.ai'}
           >
             Contact
           </Button>
