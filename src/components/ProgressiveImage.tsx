@@ -29,7 +29,7 @@ const ProgressiveImage: React.FC<ProgressiveImageProps> = ({
       return new Promise((resolve, reject) => {
         const img = new Image();
         if (priority) {
-          img.fetchPriority = priority;
+          (img as any).fetchpriority = priority;
         }
         img.onload = () => resolve();
         img.onerror = reject;
@@ -97,7 +97,7 @@ const ProgressiveImage: React.FC<ProgressiveImageProps> = ({
           filter: isLoading && currentSrc === lowSrc ? 'blur(1px)' : 'blur(0px)',
         }}
         loading="eager"
-        fetchPriority={fetchPriority}
+        {...({ fetchpriority: fetchPriority } as any)}
       />
       {isLoading && currentSrc === lowSrc && (
         <div className="absolute inset-0 bg-gradient-to-br from-transparent via-white/5 to-transparent animate-pulse" />

@@ -1,20 +1,15 @@
 
 
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { HelpCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import WaitlistForm from "./WaitlistForm";
 
 const WaitlistSection = () => {
   const blackVideoRef = useRef<HTMLVideoElement>(null);
   const whiteVideoRef = useRef<HTMLVideoElement>(null);
   const [isSafari, setIsSafari] = useState(false);
-  const [blackPopoverOpen, setBlackPopoverOpen] = useState(false);
-  const [whitePopoverOpen, setWhitePopoverOpen] = useState(false);
-  const [isWaitlistModalOpen, setIsWaitlistModalOpen] = useState(false);
+
 
   useEffect(() => {
     // Detect Safari browser
@@ -80,7 +75,7 @@ const WaitlistSection = () => {
 
     const playVideos = () => {
       if (blackVideo && blackVideo.paused) {
-        // Force reload the video source to fix freezing
+        // Force reload the video source to fix freezing on iOS Safari
         const currentTime = blackVideo.currentTime;
         blackVideo.load();
         blackVideo.currentTime = currentTime;
@@ -93,7 +88,7 @@ const WaitlistSection = () => {
       }
       
       if (whiteVideo && whiteVideo.paused) {
-        // Force reload the video source to fix freezing
+        // Force reload the video source to fix freezing on iOS Safari
         const currentTime = whiteVideo.currentTime;
         whiteVideo.load();
         whiteVideo.currentTime = currentTime;
@@ -106,56 +101,23 @@ const WaitlistSection = () => {
       }
     };
 
-    const pauseVideos = () => {
-      if (blackVideo && !blackVideo.paused) {
-        blackVideo.pause();
-      }
-      if (whiteVideo && !whiteVideo.paused) {
-        whiteVideo.pause();
-      }
-    };
-
-    // Handle multiple iOS Safari events
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        pauseVideos();
-      } else {
-        playVideos();
-      }
-    };
-
-    const handleFocus = () => {
-      playVideos();
-    };
-
-    const handleBlur = () => {
-      pauseVideos();
-    };
-
     const handlePageShow = (event: PageTransitionEvent) => {
       if (event.persisted) {
-        // Page was restored from cache
+        // Page was restored from cache - critical for iOS Safari
         playVideos();
       }
     };
 
-    // Add all the event listeners for comprehensive iOS Safari support
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('blur', handleBlur);
+    // Only handle page restoration for iOS Safari compatibility
+    // Remove navigation-based pausing to allow videos to continue when navigating away
     window.addEventListener('pageshow', handlePageShow);
 
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('focus', handleFocus);
-      window.removeEventListener('blur', handleBlur);
       window.removeEventListener('pageshow', handlePageShow);
     };
   }, []);
 
-  const handleJoinWaitlist = () => {
-    setIsWaitlistModalOpen(true);
-  };
+
 
   return (
     <section id="waitlist" className="py-32 bg-gradient-to-b from-surface to-background relative overflow-hidden">
@@ -224,52 +186,14 @@ const WaitlistSection = () => {
                 <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
               </div>
               
-              <div className="mb-8">
-                <div className="text-3xl font-light tracking-tight">
-                  $199 +
-                  <Popover open={blackPopoverOpen} onOpenChange={setBlackPopoverOpen}>
-                    <PopoverTrigger asChild>
-                      <span 
-                        className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
-                        onMouseEnter={() => setBlackPopoverOpen(true)}
-                        onMouseLeave={() => setBlackPopoverOpen(false)}
-                      >
-                        service fee
-                        <HelpCircle size={12} />
-                      </span>
-                    </PopoverTrigger>
-                    <PopoverContent 
-                      className="max-w-xs bg-background border shadow-md"
-                      onMouseEnter={() => setBlackPopoverOpen(true)}
-                      onMouseLeave={() => setBlackPopoverOpen(false)}
-                    >
-                      <div className="text-sm">
-                        <p className="font-medium mb-2">AI Provider Services</p>
-                        <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
-                        <div className="space-y-2">
-                          <div>
-                            <p className="font-medium">Provide Your Own API Keys</p>
-                            <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
-                          </div>
-                          <div>
-                            <p className="font-medium">Pay-as-You-Go Service</p>
-                            <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
-                          </div>
-                        </div>
-                        <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                </div>
-              </div>
+
               
-              <Button 
-                onClick={handleJoinWaitlist}
-                className="btn-luxury w-full"
-                size="lg"
-              >
-                Join Waitlist
-              </Button>
+              {/* Custom Expandable Waitlist Form */}
+              <div className="w-full">
+                <WaitlistForm 
+                  onSuccess={() => console.log('User joined waitlist successfully!')}
+                />
+              </div>
               
               <p className="text-xs text-muted-foreground mt-4">
                 No commitment • Early access updates
@@ -300,52 +224,14 @@ const WaitlistSection = () => {
                 <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
               </div>
               
-              <div className="mb-8">
-                <div className="text-3xl font-light tracking-tight">
-                  $199 + 
-                  <Popover open={whitePopoverOpen} onOpenChange={setWhitePopoverOpen}>
-                    <PopoverTrigger asChild>
-                      <span 
-                        className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
-                        onMouseEnter={() => setWhitePopoverOpen(true)}
-                        onMouseLeave={() => setWhitePopoverOpen(false)}
-                      >
-                        service fee
-                        <HelpCircle size={12} />
-                      </span>
-                    </PopoverTrigger>
-                    <PopoverContent 
-                      className="max-w-xs bg-background border shadow-md"
-                      onMouseEnter={() => setWhitePopoverOpen(true)}
-                      onMouseLeave={() => setWhitePopoverOpen(false)}
-                    >
-                      <div className="text-sm">
-                        <p className="font-medium mb-2">AI Provider Services</p>
-                        <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
-                        <div className="space-y-2">
-                          <div>
-                            <p className="font-medium">Provide Your Own API Keys</p>
-                            <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
-                          </div>
-                          <div>
-                            <p className="font-medium">Pay-as-You-Go Service</p>
-                            <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
-                          </div>
-                        </div>
-                        <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                </div>
-              </div>
+
               
-              <Button 
-                onClick={handleJoinWaitlist}
-                className="btn-pearl w-full"
-                size="lg"
-              >
-                Join Waitlist
-              </Button>
+              {/* Custom Expandable Waitlist Form */}
+              <div className="w-full">
+                <WaitlistForm 
+                  onSuccess={() => console.log('User joined waitlist successfully!')}
+                />
+              </div>
               
               <p className="text-xs text-muted-foreground mt-4">
                 No commitment • Early access updates
@@ -368,30 +254,12 @@ const WaitlistSection = () => {
               <div className="w-2 h-2 bg-green-500 rounded-full"></div>
               <span className="text-xs text-muted-foreground">Exclusive access</span>
             </div>
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">Early bird pricing</span>
-            </div>
+
           </div>
         </div>
       </div>
 
-      {/* Waitlist Modal */}
-      <Dialog open={isWaitlistModalOpen} onOpenChange={setIsWaitlistModalOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="text-center">Join the Waitlist</DialogTitle>
-          </DialogHeader>
-          <div className="mt-4">
-            <div 
-              className="w-full min-h-[300px] flex items-center justify-center"
-              dangerouslySetInnerHTML={{
-                __html: '<form-widget ucid="cpdWm9oR9lFjRr3SNkkR59rxXiE"></form-widget>'
-              }}
-            />
-          </div>
-        </DialogContent>
-      </Dialog>
+
     </section>
   );
 };
