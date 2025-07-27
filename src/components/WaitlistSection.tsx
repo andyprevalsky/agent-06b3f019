@@ -1,17 +1,20 @@
 
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { HelpCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
-const PreOrderSection = () => {
+const WaitlistSection = () => {
   const blackVideoRef = useRef<HTMLVideoElement>(null);
   const whiteVideoRef = useRef<HTMLVideoElement>(null);
   const [isSafari, setIsSafari] = useState(false);
   const [blackPopoverOpen, setBlackPopoverOpen] = useState(false);
   const [whitePopoverOpen, setWhitePopoverOpen] = useState(false);
+  const [isWaitlistModalOpen, setIsWaitlistModalOpen] = useState(false);
 
   useEffect(() => {
     // Detect Safari browser
@@ -150,34 +153,23 @@ const PreOrderSection = () => {
     };
   }, []);
 
-  const handlePreOrder = (variant: 'black' | 'white') => {
-    // Real Stripe Payment Links - create these in your Stripe dashboard
-    const checkoutUrls = {
-      black: 'https://buy.stripe.com/5kQ5kD6Dy4vr2Zr1OB5kk03', // Midnight Black payment link
-      white: 'https://buy.stripe.com/8x2dR9aTO6Dz6bD0Kx5kk02'  // Pearl White payment link
-    };
-
-    // Simulate creating a checkout session and redirect
-    console.log(`Creating checkout session for ${variant} Navi - $${variant === 'black' ? '299' : '199'}`);
-    
-    // Open mock Stripe checkout in new tab
-    window.open(checkoutUrls[variant], '_blank');
+  const handleJoinWaitlist = () => {
+    setIsWaitlistModalOpen(true);
   };
 
-
   return (
-    <section id="pre-order" className="py-32 bg-gradient-to-b from-surface to-background relative overflow-hidden">
+    <section id="waitlist" className="py-32 bg-gradient-to-b from-surface to-background relative overflow-hidden">
       <div className="container mx-auto px-6">
         <div className="text-center mb-16">
           <Badge variant="outline" className="mb-4 px-4 py-2 text-sm border-primary/20 text-primary">
             Limited Early Access
           </Badge>
           <h2 className="text-5xl font-light tracking-tight mb-6 reveal-up">
-            <span className="gradient-text">Reserve Your Navi</span>
+            <span className="gradient-text">Join the Waitlist</span>
           </h2>
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto reveal-up reveal-delay-1">
             Be among the first to experience the future of voice AI. 
-            Choose your preferred finish and secure your place in line.
+            Join our waitlist and we'll notify you when Navi becomes available.
           </p>
           
           <div className="text-center mt-8 mb-8 reveal-up reveal-delay-2">
@@ -272,15 +264,15 @@ const PreOrderSection = () => {
               </div>
               
               <Button 
-                onClick={() => handlePreOrder('black')}
+                onClick={handleJoinWaitlist}
                 className="btn-luxury w-full"
                 size="lg"
               >
-                Pre-order
+                Join Waitlist
               </Button>
               
               <p className="text-xs text-muted-foreground mt-4">
-                Free shipping • 30-day returns
+                No commitment • Early access updates
               </p>
             </CardContent>
           </Card>
@@ -348,15 +340,15 @@ const PreOrderSection = () => {
               </div>
               
               <Button 
-                onClick={() => handlePreOrder('white')}
+                onClick={handleJoinWaitlist}
                 className="btn-pearl w-full"
                 size="lg"
               >
-                Pre-order
+                Join Waitlist
               </Button>
               
               <p className="text-xs text-muted-foreground mt-4">
-                Free shipping • 30-day returns
+                No commitment • Early access updates
               </p>
             </CardContent>
           </Card>
@@ -365,26 +357,43 @@ const PreOrderSection = () => {
         
         <div className="text-center mt-12 reveal-up reveal-delay-3">
           <p className="text-sm text-muted-foreground mb-4">
-            Expected delivery: Q2 2024 • Limited quantities available
+            Expected launch: Q2 2024 • Join early for exclusive updates
           </p>
           <div className="flex justify-center space-x-8">
             <div className="flex items-center space-x-2">
               <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">Secure payment</span>
+              <span className="text-xs text-muted-foreground">No commitment</span>
             </div>
             <div className="flex items-center space-x-2">
               <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">No upfront charges</span>
+              <span className="text-xs text-muted-foreground">Exclusive access</span>
             </div>
             <div className="flex items-center space-x-2">
               <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">Cancel anytime</span>
+              <span className="text-xs text-muted-foreground">Early bird pricing</span>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Waitlist Modal */}
+      <Dialog open={isWaitlistModalOpen} onOpenChange={setIsWaitlistModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-center">Join the Waitlist</DialogTitle>
+          </DialogHeader>
+          <div className="mt-4">
+            <div 
+              className="w-full min-h-[300px] flex items-center justify-center"
+              dangerouslySetInnerHTML={{
+                __html: '<form-widget ucid="cpdWm9oR9lFjRr3SNkkR59rxXiE"></form-widget>'
+              }}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 };
 
-export default PreOrderSection;
+export default WaitlistSection;

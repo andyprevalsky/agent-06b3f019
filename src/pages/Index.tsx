@@ -1,10 +1,10 @@
+import { Toaster } from "@/components/ui/toaster";
 import NaviHeader from "@/components/NaviHeader";
 import HeroSection from "@/components/HeroSection";
-import PoweredByTicker from "@/components/PoweredByTicker";
-import ProductShowcase from "@/components/ProductShowcase";
 import FeaturesSection from "@/components/FeaturesSection";
-import PreOrderSection from "@/components/PreOrderSection";
-import CustomDesignForm from "@/components/CustomDesignForm";
+import WaitlistSection from "@/components/WaitlistSection";
+import ProductShowcase from "@/components/ProductShowcase";
+import ServiceFeeSection from "@/components/ServiceFeeSection";
 import NaviFooter from "@/components/NaviFooter";
 
 const Index = () => {
@@ -12,12 +12,12 @@ const Index = () => {
     <div className="min-h-screen">
       <NaviHeader />
       <HeroSection />
-      <PoweredByTicker />
       <FeaturesSection />
-      <PreOrderSection />
-      <CustomDesignForm />
-      
+      <WaitlistSection />
+      <ProductShowcase />
+      <ServiceFeeSection />
       <NaviFooter />
+      <Toaster />
     </div>
   );
 };

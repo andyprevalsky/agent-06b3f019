@@ -19,7 +19,7 @@ const NaviFooter = () => {
             <h4 className="font-semibold mb-4">Product</h4>
             <ul className="space-y-2 text-primary-foreground/70">
               <li><a href="#features" className="hover:text-primary-foreground transition-colors">Features</a></li>
-              <li><a href="#pre-order" className="hover:text-primary-foreground transition-colors">Pre-order</a></li>
+              <li><a href="#waitlist" className="hover:text-primary-foreground transition-colors">Join Waitlist</a></li>
               <li><a href="#" className="hover:text-primary-foreground transition-colors">Specifications</a></li>
               <li><a href="#" className="hover:text-primary-foreground transition-colors">Support</a></li>
             </ul>

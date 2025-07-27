@@ -13,8 +13,8 @@ const NaviHeader = () => {
           <a href="#features" className="text-muted-foreground hover:text-foreground transition-colors">
             Features
           </a>
-          <a href="#pre-order" className="text-muted-foreground hover:text-foreground transition-colors">
-            Pre-order
+          <a href="#waitlist" className="text-muted-foreground hover:text-foreground transition-colors">
+            Join Waitlist
           </a>
         </nav>
         
