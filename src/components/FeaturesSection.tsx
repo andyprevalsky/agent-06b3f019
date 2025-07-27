@@ -221,7 +221,7 @@ const FeaturesSection = () => {
                             className="w-full h-full object-contain"
                             style={{ objectPosition: 'center center' }}
                           >
-                            <source src="/navi-privacy-animation.webm" type="video/webm" />
+                            <source src="/navi-privacy-animation-2.webm" type="video/webm" />
                             <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
                               <div className="text-center">
                                 <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
