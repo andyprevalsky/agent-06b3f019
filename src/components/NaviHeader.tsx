@@ -48,10 +48,8 @@ const NaviHeader = () => {
         
         <div className="flex items-center space-x-3">
           {/* Mobile Join Waitlist Button - Reserve space to prevent layout shift */}
-          <Button 
-            variant="outline" 
-            size="sm"
-            className={`md:hidden bg-white/90 text-foreground border-gray-200 hover:bg-white hover:shadow-md transition-all duration-200 ${
+          <button 
+            className={`relative md:hidden px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 overflow-hidden hover:scale-105 ${
               showMobileButton ? 'opacity-100 visible' : 'opacity-0 invisible'
             }`}
             onClick={() => {
@@ -60,8 +58,10 @@ const NaviHeader = () => {
               });
             }}
           >
-            Join Waitlist
-          </Button>
+            <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg">
+            </div>
+            <span className="relative text-white z-10">Join Waitlist</span>
+          </button>
           
           {/* Desktop Contact Button */}
           <Button 

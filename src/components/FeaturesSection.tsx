@@ -293,6 +293,20 @@ const FeaturesSection = () => {
                     <h4 className="relative font-medium text-sm leading-tight">{feature.title}</h4>
                   </button>
                 ))}
+                
+                {/* Special Waitlist Button */}
+                <button
+                  onClick={() => {
+                    document.getElementById('waitlist')?.scrollIntoView({ 
+                      behavior: 'smooth' 
+                    });
+                  }}
+                  className="relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden border-2 border-transparent hover:scale-105"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg">
+                  </div>
+                  <h4 className="relative font-medium text-sm leading-tight text-white z-10">Join the Waitlist</h4>
+                </button>
               </div>
             </div>
           </div>
