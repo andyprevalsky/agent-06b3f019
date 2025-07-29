@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import VideoPlayer from "./VideoPlayer";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
@@ -186,66 +187,58 @@ const FeaturesSection = () => {
                   >
                     {/* Animation Area */}
                      {index === 1 ? (
-                      <div className="w-full h-[400px] flex items-center justify-center">
-                        <div className="w-full max-w-md h-full rounded-2xl overflow-hidden bg-surface">
-                          <video 
-                            autoPlay 
-                            loop 
-                            muted 
-                            playsInline
-                            preload="metadata"
-                            className="w-full h-full object-cover"
-                            style={{ objectPosition: 'center center' }}
-                          >
-                            <source src="/navi-customization-animation.webm" type="video/webm" />
-                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
-                              <div className="text-center">
-                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                      <div className="w-full h-[480px] flex items-center justify-center">
+                        <div className="w-[480px] h-full rounded-2xl overflow-hidden bg-surface">
+                          <VideoPlayer
+                            src="/navi-customization-animation.webm"
+                            className="w-full h-full"
+                            objectFit="cover"
+                            fallbackContent={
+                              <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                                <div className="text-center">
+                                  <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                                    <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                                  </div>
+                                  <p className="text-muted-foreground text-sm">Customization Animation</p>
                                 </div>
-                                <p className="text-muted-foreground text-sm">Customization Animation</p>
                               </div>
-                            </div>
-                          </video>
+                            }
+                          />
                         </div>
                       </div>
                     ) : index === 5 ? (
-                      <div className="w-full h-[400px] flex items-center justify-center">
-                        <div className="w-full max-w-md h-full rounded-2xl overflow-hidden bg-surface">
-                          <video 
-                            autoPlay 
-                            loop 
-                            muted 
-                            playsInline
-                            preload="metadata"
-                            className="w-full h-full object-contain"
-                            style={{ objectPosition: 'center center' }}
-                          >
-                            <source src="/navi-privacy-animation-2.webm" type="video/webm" />
-                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
-                              <div className="text-center">
-                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                      <div className="w-full h-[480px] flex items-center justify-center">
+                        <div className="w-[480px] h-full rounded-2xl overflow-hidden bg-surface">
+                          <VideoPlayer
+                            src="/navi-privacy-animation-2.webm"
+                            className="w-full h-full"
+                            objectFit="contain"
+                            fallbackContent={
+                              <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                                <div className="text-center">
+                                  <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                                    <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                                  </div>
+                                  <p className="text-muted-foreground text-sm">Privacy Animation</p>
                                 </div>
-                                <p className="text-muted-foreground text-sm">Privacy Animation</p>
                               </div>
-                            </div>
-                          </video>
+                            }
+                          />
                         </div>
                       </div>
                     ) : (
-                      <div className={`bg-muted/20 rounded-2xl p-12 h-[400px] flex items-center justify-center border transition-all duration-300 ${
+                      <div className={`bg-muted/20 rounded-2xl p-8 h-[480px] flex items-center justify-center border transition-all duration-300 ${
                         activeFeature === index ? 'border-primary/20 bg-primary/5' : 'border-border/20'
                       }`}>
                         <div className="text-center">
-                          <div className={`w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center transition-colors ${
+                          <div className={`w-32 h-32 rounded-full mx-auto mb-6 flex items-center justify-center transition-colors ${
                             activeFeature === index ? 'bg-primary/30' : 'bg-primary/20'
                           }`}>
-                            <div className={`w-12 h-12 rounded-full transition-colors ${
+                            <div className={`w-16 h-16 rounded-full transition-colors ${
                               activeFeature === index ? 'bg-primary/60' : 'bg-primary/40'
                             }`}></div>
                           </div>
-                          <p className="text-muted-foreground text-sm">Animation for {feature.title}</p>
+                          <p className="text-muted-foreground text-base">Animation for {feature.title}</p>
                         </div>
                       </div>
                     )}
@@ -338,60 +331,52 @@ const FeaturesSection = () => {
               <div className="feature-content-no-bg">
                 {/* Video/Animation Area for mobile */}
                 {index === 1 ? (
-                  <div className="w-full h-[280px] flex items-center justify-center mb-6">
-                    <div className="w-full max-w-sm h-full rounded-2xl overflow-hidden bg-surface">
-                      <video 
-                        autoPlay 
-                        loop 
-                        muted 
-                        playsInline
-                        preload="metadata"
-                        className="w-full h-full object-cover"
-                        style={{ objectPosition: 'center center' }}
-                      >
-                        <source src="/navi-customization-animation.webm" type="video/webm" />
-                        <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
-                          <div className="text-center">
-                            <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                              <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                  <div className="w-full h-[320px] flex items-center justify-center mb-6">
+                    <div className="w-[320px] h-full rounded-2xl overflow-hidden bg-surface">
+                      <VideoPlayer
+                        src="/navi-customization-animation.webm"
+                        className="w-full h-full"
+                        objectFit="cover"
+                        fallbackContent={
+                          <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                            <div className="text-center">
+                              <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                                <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                              </div>
+                              <p className="text-muted-foreground text-xs">Customization Animation</p>
                             </div>
-                            <p className="text-muted-foreground text-xs">Customization Animation</p>
                           </div>
-                        </div>
-                      </video>
+                        }
+                      />
                     </div>
                   </div>
                 ) : index === 5 ? (
-                  <div className="w-full h-[280px] flex items-center justify-center mb-6">
-                    <div className="w-full max-w-sm h-full rounded-2xl overflow-hidden bg-surface">
-                      <video 
-                        autoPlay 
-                        loop 
-                        muted 
-                        playsInline
-                        preload="metadata"
-                        className="w-full h-full object-contain"
-                        style={{ objectPosition: 'center center' }}
-                      >
-                        <source src="/navi-privacy-animation-2.webm" type="video/webm" />
-                        <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
-                          <div className="text-center">
-                            <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                              <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                  <div className="w-full h-[320px] flex items-center justify-center mb-6">
+                    <div className="w-[320px] h-full rounded-2xl overflow-hidden bg-surface">
+                      <VideoPlayer
+                        src="/navi-privacy-animation-2.webm"
+                        className="w-full h-full"
+                        objectFit="contain"
+                        fallbackContent={
+                          <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                            <div className="text-center">
+                              <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                                <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                              </div>
+                              <p className="text-muted-foreground text-xs">Privacy Animation</p>
                             </div>
-                            <p className="text-muted-foreground text-xs">Privacy Animation</p>
                           </div>
-                        </div>
-                      </video>
+                        }
+                      />
                     </div>
                   </div>
                 ) : (
-                  <div className="bg-muted/20 rounded-2xl p-8 h-[200px] flex items-center justify-center border border-border/20 mb-6">
+                  <div className="bg-muted/20 rounded-2xl p-6 h-[240px] flex items-center justify-center border border-border/20 mb-6">
                     <div className="text-center">
-                      <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                        <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                      <div className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                        <div className="w-10 h-10 rounded-full bg-primary/60"></div>
                       </div>
-                      <p className="text-muted-foreground text-xs">Animation for {feature.title}</p>
+                      <p className="text-muted-foreground text-sm">Animation for {feature.title}</p>
                     </div>
                   </div>
                 )}
