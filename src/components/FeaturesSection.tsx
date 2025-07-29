@@ -249,24 +249,6 @@ const FeaturesSection = () => {
                         </div>
                       </div>
                     )}
-                    
-                    {/* Description */}
-                    <div className="space-y-4">
-                      <p className="text-sm text-muted-foreground leading-relaxed">{feature.description}</p>
-                      
-                      {feature.details.length > 0 && (
-                        <ul className="space-y-3">
-                          {feature.details.map((detail, detailIndex) => (
-                            <li key={detailIndex} className="flex items-start space-x-3">
-                              <div className={`w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 transition-colors ${
-                                activeFeature === index ? 'bg-primary' : 'bg-muted-foreground/40'
-                              }`}></div>
-                              <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
                   </div>
                 ))}
               </div>
@@ -275,23 +257,56 @@ const FeaturesSection = () => {
             {/* Feature Titles Menu - Right Side */}
             <div className="w-80">
               <div className="sticky top-24 space-y-2">
-                {features.map((feature, index) => (
-                  <button
-                    key={feature.title}
-                    onClick={() => handleFeatureClick(index)}
-                    className={`relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden ${
-                      activeFeature === index
-                        ? 'text-foreground border-2 border-transparent'
-                        : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground border-2 border-transparent'
-                    }`}
-                  >
-                    {activeFeature === index && (
-                      <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg p-[2px]">
-                        <div className="w-full h-full bg-background rounded-md"></div>
+                                {features.map((feature, index) => (
+                  <div key={feature.title} className="relative">
+                    {/* Unified card structure for all items */}
+                    <div className={`relative overflow-hidden transition-all duration-500 ${
+                      activeFeature === index ? 'border-2 border-transparent rounded-lg' : 'border-2 border-transparent rounded-lg'
+                    }`}>
+                      {/* Gradient border for active item */}
+                      {activeFeature === index && (
+                        <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg p-[2px]">
+                          <div className="w-full h-full bg-background rounded-md"></div>
+                        </div>
+                      )}
+                      
+                      {/* Header button */}
+                      <button
+                        onClick={() => handleFeatureClick(index)}
+                        className={`relative w-full text-left p-4 transition-all duration-500 ${
+                          activeFeature === index
+                            ? 'text-foreground'
+                            : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <h4 className="relative font-medium text-sm leading-tight">{feature.title}</h4>
+                      </button>
+                      
+                      {/* Expandable content with proper animation timing */}
+                      <div 
+                        className={`relative overflow-hidden transition-all duration-700 ease-in-out ${
+                          activeFeature === index 
+                            ? 'max-h-96 opacity-100 delay-700' 
+                            : 'max-h-0 opacity-0 delay-0'
+                        }`}
+                      >
+                        <div className="relative px-4 pb-4">
+                          <p className="text-sm text-muted-foreground leading-relaxed mb-4">{feature.description}</p>
+                          
+                          {feature.details.length > 0 && (
+                            <ul className="space-y-3">
+                              {feature.details.map((detail, detailIndex) => (
+                                <li key={detailIndex} className="flex items-start space-x-3">
+                                  <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
+                                  <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
                       </div>
-                    )}
-                    <h4 className="relative font-medium text-sm leading-tight">{feature.title}</h4>
-                  </button>
+                    </div>
+                  </div>
                 ))}
                 
                 {/* Special Waitlist Button */}
@@ -389,7 +404,7 @@ const FeaturesSection = () => {
                     <ul className="space-y-3">
                       {feature.details.map((detail, detailIndex) => (
                         <li key={detailIndex} className="flex items-start space-x-3 feature-detail">
-                          <div className="w-1.5 h-1.5 bg-primary rounded-full mt-2 flex-shrink-0"></div>
+                          <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
                           <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
                         </li>
                       ))}
