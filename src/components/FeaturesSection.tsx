@@ -206,6 +206,26 @@ const FeaturesSection = () => {
                           />
                         </div>
                       </div>
+                    ) : index === 3 ? (
+                      <div className="w-full h-[480px] flex items-center justify-center">
+                        <div className="w-[480px] h-full rounded-2xl overflow-hidden bg-surface">
+                          <VideoPlayer
+                            src="/navi-engine-animation.webm"
+                            className="w-full h-full"
+                            objectFit="cover"
+                            fallbackContent={
+                              <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                                <div className="text-center">
+                                  <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                                    <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                                  </div>
+                                  <p className="text-muted-foreground text-sm">Agent Engine Animation</p>
+                                </div>
+                              </div>
+                            }
+                          />
+                        </div>
+                      </div>
                     ) : index === 5 ? (
                       <div className="w-full h-[480px] flex items-center justify-center">
                         <div className="w-[480px] h-full rounded-2xl overflow-hidden bg-surface">
@@ -344,6 +364,26 @@ const FeaturesSection = () => {
                                 <div className="w-8 h-8 rounded-full bg-primary/60"></div>
                               </div>
                               <p className="text-muted-foreground text-xs">Customization Animation</p>
+                            </div>
+                          </div>
+                        }
+                      />
+                    </div>
+                  </div>
+                ) : index === 3 ? (
+                  <div className="w-full h-[320px] flex items-center justify-center mb-6">
+                    <div className="w-[320px] h-full rounded-2xl overflow-hidden bg-surface">
+                      <VideoPlayer
+                        src="/navi-engine-animation.webm"
+                        className="w-full h-full"
+                        objectFit="cover"
+                        fallbackContent={
+                          <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                            <div className="text-center">
+                              <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                                <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                              </div>
+                              <p className="text-muted-foreground text-xs">Agent Engine Animation</p>
                             </div>
                           </div>
                         }

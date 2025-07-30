@@ -18,7 +18,7 @@ const WaitlistSection = () => {
           </h2>
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto reveal-up reveal-delay-1">
             Be among the first to experience the future of voice AI. 
-            Join our waitlist and we'll notify you when Navi becomes available.
+            Join our waitlist and we'll notify you when you are next in line.
           </p>
           
           <div className="text-center mt-8 mb-8 reveal-up reveal-delay-2">

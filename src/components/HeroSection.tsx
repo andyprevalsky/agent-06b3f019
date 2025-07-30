@@ -150,7 +150,7 @@ const HeroSection = () => {
 
 
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-gradient-to-br from-background via-surface to-secondary/30">
+    <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-gradient-to-br from-background via-surface to-secondary/30 grid-background">
       <FloatingParticles />
       
       <div className="container mx-auto px-6 relative z-10">

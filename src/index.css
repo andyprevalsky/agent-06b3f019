@@ -968,6 +968,15 @@
     bottom: calc(env(safe-area-inset-bottom, 0px) + 1rem);
   }
   
+  /* Grid background pattern for hero section */
+  .grid-background {
+    background-image: 
+      linear-gradient(hsl(240 8% 90% / 0.3) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(240 8% 90% / 0.3) 1px, transparent 1px);
+    background-size: 40px 40px;
+    background-position: 0 0, 0 0;
+  }
+  
   /* iOS Safari viewport height fixes */
   .min-h-screen-safe {
     min-height: 100vh;
