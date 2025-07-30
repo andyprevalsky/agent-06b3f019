@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, forwardRef } from "react";
 
 interface VideoPlayerProps {
   src: string;
@@ -15,7 +15,7 @@ interface VideoPlayerProps {
   priority?: boolean; // For immediate loading vs delayed loading
 }
 
-const VideoPlayer: React.FC<VideoPlayerProps> = ({
+const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   src,
   poster,
   className = "w-full h-full object-cover",
@@ -28,8 +28,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   preload = 'metadata',
   onLoad,
   priority = false
-}) => {
+}, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const actualVideoRef = ref || videoRef;
   const [shouldLoadVideo, setShouldLoadVideo] = useState(priority);
   const [isSafari, setIsSafari] = useState(false);
 
@@ -57,7 +58,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   useEffect(() => {
     if (!shouldLoadVideo) return;
     
-    const video = videoRef.current;
+    const video = (actualVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current;
     if (!video) return;
 
     const playVideo = () => {
@@ -133,7 +134,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   return (
     <video 
-      ref={videoRef}
+      ref={actualVideoRef}
       autoPlay={autoPlay}
       loop={loop}
       muted={muted}
@@ -147,6 +148,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {fallbackContent}
     </video>
   );
-};
+});
+
+VideoPlayer.displayName = 'VideoPlayer';
 
 export default VideoPlayer; 

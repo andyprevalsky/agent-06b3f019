@@ -7,6 +7,14 @@ const FeaturesSection = () => {
   const [isClickScrolling, setIsClickScrolling] = useState(false);
   const [clickedFeature, setClickedFeature] = useState<number | null>(null);
   const sectionRef = useRef<HTMLDivElement>(null);
+  
+  // Video refs for restarting animations
+  const customizationVideoRef = useRef<HTMLVideoElement>(null);
+  const agentEngineVideoRef = useRef<HTMLVideoElement>(null);
+  const privacyVideoRef = useRef<HTMLVideoElement>(null);
+  const mobileCustomizationVideoRef = useRef<HTMLVideoElement>(null);
+  const mobileAgentEngineVideoRef = useRef<HTMLVideoElement>(null);
+  const mobilePrivacyVideoRef = useRef<HTMLVideoElement>(null);
 
   const features = [
     {
@@ -83,24 +91,25 @@ const FeaturesSection = () => {
       
       if (clickedFeature !== null) return;
       
-      const scrollPosition = window.scrollY + window.innerHeight / 2;
-      const featureElements = sectionRef.current.querySelectorAll('.hidden.lg\\:block [data-index]');
+      const sectionElement = sectionRef.current;
+      if (!sectionElement) return;
       
-      let closestIndex = 0;
-      let closestDistance = Infinity;
+      const sectionRect = sectionElement.getBoundingClientRect();
+      const sectionTop = sectionRect.top + window.scrollY;
+      const sectionHeight = sectionRect.height;
+      const viewportCenter = window.scrollY + window.innerHeight / 2;
       
-      featureElements.forEach((element, index) => {
-        const rect = element.getBoundingClientRect();
-        const elementTop = rect.top + window.scrollY;
-        const distance = Math.abs(elementTop - scrollPosition);
+      // Only update when we're within the features section
+      if (viewportCenter >= sectionTop && viewportCenter <= sectionTop + sectionHeight) {
+        // Calculate progress through the section (0 to 1)
+        const progress = (viewportCenter - sectionTop) / sectionHeight;
         
-        if (distance < closestDistance) {
-          closestDistance = distance;
-          closestIndex = index;
-        }
-      });
-      
-      setActiveFeature(closestIndex);
+        // Divide into equal zones for each feature
+        const featureIndex = Math.floor(progress * features.length);
+        const clampedIndex = Math.max(0, Math.min(features.length - 1, featureIndex));
+        
+        setActiveFeature(clampedIndex);
+      }
     };
 
     // Update immediately on scroll, but throttle for performance
@@ -142,6 +151,30 @@ const FeaturesSection = () => {
     };
   }, [clickedFeature]);
 
+  // Restart videos when they become active
+  useEffect(() => {
+    const restartVideo = (videoRef: React.RefObject<HTMLVideoElement>) => {
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0;
+        videoRef.current.play().catch(() => {
+          // If autoplay fails, that's okay
+        });
+      }
+    };
+
+    // Restart appropriate videos based on active feature
+    if (activeFeature === 1) {
+      restartVideo(customizationVideoRef);
+      restartVideo(mobileCustomizationVideoRef);
+    } else if (activeFeature === 3) {
+      restartVideo(agentEngineVideoRef);
+      restartVideo(mobileAgentEngineVideoRef);
+    } else if (activeFeature === 5) {
+      restartVideo(privacyVideoRef);
+      restartVideo(mobilePrivacyVideoRef);
+    }
+  }, [activeFeature]);
+
   const handleFeatureClick = (index: number) => {
     setClickedFeature(index);
     setActiveFeature(index);
@@ -175,103 +208,110 @@ const FeaturesSection = () => {
         
         {/* Desktop Layout */}
         <div className="hidden lg:block max-w-7xl mx-auto">
-          <div className="flex gap-12">
-            {/* Animations and Descriptions - Left Side */}
-            <div className="flex-1">
-              <div className="space-y-12">
-                {features.map((feature, index) => (
-                  <div
-                    key={feature.title}
-                    data-index={index}
-                    className="space-y-6"
-                  >
-                    {/* Animation Area */}
-                     {index === 1 ? (
-                      <div className="w-full h-[480px] flex items-center justify-center">
-                        <div className="w-[480px] h-full rounded-2xl overflow-hidden bg-surface">
-                          <VideoPlayer
-                            src="/navi-customization-animation.webm"
-                            className="w-full h-full"
-                            objectFit="cover"
-                            fallbackContent={
-                              <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
-                                <div className="text-center">
-                                  <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                    <div className="w-12 h-12 rounded-full bg-primary/60"></div>
-                                  </div>
-                                  <p className="text-muted-foreground text-sm">Customization Animation</p>
-                                </div>
-                              </div>
-                            }
-                          />
-                        </div>
-                      </div>
-                    ) : index === 3 ? (
-                      <div className="w-full h-[480px] flex items-center justify-center">
-                        <div className="w-[480px] h-full rounded-2xl overflow-hidden bg-surface">
-                          <VideoPlayer
-                            src="/navi-engine-animation.webm"
-                            className="w-full h-full"
-                            objectFit="cover"
-                            fallbackContent={
-                              <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
-                                <div className="text-center">
-                                  <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                    <div className="w-12 h-12 rounded-full bg-primary/60"></div>
-                                  </div>
-                                  <p className="text-muted-foreground text-sm">Agent Engine Animation</p>
-                                </div>
-                              </div>
-                            }
-                          />
-                        </div>
-                      </div>
-                    ) : index === 5 ? (
-                      <div className="w-full h-[480px] flex items-center justify-center">
-                        <div className="w-[480px] h-full rounded-2xl overflow-hidden bg-surface">
-                          <VideoPlayer
-                            src="/navi-privacy-animation-2.webm"
-                            className="w-full h-full"
-                            objectFit="contain"
-                            fallbackContent={
-                              <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
-                                <div className="text-center">
-                                  <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                    <div className="w-12 h-12 rounded-full bg-primary/60"></div>
-                                  </div>
-                                  <p className="text-muted-foreground text-sm">Privacy Animation</p>
-                                </div>
-                              </div>
-                            }
-                          />
-                        </div>
-                      </div>
-                    ) : (
-                      <div className={`bg-muted/20 rounded-2xl p-8 h-[480px] flex items-center justify-center border transition-all duration-300 ${
-                        activeFeature === index ? 'border-primary/20 bg-primary/5' : 'border-border/20'
+          <div className="flex gap-12 min-h-[300vh]">
+            {/* Fixed Animation Container - Like Menu */}
+            <div className="flex-1 flex justify-center">
+              <div className="w-[480px]">
+                <div className="sticky top-24">
+                  <div className="w-full h-[480px] flex items-center justify-center relative">
+                    <div className="w-full h-full rounded-2xl overflow-hidden bg-surface relative">
+                      {/* Customization Animation */}
+                      <div className={`absolute inset-0 transition-opacity duration-700 ${
+                        activeFeature === 1 ? 'opacity-100' : 'opacity-0'
                       }`}>
-                        <div className="text-center">
-                          <div className={`w-32 h-32 rounded-full mx-auto mb-6 flex items-center justify-center transition-colors ${
-                            activeFeature === index ? 'bg-primary/30' : 'bg-primary/20'
-                          }`}>
-                            <div className={`w-16 h-16 rounded-full transition-colors ${
-                              activeFeature === index ? 'bg-primary/60' : 'bg-primary/40'
-                            }`}></div>
+                        <VideoPlayer
+                          ref={customizationVideoRef}
+                          src="/navi-customization-animation.webm"
+                          className="w-full h-full object-cover"
+                          style={{ objectPosition: 'center center' }}
+                          objectFit="cover"
+                          fallbackContent={
+                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                              <div className="text-center">
+                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                                </div>
+                                <p className="text-muted-foreground text-sm">Customization Animation</p>
+                              </div>
+                            </div>
+                          }
+                        />
+                      </div>
+
+                      {/* Agent Engine Animation */}
+                      <div className={`absolute inset-0 transition-opacity duration-700 ${
+                        activeFeature === 3 ? 'opacity-100' : 'opacity-0'
+                      }`}>
+                        <VideoPlayer
+                          ref={agentEngineVideoRef}
+                          src="/navi-engine-animation.webm"
+                          className="w-full h-full object-cover"
+                          style={{ objectPosition: 'center center' }}
+                          objectFit="cover"
+                          fallbackContent={
+                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                              <div className="text-center">
+                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                                </div>
+                                <p className="text-muted-foreground text-sm">Agent Engine Animation</p>
+                              </div>
+                            </div>
+                          }
+                        />
+                      </div>
+
+                      {/* Privacy Animation */}
+                      <div className={`absolute inset-0 transition-opacity duration-700 ${
+                        activeFeature === 5 ? 'opacity-100' : 'opacity-0'
+                      }`}>
+                        <VideoPlayer
+                          ref={privacyVideoRef}
+                          src="/navi-privacy-animation-2.webm"
+                          className="w-full h-full object-contain"
+                          style={{ objectPosition: 'center center' }}
+                          objectFit="contain"
+                          fallbackContent={
+                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                              <div className="text-center">
+                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                                </div>
+                                <p className="text-muted-foreground text-sm">Privacy Animation</p>
+                              </div>
+                            </div>
+                          }
+                        />
+                      </div>
+
+                      {/* Default/Placeholder Animation */}
+                      <div className={`absolute inset-0 transition-opacity duration-700 ${
+                        ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
+                      }`}>
+                        <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                          <div className="text-center">
+                            <div className="w-32 h-32 rounded-full mx-auto mb-6 flex items-center justify-center bg-primary/30">
+                              <div className="w-16 h-16 rounded-full bg-primary/60"></div>
+                            </div>
+                            <p className="text-muted-foreground text-base">
+                              {features[activeFeature]?.title || 'Feature Animation'}
+                            </p>
                           </div>
-                          <p className="text-muted-foreground text-base">Animation for {feature.title}</p>
                         </div>
                       </div>
-                    )}
+                    </div>
                   </div>
-                ))}
+                </div>
               </div>
             </div>
 
+
+
             {/* Feature Titles Menu - Right Side */}
             <div className="w-80">
-              <div className="sticky top-24 space-y-2">
+              <div className="sticky top-24 space-y-8">
                                 {features.map((feature, index) => (
-                  <div key={feature.title} className="relative">
+                  <div key={feature.title} className="relative" data-index={index}>
                     {/* Unified card structure for all items */}
                     <div className={`relative overflow-hidden transition-all duration-500 ${
                       activeFeature === index ? 'border-2 border-transparent rounded-lg' : 'border-2 border-transparent rounded-lg'
@@ -341,21 +381,22 @@ const FeaturesSection = () => {
         </div>
 
         {/* Mobile Layout */}
-        <div className="lg:hidden space-y-8">
-          {features.map((feature, index) => (
-            <div 
-              key={feature.title}
-              data-index={index}
-              className={`feature-card-no-bg reveal-up reveal-delay-${index + 1} feature-visible`}
-            >
-              <div className="feature-content-no-bg">
-                {/* Video/Animation Area for mobile */}
-                {index === 1 ? (
-                  <div className="w-full h-[320px] flex items-center justify-center mb-6">
-                    <div className="w-[320px] h-full rounded-2xl overflow-hidden bg-surface">
+        <div className="lg:hidden min-h-[200vh]">
+          {/* Fixed Animation Container for Mobile - Like Menu */}
+          <div className="flex justify-center">
+            <div className="w-[320px]">
+              <div className="sticky top-16 mb-8 z-10">
+                <div className="w-full h-[320px] flex items-center justify-center">
+                  <div className="w-full h-full rounded-2xl overflow-hidden bg-surface relative">
+                    {/* Customization Animation */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 ${
+                      activeFeature === 1 ? 'opacity-100' : 'opacity-0'
+                    }`}>
                       <VideoPlayer
+                        ref={mobileCustomizationVideoRef}
                         src="/navi-customization-animation.webm"
-                        className="w-full h-full"
+                        className="w-full h-full object-cover"
+                        style={{ objectPosition: 'center center' }}
                         objectFit="cover"
                         fallbackContent={
                           <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
@@ -369,13 +410,16 @@ const FeaturesSection = () => {
                         }
                       />
                     </div>
-                  </div>
-                ) : index === 3 ? (
-                  <div className="w-full h-[320px] flex items-center justify-center mb-6">
-                    <div className="w-[320px] h-full rounded-2xl overflow-hidden bg-surface">
+
+                    {/* Agent Engine Animation */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 ${
+                      activeFeature === 3 ? 'opacity-100' : 'opacity-0'
+                    }`}>
                       <VideoPlayer
+                        ref={mobileAgentEngineVideoRef}
                         src="/navi-engine-animation.webm"
-                        className="w-full h-full"
+                        className="w-full h-full object-cover"
+                        style={{ objectPosition: 'center center' }}
                         objectFit="cover"
                         fallbackContent={
                           <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
@@ -389,13 +433,16 @@ const FeaturesSection = () => {
                         }
                       />
                     </div>
-                  </div>
-                ) : index === 5 ? (
-                  <div className="w-full h-[320px] flex items-center justify-center mb-6">
-                    <div className="w-[320px] h-full rounded-2xl overflow-hidden bg-surface">
+
+                    {/* Privacy Animation */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 ${
+                      activeFeature === 5 ? 'opacity-100' : 'opacity-0'
+                    }`}>
                       <VideoPlayer
+                        ref={mobilePrivacyVideoRef}
                         src="/navi-privacy-animation-2.webm"
-                        className="w-full h-full"
+                        className="w-full h-full object-contain"
+                        style={{ objectPosition: 'center center' }}
                         objectFit="contain"
                         fallbackContent={
                           <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
@@ -409,36 +456,56 @@ const FeaturesSection = () => {
                         }
                       />
                     </div>
-                  </div>
-                ) : (
-                  <div className="bg-muted/20 rounded-2xl p-6 h-[240px] flex items-center justify-center border border-border/20 mb-6">
-                    <div className="text-center">
-                      <div className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                        <div className="w-10 h-10 rounded-full bg-primary/60"></div>
+
+                    {/* Default/Placeholder Animation */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 ${
+                      ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
+                    }`}>
+                      <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                        <div className="text-center">
+                          <div className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                            <div className="w-10 h-10 rounded-full bg-primary/60"></div>
+                          </div>
+                          <p className="text-muted-foreground text-sm">
+                            {features[activeFeature]?.title || 'Feature Animation'}
+                          </p>
+                        </div>
                       </div>
-                      <p className="text-muted-foreground text-sm">Animation for {feature.title}</p>
                     </div>
                   </div>
-                )}
-
-                <div className="feature-text">
-                  <h3 className="text-2xl font-semibold mb-4 text-foreground">{feature.title}</h3>
-                  <p className="text-muted-foreground mb-6">{feature.description}</p>
-                  
-                  {feature.details.length > 0 && (
-                    <ul className="space-y-3">
-                      {feature.details.map((detail, detailIndex) => (
-                        <li key={detailIndex} className="flex items-start space-x-3 feature-detail">
-                          <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
-                          <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
                 </div>
               </div>
             </div>
-          ))}
+          </div>
+
+          {/* Feature Content Cards */}
+          <div className="space-y-8 pt-16">
+            {features.map((feature, index) => (
+              <div 
+                key={feature.title}
+                data-index={index}
+                className={`feature-card-no-bg reveal-up reveal-delay-${index + 1} feature-visible`}
+              >
+                <div className="feature-content-no-bg">
+                  <div className="feature-text">
+                    <h3 className="text-2xl font-semibold mb-4 text-foreground">{feature.title}</h3>
+                    <p className="text-muted-foreground mb-6">{feature.description}</p>
+                    
+                    {feature.details.length > 0 && (
+                      <ul className="space-y-3">
+                        {feature.details.map((detail, detailIndex) => (
+                          <li key={detailIndex} className="flex items-start space-x-3 feature-detail">
+                            <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
+                            <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </section>
