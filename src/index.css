@@ -976,6 +976,49 @@
     background-size: 40px 40px;
     background-position: 0 0, 0 0;
   }
+
+  /* 3D perspective grid background for animations */
+  .grid-3d-background {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: 100vw;
+    height: 120vh;
+    transform: translate(-50%, -50%);
+    overflow: hidden;
+    perspective: 800px;
+    perspective-origin: center 60%;
+    pointer-events: none;
+    z-index: 0;
+    transition: clip-path 0.1s ease-out;
+  }
+
+  .grid-3d-wall {
+    position: absolute;
+    top: 0;
+    left: -50%;
+    right: -50%;
+    height: 50%;
+    background-image: 
+      linear-gradient(hsl(240 8% 88% / 0.6) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(240 8% 88% / 0.6) 1px, transparent 1px);
+    background-size: 40px 40px;
+    transform-origin: bottom center;
+  }
+
+  .grid-3d-floor {
+    position: absolute;
+    bottom: 0;
+    left: -50%;
+    right: -50%;
+    height: 50%;
+    background-image: 
+      linear-gradient(hsl(240 8% 88% / 0.7) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(240 8% 88% / 0.7) 1px, transparent 1px);
+    background-size: 40px 40px;
+    transform-origin: top center;
+    transform: rotateX(75deg) translateZ(-100px);
+  }
   
   /* iOS Safari viewport height fixes */
   .min-h-screen-safe {

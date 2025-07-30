@@ -6,6 +6,7 @@ const FeaturesSection = () => {
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
   const [isClickScrolling, setIsClickScrolling] = useState(false);
   const [clickedFeature, setClickedFeature] = useState<number | null>(null);
+  const [featuresClipPath, setFeaturesClipPath] = useState('inset(100% 0% 0% 0%)');
   const sectionRef = useRef<HTMLDivElement>(null);
   
   // Video refs for restarting animations
@@ -89,8 +90,6 @@ const FeaturesSection = () => {
         setClickedFeature(null);
       }, 150);
       
-      if (clickedFeature !== null) return;
-      
       const sectionElement = sectionRef.current;
       if (!sectionElement) return;
       
@@ -98,6 +97,30 @@ const FeaturesSection = () => {
       const sectionTop = sectionRect.top + window.scrollY;
       const sectionHeight = sectionRect.height;
       const viewportCenter = window.scrollY + window.innerHeight / 2;
+      
+      // Calculate clip-path to constrain grid to features section area
+      const viewportHeight = window.innerHeight;
+      
+      // If section is completely below viewport, hide completely
+      if (sectionRect.top >= viewportHeight) {
+        setFeaturesClipPath('inset(100% 0% 0% 0%)');
+        return;
+      }
+      
+      // If section is completely above viewport, hide completely
+      if (sectionRect.bottom <= 0) {
+        setFeaturesClipPath('inset(100% 0% 0% 0%)');
+        return;
+      }
+      
+      // Calculate visible portion
+      const topClip = Math.max(0, sectionRect.top) / viewportHeight * 100;
+      const bottomClip = Math.max(0, viewportHeight - sectionRect.bottom) / viewportHeight * 100;
+      
+      const clipPath = `inset(${topClip}% 0% ${bottomClip}% 0%)`;
+      setFeaturesClipPath(clipPath);
+      
+      if (clickedFeature !== null) return;
       
       // Only update when we're within the features section
       if (viewportCenter >= sectionTop && viewportCenter <= sectionTop + sectionHeight) {
@@ -206,17 +229,26 @@ const FeaturesSection = () => {
           </p>
         </div>
         
+              {/* 3D Grid Background - Fixed with Clip Path */}
+      <div 
+        className="grid-3d-background"
+        style={{ clipPath: featuresClipPath }}
+      >
+          <div className="grid-3d-wall"></div>
+          <div className="grid-3d-floor"></div>
+        </div>
+
         {/* Desktop Layout */}
-        <div className="hidden lg:block max-w-7xl mx-auto">
-          <div className="flex gap-12 min-h-[300vh]">
+        <div className="hidden lg:block max-w-7xl mx-auto relative">
+          <div className="flex gap-12 min-h-[300vh] relative z-10">
             {/* Fixed Animation Container - Like Menu */}
-            <div className="flex-1 flex justify-center">
+            <div className="flex-1 flex justify-center relative z-20">
               <div className="w-[480px]">
                 <div className="sticky top-24">
                   <div className="w-full h-[480px] flex items-center justify-center relative">
-                    <div className="w-full h-full rounded-2xl overflow-hidden bg-surface relative">
+                    <div className="w-full h-full rounded-2xl overflow-hidden bg-surface/80 backdrop-blur-sm relative">
                       {/* Customization Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 ${
+                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                         activeFeature === 1 ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <VideoPlayer
@@ -239,7 +271,7 @@ const FeaturesSection = () => {
                       </div>
 
                       {/* Agent Engine Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 ${
+                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                         activeFeature === 3 ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <VideoPlayer
@@ -262,7 +294,7 @@ const FeaturesSection = () => {
                       </div>
 
                       {/* Privacy Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 ${
+                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                         activeFeature === 5 ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <VideoPlayer
@@ -285,7 +317,7 @@ const FeaturesSection = () => {
                       </div>
 
                       {/* Default/Placeholder Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 ${
+                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                         ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
@@ -308,8 +340,8 @@ const FeaturesSection = () => {
 
 
             {/* Feature Titles Menu - Right Side */}
-            <div className="w-80">
-              <div className="sticky top-24 space-y-8">
+            <div className="w-80 relative z-20">
+              <div className="sticky top-24 space-y-8 bg-surface/30 backdrop-blur-sm rounded-2xl p-4">
                                 {features.map((feature, index) => (
                   <div key={feature.title} className="relative" data-index={index}>
                     {/* Unified card structure for all items */}
@@ -381,15 +413,15 @@ const FeaturesSection = () => {
         </div>
 
         {/* Mobile Layout */}
-        <div className="lg:hidden min-h-[200vh]">
+        <div className="lg:hidden min-h-[200vh] relative">
           {/* Fixed Animation Container for Mobile - Like Menu */}
-          <div className="flex justify-center">
+          <div className="flex justify-center relative z-20">
             <div className="w-[320px]">
-              <div className="sticky top-16 mb-8 z-10">
+              <div className="sticky top-16 mb-8">
                 <div className="w-full h-[320px] flex items-center justify-center">
-                  <div className="w-full h-full rounded-2xl overflow-hidden bg-surface relative">
+                  <div className="w-full h-full rounded-2xl overflow-hidden bg-surface/80 backdrop-blur-sm relative">
                     {/* Customization Animation */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 ${
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                       activeFeature === 1 ? 'opacity-100' : 'opacity-0'
                     }`}>
                       <VideoPlayer
@@ -412,7 +444,7 @@ const FeaturesSection = () => {
                     </div>
 
                     {/* Agent Engine Animation */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 ${
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                       activeFeature === 3 ? 'opacity-100' : 'opacity-0'
                     }`}>
                       <VideoPlayer
@@ -435,7 +467,7 @@ const FeaturesSection = () => {
                     </div>
 
                     {/* Privacy Animation */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 ${
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                       activeFeature === 5 ? 'opacity-100' : 'opacity-0'
                     }`}>
                       <VideoPlayer
@@ -458,7 +490,7 @@ const FeaturesSection = () => {
                     </div>
 
                     {/* Default/Placeholder Animation */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 ${
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                       ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
                     }`}>
                       <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
@@ -479,7 +511,7 @@ const FeaturesSection = () => {
           </div>
 
           {/* Feature Content Cards */}
-          <div className="space-y-8 pt-16">
+          <div className="space-y-8 pt-16 relative z-20">
             {features.map((feature, index) => (
               <div 
                 key={feature.title}
