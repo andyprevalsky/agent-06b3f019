@@ -998,26 +998,28 @@
     top: 0;
     left: -50%;
     right: -50%;
-    height: 50%;
+    height: 100%;
     background-image: 
       linear-gradient(hsl(240 8% 88% / 0.6) 1px, transparent 1px),
       linear-gradient(90deg, hsl(240 8% 88% / 0.6) 1px, transparent 1px);
     background-size: 40px 40px;
     transform-origin: bottom center;
+    clip-path: polygon(0 0, 100% 0, 100% 58%, 0 58%);
   }
 
   .grid-3d-floor {
     position: absolute;
-    bottom: 0;
+    top: 0;
     left: -50%;
     right: -50%;
-    height: 50%;
+    height: 100%;
     background-image: 
       linear-gradient(hsl(240 8% 88% / 0.7) 1px, transparent 1px),
       linear-gradient(90deg, hsl(240 8% 88% / 0.7) 1px, transparent 1px);
     background-size: 40px 40px;
-    transform-origin: top center;
+    transform-origin: 50% 50%;
     transform: rotateX(75deg) translateZ(-100px);
+    clip-path: polygon(0 52%, 100% 52%, 100% 100%, 0 100%);
   }
   
   /* iOS Safari viewport height fixes */
