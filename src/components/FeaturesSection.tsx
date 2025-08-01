@@ -393,10 +393,11 @@ const FeaturesSection = () => {
 
         {/* Mobile Layout */}
         <div className="lg:hidden min-h-[300vh] relative">
-          {/* Fixed Animation Container - Stays within section */}
+          {/* Fixed Animation and Text Container - Stays in view while scrolling through features */}
           <div className="flex justify-center relative z-20">
             <div className="w-[320px]">
-              <div className="sticky top-16">
+              <div className="sticky top-16 space-y-6">
+                {/* Animation Container */}
                 <div className="w-full h-[280px] flex items-center justify-center relative">
                   <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                     {/* Customization Animation */}
@@ -486,35 +487,33 @@ const FeaturesSection = () => {
                   </div>
                 </div>
                 
-                {/* Fixed Feature Text Container - Directly below animation */}
-                <div className="mt-8">
-                  <div className="min-h-[200px] relative">
-                    {/* Feature Text Content */}
-                    {features.map((feature, index) => (
-                      <div 
-                        key={feature.title}
-                        className={`absolute inset-0 transition-opacity duration-700 ${
-                          activeFeature === index ? 'opacity-100' : 'opacity-0'
-                        }`}
-                      >
-                        <div className="text-center">
-                          <h3 className="text-xl font-semibold mb-3 text-foreground">{feature.title}</h3>
-                          <p className="text-sm text-muted-foreground mb-4 leading-relaxed">{feature.description}</p>
-                          
-                          {feature.details.length > 0 && (
-                            <ul className="space-y-2 text-left">
-                              {feature.details.map((detail, detailIndex) => (
-                                <li key={detailIndex} className="flex items-start space-x-2">
-                                  <div className="w-1 h-1 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
-                                  <span className="text-xs text-foreground/80 leading-relaxed">{detail}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </div>
+                {/* Feature Text Container */}
+                <div className="min-h-[200px] relative">
+                  {/* Feature Text Content */}
+                  {features.map((feature, index) => (
+                    <div 
+                      key={feature.title}
+                      className={`absolute inset-0 transition-opacity duration-700 ${
+                        activeFeature === index ? 'opacity-100' : 'opacity-0'
+                      }`}
+                    >
+                      <div className="text-center">
+                        <h3 className="text-xl font-semibold mb-3 text-foreground">{feature.title}</h3>
+                        <p className="text-sm text-muted-foreground mb-4 leading-relaxed">{feature.description}</p>
+                        
+                        {feature.details.length > 0 && (
+                          <ul className="space-y-2 text-left">
+                            {feature.details.map((detail, detailIndex) => (
+                              <li key={detailIndex} className="flex items-start space-x-2">
+                                <div className="w-1 h-1 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
+                                <span className="text-xs text-foreground/80 leading-relaxed">{detail}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
-                    ))}
-                  </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
