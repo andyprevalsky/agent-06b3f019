@@ -243,10 +243,10 @@ const FeaturesSection = () => {
           <div className="flex gap-12 min-h-[300vh] relative z-10">
             {/* Fixed Animation Container - Like Menu */}
             <div className="flex-1 flex justify-center relative z-20">
-              <div className="w-[480px]">
-                <div className="sticky top-24">
-                  <div className="w-full h-[480px] flex items-center justify-center relative">
-                    <div className="w-full h-full rounded-2xl overflow-hidden bg-surface/80 backdrop-blur-sm relative">
+              <div className="w-[560px]">
+                <div className="sticky top-48">
+                  <div className="w-full h-[520px] flex items-center justify-center relative">
+                    <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                       {/* Customization Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                         activeFeature === 1 ? 'opacity-100' : 'opacity-0'
@@ -258,7 +258,7 @@ const FeaturesSection = () => {
                           style={{ objectPosition: 'center center' }}
                           objectFit="cover"
                           fallbackContent={
-                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                            <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                               <div className="text-center">
                                 <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
                                   <div className="w-12 h-12 rounded-full bg-primary/60"></div>
@@ -281,7 +281,7 @@ const FeaturesSection = () => {
                           style={{ objectPosition: 'center center' }}
                           objectFit="cover"
                           fallbackContent={
-                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                            <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                               <div className="text-center">
                                 <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
                                   <div className="w-12 h-12 rounded-full bg-primary/60"></div>
@@ -304,7 +304,7 @@ const FeaturesSection = () => {
                           style={{ objectPosition: 'center center' }}
                           objectFit="contain"
                           fallbackContent={
-                            <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                            <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                               <div className="text-center">
                                 <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
                                   <div className="w-12 h-12 rounded-full bg-primary/60"></div>
@@ -320,7 +320,7 @@ const FeaturesSection = () => {
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                         ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
                       }`}>
-                        <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                        <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                           <div className="text-center">
                             <div className="w-32 h-32 rounded-full mx-auto mb-6 flex items-center justify-center bg-primary/30">
                               <div className="w-16 h-16 rounded-full bg-primary/60"></div>
@@ -341,7 +341,7 @@ const FeaturesSection = () => {
 
             {/* Feature Titles Menu - Right Side */}
             <div className="w-80 relative z-20">
-              <div className="sticky top-24 space-y-8 bg-surface/30 backdrop-blur-sm rounded-2xl p-4">
+              <div className="sticky top-24 space-y-8 bg-surface/30 backdrop-blur-sm rounded-2xl border border-gray-200">
                                 {features.map((feature, index) => (
                   <div key={feature.title} className="relative" data-index={index}>
                     {/* Unified card structure for all items */}
@@ -418,8 +418,8 @@ const FeaturesSection = () => {
           <div className="flex justify-center relative z-20">
             <div className="w-[320px]">
               <div className="sticky top-16 mb-8">
-                <div className="w-full h-[320px] flex items-center justify-center">
-                  <div className="w-full h-full rounded-2xl overflow-hidden bg-surface/80 backdrop-blur-sm relative">
+                <div className="w-full h-[360px] flex items-center justify-center">
+                  <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                     {/* Customization Animation */}
                     <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                       activeFeature === 1 ? 'opacity-100' : 'opacity-0'
@@ -431,7 +431,7 @@ const FeaturesSection = () => {
                         style={{ objectPosition: 'center center' }}
                         objectFit="cover"
                         fallbackContent={
-                          <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                          <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                             <div className="text-center">
                               <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
                                 <div className="w-8 h-8 rounded-full bg-primary/60"></div>
@@ -454,7 +454,7 @@ const FeaturesSection = () => {
                         style={{ objectPosition: 'center center' }}
                         objectFit="cover"
                         fallbackContent={
-                          <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                          <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                             <div className="text-center">
                               <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
                                 <div className="w-8 h-8 rounded-full bg-primary/60"></div>
@@ -477,7 +477,7 @@ const FeaturesSection = () => {
                         style={{ objectPosition: 'center center' }}
                         objectFit="contain"
                         fallbackContent={
-                          <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                          <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                             <div className="text-center">
                               <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
                                 <div className="w-8 h-8 rounded-full bg-primary/60"></div>
@@ -493,7 +493,7 @@ const FeaturesSection = () => {
                     <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                       ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
                     }`}>
-                      <div className="w-full h-full flex items-center justify-center bg-muted/20 rounded-2xl border border-border/20">
+                      <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                         <div className="text-center">
                           <div className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
                             <div className="w-10 h-10 rounded-full bg-primary/60"></div>

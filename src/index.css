@@ -1004,7 +1004,7 @@
       linear-gradient(90deg, hsl(240 8% 88% / 0.6) 1px, transparent 1px);
     background-size: 40px 40px;
     transform-origin: bottom center;
-    clip-path: polygon(0 0, 100% 0, 100% 58%, 0 58%);
+    clip-path: polygon(0 0, 100% 0, 100% 59.5%, 0 59.5%);
   }
 
   .grid-3d-floor {
