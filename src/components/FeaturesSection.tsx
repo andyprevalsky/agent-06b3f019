@@ -396,7 +396,7 @@ const FeaturesSection = () => {
           {/* Fixed Animation Container - Never moves */}
           <div className="sticky top-24 z-20 flex flex-col items-center space-y-6">
             {/* Animation stays in exact same position */}
-            <div className="w-[320px] h-[180px] flex items-center justify-center relative">
+            <div className="w-[280px] h-[400px] flex items-center justify-center relative">
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                 {/* All animations in same position, fade between them */}
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
