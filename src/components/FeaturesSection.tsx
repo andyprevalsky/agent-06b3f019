@@ -393,129 +393,122 @@ const FeaturesSection = () => {
 
         {/* Mobile Layout */}
         <div className="lg:hidden min-h-[300vh] relative">
-          {/* Fixed Animation and Text Container - Stays in view while scrolling through features */}
-          <div className="flex justify-center relative z-20">
-            <div className="w-[320px]">
-              <div className="sticky top-16 space-y-6">
-                {/* Animation Container */}
-                <div className="w-full h-[280px] flex items-center justify-center relative">
-                  <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
-                    {/* Customization Animation */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                      activeFeature === 1 ? 'opacity-100' : 'opacity-0'
-                    }`}>
-                      <VideoPlayer
-                        ref={mobileCustomizationVideoRef}
-                        src="/navi-customization-animation.webm"
-                        className="w-full h-full object-cover"
-                        style={{ objectPosition: 'center center' }}
-                        objectFit="cover"
-                        fallbackContent={
-                          <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                            <div className="text-center">
-                              <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                                <div className="w-8 h-8 rounded-full bg-primary/60"></div>
-                              </div>
-                              <p className="text-muted-foreground text-xs">Customization Animation</p>
-                            </div>
-                          </div>
-                        }
-                      />
-                    </div>
-
-                    {/* Agent Engine Animation */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                      activeFeature === 3 ? 'opacity-100' : 'opacity-0'
-                    }`}>
-                      <VideoPlayer
-                        ref={mobileAgentEngineVideoRef}
-                        src="/navi-engine-animation.webm"
-                        className="w-full h-full object-cover"
-                        style={{ objectPosition: 'center center' }}
-                        objectFit="cover"
-                        fallbackContent={
-                          <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                            <div className="text-center">
-                              <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                                <div className="w-8 h-8 rounded-full bg-primary/60"></div>
-                              </div>
-                              <p className="text-muted-foreground text-xs">Agent Engine Animation</p>
-                            </div>
-                          </div>
-                        }
-                      />
-                    </div>
-
-                    {/* Privacy Animation */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                      activeFeature === 5 ? 'opacity-100' : 'opacity-0'
-                    }`}>
-                      <VideoPlayer
-                        ref={mobilePrivacyVideoRef}
-                        src="/navi-privacy-animation-2.webm"
-                        className="w-full h-full object-contain"
-                        style={{ objectPosition: 'center center' }}
-                        objectFit="contain"
-                        fallbackContent={
-                          <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                            <div className="text-center">
-                              <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                                <div className="w-8 h-8 rounded-full bg-primary/60"></div>
-                              </div>
-                              <p className="text-muted-foreground text-xs">Privacy Animation</p>
-                            </div>
-                          </div>
-                        }
-                      />
-                    </div>
-
-                    {/* Default/Placeholder Animation */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                      ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
-                    }`}>
+          {/* Fixed Animation Container - Never moves */}
+          <div className="sticky top-16 z-20 flex flex-col items-center space-y-6 bg-surface">
+            {/* Animation stays in exact same position */}
+            <div className="w-[320px] h-[280px] flex items-center justify-center relative">
+              <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
+                {/* All animations in same position, fade between them */}
+                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
+                  activeFeature === 1 ? 'opacity-100' : 'opacity-0'
+                }`}>
+                  <VideoPlayer
+                    ref={mobileCustomizationVideoRef}
+                    src="/navi-customization-animation.webm"
+                    className="w-full h-full object-cover"
+                    style={{ objectPosition: 'center center' }}
+                    objectFit="cover"
+                    fallbackContent={
                       <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                         <div className="text-center">
-                          <div className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                            <div className="w-10 h-10 rounded-full bg-primary/60"></div>
+                          <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                            <div className="w-8 h-8 rounded-full bg-primary/60"></div>
                           </div>
-                          <p className="text-muted-foreground text-sm">
-                            {features[activeFeature]?.title || 'Feature Animation'}
-                          </p>
+                          <p className="text-muted-foreground text-xs">Customization</p>
                         </div>
                       </div>
+                    }
+                  />
+                </div>
+
+                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
+                  activeFeature === 3 ? 'opacity-100' : 'opacity-0'
+                }`}>
+                  <VideoPlayer
+                    ref={mobileAgentEngineVideoRef}
+                    src="/navi-engine-animation.webm"
+                    className="w-full h-full object-cover"
+                    style={{ objectPosition: 'center center' }}
+                    objectFit="cover"
+                    fallbackContent={
+                      <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
+                        <div className="text-center">
+                          <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                            <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                          </div>
+                          <p className="text-muted-foreground text-xs">Agent Engine</p>
+                        </div>
+                      </div>
+                    }
+                  />
+                </div>
+
+                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
+                  activeFeature === 5 ? 'opacity-100' : 'opacity-0'
+                }`}>
+                  <VideoPlayer
+                    ref={mobilePrivacyVideoRef}
+                    src="/navi-privacy-animation-2.webm"
+                    className="w-full h-full object-contain"
+                    style={{ objectPosition: 'center center' }}
+                    objectFit="contain"
+                    fallbackContent={
+                      <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
+                        <div className="text-center">
+                          <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                            <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                          </div>
+                          <p className="text-muted-foreground text-xs">Privacy</p>
+                        </div>
+                      </div>
+                    }
+                  />
+                </div>
+
+                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
+                  ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
+                }`}>
+                  <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
+                    <div className="text-center">
+                      <div className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                        <div className="w-10 h-10 rounded-full bg-primary/60"></div>
+                      </div>
+                      <p className="text-muted-foreground text-sm">
+                        {features[activeFeature]?.title || 'Features'}
+                      </p>
                     </div>
                   </div>
                 </div>
-                
-                {/* Feature Text Container */}
-                <div className="min-h-[200px] relative">
-                  {/* Feature Text Content */}
-                  {features.map((feature, index) => (
-                    <div 
-                      key={feature.title}
-                      className={`absolute inset-0 transition-opacity duration-700 ${
-                        activeFeature === index ? 'opacity-100' : 'opacity-0'
-                      }`}
-                    >
-                      <div className="text-center">
-                        <h3 className="text-xl font-semibold mb-3 text-foreground">{feature.title}</h3>
-                        <p className="text-sm text-muted-foreground mb-4 leading-relaxed">{feature.description}</p>
-                        
-                        {feature.details.length > 0 && (
-                          <ul className="space-y-2 text-left">
-                            {feature.details.map((detail, detailIndex) => (
-                              <li key={detailIndex} className="flex items-start space-x-2">
-                                <div className="w-1 h-1 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
-                                <span className="text-xs text-foreground/80 leading-relaxed">{detail}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
               </div>
+            </div>
+            
+            {/* Text stays in exact same position */}
+            <div className="w-[320px] min-h-[200px] relative">
+              {/* All text content in same position, fade between them */}
+              {features.map((feature, index) => (
+                <div 
+                  key={feature.title}
+                  className={`absolute inset-0 transition-opacity duration-700 ${
+                    activeFeature === index ? 'opacity-100' : 'opacity-0'
+                  }`}
+                >
+                  <div className="text-center px-4">
+                    <h3 className="text-xl font-semibold mb-3 text-foreground">{feature.title}</h3>
+                    <p className="text-sm text-muted-foreground mb-4 leading-relaxed">{feature.description}</p>
+                    
+                    {feature.details.length > 0 && (
+                      <ul className="space-y-2 text-left">
+                        {feature.details.map((detail, detailIndex) => (
+                          <li key={detailIndex} className="flex items-start space-x-2">
+                            <div className="w-1 h-1 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
+                            <span className="text-xs text-foreground/80 leading-relaxed">{detail}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
