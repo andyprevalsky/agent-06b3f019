@@ -397,7 +397,7 @@ const FeaturesSection = () => {
             {/* Fixed Animation Container - Like Desktop */}
             <div className="flex justify-center relative z-20">
               <div className="w-[320px]">
-                <div className="sticky top-16">
+                <div className="fixed top-16 left-1/2 transform -translate-x-1/2 z-20">
                   <div className="w-full h-[280px] flex items-center justify-center relative">
                     <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                       {/* Customization Animation */}
@@ -493,7 +493,7 @@ const FeaturesSection = () => {
             {/* Fixed Feature Text Container */}
             <div className="flex justify-center relative z-20">
               <div className="w-[320px]">
-                <div className="sticky top-80">
+                <div className="fixed top-80 left-1/2 transform -translate-x-1/2 z-20 w-[320px]">
                   <div className="min-h-[200px] relative">
                     {/* Feature Text Content */}
                     {features.map((feature, index) => (
