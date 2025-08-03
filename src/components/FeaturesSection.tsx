@@ -21,14 +21,6 @@ const FeaturesSection = () => {
 
   const features = [
     {
-      title: "Frontier AI at Your Fingertips",
-      description: "Navi is a hardware device that brings frontier LLMs closer than ever before",
-      details: [
-        "Navi makes frontier reasoning models milliseconds away",
-        "Access state-of-the-art reasoning models in an instant to keep you on the go and building momentum"
-      ]
-    },
-    {
       title: "Fully Customizable",
       description: "Change the system prompt, voice model, chat providers & tools to tune Navi to your liking",
       details: [
@@ -167,13 +159,13 @@ const FeaturesSection = () => {
     };
 
     // Restart appropriate videos based on active feature
-    if (activeFeature === 1) {
+    if (activeFeature === 0) {
       restartVideo(customizationVideoRef);
       restartVideo(mobileCustomizationVideoRef);
-    } else if (activeFeature === 3) {
+    } else if (activeFeature === 2) {
       restartVideo(agentEngineVideoRef);
       restartVideo(mobileAgentEngineVideoRef);
-    } else if (activeFeature === 5) {
+    } else if (activeFeature === 3) {
       restartVideo(privacyVideoRef);
       restartVideo(mobilePrivacyVideoRef);
     } else if (activeFeature === 4) {
@@ -232,7 +224,7 @@ const FeaturesSection = () => {
                     <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                       {/* Customization Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 1 ? 'opacity-100' : 'opacity-0'
+                        activeFeature === 0 ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <VideoPlayer
                           ref={customizationVideoRef}
@@ -255,7 +247,7 @@ const FeaturesSection = () => {
 
                       {/* Agent Engine Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 3 ? 'opacity-100' : 'opacity-0'
+                        activeFeature === 2 ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <VideoPlayer
                           ref={agentEngineVideoRef}
@@ -278,14 +270,14 @@ const FeaturesSection = () => {
 
                       {/* Memory Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 4 ? 'opacity-100' : 'opacity-0'
+                        activeFeature === 3 ? 'opacity-100' : 'opacity-0'
                       }`}>
-                        <MemoryGraphAnimation restart={activeFeature === 4} />
+                        <MemoryGraphAnimation restart={activeFeature === 3} />
                       </div>
 
                       {/* Privacy Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 5 ? 'opacity-100' : 'opacity-0'
+                        activeFeature === 4 ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <VideoPlayer
                           ref={privacyVideoRef}
@@ -308,7 +300,7 @@ const FeaturesSection = () => {
 
                       {/* Default/Placeholder Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        ![1, 3, 4, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
+                        ![0, 2, 3, 4].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                           <div className="text-center">
@@ -411,7 +403,7 @@ const FeaturesSection = () => {
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                 {/* All animations in same position, fade between them */}
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 1 ? 'opacity-100' : 'opacity-0'
+                  activeFeature === 0 ? 'opacity-100' : 'opacity-0'
                 }`}>
                   <VideoPlayer
                     ref={mobileCustomizationVideoRef}
@@ -433,7 +425,7 @@ const FeaturesSection = () => {
                 </div>
 
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 3 ? 'opacity-100' : 'opacity-0'
+                  activeFeature === 2 ? 'opacity-100' : 'opacity-0'
                 }`}>
                   <VideoPlayer
                     ref={mobileAgentEngineVideoRef}
@@ -455,13 +447,13 @@ const FeaturesSection = () => {
                 </div>
 
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 4 ? 'opacity-100' : 'opacity-0'
+                  activeFeature === 3 ? 'opacity-100' : 'opacity-0'
                 }`}>
-                  <MemoryGraphAnimation restart={activeFeature === 4} />
+                  <MemoryGraphAnimation restart={activeFeature === 3} />
                 </div>
 
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 5 ? 'opacity-100' : 'opacity-0'
+                  activeFeature === 4 ? 'opacity-100' : 'opacity-0'
                 }`}>
                   <VideoPlayer
                     ref={mobilePrivacyVideoRef}
@@ -483,7 +475,7 @@ const FeaturesSection = () => {
                 </div>
 
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  ![1, 3, 4, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
+                  ![0, 2, 3, 4].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
                 }`}>
                   <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                     <div className="text-center">
