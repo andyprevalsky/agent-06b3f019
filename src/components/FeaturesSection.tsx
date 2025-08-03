@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import VideoPlayer from "./VideoPlayer";
+import { MemoryGraphAnimation } from "./MemoryGraphAnimation";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
@@ -13,6 +14,7 @@ const FeaturesSection = () => {
   const customizationVideoRef = useRef<HTMLVideoElement>(null);
   const agentEngineVideoRef = useRef<HTMLVideoElement>(null);
   const privacyVideoRef = useRef<HTMLVideoElement>(null);
+  const memoryVideoRef = useRef<HTMLVideoElement>(null);
   const mobileCustomizationVideoRef = useRef<HTMLVideoElement>(null);
   const mobileAgentEngineVideoRef = useRef<HTMLVideoElement>(null);
   const mobilePrivacyVideoRef = useRef<HTMLVideoElement>(null);
@@ -174,6 +176,8 @@ const FeaturesSection = () => {
     } else if (activeFeature === 5) {
       restartVideo(privacyVideoRef);
       restartVideo(mobilePrivacyVideoRef);
+    } else if (activeFeature === 4) {
+      restartVideo(memoryVideoRef);
     }
   }, [activeFeature]);
 
@@ -272,6 +276,13 @@ const FeaturesSection = () => {
                         />
                       </div>
 
+                      {/* Memory Animation */}
+                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
+                        activeFeature === 4 ? 'opacity-100' : 'opacity-0'
+                      }`}>
+                        <MemoryGraphAnimation restart={activeFeature === 4} />
+                      </div>
+
                       {/* Privacy Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                         activeFeature === 5 ? 'opacity-100' : 'opacity-0'
@@ -297,7 +308,7 @@ const FeaturesSection = () => {
 
                       {/* Default/Placeholder Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
+                        ![1, 3, 4, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
                       }`}>
                         <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                           <div className="text-center">
@@ -444,6 +455,12 @@ const FeaturesSection = () => {
                 </div>
 
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
+                  activeFeature === 4 ? 'opacity-100' : 'opacity-0'
+                }`}>
+                  <MemoryGraphAnimation restart={activeFeature === 4} />
+                </div>
+
+                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                   activeFeature === 5 ? 'opacity-100' : 'opacity-0'
                 }`}>
                   <VideoPlayer
@@ -466,7 +483,7 @@ const FeaturesSection = () => {
                 </div>
 
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  ![1, 3, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
+                  ![1, 3, 4, 5].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
                 }`}>
                   <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
                     <div className="text-center">
