@@ -44,7 +44,7 @@ const FeaturesSection = () => {
       details: [
         "Navi agents break down, measure & iterate towards any long-term goal",
         "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Navi can take real-world actions on your behalf",
-        "Each agent run on a STOA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions and agents"
+        "Each agent runs on a STOA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions and agents"
       ]
     },
     {
