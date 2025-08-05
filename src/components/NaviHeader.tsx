@@ -1,8 +1,10 @@
 import { Button } from "@/components/ui/button";
 import { useState, useEffect } from "react";
+import ContactModal from "./ContactModal";
 
 const NaviHeader = () => {
   const [showMobileButton, setShowMobileButton] = useState(false);
+  const [contactModalOpen, setContactModalOpen] = useState(false);
 
   useEffect(() => {
     const featuresSection = document.getElementById('features');
@@ -68,15 +70,17 @@ const NaviHeader = () => {
             variant="outline" 
             size="sm"
             className="hidden md:flex border-border/50 hover:bg-secondary/50"
-            onClick={() => {
-              console.log('Contact button clicked');
-              window.open('mailto:andy@hinavi.ai');
-            }}
+            onClick={() => setContactModalOpen(true)}
           >
             Contact
           </Button>
         </div>
       </div>
+      
+      <ContactModal 
+        open={contactModalOpen} 
+        onOpenChange={setContactModalOpen} 
+      />
     </header>
   );
 };

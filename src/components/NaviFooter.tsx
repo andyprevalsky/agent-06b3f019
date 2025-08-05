@@ -1,4 +1,8 @@
+import { useState } from "react";
+import ContactModal from "./ContactModal";
+
 const NaviFooter = () => {
+  const [contactModalOpen, setContactModalOpen] = useState(false);
   return (
     <footer className="bg-primary text-primary-foreground py-16">
       <div className="container mx-auto px-6">
@@ -28,7 +32,14 @@ const NaviFooter = () => {
               <li><a href="#" className="hover:text-primary-foreground transition-colors">About</a></li>
               <li><a href="/privacy" className="hover:text-primary-foreground transition-colors">Privacy</a></li>
               <li><a href="/terms" className="hover:text-primary-foreground transition-colors">Terms</a></li>
-              <li><a href="mailto:andy@hinavi.ai" className="hover:text-primary-foreground transition-colors">Contact</a></li>
+              <li>
+                <button 
+                  onClick={() => setContactModalOpen(true)}
+                  className="hover:text-primary-foreground transition-colors text-left"
+                >
+                  Contact
+                </button>
+              </li>
             </ul>
           </div>
           
@@ -53,6 +64,11 @@ const NaviFooter = () => {
           </div>
         </div>
       </div>
+      
+      <ContactModal 
+        open={contactModalOpen} 
+        onOpenChange={setContactModalOpen} 
+      />
     </footer>
   );
 };
