@@ -9,10 +9,10 @@ const NaviFooter = () => {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
           
           <div className="md:col-span-2">
-            <div className="flex items-center space-x-3 mb-4">
+            <a href="/" className="flex items-center space-x-3 mb-4 hover:opacity-80 transition-opacity w-fit">
               <div className="w-8 h-8 rounded-lg" style={{ background: 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)' }}></div>
               <span className="text-xl font-semibold">Navi</span>
-            </div>
+            </a>
             <p className="text-primary-foreground/70 max-w-md leading-relaxed">
               Lighting the way to what matters most. Navi is the first truly customizable AI hardware companion.
             </p>
@@ -21,8 +21,34 @@ const NaviFooter = () => {
           <div>
             <h4 className="font-semibold mb-4">Product</h4>
             <ul className="space-y-2 text-primary-foreground/70">
-              <li><a href="#features" className="hover:text-primary-foreground transition-colors">Features</a></li>
-              <li><a href="#waitlist" className="hover:text-primary-foreground transition-colors">Join Waitlist</a></li>
+              <li>
+                <button 
+                  onClick={() => {
+                    if (window.location.pathname === '/') {
+                      document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' });
+                    } else {
+                      window.location.href = '/#features';
+                    }
+                  }}
+                  className="hover:text-primary-foreground transition-colors text-left"
+                >
+                  Features
+                </button>
+              </li>
+              <li>
+                <button 
+                  onClick={() => {
+                    if (window.location.pathname === '/') {
+                      document.getElementById('waitlist')?.scrollIntoView({ behavior: 'smooth' });
+                    } else {
+                      window.location.href = '/#waitlist';
+                    }
+                  }}
+                  className="hover:text-primary-foreground transition-colors text-left"
+                >
+                  Join Waitlist
+                </button>
+              </li>
             </ul>
           </div>
           

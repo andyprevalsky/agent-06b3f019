@@ -42,9 +42,11 @@ const NaviHeader = () => {
         <nav className="hidden md:flex items-center space-x-8">
           <button 
             onClick={() => {
-              document.getElementById('features')?.scrollIntoView({ 
-                behavior: 'smooth' 
-              });
+              if (window.location.pathname === '/') {
+                document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' });
+              } else {
+                window.location.href = '/#features';
+              }
             }}
             className="text-muted-foreground hover:text-foreground transition-colors"
           >
@@ -52,9 +54,11 @@ const NaviHeader = () => {
           </button>
           <button 
             onClick={() => {
-              document.getElementById('waitlist')?.scrollIntoView({ 
-                behavior: 'smooth' 
-              });
+              if (window.location.pathname === '/') {
+                document.getElementById('waitlist')?.scrollIntoView({ behavior: 'smooth' });
+              } else {
+                window.location.href = '/#waitlist';
+              }
             }}
             className="text-muted-foreground hover:text-foreground transition-colors"
           >
@@ -69,9 +73,11 @@ const NaviHeader = () => {
               showMobileButton ? 'opacity-100 visible' : 'opacity-0 invisible'
             }`}
             onClick={() => {
-              document.getElementById('waitlist')?.scrollIntoView({ 
-                behavior: 'smooth' 
-              });
+              if (window.location.pathname === '/') {
+                document.getElementById('waitlist')?.scrollIntoView({ behavior: 'smooth' });
+              } else {
+                window.location.href = '/#waitlist';
+              }
             }}
           >
             <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg">
