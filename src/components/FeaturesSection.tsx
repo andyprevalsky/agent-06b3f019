@@ -58,12 +58,22 @@ const FeaturesSection = () => {
     },
     {
       title: "Privacy First",
-      description: "Navi stores no data from your conversations, ensuring complete privacy",
+      description: "",
       details: [
-        "All data is streamed directly to frontier AI model providers anonymously",
-        "Navi does not passively listen to conversations",
-        "Triggered only on wake word 'Hi Navi'",
-        "Complete transparency in our commitment to your privacy"
+        "Your conversations stay private. Navi never stores or sells your data.",
+        <>
+          View our{" "}
+          <a 
+            href="https://hinavi.ai/privacy" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="text-primary hover:text-primary/80 underline transition-colors"
+          >
+            privacy policy here
+          </a>
+        </>,
+        "Navi does not passively listen, and is designed to only trigger active listening according to the customizable wake word, \"Hi Navi\".",
+        "Audio data & transcriptions are streamed directly, securely & anonymously to AI providers."
       ]
     }
   ];
