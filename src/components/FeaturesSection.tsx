@@ -66,7 +66,7 @@ const FeaturesSection = () => {
             href="/privacy" 
             className="text-primary hover:text-primary/80 underline transition-colors"
           >
-            here
+            here.
           </a>
         </>,
         "Navi does not passively listen, and is designed to only trigger active listening according to the customizable wake word, \"Hi Navi\".",
