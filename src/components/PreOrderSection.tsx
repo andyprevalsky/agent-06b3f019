@@ -365,7 +365,7 @@ const PreOrderSection = () => {
         
         <div className="text-center mt-12 reveal-up reveal-delay-3">
           <p className="text-sm text-muted-foreground mb-4">
-            Expected delivery: Q2 2024 • Limited quantities available
+            Expected delivery: Q3 2025 • Limited quantities available
           </p>
           <div className="flex justify-center space-x-8">
             <div className="flex items-center space-x-2">
