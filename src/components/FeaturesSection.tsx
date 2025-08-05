@@ -63,9 +63,7 @@ const FeaturesSection = () => {
         <>
           Your conversations stay private. Navi never stores or sells your data. View our privacy policy{" "}
           <a 
-            href="https://hinavi.ai/privacy" 
-            target="_blank" 
-            rel="noopener noreferrer"
+            href="/privacy" 
             className="text-primary hover:text-primary/80 underline transition-colors"
           >
             here
