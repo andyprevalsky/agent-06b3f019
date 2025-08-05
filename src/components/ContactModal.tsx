@@ -46,30 +46,26 @@ const ContactModal = ({ open, onOpenChange }: ContactModalProps) => {
             </p>
             
             <div className="relative">
-              <div className="flex items-center justify-between p-4 bg-[#030303] rounded-lg border">
+              <button
+                onClick={copyToClipboard}
+                className="w-full flex items-center justify-between p-4 bg-[#030303] rounded-lg border hover:bg-[#0a0a0a] transition-colors cursor-pointer"
+              >
                 <span className="text-white font-mono text-sm">{email}</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={copyToClipboard}
-                  className="ml-2 p-2 hover:bg-white/10"
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  className="text-white flex-shrink-0"
                 >
-                  <svg
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    className="text-white"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      clipRule="evenodd"
-                      d="M19.5 16.5L19.5 4.5L18.75 3.75H9L8.25 4.5L8.25 7.5L5.25 7.5L4.5 8.25V20.25L5.25 21H15L15.75 20.25V17.25H18.75L19.5 16.5ZM15.75 15.75L15.75 8.25L15 7.5L9.75 7.5V5.25L18 5.25V15.75H15.75ZM6 9L14.25 9L14.25 19.5L6 19.5L6 9Z"
-                      fill="currentColor"
-                    />
-                  </svg>
-                </Button>
-              </div>
+                  <path
+                    fillRule="evenodd"
+                    clipRule="evenodd"
+                    d="M19.5 16.5L19.5 4.5L18.75 3.75H9L8.25 4.5L8.25 7.5L5.25 7.5L4.5 8.25V20.25L5.25 21H15L15.75 20.25V17.25H18.75L19.5 16.5ZM15.75 15.75L15.75 8.25L15 7.5L9.75 7.5V5.25L18 5.25V15.75H15.75ZM6 9L14.25 9L14.25 19.5L6 19.5L6 9Z"
+                    fill="currentColor"
+                  />
+                </svg>
+              </button>
               {copied && (
                 <div className="absolute -bottom-8 left-1/2 transform -translate-x-1/2">
                   <span className="text-xs text-green-600 font-medium">Copied!</span>
