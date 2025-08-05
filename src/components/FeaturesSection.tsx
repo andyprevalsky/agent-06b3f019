@@ -24,7 +24,7 @@ const FeaturesSection = () => {
       title: "Fully Customizable",
       description: "",
       details: [
-        "Change the LLM provide, System Prompt & Voice to create your perfect AI companion",
+        "Change the LLM provider, System Prompt & Voice to create your perfect AI companion",
         "Connect your own tools to Navi through MCPs, or use tools shared by other devs in our marketplace",
         "Navi comes with prebuilt presets to get you up and running with STOA models in an instant"
       ]
