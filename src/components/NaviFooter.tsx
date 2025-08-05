@@ -6,7 +6,7 @@ const NaviFooter = () => {
           
           <div className="md:col-span-2">
             <div className="flex items-center space-x-3 mb-4">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate"></div>
+              <div className="w-8 h-8 rounded-lg" style={{ background: 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)' }}></div>
               <span className="text-xl font-semibold">Navi</span>
             </div>
             <p className="text-primary-foreground/70 max-w-md leading-relaxed">
