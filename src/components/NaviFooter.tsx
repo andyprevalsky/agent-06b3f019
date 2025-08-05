@@ -10,8 +10,7 @@ const NaviFooter = () => {
               <span className="text-xl font-semibold">Navi</span>
             </div>
             <p className="text-primary-foreground/70 max-w-md leading-relaxed">
-              Transforming voice commands into infinite possibilities. 
-              The first truly customizable AI hardware companion.
+              Lighting the way to what matters most. Navi is the first truly customizable AI hardware companion.
             </p>
           </div>
           
