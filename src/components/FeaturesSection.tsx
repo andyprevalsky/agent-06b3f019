@@ -510,14 +510,14 @@ const FeaturesSection = () => {
                     activeFeature === index ? 'opacity-100' : 'opacity-0'
                   }`}
                 >
-                  <div className="relative overflow-hidden rounded-lg border-2 border-transparent">
-                    {/* Animated gradient border */}
+                  <div className="relative overflow-hidden transition-all duration-500 border-2 border-transparent rounded-lg">
+                    {/* Gradient border - always visible on mobile */}
                     <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg p-[2px]">
-                      <div className="w-full h-full bg-card rounded-md"></div>
+                      <div className="w-full h-full bg-background rounded-md"></div>
                     </div>
                     
                     {/* Card content */}
-                    <div className="relative bg-card rounded-lg p-6 z-10">
+                    <div className="relative p-6">
                       <h3 className="text-xl font-semibold mb-3 text-foreground text-left">{feature.title}</h3>
                       <p className="text-sm text-muted-foreground mb-4 leading-relaxed text-left">{feature.description}</p>
                       
