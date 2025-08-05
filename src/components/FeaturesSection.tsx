@@ -510,7 +510,7 @@ const FeaturesSection = () => {
                     activeFeature === index ? 'opacity-100' : 'opacity-0'
                   }`}
                 >
-                  <div className="relative bg-background rounded-lg shadow-lg border-2 border-transparent bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate p-[2px]">
+                  <div className="relative bg-background rounded-lg shadow-lg border-2 border-transparent bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate p-[1px]">
                     <div className="bg-background rounded-md h-full w-full">
                       {/* Card content */}
                       <div className="p-6">
