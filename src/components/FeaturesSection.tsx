@@ -53,7 +53,7 @@ const FeaturesSection = () => {
       details: [
         "After each conversation, Navi extracts key entity information to keep track of your most important relationships, events, and ideas",
         "Navi's personality evolves to match your communication style",
-        "Time-based queries keep Navi working in the background, constantly refining its understanding of your world and ideating ways to help you grow"
+        "Time-based queries keep Navi working in the background, constantly refining its understanding of your world and ideating on ways to help you grow"
       ]
     },
     {
