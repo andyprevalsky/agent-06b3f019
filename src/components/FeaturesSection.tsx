@@ -510,14 +510,10 @@ const FeaturesSection = () => {
                     activeFeature === index ? 'opacity-100' : 'opacity-0'
                   }`}
                 >
-                  <div className="relative overflow-hidden transition-all duration-500 border-2 border-transparent rounded-lg shadow-lg">
-                    {/* Gradient border - always visible on mobile */}
-                    <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg p-[2px]">
-                      <div className="w-full h-full bg-background rounded-[calc(0.5rem-2px)]"></div>
-                    </div>
-                    
-                    {/* Card content */}
-                    <div className="relative p-6">
+                  <div className="relative bg-background rounded-lg shadow-lg border-2 border-transparent bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate p-[2px]">
+                    <div className="bg-background rounded-md h-full w-full">
+                      {/* Card content */}
+                      <div className="p-6">
                       <h3 className="text-xl font-semibold mb-3 text-foreground text-left">{feature.title}</h3>
                       <p className="text-sm text-muted-foreground mb-4 leading-relaxed text-left">{feature.description}</p>
                       
@@ -531,6 +527,7 @@ const FeaturesSection = () => {
                           ))}
                         </ul>
                       )}
+                      </div>
                     </div>
                   </div>
                 </div>
