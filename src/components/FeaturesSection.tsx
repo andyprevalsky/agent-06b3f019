@@ -22,12 +22,11 @@ const FeaturesSection = () => {
   const features = [
     {
       title: "Fully Customizable",
-      description: "Change the system prompt, voice model, chat providers & tools to tune Navi to your liking",
+      description: "",
       details: [
-        "Customize system prompts, voice models, and chat model providers",
-        "Connect tools to tune Navi to your liking",
-        "Pick from a marketplace of hand-crafted presets to build from",
-        "Create your perfect AI companion"
+        "Change the LLM provide, System Prompt & Voice to create your perfect AI companion",
+        "Connect your own tools to Navi through MCPs, or use tools shared by other devs in our marketplace",
+        "Navi comes with prebuilt presets to get you up and running with STOA models in an instant"
       ]
     },
     {
