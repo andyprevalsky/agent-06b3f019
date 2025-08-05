@@ -61,14 +61,14 @@ const FeaturesSection = () => {
       description: "",
       details: [
         <>
-          Your conversations stay private. Navi never stores or sells your data.{" "}
+          Your conversations stay private. Navi never stores or sells your data. View our privacy policy{" "}
           <a 
             href="https://hinavi.ai/privacy" 
             target="_blank" 
             rel="noopener noreferrer"
             className="text-primary hover:text-primary/80 underline transition-colors"
           >
-            View our privacy policy here
+            here
           </a>
         </>,
         "Navi does not passively listen, and is designed to only trigger active listening according to the customizable wake word, \"Hi Navi\".",
