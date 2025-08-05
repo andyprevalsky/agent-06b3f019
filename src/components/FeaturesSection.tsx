@@ -117,12 +117,24 @@ const FeaturesSection = () => {
         // Calculate progress through the section (0 to 1)
         const progress = (viewportCenter - sectionTop) / sectionHeight;
         
-        // Divide into equal zones for each feature (25% more scroll space)
-        const adjustedProgress = Math.max(0, (progress - 0.125) / 0.75);
-        const featureIndex = Math.floor(adjustedProgress * features.length);
-        const clampedIndex = Math.max(0, Math.min(features.length - 1, featureIndex));
+        // Different scrolling behavior for mobile vs desktop
+        const isMobile = window.innerWidth < 1024;
         
-        setActiveFeature(clampedIndex);
+        if (isMobile) {
+          // Mobile: More discrete zones with smoother transitions
+          const adjustedProgress = Math.max(0, (progress - 0.15) / 0.7);
+          // Use more gradual zone calculation for smoother mobile scrolling
+          const rawIndex = adjustedProgress * features.length;
+          const featureIndex = Math.round(rawIndex); // Round instead of floor for smoother transitions
+          const clampedIndex = Math.max(0, Math.min(features.length - 1, featureIndex));
+          setActiveFeature(clampedIndex);
+        } else {
+          // Desktop: Original behavior
+          const adjustedProgress = Math.max(0, (progress - 0.125) / 0.75);
+          const featureIndex = Math.floor(adjustedProgress * features.length);
+          const clampedIndex = Math.max(0, Math.min(features.length - 1, featureIndex));
+          setActiveFeature(clampedIndex);
+        }
       }
     };
 
@@ -488,9 +500,9 @@ const FeaturesSection = () => {
               </div>
             </div>
             
-            {/* Text stays in exact same position */}
+            {/* Content cards in same position */}
             <div className="w-[320px] min-h-[200px] relative">
-              {/* All text content in same position, fade between them */}
+              {/* All content cards in same position, fade between them */}
               {features.map((feature, index) => (
                 <div 
                   key={feature.title}
@@ -498,20 +510,28 @@ const FeaturesSection = () => {
                     activeFeature === index ? 'opacity-100' : 'opacity-0'
                   }`}
                 >
-                  <div className="text-center px-4">
-                    <h3 className="text-xl font-semibold mb-3 text-foreground">{feature.title}</h3>
-                    <p className="text-sm text-muted-foreground mb-4 leading-relaxed">{feature.description}</p>
+                  <div className="relative overflow-hidden rounded-lg">
+                    {/* Animated gradient border */}
+                    <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg p-[2px]">
+                      <div className="w-full h-full bg-card rounded-md"></div>
+                    </div>
                     
-                    {feature.details.length > 0 && (
-                      <ul className="space-y-2 text-left">
-                        {feature.details.map((detail, detailIndex) => (
-                          <li key={detailIndex} className="flex items-start space-x-2">
-                            <div className="w-1 h-1 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
-                            <span className="text-xs text-foreground/80 leading-relaxed">{detail}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+                    {/* Card content */}
+                    <div className="relative bg-card rounded-lg p-6">
+                      <h3 className="text-xl font-semibold mb-3 text-foreground text-left">{feature.title}</h3>
+                      <p className="text-sm text-muted-foreground mb-4 leading-relaxed text-left">{feature.description}</p>
+                      
+                      {feature.details.length > 0 && (
+                        <ul className="space-y-3 text-left">
+                          {feature.details.map((detail, detailIndex) => (
+                            <li key={detailIndex} className="flex items-start space-x-3">
+                              <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
+                              <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
