@@ -40,12 +40,26 @@ const NaviHeader = () => {
         </a>
         
         <nav className="hidden md:flex items-center space-x-8">
-          <a href="#features" className="text-muted-foreground hover:text-foreground transition-colors">
+          <button 
+            onClick={() => {
+              document.getElementById('features')?.scrollIntoView({ 
+                behavior: 'smooth' 
+              });
+            }}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
             Features
-          </a>
-          <a href="#waitlist" className="text-muted-foreground hover:text-foreground transition-colors">
+          </button>
+          <button 
+            onClick={() => {
+              document.getElementById('waitlist')?.scrollIntoView({ 
+                behavior: 'smooth' 
+              });
+            }}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
             Join Waitlist
-          </a>
+          </button>
         </nav>
         
         <div className="flex items-center space-x-3">
