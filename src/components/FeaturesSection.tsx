@@ -339,7 +339,7 @@ const FeaturesSection = () => {
 
             {/* Feature Titles Menu - Right Side */}
             <div className="w-80 relative z-20">
-              <div className="sticky top-24 space-y-8 bg-surface/30 backdrop-blur-sm rounded-2xl border border-gray-200">
+              <div className="sticky top-24 space-y-2 bg-surface/30 backdrop-blur-sm rounded-2xl border border-gray-200">
                                 {features.map((feature, index) => (
                   <div key={feature.title} className="relative" data-index={index}>
                     {/* Unified card structure for all items */}
