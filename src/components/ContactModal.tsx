@@ -66,11 +66,6 @@ const ContactModal = ({ open, onOpenChange }: ContactModalProps) => {
                   />
                 </svg>
               </button>
-              {copied && (
-                <div className="absolute -bottom-8 left-1/2 transform -translate-x-1/2">
-                  <span className="text-xs text-green-600 font-medium">Copied!</span>
-                </div>
-              )}
             </div>
           </div>
         </div>
