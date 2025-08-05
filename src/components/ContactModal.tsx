@@ -40,7 +40,7 @@ const ContactModal = ({ open, onOpenChange }: ContactModalProps) => {
         </DialogHeader>
         
         <div className="space-y-6">
-          <div className="text-center">
+          <div>
             <p className="text-muted-foreground mb-4">
               Have questions? We'd love to hear from you.
             </p>
