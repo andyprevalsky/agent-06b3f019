@@ -68,7 +68,10 @@ const NaviHeader = () => {
             variant="outline" 
             size="sm"
             className="hidden md:flex border-border/50 hover:bg-secondary/50"
-            onClick={() => window.location.href = 'mailto:andy@hinavi.ai'}
+            onClick={() => {
+              console.log('Contact button clicked');
+              window.open('mailto:andy@hinavi.ai');
+            }}
           >
             Contact
           </Button>
