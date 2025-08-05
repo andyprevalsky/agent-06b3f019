@@ -55,8 +55,8 @@ const ContactModal = ({ open, onOpenChange }: ContactModalProps) => {
                   className="ml-2 p-2 hover:bg-white/10"
                 >
                   <svg
-                    width="16"
-                    height="16"
+                    width="20"
+                    height="20"
                     viewBox="0 0 24 24"
                     fill="none"
                     className="text-white"
