@@ -19,8 +19,6 @@ const NaviFooter = () => {
             <ul className="space-y-2 text-primary-foreground/70">
               <li><a href="#features" className="hover:text-primary-foreground transition-colors">Features</a></li>
               <li><a href="#waitlist" className="hover:text-primary-foreground transition-colors">Join Waitlist</a></li>
-              <li><a href="#" className="hover:text-primary-foreground transition-colors">Specifications</a></li>
-              <li><a href="mailto:andy@hinavi.ai" className="hover:text-primary-foreground transition-colors">Support</a></li>
             </ul>
           </div>
           
@@ -29,7 +27,7 @@ const NaviFooter = () => {
             <ul className="space-y-2 text-primary-foreground/70">
               <li><a href="#" className="hover:text-primary-foreground transition-colors">About</a></li>
               <li><a href="/privacy" className="hover:text-primary-foreground transition-colors">Privacy</a></li>
-              <li><a href="#" className="hover:text-primary-foreground transition-colors">Terms</a></li>
+              <li><a href="/terms" className="hover:text-primary-foreground transition-colors">Terms</a></li>
               <li><a href="mailto:andy@hinavi.ai" className="hover:text-primary-foreground transition-colors">Contact</a></li>
             </ul>
           </div>
@@ -45,7 +43,7 @@ const NaviFooter = () => {
               <a href="/privacy" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
                 Privacy Policy
               </a>
-              <a href="#" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
+              <a href="/terms" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
                 Terms of Service
               </a>
               <a href="#" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
