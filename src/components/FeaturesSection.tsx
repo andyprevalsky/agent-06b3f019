@@ -24,36 +24,36 @@ const FeaturesSection = () => {
       title: "Fully Customizable",
       description: "",
       details: [
-        "Change the LLM provider, System Prompt & Voice to create your perfect AI companion",
-        "Connect your own tools to Navi through MCPs, or use tools shared by other devs in our marketplace",
-        "Navi comes with prebuilt presets to get you up and running with STOA models in an instant"
+        "Change the LLM provider, System Prompt & Voice to create your perfect AI companion.",
+        "Connect your own tools to Navi through MCPs, or use tools shared by other devs in our marketplace.",
+        "Navi comes with prebuilt presets to get you up and running with STOA models in an instant."
       ]
     },
     {
       title: "Seamless Conversations",
       description: "",
       details: [
-        "Sub-800 ms responses keep every exchange natural and fluid",
-        "Custom models fine-tuned for smooth interruption handling and turn-taking",
-        "Custom voice pipeline engineered by veterans of top voice-AI companies"
+        "Sub-800 ms responses keep every exchange natural and fluid.",
+        "Custom models fine-tuned for smooth interruption handling and turn-taking.",
+        "Custom voice pipeline engineered by veterans of top voice-AI companies."
       ]
     },
     {
       title: "Spawn Agents",
       description: "",
       details: [
-        "Navi agents break down, measure & iterate towards any long-term goal",
-        "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Navi can take real-world actions on your behalf",
-        "Each agent runs on a STOA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions and agents"
+        "Navi agents break down, measure & iterate towards any long-term goal.",
+        "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Navi can take real-world actions on your behalf.",
+        "Each agent runs on a STOA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions and agents."
       ]
     },
     {
       title: "Navi grows with you",
       description: "",
       details: [
-        "After each conversation, Navi extracts key entity information to keep track of your most important relationships, events, and ideas",
-        "Navi's personality evolves to match your communication style",
-        "Time-based queries keep Navi working in the background, constantly refining its understanding of your world and ideating on ways to help you grow"
+        "After each conversation, Navi extracts key entity information to keep track of your most important relationships, events, and ideas.",
+        "Navi's personality evolves to match your communication style.",
+        "Time-based queries keep Navi working in the background, constantly refining its understanding of your world and ideating on ways to help you grow."
       ]
     },
     {
