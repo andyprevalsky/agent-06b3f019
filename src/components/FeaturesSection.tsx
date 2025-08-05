@@ -31,11 +31,11 @@ const FeaturesSection = () => {
     },
     {
       title: "Seamless Conversations",
-      description: "Navi is optimized to be blazing fast to make conversations feel seamless",
+      description: "",
       details: [
-        "AI models trained specifically to tell Navi when to talk and when not to",
-        "Navi feels more lifelike than anything else out there",
-        "Natural conversation flow without awkward interruptions"
+        "Sub-800 ms responses keep every exchange natural and fluid",
+        "Custom models fine-tuned for smooth interruption handling and turn-taking",
+        "Custom voice pipeline engineered by veterans of top voice-AI companies"
       ]
     },
     {
@@ -120,8 +120,9 @@ const FeaturesSection = () => {
         // Calculate progress through the section (0 to 1)
         const progress = (viewportCenter - sectionTop) / sectionHeight;
         
-        // Divide into equal zones for each feature
-        const featureIndex = Math.floor(progress * features.length);
+        // Divide into equal zones for each feature (25% more scroll space)
+        const adjustedProgress = Math.max(0, (progress - 0.125) / 0.75);
+        const featureIndex = Math.floor(adjustedProgress * features.length);
         const clampedIndex = Math.max(0, Math.min(features.length - 1, featureIndex));
         
         setActiveFeature(clampedIndex);
