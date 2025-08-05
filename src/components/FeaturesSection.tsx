@@ -39,14 +39,12 @@ const FeaturesSection = () => {
       ]
     },
     {
-      title: "Spawn Agents for Any Problem",
-      description: "Navi handles thousands of concurrent agents that interface with the real world",
+      title: "Spawn Agents",
+      description: "",
       details: [
-        "Agents can interface with the internet, hook into socials, and poll real-world oracles",
-        "Iterate towards any future outcome, whether you want to never miss a meal again or get your dream job",
-        "Continuously measure, learn, and build its way to any of your life goals",
-        "As AI gets better, the level of abstraction of problems that can be solved increases",
-        "Navi isn't just a smart speaker, it's also an engine for getting things done."
+        "Navi agents break down, measure & iterate towards any long-term goal",
+        "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Navi can take real-world actions on your behalf",
+        "Each agent run on a STOA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions and agents"
       ]
     },
     {
