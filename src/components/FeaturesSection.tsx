@@ -48,13 +48,12 @@ const FeaturesSection = () => {
       ]
     },
     {
-      title: "Navi Grows With You",
-      description: "A robust, state-of-the-art memory system that learns to be your perfect companion",
+      title: "Navi grows with you",
+      description: "",
       details: [
-        "Remembers your preferences, anniversaries, and important information",
-        "AI meetup summaries and meal prep lists",
-        "Regular check-ins and relationship tracking",
-        "Evolving personality that adapts to your needs"
+        "After each conversation, Navi extracts key entity information to track your most important relationships, events, and ideas",
+        "Navi's personality evolves to match your communication style",
+        "Time-based queries keep Navi working in the background, constantly refining its understanding of your world and ideating ways to help you grow"
       ]
     },
     {
