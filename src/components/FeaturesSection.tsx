@@ -374,7 +374,7 @@ const FeaturesSection = () => {
                         }`}
                       >
                         <div className="relative px-4 pb-4">
-                          <p className="text-sm text-muted-foreground leading-relaxed mb-4">{feature.description}</p>
+                          
                           
                           {feature.details.length > 0 && (
                             <ul className="space-y-3">
@@ -522,7 +522,7 @@ const FeaturesSection = () => {
                       {/* Card content */}
                       <div className="p-6">
                       <h3 className="text-xl font-semibold mb-3 text-foreground text-left">{feature.title}</h3>
-                      <p className="text-sm text-muted-foreground mb-4 leading-relaxed text-left">{feature.description}</p>
+                      
                       
                       {feature.details.length > 0 && (
                         <ul className="space-y-3 text-left">
