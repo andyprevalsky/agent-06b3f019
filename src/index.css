@@ -1032,12 +1032,3 @@
     height: 100vh;
     height: calc(var(--vh, 1vh) * 100);
   }
-
-  /* Eggshell background circle - works across all browsers */
-  .eggshell-background {
-    background: #F8F6F0;
-    background: -webkit-radial-gradient(circle, #F8F6F0 0%, #F0EDE5 100%);
-    background: -moz-radial-gradient(circle, #F8F6F0 0%, #F0EDE5 100%);
-    background: radial-gradient(circle, #F8F6F0 0%, #F0EDE5 100%);
-    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.05);
-  }

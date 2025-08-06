@@ -157,14 +157,14 @@ const HeroSection = () => {
       <div className="container mx-auto px-6 relative z-10">
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
-              <div className="w-96 h-96 md:w-120 md:h-120 rounded-full overflow-hidden bg-surface flex items-center justify-center">
+              <div className="w-96 h-96 md:w-120 md:h-120 rounded-full overflow-hidden bg-surface">
                 {shouldLoadVideo ? (
                   <VideoPlayer
                     ref={videoRef}
                     src="/navi-hero-animation.webm"
-                    className="w-[75%] h-[75%] object-contain rounded-full"
+                    className="w-full h-full object-cover"
                     style={{ objectPosition: 'center center' }}
-                    objectFit="contain"
+                    objectFit="cover"
                     autoPlay={true}
                     loop={true}
                     muted={true}
@@ -176,7 +176,7 @@ const HeroSection = () => {
                         medSrc="/navi-midnight-black-hero-background-med.png"
                         highSrc="/navi-midnight-black-hero-background.png"
                         alt="Navi"
-                        className="w-[75%] h-[75%] object-contain rounded-full"
+                        className="w-full h-full object-cover"
                         style={{ objectPosition: 'center center' }}
                         fetchPriority="high"
                       />
@@ -188,7 +188,7 @@ const HeroSection = () => {
                     medSrc="/navi-midnight-black-hero-background-med.png"
                     highSrc="/navi-midnight-black-hero-background.png"
                     alt="Navi"
-                    className="w-[75%] h-[75%] object-contain rounded-full"
+                    className="w-full h-full object-cover"
                     style={{ objectPosition: 'center center' }}
                     fetchPriority="high"
                   />
