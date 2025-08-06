@@ -48,7 +48,7 @@ const FeaturesSection = () => {
       ]
     },
     {
-      title: "Navi grows with you",
+      title: "Navi Grows With You",
       description: "",
       details: [
         "After each conversation, Navi extracts key entity information to keep track of your most important relationships, events, and ideas.",
