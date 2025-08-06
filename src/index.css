@@ -2,18 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-/* CSS Snap Scrolling for Mobile Features */
-.mobile-features-section {
-  scroll-snap-type: y mandatory;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
-}
-
-.mobile-feature-snap-point {
-  scroll-snap-align: start;
-  scroll-snap-stop: always;
-}
-
 /* Navi - Luxury Hardware Design System
    Colors inspired by premium materials: pearl white, space gray, midnight black
    All colors MUST be HSL.
