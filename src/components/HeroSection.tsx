@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import FloatingParticles from "./FloatingParticles";
 import ProgressiveImage from "./ProgressiveImage";
+import VideoPlayer from "./VideoPlayer";
 import { useState, useEffect, useRef } from "react";
 import { ChevronDown } from "lucide-react";
 
@@ -158,28 +159,29 @@ const HeroSection = () => {
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
               <div className="w-96 h-96 md:w-120 md:h-120 rounded-full overflow-hidden bg-surface">
                 {shouldLoadVideo ? (
-                  <video 
+                  <VideoPlayer
                     ref={videoRef}
-                    autoPlay 
-                    loop 
-                    muted 
-                    playsInline
-                    preload="none"
+                    src="/navi-hero-animation.webm"
                     className="w-full h-full object-cover"
                     style={{ objectPosition: 'center center' }}
+                    objectFit="cover"
+                    autoPlay={true}
+                    loop={true}
+                    muted={true}
+                    preload="none"
                     poster="/navi-midnight-black-hero-background-low.png"
-                  >
-                    <source src="/navi-black-v4-hero-background.webm" type="video/webm" />
-                    <ProgressiveImage
-                      lowSrc="/navi-midnight-black-hero-background-low.png"
-                      medSrc="/navi-midnight-black-hero-background-med.png"
-                      highSrc="/navi-midnight-black-hero-background.png"
-                      alt="Navi"
-                      className="w-full h-full object-cover"
-                      style={{ objectPosition: 'center center' }}
-                      fetchPriority="high"
-                    />
-                  </video>
+                    fallbackContent={
+                      <ProgressiveImage
+                        lowSrc="/navi-midnight-black-hero-background-low.png"
+                        medSrc="/navi-midnight-black-hero-background-med.png"
+                        highSrc="/navi-midnight-black-hero-background.png"
+                        alt="Navi"
+                        className="w-full h-full object-cover"
+                        style={{ objectPosition: 'center center' }}
+                        fetchPriority="high"
+                      />
+                    }
+                  />
                 ) : (
                   <ProgressiveImage
                     lowSrc="/navi-midnight-black-hero-background-low.png"

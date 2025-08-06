@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import VideoPlayer from "./VideoPlayer";
 
 interface MemoryGraphAnimationProps {
   restart?: boolean;
@@ -51,31 +52,28 @@ export const MemoryGraphAnimation = ({ restart = false }: MemoryGraphAnimationPr
     return () => observer.disconnect();
   }, [hasTriggered]);
 
-  // Handle video load and play
-  const handleVideoLoad = () => {
-    if (videoRef.current && hasTriggered) {
-      videoRef.current.currentTime = 0;
-      videoRef.current.play().catch(err => {
-        console.log('Video play failed on load:', err);
-      });
-    }
-  };
-
   return (
     <div 
       ref={containerRef}
       className="w-full h-full relative overflow-hidden flex items-center justify-center"
     >
-      <video
+      <VideoPlayer
         ref={videoRef}
         src="/navi-memory-animation.webm"
         className="w-full h-full object-cover"
-        autoPlay
-        loop
-        muted
-        playsInline
-        onLoadedData={handleVideoLoad}
-        onError={(e) => console.log('Video error:', e)}
+        style={{ objectPosition: 'center center' }}
+        objectFit="cover"
+        autoPlay={hasTriggered}
+        loop={true}
+        muted={true}
+        onLoad={() => {
+          if (videoRef.current && hasTriggered) {
+            videoRef.current.currentTime = 0;
+            videoRef.current.play().catch(err => {
+              console.log('Video play failed on load:', err);
+            });
+          }
+        }}
       />
     </div>
   );

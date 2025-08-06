@@ -33,16 +33,28 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   const actualVideoRef = ref || videoRef;
   const [shouldLoadVideo, setShouldLoadVideo] = useState(priority);
   const [isSafari, setIsSafari] = useState(false);
+  const [isIOS, setIsIOS] = useState(false);
 
-  // Detect Safari browser
+  // Detect Safari and iOS browsers
   useEffect(() => {
     const detectSafari = () => {
       const userAgent = navigator.userAgent.toLowerCase();
       return userAgent.includes('safari') && !userAgent.includes('chrome') && !userAgent.includes('firefox');
     };
     
+    const detectIOS = () => {
+      const userAgent = navigator.userAgent.toLowerCase();
+      return /iphone|ipad|ipod/.test(userAgent);
+    };
+    
     setIsSafari(detectSafari());
+    setIsIOS(detectIOS());
   }, []);
+
+  // Generate HEVC source URL for Safari/iOS
+  const getHevcSrc = (webmSrc: string) => {
+    return webmSrc.replace('.webm', '-safari.mov');
+  };
 
   // Prioritize loading strategy
   useEffect(() => {
@@ -144,7 +156,12 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       style={style}
       poster={poster}
     >
-      <source src={src} type="video/webm" />
+      {/* HEVC source for Safari/iOS with alpha channel support */}
+      {(isSafari || isIOS) && (
+        <source src={getHevcSrc(src)} type='video/mp4; codecs="hvc1"' />
+      )}
+      {/* WebM source for other browsers */}
+      <source src={src} type='video/webm; codecs="vp9"' />
       {fallbackContent}
     </video>
   );

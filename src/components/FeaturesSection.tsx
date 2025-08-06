@@ -39,12 +39,12 @@ const FeaturesSection = () => {
       ]
     },
     {
-      title: "Spawn Agents",
+      title: "Agent Enabled",
       description: "",
       details: [
         "Navi agents break down, measure & iterate towards any long-term goal.",
         "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Navi can take real-world actions on your behalf.",
-        "Each agent runs on a STOA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions and agents."
+        "Each agent runs on a STOA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions."
       ]
     },
     {
@@ -297,7 +297,7 @@ const FeaturesSection = () => {
                       }`}>
                         <VideoPlayer
                           ref={privacyVideoRef}
-                          src="/navi-privacy-animation-2.webm"
+                          src="/navi-privacy-animation.webm"
                           className="w-full h-full object-contain"
                           style={{ objectPosition: 'center center' }}
                           objectFit="contain"
@@ -473,7 +473,7 @@ const FeaturesSection = () => {
                 }`}>
                   <VideoPlayer
                     ref={mobilePrivacyVideoRef}
-                    src="/navi-privacy-animation-2.webm"
+                    src="/navi-privacy-animation.webm"
                     className="w-full h-full object-contain"
                     style={{ objectPosition: 'center center' }}
                     objectFit="contain"
