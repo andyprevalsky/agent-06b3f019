@@ -162,9 +162,9 @@ const HeroSection = () => {
                   <VideoPlayer
                     ref={videoRef}
                     src="/navi-hero-animation.webm"
-                    className="w-[75%] h-[75%] object-cover rounded-full"
+                    className="w-[75%] h-[75%] object-contain rounded-full"
                     style={{ objectPosition: 'center center' }}
-                    objectFit="cover"
+                    objectFit="contain"
                     autoPlay={true}
                     loop={true}
                     muted={true}
@@ -176,7 +176,7 @@ const HeroSection = () => {
                         medSrc="/navi-midnight-black-hero-background-med.png"
                         highSrc="/navi-midnight-black-hero-background.png"
                         alt="Navi"
-                        className="w-[75%] h-[75%] object-cover rounded-full"
+                        className="w-[75%] h-[75%] object-contain rounded-full"
                         style={{ objectPosition: 'center center' }}
                         fetchPriority="high"
                       />
@@ -188,7 +188,7 @@ const HeroSection = () => {
                     medSrc="/navi-midnight-black-hero-background-med.png"
                     highSrc="/navi-midnight-black-hero-background.png"
                     alt="Navi"
-                    className="w-[75%] h-[75%] object-cover rounded-full"
+                    className="w-[75%] h-[75%] object-contain rounded-full"
                     style={{ objectPosition: 'center center' }}
                     fetchPriority="high"
                   />
