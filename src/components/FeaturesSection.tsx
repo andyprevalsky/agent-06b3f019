@@ -410,23 +410,10 @@ const FeaturesSection = () => {
           </div>
         </div>
 
-        {/* Mobile Layout with Snap Scrolling */}
-        <div className="lg:hidden relative">
-          <div className="mobile-snap-container h-screen">
-            {/* Create scroll sections for each feature */}
-            {features.map((_, index) => (
-              <div 
-                key={`mobile-section-${index}`}
-                className="mobile-snap-section h-screen flex items-center justify-center"
-                data-index={index}
-              >
-                {/* This creates the scrollable area that triggers feature changes */}
-              </div>
-            ))}
-          </div>
-          
-          {/* Fixed Animation Container - Overlaid on top */}
-          <div className="fixed top-24 left-0 right-0 z-20 flex flex-col items-center space-y-6 pointer-events-none">
+        {/* Mobile Layout */}
+        <div className="lg:hidden min-h-[300vh] relative mobile-snap-container">
+          {/* Fixed Animation Container - Never moves */}
+          <div className="sticky top-24 z-20 flex flex-col items-center space-y-6">
             {/* Animation stays in exact same position */}
             <div className="w-[380px] h-[380px] flex items-center justify-center relative">
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
