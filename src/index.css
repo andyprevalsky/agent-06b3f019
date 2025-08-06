@@ -3,13 +3,13 @@
 @tailwind utilities;
 
 /* CSS Snap Scrolling for Mobile Features */
-.mobile-snap-container {
+.mobile-features-section {
   scroll-snap-type: y mandatory;
   -webkit-overflow-scrolling: touch;
-  overscroll-behavior: none;
+  overscroll-behavior: contain;
 }
 
-.mobile-snap-section {
+.mobile-feature-snap-point {
   scroll-snap-align: start;
   scroll-snap-stop: always;
 }

@@ -411,7 +411,15 @@ const FeaturesSection = () => {
         </div>
 
         {/* Mobile Layout */}
-        <div className="lg:hidden min-h-[300vh] relative mobile-snap-container">
+        <div className="lg:hidden min-h-[300vh] relative mobile-features-section">
+          {/* Add invisible snap points for each feature */}
+          {features.map((_, index) => (
+            <div 
+              key={`snap-point-${index}`}
+              className="mobile-feature-snap-point h-screen"
+              style={{ marginTop: index === 0 ? '0' : '-100vh' }}
+            />
+          ))}
           {/* Fixed Animation Container - Never moves */}
           <div className="sticky top-24 z-20 flex flex-col items-center space-y-6">
             {/* Animation stays in exact same position */}
