@@ -157,7 +157,7 @@ const HeroSection = () => {
       <div className="container mx-auto px-6 relative z-10">
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
-              <div className="w-[345px] h-[345px] md:w-[432px] md:h-[432px] rounded-full overflow-hidden relative bg-gradient-to-br from-[#F8F6F0] to-[#F0EDE5] shadow-inner">
+              <div className="w-[293px] h-[293px] md:w-[367px] md:h-[367px] rounded-full overflow-hidden bg-surface">
                 {shouldLoadVideo ? (
                   <VideoPlayer
                     ref={videoRef}
