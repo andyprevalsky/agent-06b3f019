@@ -151,7 +151,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       }
     };
 
-    // Primary autoplay trigger on loadeddata
+    // Multiple autoplay triggers to ensure video starts
     const handleLoadedData = async () => {
       console.log('loadeddata event fired, autoPlay:', autoPlay, 'isPlaying:', isPlaying);
       if (video && autoPlay) {
@@ -160,18 +160,39 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       onLoad?.();
     };
 
-    // Track video play/pause events
-    const handlePlay = () => setIsPlaying(true);
-    const handlePause = () => setIsPlaying(false);
+    const handleCanPlay = async () => {
+      console.log('canplay event fired, autoPlay:', autoPlay, 'isPlaying:', isPlaying);
+      if (video && autoPlay && video.paused) {
+        await safeAutoplay(video);
+      }
+    };
 
-    // Add event listeners - removed duplicate autoplay triggers
+    // Track video play/pause events
+    const handlePlay = () => {
+      console.log('Video started playing');
+      setIsPlaying(true);
+    };
+    
+    const handlePause = () => {
+      console.log('Video paused');
+      setIsPlaying(false);
+    };
+
+    // Add event listeners
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('focus', handleFocus);
     window.addEventListener('blur', handleBlur);
     window.addEventListener('pageshow', handlePageShow);
     video.addEventListener('loadeddata', handleLoadedData);
+    video.addEventListener('canplay', handleCanPlay);
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
+
+    // Immediate autoplay attempt once video is ready
+    if (autoPlay && video.readyState >= 2) {
+      console.log('Video ready state sufficient, attempting immediate play');
+      safeAutoplay(video);
+    }
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -179,6 +200,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       window.removeEventListener('blur', handleBlur);
       window.removeEventListener('pageshow', handlePageShow);
       video.removeEventListener('loadeddata', handleLoadedData);
+      video.removeEventListener('canplay', handleCanPlay);
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
     };
