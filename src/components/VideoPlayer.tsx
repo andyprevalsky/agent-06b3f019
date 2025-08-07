@@ -66,6 +66,24 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     }
   }, [priority]);
 
+  // Safe autoplay function
+  const safeAutoplay = async (video: HTMLVideoElement) => {
+    try {
+      video.muted = true;
+      await video.play();
+    } catch (err) {
+      console.warn('Autoplay blocked:', err);
+      // Try again with user interaction
+      const playOnInteraction = () => {
+        video.play().catch(() => {});
+        document.removeEventListener('click', playOnInteraction);
+        document.removeEventListener('touchstart', playOnInteraction);
+      };
+      document.addEventListener('click', playOnInteraction);
+      document.addEventListener('touchstart', playOnInteraction);
+    }
+  };
+
   // Comprehensive iOS Safari video handling
   useEffect(() => {
     if (!shouldLoadVideo) return;
@@ -73,17 +91,15 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     const video = (actualVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current;
     if (!video) return;
 
-    const playVideo = () => {
+    const playVideo = async () => {
       if (video && video.paused) {
         // Force reload the video source to fix freezing on iOS Safari
         const currentTime = video.currentTime;
         video.load();
         video.currentTime = currentTime;
         
-        setTimeout(() => {
-          video.play().catch(() => {
-            // If autoplay fails, that's okay
-          });
+        setTimeout(async () => {
+          await safeAutoplay(video);
         }, 100);
       }
     };
@@ -118,8 +134,18 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       }
     };
 
-    const handleLoadedData = () => {
+    const handleLoadedData = async () => {
+      if (video && autoPlay) {
+        await safeAutoplay(video);
+      }
       onLoad?.();
+    };
+
+    // Safe autoplay on window load
+    const handleWindowLoad = async () => {
+      if (video && autoPlay) {
+        await safeAutoplay(video);
+      }
     };
 
     // Add all the event listeners for comprehensive iOS Safari support
@@ -127,6 +153,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     window.addEventListener('focus', handleFocus);
     window.addEventListener('blur', handleBlur);
     window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('load', handleWindowLoad);
     video.addEventListener('loadeddata', handleLoadedData);
 
     return () => {
@@ -134,9 +161,10 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       window.removeEventListener('focus', handleFocus);
       window.removeEventListener('blur', handleBlur);
       window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('load', handleWindowLoad);
       video.removeEventListener('loadeddata', handleLoadedData);
     };
-  }, [shouldLoadVideo, onLoad]);
+  }, [shouldLoadVideo, onLoad, autoPlay]);
 
   const finalClassName = `${className} object-${objectFit}`;
 
