@@ -172,9 +172,9 @@ const HeroSection = () => {
                     poster="/navi-midnight-black-hero-background-low.png"
                     fallbackContent={
                       <ProgressiveImage
-                        lowSrc="/navi-midnight-black-hero-background-low.png"
-                        medSrc="/navi-midnight-black-hero-background-med.png"
-                        highSrc="/navi-midnight-black-hero-background.png"
+                        lowSrc="/navi-hero-image-low.png"
+                        medSrc="/navi-hero-image-med.png"
+                        highSrc="/navi-hero-image.png"
                         alt="Navi"
                         className="w-96 h-96 md:w-120 md:h-120 object-cover"
                         style={{ objectPosition: 'center center' }}
@@ -184,9 +184,9 @@ const HeroSection = () => {
                   />
                 ) : (
                   <ProgressiveImage
-                    lowSrc="/navi-midnight-black-hero-background-low.png"
-                    medSrc="/navi-midnight-black-hero-background-med.png"
-                    highSrc="/navi-midnight-black-hero-background.png"
+                    lowSrc="/navi-hero-image-low.png"
+                    medSrc="/navi-hero-image-med.png"
+                    highSrc="/navi-hero-image.png"
                     alt="Navi"
                     className="w-96 h-96 md:w-120 md:h-120 object-cover"
                     style={{ objectPosition: 'center center' }}
