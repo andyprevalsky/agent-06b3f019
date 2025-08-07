@@ -19,6 +19,35 @@ const FeaturesSection = () => {
   const mobileAgentEngineVideoRef = useRef<HTMLVideoElement>(null);
   const mobilePrivacyVideoRef = useRef<HTMLVideoElement>(null);
 
+  // Restart videos when they become active
+  useEffect(() => {
+    const restartVideo = (videoRef: React.RefObject<HTMLVideoElement>) => {
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0;
+        videoRef.current.play().catch(err => {
+          console.log('Video restart failed:', err);
+        });
+      }
+    };
+
+    // Restart appropriate video based on active feature
+    switch (activeFeature) {
+      case 0: // Customization
+        restartVideo(customizationVideoRef);
+        restartVideo(mobileCustomizationVideoRef);
+        break;
+      case 2: // Agent Engine  
+        restartVideo(agentEngineVideoRef);
+        restartVideo(mobileAgentEngineVideoRef);
+        break;
+      case 4: // Privacy
+        restartVideo(privacyVideoRef);
+        restartVideo(mobilePrivacyVideoRef);
+        break;
+      // Memory animation (case 3) is handled by MemoryGraphAnimation component
+    }
+  }, [activeFeature]);
+
   const features = [
     {
       title: "Fully Customizable",
@@ -163,31 +192,6 @@ const FeaturesSection = () => {
     };
   }, [clickedFeature]);
 
-  // Restart videos when they become active
-  useEffect(() => {
-    const restartVideo = (videoRef: React.RefObject<HTMLVideoElement>) => {
-      if (videoRef.current) {
-        videoRef.current.currentTime = 0;
-        videoRef.current.play().catch(() => {
-          // If autoplay fails, that's okay
-        });
-      }
-    };
-
-    // Restart appropriate videos based on active feature
-    if (activeFeature === 0) {
-      restartVideo(customizationVideoRef);
-      restartVideo(mobileCustomizationVideoRef);
-    } else if (activeFeature === 2) {
-      restartVideo(agentEngineVideoRef);
-      restartVideo(mobileAgentEngineVideoRef);
-    } else if (activeFeature === 3) {
-      restartVideo(privacyVideoRef);
-      restartVideo(mobilePrivacyVideoRef);
-    } else if (activeFeature === 4) {
-      restartVideo(memoryVideoRef);
-    }
-  }, [activeFeature]);
 
   const handleFeatureClick = (index: number) => {
     setClickedFeature(index);
