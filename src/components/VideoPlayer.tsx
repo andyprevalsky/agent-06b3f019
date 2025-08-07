@@ -94,7 +94,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     }
 
     // Handle all relevant lifecycle events
-    const handleLoad = () => {
+    const handleVideoLoad = () => {
       safeAutoplay();
       onLoad?.();
     };
@@ -109,8 +109,11 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     
     const handleDOMContentLoaded = () => safeAutoplay();
 
+    const handleWindowLoad = () => safeAutoplay();
+
     // Add event listeners
-    window.addEventListener('load', handleLoad);
+    video.addEventListener('loadeddata', handleVideoLoad);
+    window.addEventListener('load', handleWindowLoad);
     window.addEventListener('pageshow', handlePageShow);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('focus', handleFocus);
@@ -122,7 +125,8 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     }
 
     return () => {
-      window.removeEventListener('load', handleLoad);
+      video.removeEventListener('loadeddata', handleVideoLoad);
+      window.removeEventListener('load', handleWindowLoad);
       window.removeEventListener('pageshow', handlePageShow);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
