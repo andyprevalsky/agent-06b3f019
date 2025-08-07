@@ -65,51 +65,68 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     }
   }, [priority]);
 
-  // Simple safe autoplay implementation
+  // Simple safe autoplay implementation based on your example
   useEffect(() => {
     if (!shouldLoadVideo) return;
     
     const video = (actualVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current;
     if (!video) return;
 
-    const safeAutoplay = async () => {
-      try {
-        video.muted = true;
-        await video.play();
-      } catch (err) {
-        console.warn('Autoplay blocked:', err);
-        // Fallback if autoplay fails
-        const playOnInteraction = () => {
-          video.play().catch(() => {});
-          document.removeEventListener('click', playOnInteraction, true);
-          document.removeEventListener('touchstart', playOnInteraction, true);
-        };
-        document.addEventListener('click', playOnInteraction, true);
-        document.addEventListener('touchstart', playOnInteraction, true);
-      }
-    };
+    let hasAttemptedPlay = false;
 
-    // Try to play when video loads and on window load
+    function safeAutoplay() {
+      if (!video || !autoPlay) return;
+
+      // Prevent spamming play()
+      if (hasAttemptedPlay) return;
+      hasAttemptedPlay = true;
+
+      // Ensure video is muted (required by autoplay policy)
+      video.muted = true;
+
+      // Small timeout ensures the video is attached & rendered
+      setTimeout(() => {
+        video.play().catch((err) => {
+          console.warn('[Autoplay failed]', err);
+          hasAttemptedPlay = false; // allow retry later if needed
+        });
+      }, 0);
+    }
+
+    // Handle all relevant lifecycle events
     const handleLoad = () => {
-      if (autoPlay) {
-        safeAutoplay();
-      }
+      safeAutoplay();
       onLoad?.();
     };
-
-    const handleWindowLoad = () => {
-      if (autoPlay) {
-        video.muted = true;
-        video.play().catch(() => safeAutoplay());
-      }
+    
+    const handlePageShow = () => safeAutoplay();
+    
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') safeAutoplay();
     };
+    
+    const handleFocus = () => safeAutoplay();
+    
+    const handleDOMContentLoaded = () => safeAutoplay();
 
-    video.addEventListener('loadeddata', handleLoad);
-    window.addEventListener('load', handleWindowLoad);
+    // Add event listeners
+    window.addEventListener('load', handleLoad);
+    window.addEventListener('pageshow', handlePageShow);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('DOMContentLoaded', handleDOMContentLoaded);
+
+    // Initial attempt if video is already ready
+    if (video.readyState >= 2) {
+      safeAutoplay();
+    }
 
     return () => {
-      video.removeEventListener('loadeddata', handleLoad);
-      window.removeEventListener('load', handleWindowLoad);
+      window.removeEventListener('load', handleLoad);
+      window.removeEventListener('pageshow', handlePageShow);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('DOMContentLoaded', handleDOMContentLoaded);
     };
   }, [shouldLoadVideo, autoPlay, onLoad]);
 
