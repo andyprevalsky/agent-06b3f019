@@ -68,7 +68,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     }
   }, [priority]);
 
-  // Unified safe autoplay function with race condition prevention
+  // Simplified safe autoplay function
   const safeAutoplay = async (video: HTMLVideoElement): Promise<void> => {
     // Prevent multiple simultaneous play attempts
     if (playAttemptRef.current) {
@@ -77,24 +77,25 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
 
     playAttemptRef.current = (async () => {
       try {
-        if (video.paused && !isPlaying) {
+        console.log('Attempting to play video, paused:', video.paused, 'isPlaying:', isPlaying);
+        if (video.paused) {
           video.muted = true;
           await video.play();
+          console.log('Video play successful');
           setIsPlaying(true);
         }
       } catch (err) {
-        console.warn('Autoplay blocked:', err);
+        console.log('Video play failed:', err);
         setIsPlaying(false);
         // Setup user interaction fallback
         const playOnInteraction = async () => {
           try {
             await video.play();
             setIsPlaying(true);
+            console.log('User interaction play successful');
           } catch (e) {
-            console.warn('User interaction play failed:', e);
+            console.log('User interaction play failed:', e);
           }
-          document.removeEventListener('click', playOnInteraction);
-          document.removeEventListener('touchstart', playOnInteraction);
         };
         document.addEventListener('click', playOnInteraction, { once: true });
         document.addEventListener('touchstart', playOnInteraction, { once: true });
@@ -114,7 +115,8 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     if (!video) return;
 
     const playVideo = async () => {
-      if (video && video.paused && !isPlaying) {
+      console.log('playVideo called, video paused:', video?.paused, 'isPlaying:', isPlaying);
+      if (video && video.paused) {
         await safeAutoplay(video);
       }
     };
@@ -149,9 +151,10 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       }
     };
 
-    // Single loadeddata handler - primary autoplay trigger
+    // Primary autoplay trigger on loadeddata
     const handleLoadedData = async () => {
-      if (video && autoPlay && !isPlaying) {
+      console.log('loadeddata event fired, autoPlay:', autoPlay, 'isPlaying:', isPlaying);
+      if (video && autoPlay) {
         await safeAutoplay(video);
       }
       onLoad?.();
