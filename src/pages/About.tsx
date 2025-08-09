@@ -93,7 +93,7 @@ const About = () => {
       <ContactModal
         open={contactOpen}
         onOpenChange={setContactOpen}
-        subtitle={"We’re hiring! Please send your resume and a short blurb to andy@hinavi.ai."}
+        subtitle={"Come help us build the next Apple."}
       />
 
       <NaviFooter />
