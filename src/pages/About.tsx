@@ -50,7 +50,7 @@ const About = () => {
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
             <h2 className="text-2xl font-semibold mb-3 text-foreground">Our Mission</h2>
             <p className="text-muted-foreground leading-relaxed">
-              Our mission is to create Artificial Life that people love and trust. Almost everyone has the problem of only having one intelligent life-form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Navi aims to give each individual a super intelligent companion to help guide them along their unique personal journey.
+              Our mission is to create Artificial Life that is the truest embodiment of light — that people love and trust. Almost everyone has the problem of only having one intelligent life-form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Navi aims to give each individual a super intelligent companion to help guide them along their unique personal journey.
             </p>
           </section>
 
