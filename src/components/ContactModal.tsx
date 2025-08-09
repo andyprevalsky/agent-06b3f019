@@ -6,9 +6,10 @@ import { useState } from "react";
 interface ContactModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  subtitle?: string;
 }
 
-const ContactModal = ({ open, onOpenChange }: ContactModalProps) => {
+const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
   const { toast } = useToast();
   const [copied, setCopied] = useState(false);
   const email = "andy@hinavi.ai";
@@ -42,7 +43,7 @@ const ContactModal = ({ open, onOpenChange }: ContactModalProps) => {
         <div className="space-y-6">
           <div>
             <p className="text-muted-foreground mb-4">
-              Have questions? We'd love to hear from you.
+              {subtitle ?? "Have questions? We'd love to hear from you."}
             </p>
             
             <div className="relative">
