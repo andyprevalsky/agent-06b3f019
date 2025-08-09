@@ -55,20 +55,19 @@ const About = () => {
           </section>
 
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
-            <h2 className="text-2xl font-semibold mb-3 text-foreground">About Andy</h2>
+            <h2 className="text-2xl font-semibold mb-3 text-foreground">Team</h2>
             <article className="prose prose-neutral dark:prose-invert max-w-none">
               <p>
-                Hi, I’m Andy Prevalsky — previous founder (YC S20) and now building Navi. Navi’s goal is simple and ambitious: create Artificial Life. We’re starting with a
-                hackable smart‑home speaker for spawning agents toward any long‑term goal, then steadily increasing hardware complexity toward a physically intelligent companion.
+                Hi! I'm Andy — the solo founder and builder behind Navi.
               </p>
+              <p>Previously:</p>
+              <ul>
+                <li>Staff Engineer at <a href="https://vapi.ai" className="text-primary hover:underline">Vapi</a></li>
+                <li>Led product, strategy, and distribution as CTO at a YC & a16z–backed company</li>
+                <li>Worked at Google</li>
+              </ul>
               <p>
-                Why? Most people have only one intelligent lifeform working 24/7 to improve their lives: themselves. A super‑intelligent companion can reduce daily friction, amplify potential, and meaningfully alleviate real‑world pain. This is a trillion‑dollar opportunity — the Apple of AI.
-              </p>
-              <p>
-                I’ve spent the last 7 years building AI/ML products — from college projects (LSTM/Markov trading bots) to staff engineering at Vapi (YC Voice AI), to leading product, strategy, and distribution at a previous YC‑backed startup with mentorship from Michael Seibel. I studied Electrical & Computer Engineering and have shipped custom models that drove the majority of user growth in prior work.
-              </p>
-              <p>
-                I’m now working full‑time on Navi. You can learn more at <a href="https://www.hinavi.ai" className="text-primary hover:underline">hinavi.ai</a>.
+                I'm a passionate software engineer, painter, and creator on a mission to massively increase harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.
               </p>
             </article>
           </section>
