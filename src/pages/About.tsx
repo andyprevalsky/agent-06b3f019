@@ -50,7 +50,7 @@ const About = () => {
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
             <h2 className="text-2xl font-semibold mb-3 text-foreground">Our Mission</h2>
             <p className="text-muted-foreground leading-relaxed">
-              Mission placeholder: We’re on a long-term journey to create Artificial Life that people love and trust. We’re starting with a hackable smart-home speaker and will keep increasing capability — from expressive face integrations to a robust physical intelligence layer. (You can edit this later.)
+              Our mission is to create Artificial Life that people love and trust. Almost everyone has the problem of only having one intelligent life-form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Navi aims to give each individual a super intelligent companion to guide them along their own personal journey.
             </p>
           </section>
 
