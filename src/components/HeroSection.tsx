@@ -151,18 +151,25 @@ const HeroSection = () => {
 
 
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-gradient-to-br from-background via-surface to-secondary/30 grid-background">
+    <section className="relative flex items-center justify-center overflow-visible pt-16 bg-gradient-to-br from-background via-surface to-secondary/30 grid-background" style={{ height: 'calc(var(--vh) * 100)' }}>
       <FloatingParticles />
       
       <div className="container mx-auto px-6 relative z-10">
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
-              <div className="w-[28rem] h-[28rem] md:w-[36rem] md:h-[36rem] rounded-full overflow-hidden flex items-center justify-center bg-surface">
+              <div
+                className="rounded-full overflow-hidden flex items-center justify-center bg-surface"
+                style={{
+                  width: 'clamp(240px, min(70vw, 60vh), 640px)',
+                  height: 'clamp(240px, min(70vw, 60vh), 640px)',
+                  marginTop: 'clamp(16px, 5vh, 64px)'
+                }}
+              >
                 {shouldLoadVideo ? (
                   <VideoPlayer
                     ref={videoRef}
                     src="/navi-hero-animation.webm"
-                    className="w-96 h-96 md:w-120 md:h-120 object-cover"
+                    className="w-full h-full object-cover"
                     style={{ objectPosition: 'center center' }}
                     objectFit="cover"
                     autoPlay={true}
@@ -176,7 +183,7 @@ const HeroSection = () => {
                         medSrc="/navi-hero-image-med.png"
                         highSrc="/navi-hero-image.png"
                         alt="Navi"
-                        className="w-96 h-96 md:w-120 md:h-120 object-cover"
+                        className="w-full h-full object-cover"
                         style={{ objectPosition: 'center center' }}
                         fetchPriority="high"
                       />
@@ -188,7 +195,7 @@ const HeroSection = () => {
                     medSrc="/navi-hero-image-med.png"
                     highSrc="/navi-hero-image.png"
                     alt="Navi"
-                    className="w-96 h-96 md:w-120 md:h-120 object-cover"
+                    className="w-full h-full object-cover"
                     style={{ objectPosition: 'center center' }}
                     fetchPriority="high"
                   />
@@ -225,18 +232,19 @@ const HeroSection = () => {
         </div>
       </div>
       
-      {/* Scroll down arrow - positioned using dvh for Safari overlay */}
-      <div className="absolute left-1/2 transform -translate-x-1/2 z-20" style={{ bottom: 'calc(100dvh - 95dvh + env(safe-area-inset-bottom, 1rem))' }}>
+      {/* Scroll down arrow - positioned to always be ~2px above the fold using visual viewport height and safe-area inset */}
+      <div className="absolute left-1/2 transform -translate-x-1/2 z-30" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 2px)' }}>
         <button 
           className="p-3 rounded-full bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 hover:bg-gradient-to-br hover:from-[#323230] hover:to-[#252523] transition-all duration-300 shadow-lg animate-slow-bounce"
           onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
+          aria-label="Scroll to features"
         >
           <ChevronDown className="w-6 h-6 text-white" />
         </button>
       </div>
       
       {/* Gradient overlay for depth */}
-      <div className="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-background/100 to-transparent"></div>
+      <div className="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-background/100 to-transparent pointer-events-none z-10"></div>
     </section>
   );
 };
