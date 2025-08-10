@@ -8,6 +8,7 @@ import { ChevronDown } from "lucide-react";
 const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
   const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
+  const [arrowVisible, setArrowVisible] = useState(true);
   const videoRef = useRef<HTMLVideoElement>(null);
   const sectionRef = useRef<HTMLElement>(null);
 
@@ -23,6 +24,16 @@ const HeroSection = () => {
     });
   }, []);
 
+  // Show arrow only while hero is in view
+  useEffect(() => {
+    const el = sectionRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([entry]) => {
+      setArrowVisible(entry.isIntersecting);
+    }, { threshold: [0, 0.01] });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
 
   // Measure header height to keep consistent gap and avoid clipping
   useEffect(() => {
@@ -178,55 +189,57 @@ const HeroSection = () => {
 
 
   return (
-    <section ref={sectionRef} className="relative flex items-center justify-center overflow-visible bg-gradient-to-br from-background via-surface to-secondary/30 grid-background" style={{ height: 'calc(var(--vh) * 100)', paddingTop: 'calc(var(--header-h, 64px) + 8px)' }}>
+    <section ref={sectionRef} className="relative flex items-center justify-center overflow-visible bg-gradient-to-br from-background via-surface to-secondary/30 grid-background" style={{ height: '100svh', paddingTop: 'calc(var(--header-h, 64px) + 8px)' }}>
       <FloatingParticles />
       
       <div className="container mx-auto px-6 relative z-10 overflow-visible">
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center overflow-visible">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
               <div
-                className="rounded-full overflow-hidden flex items-center justify-center bg-surface"
+                className="rounded-full p-2 bg-surface flex items-center justify-center"
                 style={{
                   width: 'clamp(240px, min(70vw, 60vh), 640px)',
                   height: 'clamp(240px, min(70vw, 60vh), 640px)',
                   marginTop: 'clamp(8px, 3vh, 24px)'
                 }}
               >
-                {shouldLoadVideo ? (
-                  <VideoPlayer
-                    ref={videoRef}
-                    src="/navi-hero-animation.webm"
-                    className="w-full h-full object-cover"
-                    style={{ objectPosition: 'center center' }}
-                    objectFit="cover"
-                    autoPlay={true}
-                    loop={true}
-                    muted={true}
-                    preload="none"
-                    poster="/navi-midnight-black-hero-background-low.png"
-                    fallbackContent={
-                      <ProgressiveImage
-                        lowSrc="/navi-hero-image-low.png"
-                        medSrc="/navi-hero-image-med.png"
-                        highSrc="/navi-hero-image.png"
-                        alt="Navi"
-                        className="w-full h-full object-cover"
-                        style={{ objectPosition: 'center center' }}
-                        fetchPriority="high"
-                      />
-                    }
-                  />
-                ) : (
-                  <ProgressiveImage
-                    lowSrc="/navi-hero-image-low.png"
-                    medSrc="/navi-hero-image-med.png"
-                    highSrc="/navi-hero-image.png"
-                    alt="Navi"
-                    className="w-full h-full object-cover"
-                    style={{ objectPosition: 'center center' }}
-                    fetchPriority="high"
-                  />
-                )}
+                <div className="rounded-full overflow-hidden w-full h-full flex items-center justify-center">
+                  {shouldLoadVideo ? (
+                    <VideoPlayer
+                      ref={videoRef}
+                      src="/navi-hero-animation.webm"
+                      className="w-full h-full object-cover"
+                      style={{ objectPosition: 'center center' }}
+                      objectFit="cover"
+                      autoPlay={true}
+                      loop={true}
+                      muted={true}
+                      preload="none"
+                      poster="/navi-midnight-black-hero-background-low.png"
+                      fallbackContent={
+                        <ProgressiveImage
+                          lowSrc="/navi-hero-image-low.png"
+                          medSrc="/navi-hero-image-med.png"
+                          highSrc="/navi-hero-image.png"
+                          alt="Navi"
+                          className="w-full h-full object-cover"
+                          style={{ objectPosition: 'center center' }}
+                          fetchPriority="high"
+                        />
+                      }
+                    />
+                  ) : (
+                    <ProgressiveImage
+                      lowSrc="/navi-hero-image-low.png"
+                      medSrc="/navi-hero-image-med.png"
+                      highSrc="/navi-hero-image.png"
+                      alt="Navi"
+                      className="w-full h-full object-cover"
+                      style={{ objectPosition: 'center center' }}
+                      fetchPriority="high"
+                    />
+                  )}
+                </div>
               </div>
             </div>
           
@@ -259,8 +272,8 @@ const HeroSection = () => {
         </div>
       </div>
       
-      {/* Scroll down arrow - positioned to always be ~2px above the fold using visual viewport height and safe-area inset */}
-      <div className="absolute left-1/2 transform -translate-x-1/2 z-30" style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 2px)' }}>
+      {/* Scroll down arrow - fixed to prevent layout shift */}
+      <div className={`fixed left-1/2 transform -translate-x-1/2 z-30 transition-opacity duration-200 ${arrowVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 2px)' }}>
         <button 
           className="p-3 rounded-full bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 hover:bg-gradient-to-br hover:from-[#323230] hover:to-[#252523] transition-all duration-300 shadow-lg animate-slow-bounce"
           onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
