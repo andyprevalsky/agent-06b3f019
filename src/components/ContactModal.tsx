@@ -35,7 +35,7 @@ const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="w-[calc(100vw-2rem)] max-w-md max-h-[85vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Contact Us</DialogTitle>
         </DialogHeader>
