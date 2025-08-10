@@ -60,10 +60,8 @@ const About = () => {
               </div>
               <article className="prose prose-neutral dark:prose-invert max-w-none">
                 <p>
-                  Hi! I'm Andy, the solo founder and builder behind Navi.
-                </p>
-                <p>
-                  I'm a passionate software engineer, painter, and creator on a mission to 10x the level of harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.
+                  Hi! I'm Andy, the solo founder and builder behind Navi.<br />
+                  I'm a passionate software engineer, artist, and creator on a mission to 10x the level of harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.
                 </p>
                 <p className="mt-4">
                   <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" className="text-primary underline font-medium hover:opacity-90 focus:underline">linkedin</a>
