@@ -9,6 +9,7 @@ const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
   const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const sectionRef = useRef<HTMLElement>(null);
 
   const baseText = "Hi! I'm Navi, your voice AI ";
   const words = ["companion.", "assistant.", "daemon.", "computer."];
@@ -20,6 +21,32 @@ const HeroSection = () => {
     requestAnimationFrame(() => {
       setShouldLoadVideo(true);
     });
+  }, []);
+
+
+  // Measure header height to keep consistent gap and avoid clipping
+  useEffect(() => {
+    const updateHeaderH = () => {
+      const hh = document.getElementById('site-header')?.getBoundingClientRect().height ?? 64;
+      if (sectionRef.current) {
+        sectionRef.current.style.setProperty('--header-h', `${Math.round(hh)}px`);
+      }
+    };
+    updateHeaderH();
+    window.addEventListener('resize', updateHeaderH);
+    window.addEventListener('orientationchange', updateHeaderH);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', updateHeaderH);
+      window.visualViewport.addEventListener('scroll', updateHeaderH);
+    }
+    return () => {
+      window.removeEventListener('resize', updateHeaderH);
+      window.removeEventListener('orientationchange', updateHeaderH);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', updateHeaderH);
+        window.visualViewport.removeEventListener('scroll', updateHeaderH);
+      }
+    };
   }, []);
 
   // Handle Safari iOS video issues - only after video should load
@@ -151,18 +178,18 @@ const HeroSection = () => {
 
 
   return (
-    <section className="relative flex items-center justify-center overflow-visible pt-16 bg-gradient-to-br from-background via-surface to-secondary/30 grid-background" style={{ height: 'calc(var(--vh) * 100)' }}>
+    <section ref={sectionRef} className="relative flex items-center justify-center overflow-visible bg-gradient-to-br from-background via-surface to-secondary/30 grid-background" style={{ height: 'calc(var(--vh) * 100)', paddingTop: 'calc(var(--header-h, 64px) + 8px)' }}>
       <FloatingParticles />
       
-      <div className="container mx-auto px-6 relative z-10">
-                  <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center">
+      <div className="container mx-auto px-6 relative z-10 overflow-visible">
+                  <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center overflow-visible">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
               <div
                 className="rounded-full overflow-hidden flex items-center justify-center bg-surface"
                 style={{
                   width: 'clamp(240px, min(70vw, 60vh), 640px)',
                   height: 'clamp(240px, min(70vw, 60vh), 640px)',
-                  marginTop: 'clamp(16px, 5vh, 64px)'
+                  marginTop: 'clamp(8px, 3vh, 24px)'
                 }}
               >
                 {shouldLoadVideo ? (
