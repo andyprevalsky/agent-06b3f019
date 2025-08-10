@@ -40,7 +40,6 @@ const NaviHeader = () => {
         </a>
         
         <nav className="hidden md:flex items-center space-x-8">
-          <a href="/about" className="text-muted-foreground hover:text-foreground transition-colors">About</a>
           <button 
             onClick={() => {
               if (window.location.pathname === '/') {
@@ -65,6 +64,7 @@ const NaviHeader = () => {
           >
             Join Waitlist
           </button>
+          <a href="/about" className="text-muted-foreground hover:text-foreground transition-colors">About</a>
         </nav>
         
         <div className="flex items-center space-x-3">

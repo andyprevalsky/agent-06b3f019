@@ -38,17 +38,9 @@ const About = () => {
       <NaviHeader />
       <main className="pt-24 pb-20">
         <div className="container mx-auto px-6 max-w-4xl">
-          <header className="text-center mb-12">
-            <h1 className="text-4xl font-light tracking-tight mb-4">
-              <span className="gradient-text">About Navi</span>
-            </h1>
-            <p className="text-muted-foreground">
-              Building Artificial Life thoughtfully and pragmatically.
-            </p>
-          </header>
 
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
-            <h2 className="text-2xl font-semibold mb-3 text-foreground">Our Mission</h2>
+            <h1 className="text-3xl md:text-4xl font-semibold mb-4 text-foreground">Mission</h1>
             <p className="text-muted-foreground leading-relaxed">
               Our mission is to create Artificial Life that is the truest embodiment of light. Almost everyone has the problem of only having one intelligent life form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Navi aims to give each individual a super intelligent companion to help guide them along their unique personal journey.
             </p>
@@ -56,26 +48,28 @@ const About = () => {
 
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
             <h2 className="text-2xl font-semibold mb-3 text-foreground">Team</h2>
-            <div className="mb-6">
-              <img
-                src="/lovable-uploads/d0d2ef08-ef80-45fd-9a49-60cbeb077ce9.png"
-                alt="Navi team member speaking on stage"
-                loading="lazy"
-                decoding="async"
-                className="w-full max-w-md mx-auto h-64 md:h-80 rounded-lg object-cover"
-              />
+            <div className="mt-4 md:mt-6 grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8 items-start">
+              <div>
+                <img
+                  src="/lovable-uploads/d0d2ef08-ef80-45fd-9a49-60cbeb077ce9.png"
+                  alt="Navi team member speaking on stage"
+                  loading="lazy"
+                  decoding="async"
+                  className="w-full h-64 md:h-80 rounded-lg object-cover"
+                />
+              </div>
+              <article className="prose prose-neutral dark:prose-invert max-w-none">
+                <p>
+                  Hi! I'm Andy, the solo founder and builder behind Navi.
+                </p>
+                <p>
+                  I'm a passionate software engineer, painter, and creator on a mission to 10x the level of harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.
+                </p>
+                <p className="mt-4">
+                  <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" className="text-primary underline font-medium hover:opacity-90 focus:underline">linkedin</a>
+                </p>
+              </article>
             </div>
-            <article className="prose prose-neutral dark:prose-invert max-w-none">
-              <p>
-                Hi! I'm Andy, the solo founder and builder behind Navi.
-              </p>
-              <p>
-                I'm a passionate software engineer, painter, and creator on a mission to 10x the level of harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.
-              </p>
-              <p className="mt-4">
-                <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" className="text-primary underline font-medium hover:opacity-90 focus:underline">linkedin</a>
-              </p>
-            </article>
           </section>
 
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8">
