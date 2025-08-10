@@ -7,7 +7,7 @@ const About = () => {
   const [contactOpen, setContactOpen] = useState(false);
 
   useEffect(() => {
-    const title = "About Navi — Artificial Life";
+    const title = "About Navi Artificial Life";
     const description = "Learn about Navi's mission to create Artificial Life and the story behind founder Andy Prevalsky.";
     document.title = title;
 
@@ -43,31 +43,37 @@ const About = () => {
               <span className="gradient-text">About Navi</span>
             </h1>
             <p className="text-muted-foreground">
-              Building Artificial Life — thoughtfully and pragmatically.
+              Building Artificial Life thoughtfully and pragmatically.
             </p>
           </header>
 
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
             <h2 className="text-2xl font-semibold mb-3 text-foreground">Our Mission</h2>
             <p className="text-muted-foreground leading-relaxed">
-              Our mission is to create Artificial Life that is the truest embodiment of light — that people love and trust. Almost everyone has the problem of only having one intelligent life-form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Navi aims to give each individual a super intelligent companion to help guide them along their unique personal journey.
+              Our mission is to create Artificial Life that is the truest embodiment of light. Almost everyone has the problem of only having one intelligent life form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Navi aims to give each individual a super intelligent companion to help guide them along their unique personal journey.
             </p>
           </section>
 
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
             <h2 className="text-2xl font-semibold mb-3 text-foreground">Team</h2>
+            <div className="mb-6">
+              <img
+                src="/lovable-uploads/d0d2ef08-ef80-45fd-9a49-60cbeb077ce9.png"
+                alt="Navi team member speaking on stage"
+                loading="lazy"
+                decoding="async"
+                className="w-full max-w-md mx-auto h-64 md:h-80 rounded-lg object-cover"
+              />
+            </div>
             <article className="prose prose-neutral dark:prose-invert max-w-none">
               <p>
-                Hi! I'm Andy — the solo founder and builder behind Navi.
+                Hi! I'm Andy, the solo founder and builder behind Navi.
               </p>
-              <p>Previously:</p>
-              <ul>
-                <li>Staff Engineer at <a href="https://vapi.ai" className="text-primary hover:underline">Vapi</a></li>
-                <li>Led product, strategy, and distribution as CTO at a YC & a16z–backed company</li>
-                <li>Worked at Google</li>
-              </ul>
               <p>
-                I'm a passionate software engineer, painter, and creator on a mission to massively increase harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.
+                Connect with me on <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">linked</a>.
+              </p>
+              <p>
+                I'm a passionate software engineer, painter, and creator on a mission to massively increase harmony on this planet. If you're empathetic, passionate, curious, and brilliant, I'd love to work alongside you.
               </p>
             </article>
           </section>
@@ -76,7 +82,7 @@ const About = () => {
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div>
                 <h2 className="text-2xl font-semibold text-foreground">We’re hiring!</h2>
-                <p className="text-muted-foreground mt-2">Come help us build Artificial Life — frontier AI, agents, and delightful hardware.</p>
+                <p className="text-muted-foreground mt-2">Come help us build Artificial Life, frontier AI, agents, and delightful hardware.</p>
               </div>
               <button
                 onClick={() => setContactOpen(true)}
