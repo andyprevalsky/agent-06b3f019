@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import ContactModal from "./ContactModal";
 
 const NaviFooter = () => {
@@ -9,10 +10,10 @@ const NaviFooter = () => {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
           
           <div className="md:col-span-2">
-            <a href="/" className="flex items-center space-x-3 mb-4 hover:opacity-80 transition-opacity w-fit">
+            <Link to="/" className="flex items-center space-x-3 mb-4 hover:opacity-80 transition-opacity w-fit">
               <div className="w-8 h-8 rounded-lg" style={{ background: 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)' }}></div>
               <span className="text-xl font-semibold">Navi</span>
-            </a>
+            </Link>
             <p className="text-primary-foreground/70 max-w-md leading-relaxed">
               Lighting the way to what matters most. Navi is the first truly customizable AI hardware companion.
             </p>
@@ -55,9 +56,9 @@ const NaviFooter = () => {
           <div>
             <h4 className="font-semibold mb-4">Company</h4>
             <ul className="space-y-2 text-primary-foreground/70">
-              <li><a href="/about" className="hover:text-primary-foreground transition-colors">About</a></li>
-              <li><a href="/privacy" className="hover:text-primary-foreground transition-colors">Privacy</a></li>
-              <li><a href="/terms" className="hover:text-primary-foreground transition-colors">Terms</a></li>
+              <li><Link to="/about" className="hover:text-primary-foreground transition-colors">About</Link></li>
+              <li><Link to="/privacy" className="hover:text-primary-foreground transition-colors">Privacy</Link></li>
+              <li><Link to="/terms" className="hover:text-primary-foreground transition-colors">Terms</Link></li>
               <li>
                 <button 
                   onClick={() => setContactModalOpen(true)}
@@ -77,12 +78,12 @@ const NaviFooter = () => {
               © 2025 Navi. All rights reserved.
             </p>
             <div className="flex space-x-6 mt-4 md:mt-0">
-              <a href="/privacy" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
+              <Link to="/privacy" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
                 Privacy Policy
-              </a>
-              <a href="/terms" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
+              </Link>
+              <Link to="/terms" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
                 Terms of Service
-              </a>
+              </Link>
               <a href="#" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
                 Cookie Policy
               </a>

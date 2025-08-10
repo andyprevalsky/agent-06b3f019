@@ -35,7 +35,7 @@ const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[calc(100vw-2rem)] max-w-md max-h-[85vh] overflow-y-auto sm:max-w-md">
+      <DialogContent className="box-border w-[calc(100vw-2rem)] max-w-md max-h-[85vh] overflow-y-auto p-4 sm:p-6 sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Contact Us</DialogTitle>
         </DialogHeader>
