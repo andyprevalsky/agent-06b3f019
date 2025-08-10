@@ -70,7 +70,7 @@ const About = () => {
                 Hi! I'm Andy, the solo founder and builder behind Navi.
               </p>
               <p>
-                I'm a passionate software engineer, painter, and creator on a mission to massively increase harmony on this planet. If you're empathetic, passionate, curious, and brilliant, I'd love to work alongside you.
+                I'm a passionate software engineer, painter, and creator on a mission to 10x the level of harmony on this planet. If you're empathetic, passionate, curious, and brilliant, I'd love to work alongside you.
               </p>
               <p className="mt-4">
                 <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" className="text-primary underline font-medium hover:opacity-90 focus:underline">linkedin</a>
