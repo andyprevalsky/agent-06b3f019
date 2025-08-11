@@ -215,12 +215,12 @@ const FeaturesSection = () => {
   return (
     <section id="features" className="py-24 bg-surface relative" ref={sectionRef}>
       <div className="container mx-auto px-6">
-        <div className="text-center mb-16">
+        <div className="relative z-10 text-center mb-16">
           <h2 className="text-5xl font-light tracking-tight mb-6 reveal-up">
             <span className="gradient-text">Features</span>
           </h2>
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto reveal-up reveal-delay-1">
-            Designed for power users who demand flexibility, privacy, and performance
+            Navi is a hackable smart speaker designed for developers
           </p>
         </div>
         

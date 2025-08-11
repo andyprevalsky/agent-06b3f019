@@ -832,13 +832,13 @@
   }
 
   .provider-logo {
-    height: 48px;
+    height: 40px;
     width: auto;
     object-fit: contain;
     opacity: 0.7;
     transition: opacity 0.3s ease;
     flex-shrink: 0;
-    min-width: 48px;
+    min-width: 40px;
   }
 
   .elevenlabs-logo {
@@ -850,8 +850,8 @@
   @media (max-width: 640px) {
     .logo-ticker { height: 56px; }
     .provider-logo {
-      height: 36px;
-      min-width: 36px;
+      height: 32px;
+      min-width: 32px;
     }
   }
 
@@ -998,7 +998,7 @@
     perspective: 800px;
     perspective-origin: center 60%;
     pointer-events: none;
-    z-index: 0;
+    z-index: -1;
     transition: clip-path 0.1s ease-out;
   }
 

@@ -200,10 +200,10 @@ const HeroSection = () => {
                 style={{
                   width: 'clamp(240px, min(70vw, 60vh), 640px)',
                   height: 'clamp(240px, min(70vw, 60vh), 640px)',
-                  marginTop: 'clamp(8px, 2.25vh, 24px)'
+                  marginTop: 'clamp(8px, 3vh, 24px)'
                 }}
               >
-                <div className="rounded-full overflow-hidden w-full h-full flex items-center justify-center">
+                <div className="rounded-full w-full h-full flex items-center justify-center">
                   {shouldLoadVideo ? (
                     <VideoPlayer
                       ref={videoRef}
