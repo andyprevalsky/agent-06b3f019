@@ -233,16 +233,17 @@ const HeroSection = () => {
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center overflow-visible">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
               <div
-                className="rounded-full p-2 bg-surface flex items-center justify-center"
+                className="rounded-full p-2 bg-surface flex items-center justify-center [--hero-circle-scale:1.25] lg:[--hero-circle-scale:1.125]"
                 style={{
-                  // Expose circle size as a CSS var so we can position the typed text relative to it
-                  ['--hero-circle-size' as any]: 'clamp(320px, min(68vw, calc(75svh - var(--hero-top-gap, 64px))), 480px)',
+                  // Keep video/image at original size, enlarge only the circular background by 25%
+                  ['--hero-video-size' as any]: 'clamp(320px, min(68vw, calc(75svh - var(--hero-top-gap, 64px))), 480px)',
+                  ['--hero-circle-size' as any]: 'calc(var(--hero-video-size) * var(--hero-circle-scale, 1.25))',
                   width: 'var(--hero-circle-size)',
                   height: 'var(--hero-circle-size)',
                   marginTop: 'clamp(8px, 3vh, 24px)'
                 }}
               ref={circleRef}>
-                <div className="rounded-full w-full h-full flex items-center justify-center relative">
+                <div className="rounded-full flex items-center justify-center relative" style={{ width: 'var(--hero-video-size)', height: 'var(--hero-video-size)' }}>
                   {/* Base image shown immediately */}
                   <ProgressiveImage
                     lowSrc="/navi-hero-image-low.png"
