@@ -9,7 +9,7 @@ import NaviFooter from "@/components/NaviFooter";
 
 const Index = () => {
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen overflow-visible">
       <NaviHeader />
       <HeroSection />
       <PoweredByTicker />

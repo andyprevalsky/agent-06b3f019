@@ -200,7 +200,7 @@ const HeroSection = () => {
                 style={{
                   width: 'clamp(240px, min(70vw, 60vh), 640px)',
                   height: 'clamp(240px, min(70vw, 60vh), 640px)',
-                  marginTop: 'clamp(4px, 1.5vh, 16px)'
+                  marginTop: 'clamp(8px, 2.25vh, 24px)'
                 }}
               >
                 <div className="rounded-full overflow-hidden w-full h-full flex items-center justify-center">
@@ -244,7 +244,7 @@ const HeroSection = () => {
             </div>
           
           <div className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1 flex justify-center">
-            <div className="bg-surface border border-border/30 rounded-full p-4 shadow-lg w-[420px]">
+            <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg w-[420px]">
               <div className="flex items-center gap-3">
                 <div className="flex-shrink-0 mt-1">
                   <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center relative">
