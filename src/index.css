@@ -993,7 +993,7 @@
     perspective: 800px;
     perspective-origin: center 60%;
     pointer-events: none;
-    z-index: -1;
+    z-index: 5;
     transition: clip-path 0.1s ease-out;
   }
 

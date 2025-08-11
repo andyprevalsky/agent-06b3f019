@@ -417,9 +417,9 @@ const FeaturesSection = () => {
         {/* Mobile Layout */}
         <div className="lg:hidden min-h-[300vh] relative">
           {/* Fixed Animation Container - Never moves */}
-          <div className="sticky top-24 z-20 flex flex-col items-center space-y-6">
+          <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={{ ['--features-sticky-top' as any]: '96px' }}>
             {/* Animation stays in exact same position */}
-            <div className="w-[380px] h-[380px] flex items-center justify-center relative">
+            <div className="flex items-center justify-center relative" style={{ width: 'min(380px, calc(100vw - 48px))', height: 'clamp(280px, calc(100svh - var(--features-sticky-top, 96px) - 260px), 380px)' }}>
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                 {/* All animations in same position, fade between them */}
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
@@ -512,7 +512,7 @@ const FeaturesSection = () => {
             </div>
             
             {/* Content cards in same position */}
-            <div className="w-[380px] min-h-[200px] relative">
+            <div className="min-h-[200px] relative" style={{ width: 'min(380px, calc(100vw - 48px))' }}>
               {/* All content cards in same position, fade between them */}
               {features.map((feature, index) => (
                 <div 

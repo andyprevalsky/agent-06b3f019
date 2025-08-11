@@ -246,7 +246,7 @@ const HeroSection = () => {
               </div>
             </div>
           
-          <div className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1 flex justify-center">
+          <div className="max-w-2xl mx-auto mt-4 md:mt-6 mb-12 reveal-up reveal-delay-1 flex justify-center">
             <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg w-[420px]">
               <div className="flex items-center gap-3">
                 <div className="flex-shrink-0 mt-1">
