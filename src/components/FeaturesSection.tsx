@@ -10,6 +10,15 @@ const FeaturesSection = () => {
   const [featuresClipPath, setFeaturesClipPath] = useState('inset(100% 0% 0% 0%)');
   const sectionRef = useRef<HTMLDivElement>(null);
   
+  // Easing and debouncing for scroll-driven feature changes
+  const targetProgressRef = useRef(0); // 0..1 adjusted progress target
+  const smoothedProgressRef = useRef(0); // 0..1 eased progress used for index calc
+  const inSectionRef = useRef(false);
+  const lastChangeRef = useRef(0);
+  const activeFeatureRef = useRef(activeFeature);
+  const EASING_COEFFICIENT = 0.08; // smaller = smoother/slower
+  const MIN_MS_BETWEEN_CHANGES = 500; // debounce interval
+  
   // Video refs for restarting animations
   const customizationVideoRef = useRef<HTMLVideoElement>(null);
   const agentEngineVideoRef = useRef<HTMLVideoElement>(null);
@@ -150,27 +159,22 @@ const FeaturesSection = () => {
       
       // Only update when we're within the features section
       if (viewportCenter >= sectionTop && viewportCenter <= sectionTop + sectionHeight) {
+        inSectionRef.current = true;
         // Calculate progress through the section (0 to 1)
         const progress = (viewportCenter - sectionTop) / sectionHeight;
-        
+
         // Different scrolling behavior for mobile vs desktop
         const isMobile = window.innerWidth < 1024;
-        
-        if (isMobile) {
-          // Mobile: More discrete zones with smoother transitions
-          const adjustedProgress = Math.max(0, (progress - 0.15) / 0.7);
-          // Use more gradual zone calculation for smoother mobile scrolling
-          const rawIndex = adjustedProgress * features.length;
-          const featureIndex = Math.round(rawIndex); // Round instead of floor for smoother transitions
-          const clampedIndex = Math.max(0, Math.min(features.length - 1, featureIndex));
-          setActiveFeature(clampedIndex);
-        } else {
-          // Desktop: Original behavior
-          const adjustedProgress = Math.max(0, (progress - 0.125) / 0.75);
-          const featureIndex = Math.floor(adjustedProgress * features.length);
-          const clampedIndex = Math.max(0, Math.min(features.length - 1, featureIndex));
-          setActiveFeature(clampedIndex);
-        }
+
+        // Compute adjusted progress (0..1) matching existing offsets/scales per device
+        const adjustedProgress = isMobile
+          ? Math.max(0, Math.min(1, (progress - 0.15) / 0.7))
+          : Math.max(0, Math.min(1, (progress - 0.125) / 0.75));
+
+        // Store as target for the smoother animation loop
+        targetProgressRef.current = adjustedProgress;
+      } else {
+        inSectionRef.current = false;
       }
     };
 
@@ -191,6 +195,52 @@ const FeaturesSection = () => {
       if (rafId) cancelAnimationFrame(rafId);
     };
   }, [clickedFeature]);
+
+  // Keep ref in sync with state for use inside rAF loop
+  useEffect(() => {
+    activeFeatureRef.current = activeFeature;
+  }, [activeFeature]);
+
+  // rAF loop to ease towards the target progress and debounce index changes
+  useEffect(() => {
+    let rafId: number;
+    const tick = () => {
+      // Ease smoothed progress towards target
+      const current = smoothedProgressRef.current;
+      const target = targetProgressRef.current;
+      const next = current + (target - current) * EASING_COEFFICIENT;
+      smoothedProgressRef.current = next;
+
+      // Only compute feature index when in section and not click-overridden
+      if (inSectionRef.current && clickedFeature === null) {
+        const rawIndex = next * features.length;
+        const currentIndex = activeFeatureRef.current;
+        // Hysteresis: require deeper entry (60%) into next zone
+        const stepForward = rawIndex >= currentIndex + 0.6;
+        const stepBackward = rawIndex <= currentIndex - 0.6;
+
+        const now = performance.now();
+        if (now - lastChangeRef.current >= MIN_MS_BETWEEN_CHANGES) {
+          if (stepForward && currentIndex < features.length - 1) {
+            const nextIndex = currentIndex + 1;
+            lastChangeRef.current = now;
+            activeFeatureRef.current = nextIndex;
+            setActiveFeature(nextIndex);
+          } else if (stepBackward && currentIndex > 0) {
+            const nextIndex = currentIndex - 1;
+            lastChangeRef.current = now;
+            activeFeatureRef.current = nextIndex;
+            setActiveFeature(nextIndex);
+          }
+        }
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [features.length, clickedFeature]);
 
 
   const handleFeatureClick = (index: number) => {
@@ -235,7 +285,7 @@ const FeaturesSection = () => {
 
         {/* Desktop Layout */}
         <div className="hidden lg:block max-w-7xl mx-auto relative">
-          <div className="flex gap-12 min-h-[300vh] relative z-10">
+          <div className="flex gap-12 min-h-[600vh] relative z-10">
             {/* Fixed Animation Container - Like Menu */}
             <div className="flex-1 flex justify-center relative z-20">
               <div className="w-[560px]">
@@ -415,7 +465,7 @@ const FeaturesSection = () => {
         </div>
 
         {/* Mobile Layout */}
-        <div className="lg:hidden min-h-[300vh] relative">
+        <div className="lg:hidden min-h-[600vh] relative">
           {/* Fixed Animation Container - Never moves */}
           <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={{ ['--features-sticky-top' as any]: '96px' }}>
             {/* Animation stays in exact same position */}
