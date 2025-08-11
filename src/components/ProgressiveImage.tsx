@@ -19,7 +19,7 @@ const ProgressiveImage: React.FC<ProgressiveImageProps> = ({
   style = {},
   fetchPriority = 'auto'
 }) => {
-  const [currentSrc, setCurrentSrc] = useState('');
+  const [currentSrc, setCurrentSrc] = useState(lowSrc);
   const [isLoading, setIsLoading] = useState(true);
   const loadedRef = useRef<Set<string>>(new Set());
   const cancelledRef = useRef(false);
@@ -105,22 +105,19 @@ const ProgressiveImage: React.FC<ProgressiveImageProps> = ({
   }, [lowSrc, medSrc, highSrc, fetchPriority]);
 
   return (
-    <div className="relative overflow-hidden w-full h-full">
+    <>
       <img
         ref={imgRef}
         src={currentSrc}
         alt={alt}
         className={`w-full h-full object-cover transition-all duration-500 ease-out ${className}`}
         style={{
-          objectFit: 'cover',
-          objectPosition: 'center center',
-          filter: isLoading && currentSrc === lowSrc ? 'blur(1px)' : 'blur(0px)',
           ...style,
         }}
         loading="eager"
         {...({ fetchpriority: fetchPriority } as any)}
       />
-    </div>
+    </>
   );
 };
 

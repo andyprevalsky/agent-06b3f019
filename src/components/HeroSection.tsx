@@ -9,8 +9,13 @@ const HeroSection = () => {
   const [typedText, setTypedText] = useState("");
   const [shouldLoadVideo, setShouldLoadVideo] = useState(false);
   const [arrowVisible, setArrowVisible] = useState(true);
+  const [isVideoReady, setIsVideoReady] = useState(false);
+  const [hasPaintedFirstFrame, setHasPaintedFirstFrame] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const sectionRef = useRef<HTMLElement>(null);
+  const circleRef = useRef<HTMLDivElement>(null);
+  const arrowBtnRef = useRef<HTMLButtonElement>(null);
+  const [typedTopSpacing, setTypedTopSpacing] = useState<number>(24);
 
   const baseText = "Hi! I'm Navi, your voice AI ";
   const words = ["companion.", "assistant.", "daemon.", "computer."];
@@ -23,6 +28,35 @@ const HeroSection = () => {
       setShouldLoadVideo(true);
     });
   }, []);
+  // Keep typed text at 1/3 of the distance between circle bottom and arrow top
+  useEffect(() => {
+    const measure = () => {
+      const circleEl = circleRef.current;
+      const arrowEl = arrowBtnRef.current;
+      if (!circleEl || !arrowEl) return;
+      const circleRect = circleEl.getBoundingClientRect();
+      const arrowRect = arrowEl.getBoundingClientRect();
+      const distance = arrowRect.top - circleRect.bottom;
+      if (!isFinite(distance)) return;
+      const spacing = Math.max(12, Math.round(distance / 3));
+      setTypedTopSpacing(spacing);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('orientationchange', measure);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', measure);
+      window.visualViewport.addEventListener('scroll', measure);
+    }
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('orientationchange', measure);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', measure);
+        window.visualViewport.removeEventListener('scroll', measure);
+      }
+    };
+  }, [hasPaintedFirstFrame]);
 
   // Show arrow only while hero is in view
   useEffect(() => {
@@ -201,52 +235,48 @@ const HeroSection = () => {
               <div
                 className="rounded-full p-2 bg-surface flex items-center justify-center"
                 style={{
-                  width: 'clamp(240px, min(70vw, 60vh), 640px)',
-                  height: 'clamp(240px, min(70vw, 60vh), 640px)',
+                  // Expose circle size as a CSS var so we can position the typed text relative to it
+                  ['--hero-circle-size' as any]: 'clamp(320px, min(68vw, calc(75svh - var(--hero-top-gap, 64px))), 480px)',
+                  width: 'var(--hero-circle-size)',
+                  height: 'var(--hero-circle-size)',
                   marginTop: 'clamp(8px, 3vh, 24px)'
                 }}
-              >
-                <div className="rounded-full w-full h-full flex items-center justify-center">
-                  {shouldLoadVideo ? (
-                    <VideoPlayer
-                      ref={videoRef}
-                      src="/navi-hero-animation.webm"
-                      className="w-full h-full object-cover"
-                      style={{ objectPosition: 'center center' }}
-                      objectFit="cover"
-                      autoPlay={true}
-                      loop={true}
-                      muted={true}
-                      preload="none"
-                      poster="/navi-midnight-black-hero-background-low.png"
-                      fallbackContent={
-                        <ProgressiveImage
-                          lowSrc="/navi-hero-image-low.png"
-                          medSrc="/navi-hero-image-med.png"
-                          highSrc="/navi-hero-image.png"
-                          alt="Navi"
-                          className="w-full h-full object-cover"
-                          style={{ objectPosition: 'center center' }}
-                          fetchPriority="high"
-                        />
-                      }
-                    />
-                  ) : (
-                    <ProgressiveImage
-                      lowSrc="/navi-hero-image-low.png"
-                      medSrc="/navi-hero-image-med.png"
-                      highSrc="/navi-hero-image.png"
-                      alt="Navi"
-                      className="w-full h-full object-cover"
-                      style={{ objectPosition: 'center center' }}
-                      fetchPriority="high"
-                    />
-                  )}
+              ref={circleRef}>
+                <div className="rounded-full w-full h-full flex items-center justify-center relative">
+                  {/* Base image shown immediately */}
+                  <ProgressiveImage
+                    lowSrc="/navi-hero-image-low.png"
+                    medSrc="/navi-hero-image-med.png"
+                    highSrc="/navi-hero-image.png"
+                    alt="Navi"
+                    className="absolute inset-0 w-full h-full object-cover transform-gpu scale-[1.12] transition-opacity duration-150"
+                    style={{ objectPosition: 'center center', opacity: hasPaintedFirstFrame ? 0 : 1 }}
+                    fetchPriority="high"
+                  />
+
+                  {/* Video overlays the image; we only fade the image out to avoid video opacity flash */}
+                  <VideoPlayer
+                    ref={videoRef}
+                    src="/navi-hero-animation.webm"
+                    className="absolute inset-0 z-10 w-full h-full object-cover transform-gpu scale-[1.12]"
+                    style={{ objectPosition: 'center center', visibility: hasPaintedFirstFrame ? 'visible' : 'hidden', backgroundColor: 'transparent' }}
+                    objectFit="cover"
+                    autoPlay
+                    loop
+                    muted
+                    preload="auto"
+                    poster="/navi-midnight-black-hero-background-low.png"
+                    onLoad={() => setIsVideoReady(true)}
+                    onFirstFrame={() => setHasPaintedFirstFrame(true)}
+                  />
                 </div>
               </div>
             </div>
           
-          <div className="max-w-2xl mx-auto mt-4 md:mt-6 mb-12 reveal-up reveal-delay-1 flex justify-center">
+          <div
+            className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1 flex justify-center"
+            style={{ marginTop: `${typedTopSpacing}px` }}
+          >
             <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg w-[420px]">
               <div className="flex items-center gap-3">
                 <div className="flex-shrink-0 mt-1">
@@ -281,6 +311,7 @@ const HeroSection = () => {
           className="p-3 rounded-full bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 hover:bg-gradient-to-br hover:from-[#323230] hover:to-[#252523] transition-all duration-300 shadow-lg animate-slow-bounce"
           onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
           aria-label="Scroll to features"
+          ref={arrowBtnRef}
         >
           <ChevronDown className="w-6 h-6 text-white" />
         </button>

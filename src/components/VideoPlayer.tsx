@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, forwardRef } from "react";
+import { useEffect, useRef, useState, forwardRef, isValidElement, cloneElement } from "react";
 
 interface VideoPlayerProps {
   src: string;
@@ -12,6 +12,7 @@ interface VideoPlayerProps {
   muted?: boolean;
   preload?: 'none' | 'metadata' | 'auto';
   onLoad?: () => void;
+  onFirstFrame?: () => void;
   priority?: boolean;
 }
 
@@ -27,6 +28,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   muted = true,
   preload = 'metadata',
   onLoad,
+  onFirstFrame,
   priority = false
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -73,6 +75,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     if (!video) return;
 
     let hasAttemptedPlay = false;
+    let notifiedFirstFrame = false;
 
     function safeAutoplay() {
       if (!video || !autoPlay) return;
@@ -93,10 +96,20 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       }, 0);
     }
 
+    function maybeNotifyFirstFrame() {
+      if (!video || notifiedFirstFrame) return;
+      if (video.currentTime > 0 || video.readyState >= 2) {
+        notifiedFirstFrame = true;
+        onFirstFrame?.();
+      }
+    }
+
     // Handle all relevant lifecycle events
     const handleVideoLoad = () => {
       safeAutoplay();
       onLoad?.();
+      // Sometimes loadeddata already means first frame is available
+      maybeNotifyFirstFrame();
     };
     
     const handlePageShow = () => safeAutoplay();
@@ -111,8 +124,18 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
 
     const handleWindowLoad = () => safeAutoplay();
 
+    const handlePlaying = () => {
+      maybeNotifyFirstFrame();
+    };
+
+    const handleTimeUpdate = () => {
+      maybeNotifyFirstFrame();
+    };
+
     // Add event listeners
     video.addEventListener('loadeddata', handleVideoLoad);
+    video.addEventListener('playing', handlePlaying);
+    video.addEventListener('timeupdate', handleTimeUpdate);
     window.addEventListener('load', handleWindowLoad);
     window.addEventListener('pageshow', handlePageShow);
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -126,6 +149,8 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
 
     return () => {
       video.removeEventListener('loadeddata', handleVideoLoad);
+      video.removeEventListener('playing', handlePlaying);
+      video.removeEventListener('timeupdate', handleTimeUpdate);
       window.removeEventListener('load', handleWindowLoad);
       window.removeEventListener('pageshow', handlePageShow);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -137,7 +162,13 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   const finalClassName = `${className} object-${objectFit}`;
 
   if (!shouldLoadVideo && fallbackContent) {
-    return <>{fallbackContent}</>;
+    if (isValidElement(fallbackContent)) {
+      const existingProps: Record<string, any> = fallbackContent.props ?? {};
+      const mergedClass = `${existingProps.className ?? ''} ${finalClassName}`.trim();
+      const mergedStyle = { ...existingProps.style, ...style, backgroundColor: 'transparent' } as React.CSSProperties;
+      return cloneElement(fallbackContent as any, { ...existingProps, className: mergedClass, style: mergedStyle });
+    }
+    return <div className={finalClassName} style={style}>{fallbackContent}</div>;
   }
 
   return (
@@ -149,7 +180,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       playsInline
       preload={shouldLoadVideo ? preload : 'none'}
       className={finalClassName}
-      style={style}
+      style={{ ...style, backgroundColor: 'transparent' }}
       poster={poster}
     >
       {/* HEVC source for Safari/iOS with alpha channel support */}
@@ -158,7 +189,6 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       )}
       {/* WebM source for other browsers */}
       <source src={src} type='video/webm; codecs="vp9"' />
-      {fallbackContent}
     </video>
   );
 });
