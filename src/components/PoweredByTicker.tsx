@@ -18,24 +18,24 @@ const PoweredByTicker = () => {
         <div className="w-full overflow-hidden">
           <div className="logo-ticker animate">
             <div className="ticker-track">
-              <img src={openaiLogo} alt="OpenAI logo" className="provider-logo" />
-              <img src={anthropicLogo} alt="Anthropic logo" className="provider-logo" />
-              <img src={cerebrasLogo} alt="Cerebras logo" className="provider-logo" />
-              <img src={elevenlabsLogo} alt="ElevenLabs logo" className="provider-logo" />
-              <img src={googleAiLogo} alt="Google AI logo" className="provider-logo" />
-              <img src={metaLogo} alt="Meta logo" className="provider-logo" />
-              <img src={deepgramLogo} alt="Deepgram logo" className="provider-logo" />
-              <img src={hedraLogo} alt="Hedra logo" className="provider-logo" />
-              <img src={ycombinatorLogo} alt="Y Combinator logo" className="provider-logo" />
-              <img src={openaiLogo} alt="OpenAI logo" className="provider-logo" />
-              <img src={anthropicLogo} alt="Anthropic logo" className="provider-logo" />
-              <img src={cerebrasLogo} alt="Cerebras logo" className="provider-logo" />
-              <img src={elevenlabsLogo} alt="ElevenLabs logo" className="provider-logo" />
-              <img src={googleAiLogo} alt="Google AI logo" className="provider-logo" />
-              <img src={metaLogo} alt="Meta logo" className="provider-logo" />
-              <img src={deepgramLogo} alt="Deepgram logo" className="provider-logo" />
-              <img src={hedraLogo} alt="Hedra logo" className="provider-logo" />
-              <img src={ycombinatorLogo} alt="Y Combinator logo" className="provider-logo" />
+              <img src={openaiLogo} alt="OpenAI" className="provider-logo" style={{ maxHeight: '40px', minHeight: '40px' }} />
+              <img src={anthropicLogo} alt="Anthropic" className="provider-logo" style={{ maxHeight: '24px', minHeight: '24px' }} />
+              <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" style={{ maxHeight: '52px', minHeight: '52px' }} />
+              <img src={elevenlabsLogo} alt="ElevenLabs" className="provider-logo elevenlabs-logo" style={{ maxHeight: '24px', minHeight: '24px' }} />
+              <img src={googleAiLogo} alt="Google AI" className="provider-logo" style={{ maxHeight: '40px', minHeight: '40px', marginBottom: '8px' }} />
+              <img src={metaLogo} alt="Meta" className="provider-logo" style={{ maxHeight: '24px', minHeight: '24px' }} />
+              <img src={deepgramLogo} alt="Deepgram" className="provider-logo" style={{ maxHeight: '32px', minHeight: '32px', marginTop: '8px' }} />
+              <img src={hedraLogo} alt="Hedra" className="provider-logo" style={{ maxHeight: '40px', minHeight: '40px' }} />
+              <img src={ycombinatorLogo} alt="Y Combinator" className="provider-logo" style={{ maxHeight: '40px', minHeight: '40px' }} />
+              <img src={openaiLogo} alt="OpenAI" className="provider-logo" style={{ maxHeight: '40px', minHeight: '40px' }} />
+              <img src={anthropicLogo} alt="Anthropic" className="provider-logo" style={{ maxHeight: '24px', minHeight: '24px' }} />
+              <img src={cerebrasLogo} alt="Cerebras" className="provider-logo" style={{ maxHeight: '52px', minHeight: '52px' }} />
+              <img src={elevenlabsLogo} alt="ElevenLabs" className="provider-logo elevenlabs-logo" style={{ maxHeight: '24px', minHeight: '24px' }} />
+              <img src={googleAiLogo} alt="Google AI" className="provider-logo" style={{ maxHeight: '40px', minHeight: '40px', marginBottom: '8px' }} />
+              <img src={metaLogo} alt="Meta" className="provider-logo" style={{ maxHeight: '24px', minHeight: '24px' }} />
+              <img src={deepgramLogo} alt="Deepgram" className="provider-logo" style={{ maxHeight: '32px', minHeight: '32px', marginTop: '8px' }} />
+              <img src={hedraLogo} alt="Hedra" className="provider-logo" style={{ maxHeight: '40px', minHeight: '40px' }} />
+              <img src={ycombinatorLogo} alt="Y Combinator" className="provider-logo" style={{ maxHeight: '40px', minHeight: '40px' }} />
             </div>
           </div>
         </div>
