@@ -39,8 +39,11 @@ const HeroSection = () => {
   useEffect(() => {
     const updateHeaderH = () => {
       const hh = document.getElementById('site-header')?.getBoundingClientRect().height ?? 64;
+      const isMobile = window.matchMedia('(max-width: 640px)').matches;
+      const topGap = Math.round((isMobile ? hh * 2 : hh) + 8);
       if (sectionRef.current) {
         sectionRef.current.style.setProperty('--header-h', `${Math.round(hh)}px`);
+        sectionRef.current.style.setProperty('--hero-top-gap', `${topGap}px`);
       }
     };
     updateHeaderH();
@@ -189,7 +192,7 @@ const HeroSection = () => {
 
 
   return (
-    <section ref={sectionRef} className="relative flex flex-col items-center overflow-visible bg-gradient-to-br from-background via-surface to-secondary/30 grid-background" style={{ height: '100svh', paddingTop: 'calc(var(--header-h, 64px) + 8px)' }}>
+    <section ref={sectionRef} className="relative flex flex-col items-center overflow-visible bg-gradient-to-br from-background via-surface to-secondary/30 grid-background" style={{ height: '100svh', paddingTop: 'var(--hero-top-gap, calc(var(--header-h, 64px) + 8px))' }}>
       <FloatingParticles />
       
       <div className="container mx-auto px-6 relative z-10 overflow-visible">

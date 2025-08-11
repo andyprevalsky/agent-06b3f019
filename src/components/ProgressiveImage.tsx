@@ -21,10 +21,15 @@ const ProgressiveImage: React.FC<ProgressiveImageProps> = ({
 }) => {
   const [currentSrc, setCurrentSrc] = useState('');
   const [isLoading, setIsLoading] = useState(true);
-  const [loadedImages, setLoadedImages] = useState<Set<string>>(new Set());
+  const loadedRef = useRef<Set<string>>(new Set());
+  const cancelledRef = useRef(false);
   const imgRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
+    cancelledRef.current = false;
+    loadedRef.current = new Set();
+    setIsLoading(true);
+
     const preloadImage = (src: string, priority?: 'high' | 'low'): Promise<void> => {
       return new Promise((resolve, reject) => {
         const img = new Image();
@@ -37,71 +42,84 @@ const ProgressiveImage: React.FC<ProgressiveImageProps> = ({
       });
     };
 
-    const loadImages = async () => {
+    const run = async () => {
       try {
         // Step 1: Load low-res image first with high priority
         await preloadImage(lowSrc, fetchPriority === 'high' ? 'high' : undefined);
-        setLoadedImages(prev => new Set(prev).add(lowSrc));
-        setCurrentSrc(lowSrc);
+        loadedRef.current.add(lowSrc);
+        if (!cancelledRef.current) {
+          setCurrentSrc(lowSrc);
+        }
 
         // Step 2: Start loading medium and high-res in parallel with lower priorities
-        const mediumPromise = preloadImage(medSrc, 'low'); // Lower priority for progressive enhancement
-        const highPromise = preloadImage(highSrc, 'low'); // Lowest priority for high-res
+        const mediumPromise = preloadImage(medSrc, 'low')
+          .then(() => {
+            loadedRef.current.add(medSrc);
+            if (!cancelledRef.current) {
+              setCurrentSrc(medSrc);
+            }
+          })
+          .catch((error) => {
+            console.warn('Failed to load medium resolution image:', error);
+          });
 
-        // Step 3: Handle medium-res as soon as it's ready
-        mediumPromise.then(() => {
-          setLoadedImages(prev => new Set(prev).add(medSrc));
-          setCurrentSrc(medSrc);
-        }).catch(error => {
-          console.warn('Failed to load medium resolution image:', error);
-        });
-
-        // Step 4: Handle high-res when ready, but only if we haven't moved to a better version
-        highPromise.then(() => {
-          setLoadedImages(prev => new Set(prev).add(highSrc));
-          setCurrentSrc(highSrc);
-          setIsLoading(false);
-        }).catch(error => {
-          console.warn('Failed to load high resolution image:', error);
-          setIsLoading(false);
-        });
+        const highPromise = preloadImage(highSrc, 'low')
+          .then(() => {
+            loadedRef.current.add(highSrc);
+            if (!cancelledRef.current) {
+              setCurrentSrc(highSrc);
+              setIsLoading(false);
+            }
+          })
+          .catch((error) => {
+            console.warn('Failed to load high resolution image:', error);
+            if (!cancelledRef.current) {
+              setIsLoading(false);
+            }
+          });
 
         // Fallback: If high-res takes too long, stop loading indicator after medium loads
         await mediumPromise;
         setTimeout(() => {
-          if (!loadedImages.has(highSrc)) {
+          if (!loadedRef.current.has(highSrc) && !cancelledRef.current) {
             setIsLoading(false);
           }
-        }, 2000); // Stop loading indicator after 2 seconds even if high-res isn't ready
+        }, 2000);
 
+        await highPromise;
       } catch (error) {
         console.warn('Failed to load low resolution image:', error);
         // Fallback to original low-res src
-        setCurrentSrc(lowSrc);
-        setIsLoading(false);
+        if (!cancelledRef.current) {
+          setCurrentSrc(lowSrc);
+          setIsLoading(false);
+        }
       }
     };
 
-    loadImages();
-  }, [lowSrc, medSrc, highSrc, fetchPriority, loadedImages]);
+    run();
+
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, [lowSrc, medSrc, highSrc, fetchPriority]);
 
   return (
-    <div className="relative overflow-hidden">
+    <div className="relative overflow-hidden w-full h-full">
       <img
         ref={imgRef}
         src={currentSrc}
         alt={alt}
-        className={`transition-all duration-500 ease-out ${className}`}
+        className={`w-full h-full object-cover transition-all duration-500 ease-out ${className}`}
         style={{
-          ...style,
+          objectFit: 'cover',
+          objectPosition: 'center center',
           filter: isLoading && currentSrc === lowSrc ? 'blur(1px)' : 'blur(0px)',
+          ...style,
         }}
         loading="eager"
         {...({ fetchpriority: fetchPriority } as any)}
       />
-      {isLoading && currentSrc === lowSrc && (
-        <div className="absolute inset-0 bg-gradient-to-br from-transparent via-white/5 to-transparent animate-pulse" />
-      )}
     </div>
   );
 };
