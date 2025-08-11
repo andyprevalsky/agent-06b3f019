@@ -273,7 +273,7 @@ const HeroSection = () => {
       </div>
       
       {/* Scroll down arrow - fixed to prevent layout shift */}
-      <div className={`fixed left-1/2 transform -translate-x-1/2 z-30 transition-opacity duration-200 ${arrowVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 2px)' }}>
+      <div className={`fixed left-1/2 transform -translate-x-1/2 z-30 transition-opacity duration-200 ${arrowVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} style={{ bottom: 'clamp(8px, calc(env(safe-area-inset-bottom, 0px) + 10px), 24px)' }}>
         <button 
           className="p-3 rounded-full bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 hover:bg-gradient-to-br hover:from-[#323230] hover:to-[#252523] transition-all duration-300 shadow-lg animate-slow-bounce"
           onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
