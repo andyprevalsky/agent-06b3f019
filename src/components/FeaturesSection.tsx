@@ -21,10 +21,12 @@ const FeaturesSection = () => {
   
   // Video refs for restarting animations
   const customizationVideoRef = useRef<HTMLVideoElement>(null);
+  const conversationsVideoRef = useRef<HTMLVideoElement>(null);
   const agentEngineVideoRef = useRef<HTMLVideoElement>(null);
   const privacyVideoRef = useRef<HTMLVideoElement>(null);
   const memoryVideoRef = useRef<HTMLVideoElement>(null);
   const mobileCustomizationVideoRef = useRef<HTMLVideoElement>(null);
+  const mobileConversationsVideoRef = useRef<HTMLVideoElement>(null);
   const mobileAgentEngineVideoRef = useRef<HTMLVideoElement>(null);
   const mobilePrivacyVideoRef = useRef<HTMLVideoElement>(null);
 
@@ -44,6 +46,10 @@ const FeaturesSection = () => {
       case 0: // Customization
         restartVideo(customizationVideoRef);
         restartVideo(mobileCustomizationVideoRef);
+        break;
+      case 1: // Seamless Conversations
+        restartVideo(conversationsVideoRef);
+        restartVideo(mobileConversationsVideoRef);
         break;
       case 2: // Agent Engine  
         restartVideo(agentEngineVideoRef);
@@ -315,6 +321,29 @@ const FeaturesSection = () => {
                         />
                       </div>
 
+                      {/* Seamless Conversations Animation */}
+                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
+                        activeFeature === 1 ? 'opacity-100' : 'opacity-0'
+                      }`}>
+                        <VideoPlayer
+                          ref={conversationsVideoRef}
+                          src="/navi-animation-conversations.webm"
+                          className="w-full h-full object-cover"
+                          style={{ objectPosition: 'center center' }}
+                          objectFit="cover"
+                          fallbackContent={
+                            <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
+                              <div className="text-center">
+                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
+                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
+                                </div>
+                                <p className="text-muted-foreground text-sm">Seamless Conversations</p>
+                              </div>
+                            </div>
+                          }
+                        />
+                      </div>
+
                       {/* Agent Engine Animation */}
                       <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                         activeFeature === 2 ? 'opacity-100' : 'opacity-0'
@@ -368,21 +397,7 @@ const FeaturesSection = () => {
                         />
                       </div>
 
-                      {/* Default/Placeholder Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        ![0, 2, 3, 4].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
-                      }`}>
-                        <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                          <div className="text-center">
-                            <div className="w-32 h-32 rounded-full mx-auto mb-6 flex items-center justify-center bg-primary/30">
-                              <div className="w-16 h-16 rounded-full bg-primary/60"></div>
-                            </div>
-                            <p className="text-muted-foreground text-base">
-                              {features[activeFeature]?.title || 'Feature Animation'}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
+                      
                     </div>
                   </div>
                 </div>
@@ -495,6 +510,28 @@ const FeaturesSection = () => {
                 </div>
 
                 <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
+                  activeFeature === 1 ? 'opacity-100' : 'opacity-0'
+                }`}>
+                  <VideoPlayer
+                    ref={mobileConversationsVideoRef}
+                    src="/navi-animation-conversations.webm"
+                    className="w-full h-full object-cover"
+                    style={{ objectPosition: 'center center' }}
+                    objectFit="cover"
+                    fallbackContent={
+                      <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
+                        <div className="text-center">
+                          <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
+                            <div className="w-8 h-8 rounded-full bg-primary/60"></div>
+                          </div>
+                          <p className="text-muted-foreground text-xs">Seamless Conversations</p>
+                        </div>
+                      </div>
+                    }
+                  />
+                </div>
+
+                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
                   activeFeature === 2 ? 'opacity-100' : 'opacity-0'
                 }`}>
                   <VideoPlayer
@@ -544,20 +581,7 @@ const FeaturesSection = () => {
                   />
                 </div>
 
-                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  ![0, 2, 3, 4].includes(activeFeature) ? 'opacity-100' : 'opacity-0'
-                }`}>
-                  <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                    <div className="text-center">
-                      <div className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                        <div className="w-10 h-10 rounded-full bg-primary/60"></div>
-                      </div>
-                      <p className="text-muted-foreground text-sm">
-                        {features[activeFeature]?.title || 'Features'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
+                
               </div>
             </div>
             
