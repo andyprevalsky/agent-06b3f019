@@ -229,7 +229,7 @@ const HeroSection = () => {
 
 
   return (
-    <section ref={sectionRef} className="relative flex flex-col items-center overflow-visible bg-gradient-to-br from-background via-surface to-secondary/30 grid-background" style={{ height: '100svh', paddingTop: 'var(--hero-top-gap, calc(var(--header-h, 64px) + 8px))' }}>
+    <section ref={sectionRef} className="relative z-10 flex flex-col items-center overflow-visible bg-gradient-to-br from-background via-surface to-secondary grid-background" style={{ height: '100svh', paddingTop: 'var(--hero-top-gap, calc(var(--header-h, 64px) + 8px))', backgroundColor: '#F9F9FB' }}>
       <FloatingParticles />
       
       <div className="container mx-auto px-6 relative z-10 overflow-visible">
@@ -320,9 +320,11 @@ const HeroSection = () => {
           <ChevronDown className="w-6 h-6 text-white" />
         </button>
       </div>
-      
+      {/* Opaque base fill to mask grid between hero and ticker */}
+      <div className="absolute bottom-0 left-0 right-0 h-48 bg-background z-0 pointer-events-none"></div>
+
       {/* Gradient overlay for depth */}
-      <div className="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-background/100 to-transparent pointer-events-none z-10"></div>
+      <div className="absolute bottom-0 left-0 right-0 h-48 bg-gradient-to-t from-background/100 to-transparent pointer-events-none z-10"></div>
     </section>
   );
 };

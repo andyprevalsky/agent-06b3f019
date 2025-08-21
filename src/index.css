@@ -993,12 +993,13 @@ html {
     left: 50%;
     width: 100vw;
     height: 120vh;
+    height: 120svh;
     transform: translate(-50%, -50%);
     overflow: hidden;
     perspective: 800px;
     perspective-origin: center 60%;
     pointer-events: none;
-    z-index: 5;
+    z-index: 2;
     transition: clip-path 0.1s ease-out;
   }
 

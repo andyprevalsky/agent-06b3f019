@@ -1,7 +1,6 @@
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { HelpCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -166,12 +165,9 @@ const PreOrderSection = () => {
 
 
   return (
-    <section id="pre-order" className="py-32 bg-gradient-to-b from-surface to-background relative overflow-hidden">
+    <section id="pre-order" className="relative z-20 py-32 bg-gradient-to-b from-surface to-background overflow-hidden">
       <div className="container mx-auto px-6">
         <div className="text-center mb-16">
-          <Badge variant="outline" className="mb-4 px-4 py-2 text-sm border-primary/20 text-primary">
-            Limited Early Access
-          </Badge>
           <h2 className="text-5xl font-light tracking-tight mb-6 reveal-up">
             <span className="gradient-text">Reserve Your Navi</span>
           </h2>

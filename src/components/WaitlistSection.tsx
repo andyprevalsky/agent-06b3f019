@@ -1,18 +1,18 @@
 
 
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import WaitlistForm from "./WaitlistForm";
 import VideoPlayer from "./VideoPlayer";
 
 const WaitlistSection = () => {
   return (
-    <section id="waitlist" className="py-32 bg-gradient-to-b from-surface to-background relative overflow-hidden">
-      <div className="container mx-auto px-6">
+    <section id="waitlist" className="relative z-10 py-32 bg-gradient-to-b from-surface to-background overflow-hidden">
+      {/* Top bleed so this section paints a bit earlier and avoids a visible gap; it's hidden beneath prior content */}
+      <div className="absolute -top-24 left-0 right-0 h-24 bg-gradient-to-b from-surface to-transparent z-0 pointer-events-none" aria-hidden="true"></div>
+      {/* Opacity dropoff at the top: fade from transparent to the section's top color */}
+      <div className="absolute top-0 left-0 right-0 h-16 bg-gradient-to-b from-transparent to-surface z-20 pointer-events-none" aria-hidden="true"></div>
+      <div className="relative z-10 container mx-auto px-6">
         <div className="text-center mb-16">
-          <Badge variant="outline" className="mb-4 px-4 py-2 text-sm border-primary/20 text-primary">
-            Limited Early Access
-          </Badge>
           <h2 className="text-5xl font-light tracking-tight mb-6 reveal-up">
             <span className="gradient-text">Join the Waitlist</span>
           </h2>

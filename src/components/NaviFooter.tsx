@@ -5,7 +5,7 @@ import ContactModal from "./ContactModal";
 const NaviFooter = () => {
   const [contactModalOpen, setContactModalOpen] = useState(false);
   return (
-    <footer className="bg-primary text-primary-foreground py-16">
+    <footer className="relative z-20 bg-primary text-primary-foreground py-16">
       <div className="container mx-auto px-6">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
           

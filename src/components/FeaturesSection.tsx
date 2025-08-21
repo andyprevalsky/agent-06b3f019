@@ -4,7 +4,8 @@ import { MemoryGraphAnimation } from "./MemoryGraphAnimation";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
-  const [featuresClipPath, setFeaturesClipPath] = useState('inset(100% 0% 0% 0%)');
+  const [featuresClipPath, setFeaturesClipPath] = useState('inset(99% 0% 0% 0%)');
+  const [gridOffsetX, setGridOffsetX] = useState(0);
   const sectionRef = useRef<HTMLDivElement>(null);
   const observersReadyRef = useRef(false);
   // Temporarily pause scroll-driven highlight updates after a click
@@ -117,15 +118,20 @@ const FeaturesSection = () => {
       const sectionElement = sectionRef.current;
       const sectionRect = sectionElement.getBoundingClientRect();
       const viewportHeight = window.innerHeight;
-
-      if (sectionRect.top >= viewportHeight || sectionRect.bottom <= 0) {
-        setFeaturesClipPath('inset(100% 0% 0% 0%)');
-        return;
-      }
-
-      const topClip = Math.max(0, sectionRect.top) / viewportHeight * 100;
-      const bottomClip = Math.max(0, viewportHeight - sectionRect.bottom) / viewportHeight * 100;
+      const sectionHeight = sectionElement.offsetHeight || 1;
+      
+      // Pre-reveal margin so the grid paints early, with a stronger effect on small screens
+      const isSmall = window.matchMedia('(max-width: 1024px)').matches;
+      const preRevealPx = viewportHeight * (isSmall ? 0.6 : 0.25);
+      const topClip = Math.max(0, (sectionRect.top - preRevealPx)) / viewportHeight * 100;
+      const bottomClip = Math.max(0, (viewportHeight - sectionRect.bottom)) / viewportHeight * 100;
       setFeaturesClipPath(`inset(${topClip}% 0% ${bottomClip}% 0%)`);
+
+      // Smooth horizontal scan tied to scroll
+      const scrolledWithin = Math.min(Math.max(-sectionRect.top, 0), sectionHeight);
+      const progress = scrolledWithin / sectionHeight; // 0..1 across the section
+      const offset = (progress * 1200) + (window.scrollY * 0.1);
+      setGridOffsetX(offset);
     };
 
     let rafId = 0 as unknown as number;
@@ -166,7 +172,11 @@ const FeaturesSection = () => {
           if (!Number.isNaN(idx)) setActiveFeature(idx);
         }
       },
-      { threshold: [0.6] }
+      {
+        // Broader thresholds and a centered root margin band make switching smoother
+        threshold: [0, 0.25, 0.5, 0.75, 1],
+        rootMargin: '-40% 0px -40% 0px'
+      }
     );
 
     sentinels.forEach(s => observer.observe(s));
@@ -201,25 +211,26 @@ const FeaturesSection = () => {
               {/* 3D Grid Background - Fixed with Clip Path */}
       <div 
         className="grid-3d-background"
-        style={{ clipPath: featuresClipPath }}
+        style={{ clipPath: featuresClipPath, willChange: 'clip-path, background-position' }}
       >
-          <div className="grid-3d-wall"></div>
-          <div className="grid-3d-floor"></div>
+          <div className="grid-3d-wall" style={{ backgroundPosition: `${-gridOffsetX}px 0px` }}></div>
+          <div className="grid-3d-floor" style={{ backgroundPosition: `${-gridOffsetX}px 0px` }}></div>
         </div>
+        {/* Top fade to ensure grid never peeks above and bottom bleed under waitlist */}
+        <div className="pointer-events-none absolute top-0 left-0 right-0 h-24 z-20 bg-gradient-to-b from-background to-transparent"></div>
+        <div className="pointer-events-none absolute -bottom-24 left-0 right-0 h-24 z-0 bg-gradient-to-t from-background to-transparent"></div>
 
         {/* Desktop Layout */}
         <div className="hidden lg:block max-w-7xl mx-auto relative">
           <div className="flex gap-12 min-h-[600vh] relative z-10">
             {/* Fixed Animation Container - Like Menu */}
             <div className="flex-1 flex justify-center relative z-20">
-              <div className="w-[560px]">
-                <div className="sticky top-48">
-                  <div className="w-full h-[520px] flex items-center justify-center relative">
-                    <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
-                      {/* Customization Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 0 ? 'opacity-100' : 'opacity-0'
-                      }`}>
+              <div className="" style={{ width: '840px' }}>
+                <div className="sticky top-24">
+                  <div className={`w-full h-[780px] flex items-center justify-center relative`}>
+                    {/* Customization - dedicated container */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 0 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
                         <VideoPlayer
                           ref={customizationVideoRef}
                           src="/navi-customization-animation.webm"
@@ -238,16 +249,16 @@ const FeaturesSection = () => {
                           }
                         />
                       </div>
+                    </div>
 
-                      {/* Seamless Conversations Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 1 ? 'opacity-100' : 'opacity-0'
-                      }`}>
+                    {/* Seamless Conversations - dedicated container */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 1 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                         <VideoPlayer
                           ref={conversationsVideoRef}
                           src="/navi-conversations-animation.webm"
                           className="w-full h-full object-cover"
-                          style={{ objectPosition: 'center center' }}
+                          style={{ objectPosition: 'center 30%' }}
                           objectFit="cover"
                           fallbackContent={
                             <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
@@ -261,11 +272,11 @@ const FeaturesSection = () => {
                           }
                         />
                       </div>
+                    </div>
 
-                      {/* Agent Engine Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 2 ? 'opacity-100' : 'opacity-0'
-                      }`}>
+                    {/* Agent Engine - dedicated container */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 2 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
                         <VideoPlayer
                           ref={agentEngineVideoRef}
                           src="/navi-engine-animation.webm"
@@ -284,18 +295,18 @@ const FeaturesSection = () => {
                           }
                         />
                       </div>
+                    </div>
 
-                      {/* Memory Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 3 ? 'opacity-100' : 'opacity-0'
-                      }`}>
+                    {/* Memory - dedicated container */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 3 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
                         <MemoryGraphAnimation restart={activeFeature === 3} />
                       </div>
+                    </div>
 
-                      {/* Privacy Animation */}
-                      <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                        activeFeature === 4 ? 'opacity-100' : 'opacity-0'
-                      }`}>
+                    {/* Privacy - dedicated container */}
+                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 4 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
                         <VideoPlayer
                           ref={privacyVideoRef}
                           src="/navi-privacy-animation.webm"
@@ -314,8 +325,6 @@ const FeaturesSection = () => {
                           }
                         />
                       </div>
-
-                      
                     </div>
                   </div>
                 </div>
@@ -325,7 +334,7 @@ const FeaturesSection = () => {
                     <div
                       key={`desktop-sentinel-${i}`}
                       data-sentinel-index={i}
-                      className="h-[120vh] snap-start snap-always"
+                      className="h-[120vh]"
                       aria-hidden="true"
                     />
                   ))}
@@ -336,7 +345,7 @@ const FeaturesSection = () => {
 
 
             {/* Feature Titles Menu - Right Side */}
-            <div className="w-80 relative z-20">
+            <div className="w-[400px] relative z-20">
               <div className="sticky top-24 space-y-2 bg-surface/30 backdrop-blur-sm rounded-2xl border border-gray-200">
                 {features.map((feature, index) => (
                   <div key={feature.title} className="relative">
@@ -397,7 +406,7 @@ const FeaturesSection = () => {
                       behavior: 'smooth' 
                     });
                   }}
-                  className="relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden border-2 border-transparent hover:scale-105"
+                  className="relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden border-2 border-transparent"
                 >
                   <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg">
                   </div>
@@ -443,9 +452,9 @@ const FeaturesSection = () => {
                 }`}>
                   <VideoPlayer
                     ref={mobileConversationsVideoRef}
-                    src="/navi-animation-conversations.webm"
+                    src="/navi-conversations-animation.webm"
                     className="w-full h-full object-cover"
-                    style={{ objectPosition: 'center center' }}
+                    style={{ objectPosition: 'center 30%' }}
                     objectFit="cover"
                     fallbackContent={
                       <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
@@ -554,7 +563,7 @@ const FeaturesSection = () => {
               <div
                 key={`mobile-sentinel-${i}`}
                 data-sentinel-index={i}
-                className="h-[120vh] snap-start snap-always"
+                className="h-[120vh]"
                 aria-hidden="true"
               />
             ))}

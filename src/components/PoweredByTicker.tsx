@@ -10,7 +10,7 @@ import ycombinatorLogo from "@/assets/ycombinator-logo.png";
 
 const PoweredByTicker = () => {
   return (
-    <section className="py-8 bg-background border-b border-border/50 relative z-10">
+    <section className="py-8 bg-background border-b border-border/50 relative z-20">
       <div className="container mx-auto px-6">
         <p className="text-center text-sm text-muted-foreground/60 mb-8 font-light">
           Powered by
