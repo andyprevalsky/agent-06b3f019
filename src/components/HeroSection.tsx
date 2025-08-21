@@ -74,10 +74,13 @@ const HeroSection = () => {
     const updateHeaderH = () => {
       const hh = document.getElementById('site-header')?.getBoundingClientRect().height ?? 64;
       const isMobile = window.matchMedia('(max-width: 640px)').matches;
-      const topGap = Math.round((isMobile ? hh * 2 : hh) + 8);
+      // Reduce the gap on mobile to reclaim vertical space; keep desktop unchanged
+      const topGap = Math.round(isMobile ? (hh + 4) : (hh + 8));
       if (sectionRef.current) {
         sectionRef.current.style.setProperty('--header-h', `${Math.round(hh)}px`);
         sectionRef.current.style.setProperty('--hero-top-gap', `${topGap}px`);
+        // Tighter svh cap on small phones to ensure everything fits
+        sectionRef.current.style.setProperty('--hero-svh-base', isMobile ? '65svh' : '75svh');
       }
     };
     updateHeaderH();
@@ -233,10 +236,10 @@ const HeroSection = () => {
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center overflow-visible">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
               <div
-                className="rounded-full p-2 bg-surface flex items-center justify-center [--hero-circle-scale:1.25] lg:[--hero-circle-scale:1.125]"
+                className="rounded-full p-2 bg-surface flex items-center justify-center [--hero-circle-scale:1.15] sm:[--hero-circle-scale:1.2] lg:[--hero-circle-scale:1.125]"
                 style={{
                   // Keep video/image at original size, enlarge only the circular background by 25%
-                  ['--hero-video-size' as any]: 'clamp(320px, min(68vw, calc(75svh - var(--hero-top-gap, 64px))), 480px)',
+                  ['--hero-video-size' as any]: 'clamp(300px, min(68vw, calc(var(--hero-svh-base, 75svh) - var(--hero-top-gap, 64px))), 480px)',
                   ['--hero-circle-size' as any]: 'calc(var(--hero-video-size) * var(--hero-circle-scale, 1.25))',
                   width: 'var(--hero-circle-size)',
                   height: 'var(--hero-circle-size)',

@@ -4,20 +4,11 @@ import { MemoryGraphAnimation } from "./MemoryGraphAnimation";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
-  const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set());
-  const [isClickScrolling, setIsClickScrolling] = useState(false);
-  const [clickedFeature, setClickedFeature] = useState<number | null>(null);
   const [featuresClipPath, setFeaturesClipPath] = useState('inset(100% 0% 0% 0%)');
   const sectionRef = useRef<HTMLDivElement>(null);
-  
-  // Easing and debouncing for scroll-driven feature changes
-  const targetProgressRef = useRef(0); // 0..1 adjusted progress target
-  const smoothedProgressRef = useRef(0); // 0..1 eased progress used for index calc
-  const inSectionRef = useRef(false);
-  const lastChangeRef = useRef(0);
-  const activeFeatureRef = useRef(activeFeature);
-  const EASING_COEFFICIENT = 0.08; // smaller = smoother/slower
-  const MIN_MS_BETWEEN_CHANGES = 500; // debounce interval
+  const observersReadyRef = useRef(false);
+  // Temporarily pause scroll-driven highlight updates after a click
+  const scrollSpyPauseUntilRef = useRef<number>(0);
   
   // Video refs for restarting animations
   const customizationVideoRef = useRef<HTMLVideoElement>(null);
@@ -120,150 +111,77 @@ const FeaturesSection = () => {
   ];
 
   useEffect(() => {
-    let scrollTimeout: NodeJS.Timeout;
-    
+    // Clip-path updater for 3D grid background. No debouncing of feature state.
     const handleScroll = () => {
       if (!sectionRef.current) return;
-      
-      // Clear the clicked feature override when scrolling stops
-      clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(() => {
-        setClickedFeature(null);
-      }, 150);
-      
       const sectionElement = sectionRef.current;
-      if (!sectionElement) return;
-      
       const sectionRect = sectionElement.getBoundingClientRect();
-      const sectionTop = sectionRect.top + window.scrollY;
-      const sectionHeight = sectionRect.height;
-      const viewportCenter = window.scrollY + window.innerHeight / 2;
-      
-      // Calculate clip-path to constrain grid to features section area
       const viewportHeight = window.innerHeight;
-      
-      // If section is completely below viewport, hide completely
-      if (sectionRect.top >= viewportHeight) {
+
+      if (sectionRect.top >= viewportHeight || sectionRect.bottom <= 0) {
         setFeaturesClipPath('inset(100% 0% 0% 0%)');
         return;
       }
-      
-      // If section is completely above viewport, hide completely
-      if (sectionRect.bottom <= 0) {
-        setFeaturesClipPath('inset(100% 0% 0% 0%)');
-        return;
-      }
-      
-      // Calculate visible portion
+
       const topClip = Math.max(0, sectionRect.top) / viewportHeight * 100;
       const bottomClip = Math.max(0, viewportHeight - sectionRect.bottom) / viewportHeight * 100;
-      
-      const clipPath = `inset(${topClip}% 0% ${bottomClip}% 0%)`;
-      setFeaturesClipPath(clipPath);
-      
-      if (clickedFeature !== null) return;
-      
-      // Only update when we're within the features section
-      if (viewportCenter >= sectionTop && viewportCenter <= sectionTop + sectionHeight) {
-        inSectionRef.current = true;
-        // Calculate progress through the section (0 to 1)
-        const progress = (viewportCenter - sectionTop) / sectionHeight;
-
-        // Different scrolling behavior for mobile vs desktop
-        const isMobile = window.innerWidth < 1024;
-
-        // Compute adjusted progress (0..1) matching existing offsets/scales per device
-        const adjustedProgress = isMobile
-          ? Math.max(0, Math.min(1, (progress - 0.15) / 0.7))
-          : Math.max(0, Math.min(1, (progress - 0.125) / 0.75));
-
-        // Store as target for the smoother animation loop
-        targetProgressRef.current = adjustedProgress;
-      } else {
-        inSectionRef.current = false;
-      }
+      setFeaturesClipPath(`inset(${topClip}% 0% ${bottomClip}% 0%)`);
     };
 
-    // Update immediately on scroll, but throttle for performance
-    let rafId: number;
-    const throttledScroll = () => {
+    let rafId = 0 as unknown as number;
+    const onScroll = () => {
       if (rafId) return;
       rafId = requestAnimationFrame(() => {
         handleScroll();
-        rafId = 0;
+        rafId = 0 as unknown as number;
       });
     };
 
-    window.addEventListener('scroll', throttledScroll, { passive: true });
-
+    window.addEventListener('scroll', onScroll, { passive: true });
+    handleScroll();
     return () => {
-      window.removeEventListener('scroll', throttledScroll);
+      window.removeEventListener('scroll', onScroll);
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [clickedFeature]);
+  }, []);
 
-  // Keep ref in sync with state for use inside rAF loop
+  // Set active feature when sentinels enter view
   useEffect(() => {
-    activeFeatureRef.current = activeFeature;
-  }, [activeFeature]);
+    if (!sectionRef.current || observersReadyRef.current) return;
+    const sectionEl = sectionRef.current;
+    const sentinels = Array.from(sectionEl.querySelectorAll('[data-sentinel-index]')) as HTMLElement[];
+    if (sentinels.length === 0) return;
 
-  // rAF loop to ease towards the target progress and debounce index changes
-  useEffect(() => {
-    let rafId: number;
-    const tick = () => {
-      // Ease smoothed progress towards target
-      const current = smoothedProgressRef.current;
-      const target = targetProgressRef.current;
-      const next = current + (target - current) * EASING_COEFFICIENT;
-      smoothedProgressRef.current = next;
-
-      // Only compute feature index when in section and not click-overridden
-      if (inSectionRef.current && clickedFeature === null) {
-        const rawIndex = next * features.length;
-        const currentIndex = activeFeatureRef.current;
-        // Hysteresis: require deeper entry (60%) into next zone
-        const stepForward = rawIndex >= currentIndex + 0.6;
-        const stepBackward = rawIndex <= currentIndex - 0.6;
-
-        const now = performance.now();
-        if (now - lastChangeRef.current >= MIN_MS_BETWEEN_CHANGES) {
-          if (stepForward && currentIndex < features.length - 1) {
-            const nextIndex = currentIndex + 1;
-            lastChangeRef.current = now;
-            activeFeatureRef.current = nextIndex;
-            setActiveFeature(nextIndex);
-          } else if (stepBackward && currentIndex > 0) {
-            const nextIndex = currentIndex - 1;
-            lastChangeRef.current = now;
-            activeFeatureRef.current = nextIndex;
-            setActiveFeature(nextIndex);
-          }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        // Ignore updates while a manual click override is active
+        if (performance.now() < scrollSpyPauseUntilRef.current) return;
+        // Pick the entry most centered/in view
+        const visible = entries
+          .filter(e => e.isIntersecting)
+          .sort((a, b) => (b.intersectionRatio || 0) - (a.intersectionRatio || 0));
+        if (visible.length > 0) {
+          const idxAttr = (visible[0].target as HTMLElement).getAttribute('data-sentinel-index');
+          const idx = idxAttr ? parseInt(idxAttr, 10) : NaN;
+          if (!Number.isNaN(idx)) setActiveFeature(idx);
         }
-      }
+      },
+      { threshold: [0.6] }
+    );
 
-      rafId = requestAnimationFrame(tick);
-    };
-
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [features.length, clickedFeature]);
+    sentinels.forEach(s => observer.observe(s));
+    observersReadyRef.current = true;
+    return () => observer.disconnect();
+  }, []);
 
 
   const handleFeatureClick = (index: number) => {
-    setClickedFeature(index);
     setActiveFeature(index);
-    
-    const featureElement = sectionRef.current?.querySelector(`[data-index="${index}"]`);
-    if (featureElement) {
-      featureElement.scrollIntoView({ 
-        behavior: 'smooth', 
-        block: 'center'
-      });
-      
-      // Clear clicked feature after scroll completes
-      setTimeout(() => {
-        setClickedFeature(null);
-      }, 2000);
+    // Pause scroll-based updates to avoid highlight flicker while smooth-scrolling
+    scrollSpyPauseUntilRef.current = performance.now() + 1500; // ms
+    const sentinel = sectionRef.current?.querySelector(`[data-sentinel-index="${index}"]`) as HTMLElement | null;
+    if (sentinel) {
+      sentinel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   };
 
@@ -327,7 +245,7 @@ const FeaturesSection = () => {
                       }`}>
                         <VideoPlayer
                           ref={conversationsVideoRef}
-                          src="/navi-animation-conversations.webm"
+                          src="/navi-conversations-animation.webm"
                           className="w-full h-full object-cover"
                           style={{ objectPosition: 'center center' }}
                           objectFit="cover"
@@ -401,6 +319,17 @@ const FeaturesSection = () => {
                     </div>
                   </div>
                 </div>
+                {/* Scroll sentinels to allocate space for each feature on desktop */}
+                <div className="lg:block hidden">
+                  {features.map((_, i) => (
+                    <div
+                      key={`desktop-sentinel-${i}`}
+                      data-sentinel-index={i}
+                      className="h-[120vh] snap-start snap-always"
+                      aria-hidden="true"
+                    />
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -409,8 +338,8 @@ const FeaturesSection = () => {
             {/* Feature Titles Menu - Right Side */}
             <div className="w-80 relative z-20">
               <div className="sticky top-24 space-y-2 bg-surface/30 backdrop-blur-sm rounded-2xl border border-gray-200">
-                                {features.map((feature, index) => (
-                  <div key={feature.title} className="relative" data-index={index}>
+                {features.map((feature, index) => (
+                  <div key={feature.title} className="relative">
                     {/* Unified card structure for all items */}
                     <div className={`relative overflow-hidden transition-all duration-500 ${
                       activeFeature === index ? 'border-2 border-transparent rounded-lg' : 'border-2 border-transparent rounded-lg'
@@ -618,6 +547,17 @@ const FeaturesSection = () => {
                 </div>
               ))}
             </div>
+          </div>
+          {/* Scroll sentinels to allocate space for each feature on mobile */}
+          <div className="lg:hidden block">
+            {features.map((_, i) => (
+              <div
+                key={`mobile-sentinel-${i}`}
+                data-sentinel-index={i}
+                className="h-[120vh] snap-start snap-always"
+                aria-hidden="true"
+              />
+            ))}
           </div>
         </div>
       </div>

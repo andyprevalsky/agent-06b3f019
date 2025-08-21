@@ -55,7 +55,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
 
   // Generate HEVC source URL for Safari/iOS
   const getHevcSrc = (webmSrc: string) => {
-    return webmSrc.replace('.webm', '-safari.mov');
+    return webmSrc.replace('.webm', '-hevc.mov');
   };
 
   // Prioritize loading strategy

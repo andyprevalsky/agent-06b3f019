@@ -224,7 +224,7 @@ const PreOrderSection = () => {
                     preload="metadata"
                     poster="/navi-midnight-black-white-background.png"
                   >
-                    <source src="/navi-black-v4-white-background.webm" type="video/webm" />
+                    <source src="/navi-hero-animation.webm" type="video/webm" />
                     <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
                   </video>
                 </div>

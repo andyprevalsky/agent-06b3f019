@@ -126,6 +126,11 @@
   }
 }
 
+/* Enable viewport scroll snapping along Y axis. Only elements with snap-* will snap. */
+html {
+  scroll-snap-type: y proximity;
+}
+
 @layer components {
   /* Luxury button variants */
   .btn-luxury {
