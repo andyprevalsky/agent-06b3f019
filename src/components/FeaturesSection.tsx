@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import VideoPlayer from "./VideoPlayer";
-import { MemoryGraphAnimation } from "./MemoryGraphAnimation";
+import FeatureVideoStage from "./FeatureVideoStage";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
@@ -11,49 +10,7 @@ const FeaturesSection = () => {
   // Temporarily pause scroll-driven highlight updates after a click
   const scrollSpyPauseUntilRef = useRef<number>(0);
   
-  // Video refs for restarting animations
-  const customizationVideoRef = useRef<HTMLVideoElement>(null);
-  const conversationsVideoRef = useRef<HTMLVideoElement>(null);
-  const agentEngineVideoRef = useRef<HTMLVideoElement>(null);
-  const privacyVideoRef = useRef<HTMLVideoElement>(null);
-  const memoryVideoRef = useRef<HTMLVideoElement>(null);
-  const mobileCustomizationVideoRef = useRef<HTMLVideoElement>(null);
-  const mobileConversationsVideoRef = useRef<HTMLVideoElement>(null);
-  const mobileAgentEngineVideoRef = useRef<HTMLVideoElement>(null);
-  const mobilePrivacyVideoRef = useRef<HTMLVideoElement>(null);
-
-  // Restart videos when they become active
-  useEffect(() => {
-    const restartVideo = (videoRef: React.RefObject<HTMLVideoElement>) => {
-      if (videoRef.current) {
-        videoRef.current.currentTime = 0;
-        videoRef.current.play().catch(err => {
-          console.log('Video restart failed:', err);
-        });
-      }
-    };
-
-    // Restart appropriate video based on active feature
-    switch (activeFeature) {
-      case 0: // Customization
-        restartVideo(customizationVideoRef);
-        restartVideo(mobileCustomizationVideoRef);
-        break;
-      case 1: // Seamless Conversations
-        restartVideo(conversationsVideoRef);
-        restartVideo(mobileConversationsVideoRef);
-        break;
-      case 2: // Agent Engine  
-        restartVideo(agentEngineVideoRef);
-        restartVideo(mobileAgentEngineVideoRef);
-        break;
-      case 4: // Privacy
-        restartVideo(privacyVideoRef);
-        restartVideo(mobilePrivacyVideoRef);
-        break;
-      // Memory animation (case 3) is handled by MemoryGraphAnimation component
-    }
-  }, [activeFeature]);
+  // Orchestrator manages playback; no direct video refs needed here
 
   const features = [
     {
@@ -228,104 +185,7 @@ const FeaturesSection = () => {
               <div className="" style={{ width: '840px' }}>
                 <div className="sticky top-24">
                   <div className={`w-full h-[780px] flex items-center justify-center relative`}>
-                    {/* Customization - dedicated container */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 0 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
-                        <VideoPlayer
-                          ref={customizationVideoRef}
-                          src="/navi-customization-animation.webm"
-                          className="w-full h-full object-cover"
-                          style={{ objectPosition: 'center center' }}
-                          objectFit="cover"
-                          fallbackContent={
-                            <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                              <div className="text-center">
-                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
-                                </div>
-                                <p className="text-muted-foreground text-sm">Customization Animation</p>
-                              </div>
-                            </div>
-                          }
-                        />
-                      </div>
-                    </div>
-
-                    {/* Seamless Conversations - dedicated container */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 1 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
-                        <VideoPlayer
-                          ref={conversationsVideoRef}
-                          src="/navi-conversations-animation.webm"
-                          className="w-full h-full object-cover"
-                          style={{ objectPosition: 'center 30%' }}
-                          objectFit="cover"
-                          fallbackContent={
-                            <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                              <div className="text-center">
-                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
-                                </div>
-                                <p className="text-muted-foreground text-sm">Seamless Conversations</p>
-                              </div>
-                            </div>
-                          }
-                        />
-                      </div>
-                    </div>
-
-                    {/* Agent Engine - dedicated container */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 2 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
-                        <VideoPlayer
-                          ref={agentEngineVideoRef}
-                          src="/navi-engine-animation.webm"
-                          className="w-full h-full object-cover"
-                          style={{ objectPosition: 'center center' }}
-                          objectFit="cover"
-                          fallbackContent={
-                            <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                              <div className="text-center">
-                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
-                                </div>
-                                <p className="text-muted-foreground text-sm">Agent Engine Animation</p>
-                              </div>
-                            </div>
-                          }
-                        />
-                      </div>
-                    </div>
-
-                    {/* Memory - dedicated container */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 3 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
-                        <MemoryGraphAnimation restart={activeFeature === 3} />
-                      </div>
-                    </div>
-
-                    {/* Privacy - dedicated container */}
-                    <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${activeFeature === 4 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                      <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
-                        <VideoPlayer
-                          ref={privacyVideoRef}
-                          src="/navi-privacy-animation.webm"
-                          className="w-full h-full object-contain"
-                          style={{ objectPosition: 'center center' }}
-                          objectFit="contain"
-                          fallbackContent={
-                            <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                              <div className="text-center">
-                                <div className="w-24 h-24 rounded-full mx-auto mb-4 flex items-center justify-center bg-primary/30">
-                                  <div className="w-12 h-12 rounded-full bg-primary/60"></div>
-                                </div>
-                                <p className="text-muted-foreground text-sm">Privacy Animation</p>
-                              </div>
-                            </div>
-                          }
-                        />
-                      </div>
-                    </div>
+                    <FeatureVideoStage activeIndex={activeFeature} />
                   </div>
                 </div>
                 {/* Scroll sentinels to allocate space for each feature on desktop */}
@@ -424,102 +284,7 @@ const FeaturesSection = () => {
             {/* Animation stays in exact same position */}
             <div className="flex items-center justify-center relative" style={{ width: 'min(380px, calc(100vw - 48px))', height: 'clamp(280px, calc(100svh - var(--features-sticky-top, 96px) - 260px), 380px)' }}>
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
-                {/* All animations in same position, fade between them */}
-                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 0 ? 'opacity-100' : 'opacity-0'
-                }`}>
-                  <VideoPlayer
-                    ref={mobileCustomizationVideoRef}
-                    src="/navi-customization-animation.webm"
-                    className="w-full h-full object-cover"
-                    style={{ objectPosition: 'center center' }}
-                    objectFit="cover"
-                    fallbackContent={
-                      <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                        <div className="text-center">
-                          <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                            <div className="w-8 h-8 rounded-full bg-primary/60"></div>
-                          </div>
-                          <p className="text-muted-foreground text-xs">Customization</p>
-                        </div>
-                      </div>
-                    }
-                  />
-                </div>
-
-                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 1 ? 'opacity-100' : 'opacity-0'
-                }`}>
-                  <VideoPlayer
-                    ref={mobileConversationsVideoRef}
-                    src="/navi-conversations-animation.webm"
-                    className="w-full h-full object-cover"
-                    style={{ objectPosition: 'center 30%' }}
-                    objectFit="cover"
-                    fallbackContent={
-                      <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                        <div className="text-center">
-                          <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                            <div className="w-8 h-8 rounded-full bg-primary/60"></div>
-                          </div>
-                          <p className="text-muted-foreground text-xs">Seamless Conversations</p>
-                        </div>
-                      </div>
-                    }
-                  />
-                </div>
-
-                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 2 ? 'opacity-100' : 'opacity-0'
-                }`}>
-                  <VideoPlayer
-                    ref={mobileAgentEngineVideoRef}
-                    src="/navi-engine-animation.webm"
-                    className="w-full h-full object-cover"
-                    style={{ objectPosition: 'center center' }}
-                    objectFit="cover"
-                    fallbackContent={
-                      <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                        <div className="text-center">
-                          <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                            <div className="w-8 h-8 rounded-full bg-primary/60"></div>
-                          </div>
-                          <p className="text-muted-foreground text-xs">Agent Engine</p>
-                        </div>
-                      </div>
-                    }
-                  />
-                </div>
-
-                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 3 ? 'opacity-100' : 'opacity-0'
-                }`}>
-                  <MemoryGraphAnimation restart={activeFeature === 3} />
-                </div>
-
-                <div className={`absolute inset-0 transition-opacity duration-700 z-10 ${
-                  activeFeature === 4 ? 'opacity-100' : 'opacity-0'
-                }`}>
-                  <VideoPlayer
-                    ref={mobilePrivacyVideoRef}
-                    src="/navi-privacy-animation.webm"
-                    className="w-full h-full object-contain"
-                    style={{ objectPosition: 'center center' }}
-                    objectFit="contain"
-                    fallbackContent={
-                      <div className="w-full h-full flex items-center justify-center bg-transparent rounded-2xl border border-border/20">
-                        <div className="text-center">
-                          <div className="w-16 h-16 rounded-full mx-auto mb-3 flex items-center justify-center bg-primary/30">
-                            <div className="w-8 h-8 rounded-full bg-primary/60"></div>
-                          </div>
-                          <p className="text-muted-foreground text-xs">Privacy</p>
-                        </div>
-                      </div>
-                    }
-                  />
-                </div>
-
-                
+                <FeatureVideoStage activeIndex={activeFeature} />
               </div>
             </div>
             
