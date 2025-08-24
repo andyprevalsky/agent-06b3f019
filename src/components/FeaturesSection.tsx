@@ -265,9 +265,11 @@ const FeaturesSection = () => {
                 <button
                   onClick={() => {
                     const targetId = earlyAccess ? 'pre-order' : 'waitlist';
-                    document.getElementById(targetId)?.scrollIntoView({ 
-                      behavior: 'smooth' 
-                    });
+                    if (window.location.pathname === '/') {
+                      document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
+                    } else {
+                      window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
+                    }
                   }}
                   className="relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden border-2 border-transparent"
                 >

@@ -60,7 +60,7 @@ const NaviHeader = () => {
               if (window.location.pathname === '/') {
                 document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
               } else {
-                window.location.href = `/#${targetId}`;
+                window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
               }
             }}
             className="text-muted-foreground hover:text-foreground transition-colors"
@@ -81,7 +81,7 @@ const NaviHeader = () => {
               if (window.location.pathname === '/') {
                 document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
               } else {
-                window.location.href = `/#${targetId}`;
+                window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
               }
             }}
           >

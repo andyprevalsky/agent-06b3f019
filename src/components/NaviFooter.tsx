@@ -45,7 +45,7 @@ const NaviFooter = () => {
                     if (window.location.pathname === '/') {
                       document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
                     } else {
-                      window.location.href = `/#${targetId}`;
+                      window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
                     }
                   }}
                   className="hover:text-primary-foreground transition-colors text-left"
