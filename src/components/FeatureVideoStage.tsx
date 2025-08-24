@@ -281,7 +281,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
 
   return (
     <div className="w-full h-full relative overflow-hidden rounded-2xl">
-      <div className="absolute inset-0" style={{ transform: 'scale(0.6667)', transformOrigin: 'center center' }}>
+      <div className="absolute inset-0 transform scale-[1] origin-center md:scale-[0.6667] scale-100" style={{ transformOrigin: 'center center' }}>
         <video
           ref={bindRef}
           className="w-full h-full object-cover"
