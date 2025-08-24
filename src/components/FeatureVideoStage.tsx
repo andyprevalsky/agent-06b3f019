@@ -189,28 +189,41 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         }
       }
 
-      // After a seek, verify we actually landed inside the intro; some browsers snap to the next keyframe
+      // After a seek, verify we actually landed inside the intro; suppress cycle-looping until confirmed
       if (modeRef.current === "idle" && activeKeyRef.current && verifyAfterSeekRef.current === activeKeyRef.current) {
         const seg = normalized[activeKeyRef.current];
-        if (t > seg.introEnd - eps) {
-          if (seg.introStart <= 0.01 && seekRetryRef.current < 1) {
-            // One-time corrective seek to exact 0 for conversations intro
-            (video as HTMLVideoElement).currentTime = 0.0;
+        // Not yet inside intro: keep waiting (do not clear verification)
+        if (t < seg.introStart - eps) {
+          log('intro-waiting', { key: activeKeyRef.current, t: Number(t.toFixed(3)), want: Number(seg.introStart.toFixed(3)) });
+          schedule();
+          return;
+        }
+        // Inside intro window
+        if (t <= seg.introEnd - eps) {
+          log('intro-confirmed', { key: activeKeyRef.current, t: Number(t.toFixed(3)) });
+          verifyAfterSeekRef.current = null;
+          // Continue into normal flow
+        } else {
+          // Landed past intro: retry seek once to introStart for all segments
+          if (seekRetryRef.current < 1) {
+            const desired = seg.introStart <= 0.01 ? 0.0 : (seg.introStart + 0.001);
+            (video as HTMLVideoElement).currentTime = desired;
             try { (video as HTMLVideoElement).play(); } catch {}
             seekRetryRef.current += 1;
-            log('intro-correction-seek0', { key: activeKeyRef.current });
+            log(seg.introStart <= 0.01 ? 'intro-correction-seek0' : 'intro-retry-seek', { key: activeKeyRef.current, to: Number(desired.toFixed(3)) });
             schedule();
             return;
           }
-          verifyAfterSeekRef.current = null;
-        } else {
-          log('intro-confirmed', { key: activeKeyRef.current, t: Number(t.toFixed(3)) });
+          // Give up after one retry to avoid infinite loop
+          log('intro-giveup', { key: activeKeyRef.current, t: Number(t.toFixed(3)) });
           verifyAfterSeekRef.current = null;
         }
       }
 
       // Loop the active feature's cycle while idle
-      if (modeRef.current === "idle" && activeKeyRef.current) {
+      // IMPORTANT: skip looping while we are verifying a recent seek, because `t` may still
+      // reflect the previous segment's time and incorrectly trigger a cycle loop on the new segment
+      if (modeRef.current === "idle" && activeKeyRef.current && !verifyAfterSeekRef.current) {
         const seg = normalized[activeKeyRef.current];
         if (t >= seg.cycleEnd - eps) {
           video.currentTime = seg.cycleStart + 0.001;

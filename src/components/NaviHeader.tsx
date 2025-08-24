@@ -1,10 +1,12 @@
 import { Button } from "@/components/ui/button";
+import { isEarlyAccessEnabled } from "@/lib/utils";
 import { useState, useEffect } from "react";
 import ContactModal from "./ContactModal";
 
 const NaviHeader = () => {
   const [showMobileButton, setShowMobileButton] = useState(false);
   const [contactModalOpen, setContactModalOpen] = useState(false);
+  const earlyAccess = isEarlyAccessEnabled();
 
   useEffect(() => {
     const featuresSection = document.getElementById('features');
@@ -54,15 +56,16 @@ const NaviHeader = () => {
           </button>
           <button 
             onClick={() => {
+              const targetId = earlyAccess ? 'pre-order' : 'waitlist';
               if (window.location.pathname === '/') {
-                document.getElementById('waitlist')?.scrollIntoView({ behavior: 'smooth' });
+                document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
               } else {
-                window.location.href = '/#waitlist';
+                window.location.href = `/#${targetId}`;
               }
             }}
             className="text-muted-foreground hover:text-foreground transition-colors"
           >
-            Join Waitlist
+            {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
           </button>
           <a href="/about" className="text-muted-foreground hover:text-foreground transition-colors">About</a>
         </nav>
@@ -74,16 +77,17 @@ const NaviHeader = () => {
               showMobileButton ? 'opacity-100 visible' : 'opacity-0 invisible'
             }`}
             onClick={() => {
+              const targetId = earlyAccess ? 'pre-order' : 'waitlist';
               if (window.location.pathname === '/') {
-                document.getElementById('waitlist')?.scrollIntoView({ behavior: 'smooth' });
+                document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
               } else {
-                window.location.href = '/#waitlist';
+                window.location.href = `/#${targetId}`;
               }
             }}
           >
             <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg">
             </div>
-            <span className="relative text-white z-10">Join Waitlist</span>
+            <span className="relative text-white z-10">{earlyAccess ? 'Pre-order' : 'Join Waitlist'}</span>
           </button>
           
           {/* Desktop Contact Button */}

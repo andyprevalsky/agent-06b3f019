@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import ContactModal from "./ContactModal";
+import { isEarlyAccessEnabled } from "@/lib/utils";
 
 const NaviFooter = () => {
   const [contactModalOpen, setContactModalOpen] = useState(false);
+  const earlyAccess = isEarlyAccessEnabled();
   return (
     <footer className="relative z-20 bg-primary text-primary-foreground py-16">
       <div className="container mx-auto px-6">
@@ -39,15 +41,16 @@ const NaviFooter = () => {
               <li>
                 <button 
                   onClick={() => {
+                    const targetId = earlyAccess ? 'pre-order' : 'waitlist';
                     if (window.location.pathname === '/') {
-                      document.getElementById('waitlist')?.scrollIntoView({ behavior: 'smooth' });
+                      document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
                     } else {
-                      window.location.href = '/#waitlist';
+                      window.location.href = `/#${targetId}`;
                     }
                   }}
                   className="hover:text-primary-foreground transition-colors text-left"
                 >
-                  Join Waitlist
+                  {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
                 </button>
               </li>
             </ul>

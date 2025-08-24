@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import FeatureVideoStage from "./FeatureVideoStage";
+import { isEarlyAccessEnabled } from "@/lib/utils";
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
@@ -9,6 +10,7 @@ const FeaturesSection = () => {
   const observersReadyRef = useRef(false);
   // Temporarily pause scroll-driven highlight updates after a click
   const scrollSpyPauseUntilRef = useRef<number>(0);
+  const earlyAccess = isEarlyAccessEnabled();
   
   // Orchestrator manages playback; no direct video refs needed here
 
@@ -259,10 +261,11 @@ const FeaturesSection = () => {
                   </div>
                 ))}
                 
-                {/* Special Waitlist Button */}
+                {/* Special Waitlist/Pre-order Button */}
                 <button
                   onClick={() => {
-                    document.getElementById('waitlist')?.scrollIntoView({ 
+                    const targetId = earlyAccess ? 'pre-order' : 'waitlist';
+                    document.getElementById(targetId)?.scrollIntoView({ 
                       behavior: 'smooth' 
                     });
                   }}
@@ -270,7 +273,7 @@ const FeaturesSection = () => {
                 >
                   <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg">
                   </div>
-                  <h4 className="relative font-medium text-sm leading-tight text-white z-10">Join the Waitlist</h4>
+                  <h4 className="relative font-medium text-sm leading-tight text-white z-10">{earlyAccess ? 'Pre-order' : 'Join the Waitlist'}</h4>
                 </button>
               </div>
             </div>
