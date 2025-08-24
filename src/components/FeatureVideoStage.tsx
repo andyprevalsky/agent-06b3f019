@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type FeatureKey = "conversations" | "engine" | "memory" | "privacy";
+type FeatureKey = "customization" | "conversations" | "engine" | "memory" | "privacy";
 
 interface Segment {
   introStart: number;
@@ -13,6 +13,7 @@ interface Segment {
 
 interface MarkersFile {
   fps: number;
+  customization: Segment;
   conversations: Segment;
   engine: Segment;
   memory: Segment;
@@ -24,9 +25,11 @@ interface FeatureVideoStageProps {
 }
 
 function mapIndexToKey(index: number): FeatureKey {
-  // 0: customization (stand-in -> engine), 1: conversations, 2: engine, 3: memory, 4: privacy
+  // 0: customization, 1: conversations, 2: engine, 3: memory, 4: privacy
   switch (index) {
+    case 0: return "customization";
     case 1: return "conversations";
+    case 2: return "engine";
     case 3: return "memory";
     case 4: return "privacy";
     default: return "engine";
@@ -34,7 +37,7 @@ function mapIndexToKey(index: number): FeatureKey {
 }
 
 function findContainingFeature(markers: MarkersFile, t: number): { key: FeatureKey; part: "intro" | "cycle" | "outro" | "none" } {
-  const keys: FeatureKey[] = ["conversations", "engine", "memory", "privacy"];
+  const keys: FeatureKey[] = ["customization", "conversations", "engine", "memory", "privacy"];
   for (const key of keys) {
     const s = markers[key];
     if (t >= s.introStart && t < s.introEnd) return { key, part: "intro" };
@@ -61,6 +64,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     };
     return {
       fps: markers.fps,
+      customization: fix(markers.customization),
       conversations: fix(markers.conversations),
       engine: fix(markers.engine),
       memory: fix(markers.memory),
@@ -99,7 +103,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       .then(r => r.json())
       .then((data: MarkersFile) => { if (!aborted) {
         setMarkers(data);
-        log('markers-loaded', { fps: data.fps, keys: ['conversations','engine','memory','privacy'] });
+        log('markers-loaded', { fps: data.fps, keys: ['customization','conversations','engine','memory','privacy'] });
       } })
       .catch(() => {});
     return () => { aborted = true; };
