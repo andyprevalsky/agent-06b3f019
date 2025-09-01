@@ -41,7 +41,7 @@ function findContainingFeature(markers: MarkersFile, t: number): { key: FeatureK
   for (const key of keys) {
     const s = markers[key];
     if (t >= s.introStart && t < s.introEnd) return { key, part: "intro" };
-    if (t >= s.cycleStart && t < s.cycleEnd) return { key, part: "cycle" };
+    if (t >= s.introEnd && t < s.outroStart) return { key, part: "cycle" };
     if (t >= s.outroStart && t < s.outroEnd + 0.0001) return { key, part: "outro" };
   }
   return { key: "engine", part: "none" };
@@ -53,22 +53,13 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
   const [markers, setMarkers] = useState<MarkersFile | null>(null);
   const normalized = useMemo<MarkersFile | null>(() => {
     if (!markers) return null;
-    const fix = (s: Segment): Segment => {
-      const introStart = Math.max(0, s.introStart);
-      const introEnd = Math.max(introStart, s.introEnd);
-      const cycleStart = Math.max(introEnd, s.cycleStart);
-      const cycleEnd = Math.max(cycleStart + 0.001, s.cycleEnd);
-      const outroStart = Math.max(cycleEnd, s.outroStart);
-      const outroEnd = Math.max(outroStart + 0.001, s.outroEnd);
-      return { introStart, introEnd, cycleStart, cycleEnd, outroStart, outroEnd };
-    };
     return {
       fps: markers.fps,
-      customization: fix(markers.customization),
-      conversations: fix(markers.conversations),
-      engine: fix(markers.engine),
-      memory: fix(markers.memory),
-      privacy: fix(markers.privacy)
+      customization: markers.customization,
+      conversations: markers.conversations,
+      engine: markers.engine,
+      memory: markers.memory,
+      privacy: markers.privacy
     };
   }, [markers]);
 
@@ -281,10 +272,10 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
 
   return (
     <div className="w-full h-full relative overflow-hidden rounded-2xl">
-      <div className="absolute inset-0 transform scale-[1] origin-center md:scale-[0.6667] scale-100" style={{ transformOrigin: 'center center' }}>
+      <div className="absolute inset-0 transform scale-[1] origin-center md:scale-[1] lg:scale-[0.78] scale-100" style={{ transformOrigin: 'center center' }}>
         <video
           ref={bindRef}
-          className="w-full h-full object-cover"
+          className="w-full h-full object-contain"
           style={{ backgroundColor: 'transparent' }}
           playsInline
           muted

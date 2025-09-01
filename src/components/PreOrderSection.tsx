@@ -169,11 +169,11 @@ const PreOrderSection = () => {
       <div className="container mx-auto px-6">
         <div className="text-center mb-16">
           <h2 className="text-5xl font-light tracking-tight mb-6 reveal-up">
-            <span className="gradient-text">Reserve Your Navi</span>
+            <span className="gradient-text">Pre-order</span>
           </h2>
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto reveal-up reveal-delay-1">
-            Be among the first to experience the future of voice AI. 
-            Choose your preferred finish and secure your place in line.
+            You've been given early access to acquire one of the first 10 Navis. 
+            Choose your preferred finish and lock in your spot before the public release.
           </p>
           
           <div className="text-center mt-8 mb-8 reveal-up reveal-delay-2">
@@ -363,20 +363,6 @@ const PreOrderSection = () => {
           <p className="text-sm text-muted-foreground mb-4">
             Expected delivery: Q3 2025 • Limited quantities available
           </p>
-          <div className="flex justify-center space-x-8">
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">Secure payment</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">No upfront charges</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span className="text-xs text-muted-foreground">Cancel anytime</span>
-            </div>
-          </div>
         </div>
       </div>
     </section>

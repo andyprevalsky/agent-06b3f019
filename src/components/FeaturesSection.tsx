@@ -283,11 +283,14 @@ const FeaturesSection = () => {
         </div>
 
         {/* Mobile Layout */}
-        <div className="lg:hidden min-h-[600vh] relative">
+        <div className="md:hidden min-h-[600vh] relative">
           {/* Fixed Animation Container - Never moves */}
           <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={{ ['--features-sticky-top' as any]: '96px' }}>
             {/* Animation stays in exact same position */}
-            <div className="flex items-center justify-center relative" style={{ width: 'min(380px, calc(100vw - 48px))', height: 'clamp(280px, calc(100svh - var(--features-sticky-top, 96px) - 260px), 380px)' }}>
+            <div className="flex items-center justify-center relative" style={{ 
+              width: 'min(380px, calc(100vw - 48px))', 
+              height: 'clamp(280px, calc(100svh - var(--features-sticky-top, 96px) - 260px), 380px)' 
+            }}>
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                 <FeatureVideoStage activeIndex={activeFeature} />
               </div>
@@ -328,10 +331,71 @@ const FeaturesSection = () => {
             </div>
           </div>
           {/* Scroll sentinels to allocate space for each feature on mobile */}
-          <div className="lg:hidden block">
+          <div className="md:hidden block">
             {features.map((_, i) => (
               <div
                 key={`mobile-sentinel-${i}`}
+                data-sentinel-index={i}
+                className="h-[120vh]"
+                aria-hidden="true"
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Medium Screen Layout (iPads, ~850px width) */}
+        <div className="hidden md:block lg:hidden min-h-[600vh] relative">
+          {/* Fixed Animation Container - Never moves */}
+          <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={{ ['--features-sticky-top' as any]: '96px' }}>
+            {/* Animation stays in exact same position - Larger for medium screens */}
+            <div className="flex items-center justify-center relative" style={{ 
+              width: 'min(525px, calc(100vw - 48px))', 
+              height: 'clamp(375px, calc(100svh - var(--features-sticky-top, 96px) - 200px), 450px)' 
+            }}>
+              <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
+                <FeatureVideoStage activeIndex={activeFeature} />
+              </div>
+            </div>
+            
+            {/* Content cards in same position */}
+            <div className="min-h-[200px] relative" style={{ width: 'min(525px, calc(100vw - 48px))' }}>
+              {/* All content cards in same position, fade between them */}
+              {features.map((feature, index) => (
+                <div 
+                  key={feature.title}
+                  className={`absolute inset-0 transition-opacity duration-700 ${
+                    activeFeature === index ? 'opacity-100' : 'opacity-0'
+                  }`}
+                >
+                  <div className="relative bg-background rounded-lg shadow-lg border-2 border-transparent bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate p-[1px]">
+                    <div className="bg-background rounded-md h-full w-full">
+                      {/* Card content */}
+                      <div className="p-6">
+                      <h3 className="text-xl font-semibold mb-3 text-foreground text-left">{feature.title}</h3>
+                      
+                      
+                      {feature.details.length > 0 && (
+                        <ul className="space-y-3 text-left">
+                          {feature.details.map((detail, detailIndex) => (
+                            <li key={detailIndex} className="flex items-start space-x-3">
+                              <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
+                              <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Scroll sentinels to allocate space for each feature on medium screens */}
+          <div className="hidden md:block lg:hidden">
+            {features.map((_, i) => (
+              <div
+                key={`medium-sentinel-${i}`}
                 data-sentinel-index={i}
                 className="h-[120vh]"
                 aria-hidden="true"

@@ -133,7 +133,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
           )}
           
           {/* Custom with Waitlist */}
-          <div className="w-full">
+          <div className={`w-full ${customOnly ? 'max-w-xl mx-auto' : ''}`}>
             <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-3">
               <CardContent className="p-8 text-center">
                  <div className="mb-6">
@@ -149,7 +149,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
             </Card>
             
             {/* Waitlist Form for Custom */}
-            <div className="mt-6">
+            <div className={`mt-6 ${customOnly ? 'max-w-xl mx-auto' : ''}`}>
               <WaitlistForm 
                 onSuccess={() => console.log('User joined waitlist successfully!')}
               />
