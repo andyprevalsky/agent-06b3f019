@@ -1,1 +1,43 @@
-{"fps":30,"customization":{"introStart":0.0,"introEnd":0.966667,"cycleStart":0.966667,"cycleEnd":14.3,"outroStart":14.3,"outroEnd":15.266667},"conversations":{"introStart":15.266667,"introEnd":16.233333,"cycleStart":16.233333,"cycleEnd":22.533333,"outroStart":22.533333,"outroEnd":23.5},"engine":{"introStart":23.5,"introEnd":26.766667,"cycleStart":26.766667,"cycleEnd":35.066667,"outroStart":35.066667,"outroEnd":40.533333},"memory":{"introStart":40.533333,"introEnd":41.533333,"cycleStart":41.533333,"cycleEnd":50.833333,"outroStart":49.833333,"outroEnd":49.833333},"privacy":{"introStart":50.833333,"introEnd":51.8,"cycleStart":51.8,"cycleEnd":66.466667,"outroStart":66.466667,"outroEnd":67.466667}}
+{
+  "fps": 30,
+  "customization": {
+    "introStart": 0.000,
+    "introEnd": 0.967,
+    "cycleStart": 0.967,
+    "cycleEnd": 14.300,
+    "outroStart": 14.333,
+    "outroEnd": 15.267
+  },
+  "conversations": {
+    "introStart": 15.267,
+    "introEnd": 16.233,
+    "cycleStart": 16.233,
+    "cycleEnd": 22.900,
+    "outroStart": 22.933,
+    "outroEnd": 23.900
+  },
+  "engine": {
+    "introStart": 23.900,
+    "introEnd": 24.900,
+    "cycleStart": 27.200,
+    "cycleEnd": 35.467,
+    "outroStart": 39.533,
+    "outroEnd": 40.533
+  },
+  "memory": {
+    "introStart": 40.567,
+    "introEnd": 41.500,
+    "cycleStart": 41.533,
+    "cycleEnd": 50.8,
+    "outroStart": 49.833,
+    "outroEnd": 49.833
+  },
+  "privacy": {
+    "introStart": 50.866,
+    "introEnd": 51.833,
+    "cycleStart": 51.833,
+    "cycleEnd": 60.133,
+    "outroStart": 66.466,
+    "outroEnd": 67.466
+  }
+}
