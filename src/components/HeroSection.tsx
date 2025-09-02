@@ -11,6 +11,7 @@ const HeroSection = () => {
   const [arrowVisible, setArrowVisible] = useState(true);
   const [isVideoReady, setIsVideoReady] = useState(false);
   const [hasPaintedFirstFrame, setHasPaintedFirstFrame] = useState(false);
+  const [shouldBePlaying, setShouldBePlaying] = useState(true);
   const videoRef = useRef<HTMLVideoElement>(null);
   const sectionRef = useRef<HTMLElement>(null);
   const circleRef = useRef<HTMLDivElement>(null);
@@ -133,12 +134,12 @@ const HeroSection = () => {
       if (document.hidden) {
         pauseVideo();
       } else {
-        playVideo();
+        if (shouldBePlaying) playVideo();
       }
     };
 
     const handleFocus = () => {
-      playVideo();
+      if (shouldBePlaying) playVideo();
     };
 
     const handleBlur = () => {
@@ -164,7 +165,32 @@ const HeroSection = () => {
       window.removeEventListener('blur', handleBlur);
       window.removeEventListener('pageshow', handlePageShow);
     };
+  }, [shouldLoadVideo, shouldBePlaying]);
+
+  // Auto pause/resume hero video based on viewport visibility (watch the video element)
+  useEffect(() => {
+    const node = videoRef.current;
+    if (!node) return;
+
+    const io = new IntersectionObserver(([entry]) => {
+      const visible = entry.isIntersecting && entry.intersectionRatio > 0;
+      setShouldBePlaying(visible);
+    }, { threshold: [0], rootMargin: '0px' });
+
+    io.observe(node);
+    return () => io.disconnect();
   }, [shouldLoadVideo]);
+
+  // Apply desired play/pause state to the video element
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (shouldBePlaying) {
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
+  }, [shouldBePlaying]);
 
   useEffect(() => {
     let currentWordIndex = 0;
@@ -265,7 +291,7 @@ const HeroSection = () => {
                     className="absolute inset-0 z-10 w-full h-full object-cover transform-gpu scale-[1.12]"
                     style={{ objectPosition: 'center center', visibility: hasPaintedFirstFrame ? 'visible' : 'hidden', backgroundColor: 'transparent' }}
                     objectFit="cover"
-                    autoPlay
+                    autoPlay={shouldBePlaying}
                     loop
                     muted
                     preload="auto"

@@ -4,6 +4,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { HelpCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useInView } from "react-intersection-observer";
 
 const PreOrderSection = () => {
   const blackVideoRef = useRef<HTMLVideoElement>(null);
@@ -11,6 +12,19 @@ const PreOrderSection = () => {
   const [isSafari, setIsSafari] = useState(false);
   const [blackPopoverOpen, setBlackPopoverOpen] = useState(false);
   const [whitePopoverOpen, setWhitePopoverOpen] = useState(false);
+  const { ref: blackInViewRef, inView: blackInView } = useInView({ rootMargin: "600px", triggerOnce: true });
+  const { ref: whiteInViewRef, inView: whiteInView } = useInView({ rootMargin: "600px", triggerOnce: true });
+  const { ref: blackVisibleRef, inView: blackVisible } = useInView({ rootMargin: "100px", threshold: 0.15 });
+  const { ref: whiteVisibleRef, inView: whiteVisible } = useInView({ rootMargin: "100px", threshold: 0.15 });
+
+  const setBlackWrapperRef = (node: HTMLDivElement | null) => {
+    blackInViewRef(node);
+    blackVisibleRef(node);
+  };
+  const setWhiteWrapperRef = (node: HTMLDivElement | null) => {
+    whiteInViewRef(node);
+    whiteVisibleRef(node);
+  };
 
   useEffect(() => {
     // Detect Safari browser
@@ -25,7 +39,7 @@ const PreOrderSection = () => {
   useEffect(() => {
     const syncVideos = async () => {
       // Only sync videos if not Safari (Safari users get static images)
-      if (!isSafari && blackVideoRef.current && whiteVideoRef.current) {
+      if (!isSafari && blackVideoRef.current && whiteVideoRef.current && blackInView && whiteInView) {
         try {
           const blackVideo = blackVideoRef.current;
           const whiteVideo = whiteVideoRef.current;
@@ -65,7 +79,28 @@ const PreOrderSection = () => {
     };
 
     syncVideos();
-  }, [isSafari]);
+  }, [isSafari, blackInView, whiteInView]);
+
+  // Pause/play based on actual viewport visibility (no stutter)
+  useEffect(() => {
+    const video = blackVideoRef.current;
+    if (!video) return;
+    if (blackVisible) {
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
+  }, [blackVisible]);
+
+  useEffect(() => {
+    const video = whiteVideoRef.current;
+    if (!video) return;
+    if (whiteVisible) {
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
+  }, [whiteVisible]);
 
   // Handle Safari iOS video issues for both videos
   useEffect(() => {
@@ -209,7 +244,7 @@ const PreOrderSection = () => {
           <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
             <CardContent className="p-8 text-center">
                <div className="mb-6">
-                <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
+                <div ref={setBlackWrapperRef} className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
                   <video 
                     ref={blackVideoRef}
                     autoPlay
@@ -217,10 +252,12 @@ const PreOrderSection = () => {
                     loop
                     muted
                     playsInline
-                    preload="metadata"
+                    preload={blackInView ? "auto" : "none"}
                     poster="/navi-midnight-black-white-background.png"
                   >
-                    <source src="/navi-hero-animation.webm" type="video/webm" />
+                    {blackInView && (
+                      <source src="/navi-black-v4-white-background.webm" type="video/webm" />
+                    )}
                     <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
                   </video>
                 </div>
@@ -285,7 +322,7 @@ const PreOrderSection = () => {
           <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
             <CardContent className="p-8 text-center">
                <div className="mb-6">
-                <div className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
+                <div ref={setWhiteWrapperRef} className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
                   <video 
                     ref={whiteVideoRef}
                     autoPlay
@@ -293,10 +330,12 @@ const PreOrderSection = () => {
                     loop
                     muted
                     playsInline
-                    preload="metadata"
+                    preload={whiteInView ? "auto" : "none"}
                     poster="/navi-pearl-white-white-background.png"
                   >
-                    <source src="/navi-white-v4-white-background.webm" type="video/webm" />
+                    {whiteInView && (
+                      <source src="/navi-white-v4-white-background.webm" type="video/webm" />
+                    )}
                     <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
                   </video>
                 </div>
