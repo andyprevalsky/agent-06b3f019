@@ -68,7 +68,7 @@ const FeaturesSection = () => {
 
   // Lux neutral palette accents
   const pearlBlue = '#F8FAFF'; // slightly less blue, pearl-white tint
-  const midnightBlue = '#1b2540';
+  const heroBlack = '#272725'; // match hero section dark tone
 
   const getIconForIndex = (index: number) => {
     switch (index) {
@@ -438,7 +438,7 @@ const FeaturesSection = () => {
                       style={{ 
                         backgroundColor: (activeFeature === index) ? pearlBlue : '#ffffff',
                         transition: 'background-color 2000ms ease',
-                        borderColor: 'hsl(var(--foreground))'
+                        borderColor: heroBlack
                       }}
                     >
                       {/* Card content */}
@@ -449,9 +449,9 @@ const FeaturesSection = () => {
                           style={{
                             width: '2.25rem',
                             height: '2.25rem',
-                            backgroundColor: (activeFeature === index) ? midnightBlue : '#d1d5db',
+                            backgroundColor: (activeFeature === index) ? heroBlack : '#d1d5db',
                             transition: 'background-color 2000ms ease',
-                            borderColor: 'hsl(var(--foreground))'
+                            borderColor: heroBlack
                           }}
                         >
                           <img 
@@ -471,7 +471,7 @@ const FeaturesSection = () => {
                             <li key={detailIndex} className="flex items-start space-x-3">
                               <div 
                                 className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 transition-colors duration-1000"
-                                style={{ backgroundColor: (activeFeature === index) ? midnightBlue : '#d1d5db' }}
+                                style={{ backgroundColor: (activeFeature === index) ? heroBlack : '#d1d5db' }}
                               ></div>
                               <span className="text-foreground/80 leading-relaxed">{
                                 (index === 4 && detailIndex === 1)
@@ -506,7 +506,7 @@ const FeaturesSection = () => {
                         }
                       }}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#1b2540" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" className="w-4 h-4">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#272725" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" className="w-4 h-4">
                         <path d="M6 9l6 6 6-6" />
                       </svg>
                     </button>
@@ -519,7 +519,7 @@ const FeaturesSection = () => {
             <div className="flex items-center justify-center gap-2" style={{ width: 'min(380px, calc(100vw - 48px))' }}>
               {features.map((_, i) => {
                 const isActive = activeFeature === i;
-                const activeBg = midnightBlue;
+                const activeBg = heroBlack;
                 return (
                   <button
                     key={`dot-m-${i}`}

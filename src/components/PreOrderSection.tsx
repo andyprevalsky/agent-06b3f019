@@ -304,19 +304,22 @@ const PreOrderSection = () => {
                 </div>
               </div>
               
-              <Button 
-                onClick={() => handlePreOrder('black')}
-                className="btn-luxury w-full"
-                size="lg"
-              >
-                Pre-order
-              </Button>
-              
-              <p className="text-xs text-muted-foreground mt-4">
-                Free shipping • 30-day returns
-              </p>
+              {/* Button moved below card to match waitlist layout */}
             </CardContent>
           </Card>
+          {/* Pre-order button below the card (Midnight Black) */}
+          <div className="mt-0">
+            <Button 
+              onClick={() => handlePreOrder('black')}
+              className="btn-luxury w-full"
+              size="lg"
+            >
+              Pre-order
+            </Button>
+            <p className="text-xs text-muted-foreground mt-4 text-center">
+              Free shipping • 30-day returns
+            </p>
+          </div>
           
           {/* Pearl White */}
           <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
@@ -382,19 +385,22 @@ const PreOrderSection = () => {
                 </div>
               </div>
               
-              <Button 
-                onClick={() => handlePreOrder('white')}
-                className="btn-pearl w-full"
-                size="lg"
-              >
-                Pre-order
-              </Button>
-              
-              <p className="text-xs text-muted-foreground mt-4">
-                Free shipping • 30-day returns
-              </p>
+              {/* Button moved below card to match waitlist layout */}
             </CardContent>
           </Card>
+          {/* Pre-order button below the card (Pearl White) */}
+          <div className="mt-0">
+            <Button 
+              onClick={() => handlePreOrder('white')}
+              className="btn-pearl w-full"
+              size="lg"
+            >
+              Pre-order
+            </Button>
+            <p className="text-xs text-muted-foreground mt-4 text-center">
+              Free shipping • 30-day returns
+            </p>
+          </div>
           
         </div>
         
