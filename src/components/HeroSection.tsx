@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import FloatingParticles from "./FloatingParticles";
 import ProgressiveImage from "./ProgressiveImage";
 import VideoPlayer from "./VideoPlayer";
 import { useState, useEffect, useRef } from "react";
@@ -255,14 +254,16 @@ const HeroSection = () => {
 
 
   return (
-    <section ref={sectionRef} className="relative z-10 flex flex-col items-center overflow-visible bg-gradient-to-br from-background via-surface to-secondary grid-background" style={{ height: '100svh', paddingTop: 'var(--hero-top-gap, calc(var(--header-h, 64px) + 8px))', backgroundColor: '#F9F9FB' }}>
-      <FloatingParticles />
+    <section ref={sectionRef} className="relative z-10 flex flex-col items-center overflow-visible bg-background" style={{ height: '100svh', paddingTop: 'var(--hero-top-gap, calc(var(--header-h, 64px) + 8px))' }}>
+      <div className="absolute inset-0 pointer-events-none z-20">
+        <div className="absolute inset-0 grid-background"></div>
+      </div>
       
-      <div className="container mx-auto px-6 relative z-10 overflow-visible">
+      <div className="container mx-auto px-6 relative z-30 overflow-visible">
                   <div className="max-w-4xl xl:max-w-6xl 2xl:max-w-7xl mx-auto text-center overflow-visible">
             <div className="mb-8 md:mt-3 reveal-up flex justify-center">
               <div
-                className="rounded-full p-2 bg-surface flex items-center justify-center [--hero-circle-scale:1.15] sm:[--hero-circle-scale:1.2] lg:[--hero-circle-scale:1.125]"
+                className="rounded-full p-2 bg-background flex items-center justify-center [--hero-circle-scale:1.15] sm:[--hero-circle-scale:1.2] lg:[--hero-circle-scale:1.125]"
                 style={{
                   // Keep video/image at original size, enlarge only the circular background by 25%
                   ['--hero-video-size' as any]: 'clamp(300px, min(68vw, calc(var(--hero-svh-base, 75svh) - var(--hero-top-gap, 64px))), 480px)',
@@ -307,7 +308,7 @@ const HeroSection = () => {
             className="max-w-2xl mx-auto mb-12 reveal-up reveal-delay-1 flex justify-center"
             style={{ marginTop: `${typedTopSpacing}px` }}
           >
-            <div className="bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg w-[420px]">
+            <div className="relative z-40 backdrop-blur-none bg-gradient-to-br from-[#272725] to-[#1f1f1d] border border-border/30 rounded-full p-4 shadow-lg w-[420px]">
               <div className="flex items-center gap-3">
                 <div className="flex-shrink-0 mt-1">
                   <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center relative">
@@ -320,7 +321,7 @@ const HeroSection = () => {
                   </div>
                 </div>
                 <div className="flex-1 min-h-[2rem] flex items-center">
-                  <p className="text-base md:text-xl text-white leading-relaxed text-left drop-shadow-sm">
+                  <p className="hero-typed-text text-base md:text-xl text-white leading-relaxed text-left drop-shadow-sm">
                     <span className="inline">
                       {typedText}<span className="animate-pulse">|</span>
                     </span>

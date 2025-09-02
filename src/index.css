@@ -963,6 +963,32 @@ html {
     animation: slow-bounce 2s ease-in-out infinite;
   }
 
+  /* Half-height bounce (keeps bottom touch point the same) */
+  @keyframes slow-bounce-half {
+    0% {
+      transform: translateY(0);
+      animation-timing-function: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    }
+    50% {
+      transform: translateY(-8px);
+      animation-timing-function: cubic-bezier(0.55, 0.06, 0.68, 0.19);
+    }
+    100% {
+      transform: translateY(0);
+    }
+  }
+  .animate-slow-bounce-half {
+    animation: slow-bounce-half 2s ease-in-out infinite;
+  }
+
+  /* Hero typed text small-phone override */
+  @media (max-width: 390px) {
+    .hero-typed-text {
+      font-size: 14px !important; /* 2px smaller than base 16px */
+      line-height: 1.4 !important;
+    }
+  }
+
   /* Safari iOS overlay utilities */
   .safari-safe-area-bottom {
     padding-bottom: env(safe-area-inset-bottom, 1rem);
@@ -992,8 +1018,8 @@ html {
     top: 50%;
     left: 50%;
     width: 100vw;
-    height: 120vh;
-    height: 120svh;
+    height: 160vh;
+    height: 160svh;
     transform: translate(-50%, -50%);
     overflow: hidden;
     perspective: 800px;
@@ -1001,23 +1027,6 @@ html {
     pointer-events: none;
     z-index: 2;
     transition: clip-path 0.1s ease-out;
-  }
-
-  /* Prevent horizontal drag/pan within Features section on touch devices
-     Keeps vertical scroll, sticky, and observers intact */
-  #features {
-    touch-action: pan-y;
-    -ms-touch-action: pan-y;
-    overscroll-behavior-x: none;
-  }
-  /* Ensure all interactive descendants also respect vertical-only panning */
-  #features * {
-    touch-action: pan-y;
-    -ms-touch-action: pan-y;
-  }
-  /* Extra guard for scrollable content areas inside features */
-  #features .overflow-y-auto {
-    overscroll-behavior-x: none;
   }
 
   .grid-3d-wall {

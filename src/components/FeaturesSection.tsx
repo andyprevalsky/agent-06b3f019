@@ -67,7 +67,7 @@ const FeaturesSection = () => {
   };
 
   // Lux neutral palette accents
-  const pearlBlue = '#F6F9FF'; // subtle pearl-white blue tint
+  const pearlBlue = '#F8FAFF'; // slightly less blue, pearl-white tint
   const midnightBlue = '#1b2540';
 
   const getIconForIndex = (index: number) => {
@@ -263,9 +263,29 @@ const FeaturesSection = () => {
     }
   };
 
+  // Scroll to a feature sentinel and let the IntersectionObserver set activeFeature naturally
+  const scrollToFeature = (index: number) => {
+    const node = sectionRef.current;
+    if (!node) return;
+    const all = Array.from(node.querySelectorAll(`[data-sentinel-index="${index}"]`)) as HTMLElement[];
+    // Prefer the visible sentinel (not display:none and with layout)
+    let sentinel = all.find(el => {
+      const cs = window.getComputedStyle(el);
+      return cs.display !== 'none' && el.offsetParent !== null;
+    }) || all[0] || null;
+    if (!sentinel) return;
+    const rect = sentinel.getBoundingClientRect();
+    const targetY = window.scrollY + rect.top + 1; // nudge to ensure IO band overlap
+    try {
+      window.scrollTo({ top: targetY, behavior: 'smooth' });
+    } catch {
+      window.scrollTo(0, targetY);
+    }
+  };
+
 
   return (
-    <section id="features" className="py-24 bg-surface relative" ref={sectionRef}>
+    <section id="features" className="py-24 bg-background relative" ref={sectionRef}>
       <div className="container mx-auto px-6">
         <div className="relative z-10 text-center mb-16">
           <h2 className="text-5xl font-light tracking-tight mb-6 reveal-up">
@@ -305,6 +325,7 @@ const FeaturesSection = () => {
                     <div
                       key={`desktop-sentinel-${i}`}
                       data-sentinel-index={i}
+                      id={`feature-sentinel-${i}`}
                       className="h-[180vh]"
                       aria-hidden="true"
                     />
@@ -446,14 +467,14 @@ const FeaturesSection = () => {
                       
                       {feature.details.length > 0 && (
                         <ul ref={el => (textContentRefs.current[index] = el)} className="space-y-3 text-left" style={{ fontSize: `calc(${isMobile ? 0.95 : 0.875}rem * ${textScales[index] || 1})`, lineHeight: `calc(${isMobile ? 1.45 : 1.375}rem * ${textScales[index] || 1})` }}>
-                          {(isMobile ? (index === 2 ? ((isNarrowPhone || isShortHeight) ? feature.details.slice(0, 2) : feature.details.slice(0, 3)) : ((isShortHeight) ? feature.details.slice(0, 2) : feature.details.slice(0, 3))) : feature.details).map((detail, detailIndex) => (
+                          {(isMobile ? (index === 2 ? feature.details.slice(0, 2) : (isShortHeight ? feature.details.slice(0, 2) : feature.details.slice(0, 3))) : feature.details).map((detail, detailIndex) => (
                             <li key={detailIndex} className="flex items-start space-x-3">
                               <div 
                                 className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 transition-colors duration-1000"
                                 style={{ backgroundColor: (activeFeature === index) ? midnightBlue : '#d1d5db' }}
                               ></div>
                               <span className="text-foreground/80 leading-relaxed">{
-                                (isMobile && isShortHeight && index === 4 && detailIndex === 1)
+                                (index === 4 && detailIndex === 1)
                                   ? 'Navi does not passively listen, active listening is enabled only by the customizable wake word, "Hi Navi".'
                                   : (isMobile && index === 3 && detailIndex === 2)
                                     ? 'Time based queries keep navi working in the background.'
@@ -465,6 +486,30 @@ const FeaturesSection = () => {
                       )}
                       </div>
                     </div>
+                  </div>
+                  {/* Bottom-right bounce arrow */}
+                  <div className="absolute right-2 bottom-2 z-30 pointer-events-auto">
+                    <button 
+                      type="button"
+                      className="w-8 h-4 flex items-center justify-center animate-slow-bounce-half pointer-events-auto"
+                      aria-label="Scroll to next feature"
+                      onClick={() => {
+                        if (activeFeature >= features.length - 1) {
+                          const targetId = earlyAccess ? 'pre-order' : 'waitlist';
+                          if (window.location.pathname === '/') {
+                            document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
+                          } else {
+                            window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
+                          }
+                        } else {
+                          scrollToFeature(activeFeature + 1);
+                        }
+                      }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#1b2540" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" className="w-4 h-4">
+                        <path d="M6 9l6 6 6-6" />
+                      </svg>
+                    </button>
                   </div>
                 </div>
               ))}
@@ -479,7 +524,7 @@ const FeaturesSection = () => {
                   <button
                     key={`dot-m-${i}`}
                     aria-label={`Go to feature ${i + 1}`}
-                    onClick={() => handleFeatureClick(i)}
+                    onClick={() => scrollToFeature(i)}
                     className={`h-1.5 transition-all duration-300 ${isActive ? 'w-6 rounded-md' : 'w-1.5 rounded-full'}`}
                     style={{ backgroundColor: isActive ? activeBg : '#d1d5db' }}
                   />
@@ -493,6 +538,7 @@ const FeaturesSection = () => {
               <div
                 key={`mobile-sentinel-${i}`}
                 data-sentinel-index={i}
+                id={`feature-sentinel-${i}`}
                 className="h-[180vh]"
                 aria-hidden="true"
               />
