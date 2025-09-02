@@ -140,7 +140,9 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         }
         if (modeRef.current === "ramping") {
           const k = Math.min((performance.now() - rampStartMsRef.current) / 1000, 1);
-          const rate = 1 + (4 - 1) * k;
+          const isHevc = typeof (video as HTMLVideoElement).currentSrc === 'string' && (video as HTMLVideoElement).currentSrc.includes('navi-features-hevc');
+          const maxRate = isHevc ? 2 : 4;
+          const rate = 1 + (maxRate - 1) * k;
           video.playbackRate = rate;
           if (t >= stopAtRef.current - eps) {
             video.playbackRate = 1.0;

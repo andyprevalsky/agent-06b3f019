@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useIsMobile } from "@/hooks/use-mobile";
 import FeatureVideoStage from "./FeatureVideoStage";
 import { isEarlyAccessEnabled } from "@/lib/utils";
 
@@ -11,8 +12,116 @@ const FeaturesSection = () => {
   // Temporarily pause scroll-driven highlight updates after a click
   const scrollSpyPauseUntilRef = useRef<number>(0);
   const earlyAccess = isEarlyAccessEnabled();
+  const isMobile = useIsMobile();
+  const [isNarrowPhone, setIsNarrowPhone] = useState<boolean>(false);
+  const [isShortHeight, setIsShortHeight] = useState<boolean>(false);
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 380px)');
+    const onChange = () => setIsNarrowPhone(mql.matches);
+    onChange();
+    try { mql.addEventListener('change', onChange); } catch { /* Safari */ mql.addListener(onChange as any); }
+    return () => { try { mql.removeEventListener('change', onChange); } catch { mql.removeListener(onChange as any); } };
+  }, []);
+  useEffect(() => {
+    const mqlH = window.matchMedia('(max-height: 750px)');
+    const onChangeH = () => setIsShortHeight(mqlH.matches);
+    onChangeH();
+    try { mqlH.addEventListener('change', onChangeH); } catch { /* Safari */ mqlH.addListener(onChangeH as any); }
+    return () => { try { mqlH.removeEventListener('change', onChangeH); } catch { mqlH.removeListener(onChangeH as any); } };
+  }, []);
   
   // Orchestrator manages playback; no direct video refs needed here
+
+  // Navi logo gradient stops (left-to-right) for sequential card backgrounds
+  const logoStops = ['#FE7503', '#FC585C', '#FD5776', '#E062CC', '#A76CED', '#7A6BEC'];
+  const getStopForIndex = (index: number) => logoStops[index % logoStops.length];
+  const hexToRgb = (hex: string) => {
+    const clean = hex.replace('#', '');
+    const bigint = parseInt(clean, 16);
+    const r = (bigint >> 16) & 255;
+    const g = (bigint >> 8) & 255;
+    const b = bigint & 255;
+    return { r, g, b };
+  };
+  const rgbaString = (hex: string, alpha: number) => {
+    const { r, g, b } = hexToRgb(hex);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  };
+  const darkenHex = (hex: string, amount: number) => {
+    const { r, g, b } = hexToRgb(hex);
+    const k = Math.max(0, Math.min(1, amount));
+    const dr = Math.max(0, Math.round(r * (1 - k)));
+    const dg = Math.max(0, Math.round(g * (1 - k)));
+    const db = Math.max(0, Math.round(b * (1 - k)));
+    const toHex = (v: number) => v.toString(16).padStart(2, '0');
+    return `#${toHex(dr)}${toHex(dg)}${toHex(db)}`;
+  };
+  const mixWithWhite = (hex: string, t: number) => {
+    const { r, g, b } = hexToRgb(hex);
+    const k = Math.max(0, Math.min(1, t));
+    const mr = Math.round(r * (1 - k) + 255 * k);
+    const mg = Math.round(g * (1 - k) + 255 * k);
+    const mb = Math.round(b * (1 - k) + 255 * k);
+    const toHex = (v: number) => v.toString(16).padStart(2, '0');
+    return `#${toHex(mr)}${toHex(mg)}${toHex(mb)}`;
+  };
+
+  // Lux neutral palette accents
+  const pearlBlue = '#F6F9FF'; // subtle pearl-white blue tint
+  const midnightBlue = '#1b2540';
+
+  const getIconForIndex = (index: number) => {
+    switch (index) {
+      case 0: return 'customize.svg';
+      case 1: return 'seamless.svg';
+      case 2: return 'agent.svg';
+      case 3: return 'grow.svg';
+      case 4: return 'privacy.svg';
+      default: return 'seamless.svg';
+    }
+  };
+
+  // Fit text to container (mobile/tablet): scale typography down until it fits
+  const textContainerRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const textContentRefs = useRef<Array<HTMLUListElement | null>>([]);
+  const [textScales, setTextScales] = useState<number[]>(() => new Array(5).fill(1));
+  useLayoutEffect(() => {
+    const isDesktop = window.matchMedia('(min-width: 1024px)').matches;
+    if (isDesktop) return; // desktop uses different layout
+    const idx = activeFeature;
+    const container = textContainerRefs.current[idx];
+    const content = textContentRefs.current[idx];
+    if (!container || !content) return;
+    // Try decreasing scale until content fits or min scale reached
+    let scale = 1;
+    const minScale = 0.85;
+    const step = 0.04;
+    // Limit attempts to avoid long loops
+    let attempts = 0;
+    while (attempts < 8) {
+      // Apply temporary inline styles to content for measurement
+      content.style.setProperty('--title-scale', String(scale));
+      content.style.setProperty('--body-scale', String(scale));
+      // Force sync measurement after style change
+      // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+      content.offsetHeight;
+      const overflows = content.scrollHeight > container.clientHeight;
+      if (!overflows || scale <= minScale) break;
+      scale = Math.max(minScale, scale - step);
+      attempts += 1;
+    }
+    setTextScales(prev => {
+      const next = [...prev];
+      next[idx] = scale;
+      return next;
+    });
+    return () => {
+      try {
+        content?.style.removeProperty('--title-scale');
+        content?.style.removeProperty('--body-scale');
+      } catch {}
+    };
+  }, [activeFeature]);
 
   const features = [
     {
@@ -147,7 +256,7 @@ const FeaturesSection = () => {
   const handleFeatureClick = (index: number) => {
     setActiveFeature(index);
     // Pause scroll-based updates to avoid highlight flicker while smooth-scrolling
-    scrollSpyPauseUntilRef.current = performance.now() + 1500; // ms
+    scrollSpyPauseUntilRef.current = performance.now() + 300; // ms
     const sentinel = sectionRef.current?.querySelector(`[data-sentinel-index="${index}"]`) as HTMLElement | null;
     if (sentinel) {
       sentinel.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -196,7 +305,7 @@ const FeaturesSection = () => {
                     <div
                       key={`desktop-sentinel-${i}`}
                       data-sentinel-index={i}
-                      className="h-[120vh]"
+                      className="h-[180vh]"
                       aria-hidden="true"
                     />
                   ))}
@@ -261,7 +370,7 @@ const FeaturesSection = () => {
                   </div>
                 ))}
                 
-                {/* Special Waitlist/Pre-order Button */}
+                {/* Special Waitlist/Pre-order Button - GRADIENT (desktop) */}
                 <button
                   onClick={() => {
                     const targetId = earlyAccess ? 'pre-order' : 'waitlist';
@@ -273,8 +382,7 @@ const FeaturesSection = () => {
                   }}
                   className="relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden border-2 border-transparent"
                 >
-                  <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg">
-                  </div>
+                  <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg"></div>
                   <h4 className="relative font-medium text-sm leading-tight text-white z-10">{earlyAccess ? 'Pre-order' : 'Join the Waitlist'}</h4>
                 </button>
               </div>
@@ -282,22 +390,19 @@ const FeaturesSection = () => {
           </div>
         </div>
 
-        {/* Mobile Layout */}
-        <div className="md:hidden min-h-[600vh] relative">
+        {/* Mobile/Tablet Layout (applies up to lg) */}
+        <div className="lg:hidden min-h-[600vh] relative">
           {/* Fixed Animation Container - Never moves */}
           <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={{ ['--features-sticky-top' as any]: '96px' }}>
             {/* Animation stays in exact same position */}
-            <div className="flex items-center justify-center relative" style={{ 
-              width: 'min(380px, calc(100vw - 48px))', 
-              height: 'clamp(280px, calc(100svh - var(--features-sticky-top, 96px) - 260px), 380px)' 
-            }}>
+            <div className="flex items-center justify-center relative" style={{ width: 'min(420px, calc(100vw - 24px))', height: 'clamp(240px, calc((100svh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)' }}>
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                 <FeatureVideoStage activeIndex={activeFeature} />
               </div>
             </div>
             
             {/* Content cards in same position */}
-            <div className="min-h-[200px] relative" style={{ width: 'min(380px, calc(100vw - 48px))' }}>
+            <div className="relative" style={{ width: 'min(420px, calc(100vw - 24px))', height: 'clamp(240px, calc((100svh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)' }}>
               {/* All content cards in same position, fade between them */}
               {features.map((feature, index) => (
                 <div 
@@ -306,19 +411,54 @@ const FeaturesSection = () => {
                     activeFeature === index ? 'opacity-100' : 'opacity-0'
                   }`}
                 >
-                  <div className="relative bg-background rounded-lg shadow-lg border-2 border-transparent bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate p-[1px]">
-                    <div className="bg-background rounded-md h-full w-full">
+                  <div className="relative h-full w-full">
+                    <div 
+                      className="h-full w-full border rounded-none shadow-lg"
+                      style={{ 
+                        backgroundColor: (activeFeature === index) ? pearlBlue : '#ffffff',
+                        transition: 'background-color 2000ms ease',
+                        borderColor: 'hsl(var(--foreground))'
+                      }}
+                    >
                       {/* Card content */}
-                      <div className="p-6">
-                      <h3 className="text-xl font-semibold mb-3 text-foreground text-left">{feature.title}</h3>
+                      <div ref={el => (textContainerRefs.current[index] = el)} className="p-6">
+                      <div className="flex items-center gap-3" style={{ marginBottom: (!isShortHeight ? '1.25rem' : '0.75rem') }}>
+                        <div
+                          className="border p-1 flex items-center justify-center"
+                          style={{
+                            width: '2.25rem',
+                            height: '2.25rem',
+                            backgroundColor: (activeFeature === index) ? midnightBlue : '#d1d5db',
+                            transition: 'background-color 2000ms ease',
+                            borderColor: 'hsl(var(--foreground))'
+                          }}
+                        >
+                          <img 
+                            src={`/${getIconForIndex(index)}`} 
+                            alt="" 
+                            className="w-full h-full object-contain"
+                            style={{ filter: 'brightness(0) invert(1)', transition: 'none' }}
+                          />
+                        </div>
+                        <h3 className="font-semibold text-foreground text-left" style={{ fontSize: `calc(${isMobile ? 1.125 : 1.25}rem * ${textScales[index] || 1})`, lineHeight: `calc(${isMobile ? 1.6 : 1.75}rem * ${textScales[index] || 1})` }}>{feature.title}</h3>
+                      </div>
                       
                       
                       {feature.details.length > 0 && (
-                        <ul className="space-y-3 text-left">
-                          {feature.details.map((detail, detailIndex) => (
+                        <ul ref={el => (textContentRefs.current[index] = el)} className="space-y-3 text-left" style={{ fontSize: `calc(${isMobile ? 0.95 : 0.875}rem * ${textScales[index] || 1})`, lineHeight: `calc(${isMobile ? 1.45 : 1.375}rem * ${textScales[index] || 1})` }}>
+                          {(isMobile ? (index === 2 ? ((isNarrowPhone || isShortHeight) ? feature.details.slice(0, 2) : feature.details.slice(0, 3)) : ((isShortHeight) ? feature.details.slice(0, 2) : feature.details.slice(0, 3))) : feature.details).map((detail, detailIndex) => (
                             <li key={detailIndex} className="flex items-start space-x-3">
-                              <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
-                              <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
+                              <div 
+                                className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 transition-colors duration-1000"
+                                style={{ backgroundColor: (activeFeature === index) ? midnightBlue : '#d1d5db' }}
+                              ></div>
+                              <span className="text-foreground/80 leading-relaxed">{
+                                (isMobile && isShortHeight && index === 4 && detailIndex === 1)
+                                  ? 'Navi does not passively listen, active listening is enabled only by the customizable wake word, "Hi Navi".'
+                                  : (isMobile && index === 3 && detailIndex === 2)
+                                    ? 'Time based queries keep navi working in the background.'
+                                    : detail
+                              }</span>
                             </li>
                           ))}
                         </ul>
@@ -329,75 +469,31 @@ const FeaturesSection = () => {
                 </div>
               ))}
             </div>
+            {/* Removed measurement nodes; we now use 50/50 split with scrollable content */}
+            {/* Dots pagination */}
+            <div className="flex items-center justify-center gap-2" style={{ width: 'min(380px, calc(100vw - 48px))' }}>
+              {features.map((_, i) => {
+                const isActive = activeFeature === i;
+                const activeBg = midnightBlue;
+                return (
+                  <button
+                    key={`dot-m-${i}`}
+                    aria-label={`Go to feature ${i + 1}`}
+                    onClick={() => handleFeatureClick(i)}
+                    className={`h-1.5 transition-all duration-300 ${isActive ? 'w-6 rounded-md' : 'w-1.5 rounded-full'}`}
+                    style={{ backgroundColor: isActive ? activeBg : '#d1d5db' }}
+                  />
+                );
+              })}
+            </div>
           </div>
-          {/* Scroll sentinels to allocate space for each feature on mobile */}
-          <div className="md:hidden block">
+          {/* Scroll sentinels to allocate space for each feature on mobile/tablet */}
+          <div className="lg:hidden block">
             {features.map((_, i) => (
               <div
                 key={`mobile-sentinel-${i}`}
                 data-sentinel-index={i}
-                className="h-[120vh]"
-                aria-hidden="true"
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Medium Screen Layout (iPads, ~850px width) */}
-        <div className="hidden md:block lg:hidden min-h-[600vh] relative">
-          {/* Fixed Animation Container - Never moves */}
-          <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={{ ['--features-sticky-top' as any]: '96px' }}>
-            {/* Animation stays in exact same position - Larger for medium screens */}
-            <div className="flex items-center justify-center relative" style={{ 
-              width: 'min(525px, calc(100vw - 48px))', 
-              height: 'clamp(375px, calc(100svh - var(--features-sticky-top, 96px) - 200px), 450px)' 
-            }}>
-              <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
-                <FeatureVideoStage activeIndex={activeFeature} />
-              </div>
-            </div>
-            
-            {/* Content cards in same position */}
-            <div className="min-h-[200px] relative" style={{ width: 'min(525px, calc(100vw - 48px))' }}>
-              {/* All content cards in same position, fade between them */}
-              {features.map((feature, index) => (
-                <div 
-                  key={feature.title}
-                  className={`absolute inset-0 transition-opacity duration-700 ${
-                    activeFeature === index ? 'opacity-100' : 'opacity-0'
-                  }`}
-                >
-                  <div className="relative bg-background rounded-lg shadow-lg border-2 border-transparent bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate p-[1px]">
-                    <div className="bg-background rounded-md h-full w-full">
-                      {/* Card content */}
-                      <div className="p-6">
-                      <h3 className="text-xl font-semibold mb-3 text-foreground text-left">{feature.title}</h3>
-                      
-                      
-                      {feature.details.length > 0 && (
-                        <ul className="space-y-3 text-left">
-                          {feature.details.map((detail, detailIndex) => (
-                            <li key={detailIndex} className="flex items-start space-x-3">
-                              <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
-                              <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-          {/* Scroll sentinels to allocate space for each feature on medium screens */}
-          <div className="hidden md:block lg:hidden">
-            {features.map((_, i) => (
-              <div
-                key={`medium-sentinel-${i}`}
-                data-sentinel-index={i}
-                className="h-[120vh]"
+                className="h-[180vh]"
                 aria-hidden="true"
               />
             ))}

@@ -1003,6 +1003,23 @@ html {
     transition: clip-path 0.1s ease-out;
   }
 
+  /* Prevent horizontal drag/pan within Features section on touch devices
+     Keeps vertical scroll, sticky, and observers intact */
+  #features {
+    touch-action: pan-y;
+    -ms-touch-action: pan-y;
+    overscroll-behavior-x: none;
+  }
+  /* Ensure all interactive descendants also respect vertical-only panning */
+  #features * {
+    touch-action: pan-y;
+    -ms-touch-action: pan-y;
+  }
+  /* Extra guard for scrollable content areas inside features */
+  #features .overflow-y-auto {
+    overscroll-behavior-x: none;
+  }
+
   .grid-3d-wall {
     position: absolute;
     top: 0;
