@@ -6,11 +6,6 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function isEarlyAccessEnabled(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    const params = new URLSearchParams(window.location.search);
-    return params.has('earlyaccess');
-  } catch {
-    return false;
-  }
+  // Temporarily force Early Access on regardless of query params
+  return true;
 }
