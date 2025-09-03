@@ -338,7 +338,8 @@ const FeaturesSection = () => {
 
             {/* Feature Titles Menu - Right Side */}
             <div className="w-[400px] relative z-20">
-              <div className="sticky top-24 space-y-2 bg-surface/30 backdrop-blur-sm rounded-2xl border border-gray-200">
+              <div className="sticky top-24">
+                <div className="bg-surface/30 backdrop-blur-sm rounded-2xl border border-gray-200">
                 {features.map((feature, index) => (
                   <div key={feature.title} className="relative">
                     {/* Unified card structure for all items */}
@@ -390,7 +391,8 @@ const FeaturesSection = () => {
                     </div>
                   </div>
                 ))}
-                
+                </div>
+
                 {/* Special Waitlist/Pre-order Button - GRADIENT (desktop) */}
                 <button
                   onClick={() => {
@@ -401,7 +403,7 @@ const FeaturesSection = () => {
                       window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
                     }
                   }}
-                  className="relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden border-2 border-transparent"
+                  className="relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden border-2 border-transparent mt-2"
                 >
                   <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg"></div>
                   <h4 className="relative font-medium text-sm leading-tight text-white z-10">{earlyAccess ? 'Pre-order' : 'Join the Waitlist'}</h4>
