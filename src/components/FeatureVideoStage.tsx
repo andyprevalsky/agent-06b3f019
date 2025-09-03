@@ -89,10 +89,11 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     targetKey: FeatureKey;
     chosen?: { validStart: number; validEnd: number; outroStart: number; outroEnd: number };
   } | null>(null);
-  const lastTimeRef = useRef<number | null>(null);
-  const stagnationMsRef = useRef<number>(0);
-  const lastVfcAtMsRef = useRef<number>(performance.now());
-  const stallNoVfcActiveRef = useRef<boolean>(false);
+  const lastTimeRef = useRef<number>(0);
+  const blobUrlRef = useRef<string | null>(null);
+  const isHevcRef = useRef<boolean>(false);
+
+  // No freeze detection (removed by request)
 
   // Simple logger
   const log = (label: string, data?: Record<string, any>) => {
@@ -117,6 +118,70 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       } })
       .catch(() => {});
     return () => { aborted = true; };
+  }, []);
+
+  // Simple background buffering - no UI, no complexity
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !markers) return;
+
+    const forceBuffering = () => {
+      const duration = video.duration || 0;
+      if (duration > 0) {
+        // Simple: just seek to end and back to force full buffering
+        video.currentTime = duration - 0.1;
+        setTimeout(() => {
+          video.currentTime = 0;
+        }, 100);
+      }
+    };
+
+    const onLoadedMetadata = () => {
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
+      forceBuffering();
+    };
+
+    video.addEventListener('loadedmetadata', onLoadedMetadata);
+    if (video.readyState >= 1) forceBuffering();
+
+    return () => video.removeEventListener('loadedmetadata', onLoadedMetadata);
+  }, [markers]);
+
+  // Background prefetch full file to Blob and swap to object URL ASAP (page load)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    // Decide source we actually want to prefetch (match what the browser would choose)
+    const ua = navigator.userAgent.toLowerCase();
+    const isSafari = ua.includes('safari') && !ua.includes('chrome') && !ua.includes('firefox');
+    const isIOS = /iphone|ipad|ipod/.test(ua);
+    const sourceUrl = (isSafari || isIOS) ? MASTER_SRC_HEVC : MASTER_SRC_WEBM;
+    isHevcRef.current = (isSafari || isIOS);
+
+    let aborted = false;
+    (async () => {
+      try {
+        const res = await fetch(sourceUrl, { cache: 'force-cache', credentials: 'same-origin' });
+        if (!res.ok) return;
+        const blob = await res.blob();
+        if (aborted) return;
+        const url = URL.createObjectURL(blob);
+        blobUrlRef.current = url;
+        // Swap src to object URL; this makes all seeks local and seamless
+        video.src = url;
+        video.preload = 'auto';
+        try { video.load(); } catch {}
+      } catch {}
+    })();
+
+    return () => {
+      aborted = true;
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    };
   }, []);
 
   // Handle feature change by setting targetKey; state machine decides the flow
@@ -179,7 +244,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         }
         if (modeRef.current === "ramping") {
           const k = Math.min((performance.now() - rampStartMsRef.current) / 1000, 1);
-          const isHevc = typeof (video as HTMLVideoElement).currentSrc === 'string' && (video as HTMLVideoElement).currentSrc.includes('navi-features-hevc');
+          const isHevc = isHevcRef.current;
           const maxRate = isHevc ? 2 : 4;
           const desiredRate = 1 + (maxRate - 1) * k;
           // Disable speed-up as soon as we enter the current segment's outro
@@ -233,7 +298,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           video.playbackRate = 1.0;
           // Special handling for near-zero intros on HEVC to avoid Safari snapping past intro on seek
           const isNearZero = targetSeg.introStart <= 0.01;
-          const isHevc = typeof (video as HTMLVideoElement).currentSrc === 'string' && (video as HTMLVideoElement).currentSrc.includes('navi-features-hevc');
+          const isHevc = isHevcRef.current;
           if (isNearZero && isHevc) {
             const onLoaded = () => {
               try { (video as HTMLVideoElement).removeEventListener('loadedmetadata', onLoaded as any); } catch {}
@@ -328,7 +393,6 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       scheduledRef.current = true;
       if (rvfc) {
         vfcIdRef.current = rvfc((now, meta) => {
-          lastVfcAtMsRef.current = performance.now();
           scheduledRef.current = false;
           onTick(meta?.mediaTime);
         });
@@ -359,64 +423,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     };
   }, [normalized]);
 
-  // Polling-based auto-resume for HEVC: if paused unexpectedly, try play()
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const v = videoRef.current as HTMLVideoElement | null;
-      if (!v) return;
-      // Only act when tab is visible to avoid background churn
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      const isHevc = typeof v.currentSrc === 'string' && v.currentSrc.includes('navi-features-hevc');
-      if (!isHevc) return;
-      const paused = v.paused;
-      // Log every poll with extra media state
-      const rs = v.readyState; // 0..4
-      const ns = v.networkState; // 0..3
-      const rsLabel = rs === 0 ? 'HAVE_NOTHING' : rs === 1 ? 'HAVE_METADATA' : rs === 2 ? 'HAVE_CURRENT_DATA' : rs === 3 ? 'HAVE_FUTURE_DATA' : 'HAVE_ENOUGH_DATA';
-      const nsLabel = ns === 0 ? 'NETWORK_EMPTY' : ns === 1 ? 'NETWORK_IDLE' : ns === 2 ? 'NETWORK_LOADING' : 'NETWORK_NO_SOURCE';
-      const seeking = (v as HTMLVideoElement).seeking;
-      const t = v.currentTime;
-      const dt = lastTimeRef.current == null ? 0 : (t - lastTimeRef.current);
-      log(`Paused: ${paused ? 'True' : 'False'} | RS: ${rs}(${rsLabel}) | NS: ${ns}(${nsLabel}) | seeking: ${seeking ? 'True' : 'False'} | t: ${t.toFixed(3)} | dt: ${dt.toFixed(3)}`);
-      lastTimeRef.current = t;
-      lastPausedRef.current = paused;
-      if (paused) {
-        try { v.play(); } catch {}
-      } else {
-        // Detect stall: no currentTime progress while not paused and not seeking
-        if (!seeking) {
-          if (dt < 0.0005) {
-            stagnationMsRef.current += 250;
-          } else {
-            stagnationMsRef.current = 0;
-          }
-          if (stagnationMsRef.current >= 750) {
-            log('stall-detected-no-progress');
-            try { v.play(); } catch {}
-            stagnationMsRef.current = 0;
-          }
-
-          // Detect render stall: no video frame callbacks for >500ms while time is advancing
-          const nowMs = performance.now();
-          const sinceVfc = nowMs - lastVfcAtMsRef.current;
-          if (dt > 0.01 && sinceVfc > 500) {
-            if (!stallNoVfcActiveRef.current) {
-              stallNoVfcActiveRef.current = true;
-              log('stall-detected-render-no-vfc', { sinceVfc: Math.round(sinceVfc) });
-            }
-            try { v.play(); } catch {}
-          } else if (stallNoVfcActiveRef.current && sinceVfc <= 500) {
-            stallNoVfcActiveRef.current = false;
-            log('stall-cleared-render');
-          }
-        } else {
-          stagnationMsRef.current = 0;
-          stallNoVfcActiveRef.current = false;
-        }
-      }
-    }, 250);
-    return () => { clearInterval(interval); };
-  }, []);
+  // Freeze detection removed (by request)
 
   const bindRef = (el: HTMLVideoElement | null) => { videoRef.current = el; };
 
