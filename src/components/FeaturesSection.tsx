@@ -416,14 +416,14 @@ const FeaturesSection = () => {
           {/* Fixed Animation Container - Never moves */}
           <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={{ ['--features-sticky-top' as any]: '96px' }}>
             {/* Animation stays in exact same position */}
-            <div className="flex items-center justify-center relative" style={{ width: 'min(420px, calc(100vw - 24px))', height: 'clamp(240px, calc((100svh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)' }}>
+            <div className="flex items-center justify-center relative" style={{ width: 'min(420px, calc(100vw - 24px))', height: 'clamp(240px, calc((100vh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)' }}>
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                 <FeatureVideoStage activeIndex={activeFeature} />
               </div>
             </div>
             
             {/* Content cards in same position */}
-            <div className="relative" style={{ width: 'min(420px, calc(100vw - 24px))', height: 'clamp(240px, calc((100svh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)' }}>
+            <div className="relative" style={{ width: 'min(420px, calc(100vw - 24px))', height: 'clamp(240px, calc((100vh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)' }}>
               {/* All content cards in same position, fade between them */}
               {features.map((feature, index) => (
                 <div 
