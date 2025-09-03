@@ -9,6 +9,15 @@ interface Segment {
   cycleEnd: number;
   outroStart: number;
   outroEnd: number;
+  // Customization-only optional specialized outros
+  outroAnthropicStart?: number;
+  outroAnthropicEnd?: number;
+  outroGeminiStart?: number;
+  outroGeminiEnd?: number;
+  outroMetaStart?: number;
+  outroMetaEnd?: number;
+  outroDeepseakStart?: number;
+  outroDeepseakEnd?: number;
 }
 
 interface MarkersFile {
@@ -68,12 +77,22 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
   const rafRef = useRef<number | null>(null);
   const vfcIdRef = useRef<number | null>(null);
   const scheduledRef = useRef<boolean>(false);
-  const modeRef = useRef<"idle" | "ramping" | "awaitOutro" | "seeking">("idle");
+  const modeRef = useRef<"idle" | "ramping" | "awaitOutro" | "seeking" | "customAwaitWindow" | "customOutroPlaying">("idle");
   const rampStartMsRef = useRef<number>(0);
   const stopAtRef = useRef<number>(0);
   const targetKeyRef = useRef<FeatureKey | null>(null);
   const verifyAfterSeekRef = useRef<FeatureKey | null>(null);
   const seekRetryRef = useRef<number>(0);
+  const lastPausedRef = useRef<boolean | null>(null);
+  const customPlanRef = useRef<{
+    windows: Array<{ name: 'anthropic' | 'meta' | 'deepseak' | 'gemini' | 'oai'; start: number; end: number; mStart?: number; mEnd?: number }>;
+    targetKey: FeatureKey;
+    chosen?: { validStart: number; validEnd: number; outroStart: number; outroEnd: number };
+  } | null>(null);
+  const lastTimeRef = useRef<number | null>(null);
+  const stagnationMsRef = useRef<number>(0);
+  const lastVfcAtMsRef = useRef<number>(performance.now());
+  const stallNoVfcActiveRef = useRef<boolean>(false);
 
   // Simple logger
   const log = (label: string, data?: Record<string, any>) => {
@@ -123,6 +142,26 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       // If a new target is requested, decide how to leave current position
       const requested = targetKeyRef.current;
       if (requested) {
+        // Special handling: leaving customization uses global time windows to choose a unique outro
+        if (where.key === "customization" && requested !== "customization") {
+          const cz = normalized.customization;
+          // Define global windows and corresponding customization outro markers
+          const windows = [
+            { name: "anthropic" as const, start: 70, end: 110, mStart: cz.outroAnthropicStart, mEnd: cz.outroAnthropicEnd },
+            { name: "meta" as const, start: 150, end: 190, mStart: cz.outroMetaStart, mEnd: cz.outroMetaEnd },
+            { name: "deepseak" as const, start: 230, end: 270, mStart: cz.outroDeepseakStart, mEnd: cz.outroDeepseakEnd },
+            { name: "gemini" as const, start: 310, end: 350, mStart: cz.outroGeminiStart, mEnd: cz.outroGeminiEnd },
+            // oai uses generic outroStart/End
+            { name: "oai" as const, start: 390, end: 430, mStart: cz.outroStart, mEnd: cz.outroEnd },
+          ];
+          // Activate waiting mode until we enter any valid global window
+          if (modeRef.current !== "customAwaitWindow" && modeRef.current !== "customOutroPlaying") {
+            customPlanRef.current = { windows, targetKey: requested };
+            modeRef.current = "customAwaitWindow";
+            log('CZ-await-any-window');
+          }
+        }
+
         const targetSeg = normalized[requested];
         if (modeRef.current === "idle") {
           if (where.part === "cycle" || where.part === "outro") {
@@ -142,12 +181,52 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           const k = Math.min((performance.now() - rampStartMsRef.current) / 1000, 1);
           const isHevc = typeof (video as HTMLVideoElement).currentSrc === 'string' && (video as HTMLVideoElement).currentSrc.includes('navi-features-hevc');
           const maxRate = isHevc ? 2 : 4;
-          const rate = 1 + (maxRate - 1) * k;
-          video.playbackRate = rate;
+          const desiredRate = 1 + (maxRate - 1) * k;
+          // Disable speed-up as soon as we enter the current segment's outro
+          const curSeg = normalized[where.key];
+          if (t >= curSeg.outroStart - eps) {
+            video.playbackRate = 1.0;
+          } else {
+            video.playbackRate = desiredRate;
+          }
           if (t >= stopAtRef.current - eps) {
             video.playbackRate = 1.0;
             modeRef.current = "seeking";
             log('P1-hit-outroEnd', { at: Number(t.toFixed(3)) });
+          }
+        }
+        // Customization: wait until inside valid global window, then jump to selected outro start
+        if (modeRef.current === "customAwaitWindow" && customPlanRef.current) {
+          const plan = customPlanRef.current;
+          // Keep normal playback (no speed-up) while waiting to reach a valid window
+          (video as HTMLVideoElement).playbackRate = 1.0;
+          // Windows are defined in FRAMES; convert to seconds using fps
+          const fps = normalized.fps || 30;
+          const chosen = plan.windows.find(w => t >= (w.start / fps) && t <= (w.end / fps));
+          if (chosen) {
+            const mStart = chosen.mStart;
+            const mEnd = chosen.mEnd;
+            if (mStart != null && mEnd != null) {
+              plan.chosen = { validStart: chosen.start, validEnd: chosen.end, outroStart: mStart, outroEnd: mEnd };
+              // Disable speed-up as soon as we jump into an outro
+              (video as HTMLVideoElement).playbackRate = 1.0;
+              (video as HTMLVideoElement).currentTime = mStart + 0.001;
+              try { (video as HTMLVideoElement).play(); } catch {}
+              modeRef.current = "customOutroPlaying";
+              log('CZ-seek-outro-start', { window: chosen.name, to: Number(mStart.toFixed(3)) });
+            } else {
+              log('CZ-missing-markers-fallback');
+            }
+          }
+        }
+        // While playing the chosen customization outro, upon reaching its end, proceed to target feature intro
+        if (modeRef.current === "customOutroPlaying" && customPlanRef.current) {
+          const plan = customPlanRef.current;
+          const end = plan.chosen?.outroEnd ?? Number.POSITIVE_INFINITY;
+          if (t >= end - eps) {
+            // Reuse generic seeking flow to target intro
+            modeRef.current = "seeking";
+            log('CZ-hit-outroEnd', { at: Number(t.toFixed(3)) });
           }
         }
         if (modeRef.current === "seeking") {
@@ -163,6 +242,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
               activeKeyRef.current = requested;
               targetKeyRef.current = null;
               modeRef.current = "idle";
+              customPlanRef.current = null;
               verifyAfterSeekRef.current = requested;
               seekRetryRef.current = 0;
               log('seek-zero-intro-reload', { key: activeKeyRef.current });
@@ -178,6 +258,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
             activeKeyRef.current = requested;
             targetKeyRef.current = null;
             modeRef.current = "idle";
+            customPlanRef.current = null;
             verifyAfterSeekRef.current = requested;
             seekRetryRef.current = 0;
             log('seek-to-intro', { key: activeKeyRef.current, introStart: Number(targetSeg.introStart.toFixed(3)) });
@@ -229,6 +310,10 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           schedule();
         }
       }
+      // Suppress cycle-looping while awaiting/playing customization outro
+      if ((modeRef.current === "customAwaitWindow" || modeRef.current === "customOutroPlaying") && activeKeyRef.current) {
+        // No-op: loop suppression achieved by not being in 'idle' mode
+      }
 
       schedule();
     };
@@ -242,7 +327,11 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         : undefined;
       scheduledRef.current = true;
       if (rvfc) {
-        vfcIdRef.current = rvfc((now, meta) => { scheduledRef.current = false; onTick(meta?.mediaTime); });
+        vfcIdRef.current = rvfc((now, meta) => {
+          lastVfcAtMsRef.current = performance.now();
+          scheduledRef.current = false;
+          onTick(meta?.mediaTime);
+        });
       } else {
         rafRef.current = requestAnimationFrame(() => { scheduledRef.current = false; onTick(); });
       }
@@ -269,6 +358,65 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       } catch {}
     };
   }, [normalized]);
+
+  // Polling-based auto-resume for HEVC: if paused unexpectedly, try play()
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const v = videoRef.current as HTMLVideoElement | null;
+      if (!v) return;
+      // Only act when tab is visible to avoid background churn
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      const isHevc = typeof v.currentSrc === 'string' && v.currentSrc.includes('navi-features-hevc');
+      if (!isHevc) return;
+      const paused = v.paused;
+      // Log every poll with extra media state
+      const rs = v.readyState; // 0..4
+      const ns = v.networkState; // 0..3
+      const rsLabel = rs === 0 ? 'HAVE_NOTHING' : rs === 1 ? 'HAVE_METADATA' : rs === 2 ? 'HAVE_CURRENT_DATA' : rs === 3 ? 'HAVE_FUTURE_DATA' : 'HAVE_ENOUGH_DATA';
+      const nsLabel = ns === 0 ? 'NETWORK_EMPTY' : ns === 1 ? 'NETWORK_IDLE' : ns === 2 ? 'NETWORK_LOADING' : 'NETWORK_NO_SOURCE';
+      const seeking = (v as HTMLVideoElement).seeking;
+      const t = v.currentTime;
+      const dt = lastTimeRef.current == null ? 0 : (t - lastTimeRef.current);
+      log(`Paused: ${paused ? 'True' : 'False'} | RS: ${rs}(${rsLabel}) | NS: ${ns}(${nsLabel}) | seeking: ${seeking ? 'True' : 'False'} | t: ${t.toFixed(3)} | dt: ${dt.toFixed(3)}`);
+      lastTimeRef.current = t;
+      lastPausedRef.current = paused;
+      if (paused) {
+        try { v.play(); } catch {}
+      } else {
+        // Detect stall: no currentTime progress while not paused and not seeking
+        if (!seeking) {
+          if (dt < 0.0005) {
+            stagnationMsRef.current += 250;
+          } else {
+            stagnationMsRef.current = 0;
+          }
+          if (stagnationMsRef.current >= 750) {
+            log('stall-detected-no-progress');
+            try { v.play(); } catch {}
+            stagnationMsRef.current = 0;
+          }
+
+          // Detect render stall: no video frame callbacks for >500ms while time is advancing
+          const nowMs = performance.now();
+          const sinceVfc = nowMs - lastVfcAtMsRef.current;
+          if (dt > 0.01 && sinceVfc > 500) {
+            if (!stallNoVfcActiveRef.current) {
+              stallNoVfcActiveRef.current = true;
+              log('stall-detected-render-no-vfc', { sinceVfc: Math.round(sinceVfc) });
+            }
+            try { v.play(); } catch {}
+          } else if (stallNoVfcActiveRef.current && sinceVfc <= 500) {
+            stallNoVfcActiveRef.current = false;
+            log('stall-cleared-render');
+          }
+        } else {
+          stagnationMsRef.current = 0;
+          stallNoVfcActiveRef.current = false;
+        }
+      }
+    }, 250);
+    return () => { clearInterval(interval); };
+  }, []);
 
   const bindRef = (el: HTMLVideoElement | null) => { videoRef.current = el; };
 
