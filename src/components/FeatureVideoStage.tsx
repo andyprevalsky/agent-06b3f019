@@ -99,10 +99,10 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     try {
       const payload = data ? ` ${JSON.stringify(data)}` : '';
       // eslint-disable-next-line no-console
-      console.log(`[features-video] ${label}${payload}`);
+      // console.log(`[features-video] ${label}${payload}`);
     } catch {
       // eslint-disable-next-line no-console
-      console.log(`[features-video] ${label}`);
+      // console.log(`[features-video] ${label}`);
     }
   };
 

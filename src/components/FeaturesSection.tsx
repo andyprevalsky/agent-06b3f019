@@ -506,7 +506,7 @@ const FeaturesSection = () => {
                         }
                       }}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#272725" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" className="w-4 h-4">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#272725" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
                         <path d="M6 9l6 6 6-6" />
                       </svg>
                     </button>
