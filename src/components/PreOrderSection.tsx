@@ -239,169 +239,167 @@ const PreOrderSection = () => {
         </div>
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
-          
-          {/* Midnight Black */}
-          <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
-            <CardContent className="p-8 text-center">
-               <div className="mb-6">
-                <div ref={setBlackWrapperRef} className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
-                  <video 
-                    ref={blackVideoRef}
-                    autoPlay
-                    className="w-full h-full object-cover"
-                    loop
-                    muted
-                    playsInline
-                    preload={blackInView ? "auto" : "none"}
-                    poster="/navi-midnight-black-white-background.png"
-                  >
-                    {blackInView && (
-                      <source src="/navi-black-v4-white-background.webm" type="video/webm" />
-                    )}
-                    <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
-                  </video>
+          {/* Midnight Black - wrap card and button together, like WaitlistSection */}
+          <div className="w-full">
+            <Card className="group bg-card border-border/50 hover:border-primary/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-1">
+              <CardContent className="p-8 text-center">
+                 <div className="mb-6">
+                  <div ref={setBlackWrapperRef} className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
+                    <video 
+                      ref={blackVideoRef}
+                      autoPlay
+                      className="w-full h-full object-cover"
+                      loop
+                      muted
+                      playsInline
+                      preload={blackInView ? "auto" : "none"}
+                      poster="/navi-midnight-black-white-background.png"
+                    >
+                      {blackInView && (
+                        <source src="/navi-black-v4-white-background.webm" type="video/webm" />
+                      )}
+                      <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
+                    </video>
+                  </div>
+                  <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
+                  <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
                 </div>
-                <h3 className="text-2xl font-semibold mb-2">Midnight Black</h3>
-                <p className="text-muted-foreground">Deep, sophisticated finish with precision-crafted aluminum</p>
-              </div>
-              
-              <div className="mb-8">
-                <div className="text-3xl font-light tracking-tight">
-                  $199 +
-                  <Popover open={blackPopoverOpen} onOpenChange={setBlackPopoverOpen}>
-                    <PopoverTrigger asChild>
-                      <span 
-                        className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                
+                <div className="mb-8">
+                  <div className="text-3xl font-light tracking-tight">
+                    $199 +
+                    <Popover open={blackPopoverOpen} onOpenChange={setBlackPopoverOpen}>
+                      <PopoverTrigger asChild>
+                        <span 
+                          className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                          onMouseEnter={() => setBlackPopoverOpen(true)}
+                          onMouseLeave={() => setBlackPopoverOpen(false)}
+                        >
+                          service fee
+                          <HelpCircle size={12} />
+                        </span>
+                      </PopoverTrigger>
+                      <PopoverContent 
+                        className="max-w-xs bg-background border shadow-md"
                         onMouseEnter={() => setBlackPopoverOpen(true)}
                         onMouseLeave={() => setBlackPopoverOpen(false)}
                       >
-                        service fee
-                        <HelpCircle size={12} />
-                      </span>
-                    </PopoverTrigger>
-                    <PopoverContent 
-                      className="max-w-xs bg-background border shadow-md"
-                      onMouseEnter={() => setBlackPopoverOpen(true)}
-                      onMouseLeave={() => setBlackPopoverOpen(false)}
-                    >
-                      <div className="text-sm">
-                        <p className="font-medium mb-2">AI Provider Services</p>
-                        <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
-                        <div className="space-y-2">
-                          <div>
-                            <p className="font-medium">Provide Your Own API Keys</p>
-                            <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
+                        <div className="text-sm">
+                          <p className="font-medium mb-2">AI Provider Services</p>
+                          <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
+                          <div className="space-y-2">
+                            <div>
+                              <p className="font-medium">Provide Your Own API Keys</p>
+                              <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
+                            </div>
+                            <div>
+                              <p className="font-medium">Pay-as-You-Go Service</p>
+                              <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
+                            </div>
                           </div>
-                          <div>
-                            <p className="font-medium">Pay-as-You-Go Service</p>
-                            <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
-                          </div>
+                          <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
                         </div>
-                        <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
                 </div>
-              </div>
-              
-              {/* Button moved below card to match waitlist layout */}
-            </CardContent>
-          </Card>
-          {/* Pre-order button below the card (Midnight Black) */}
-          <div className="mt-0">
-            <Button 
-              onClick={() => handlePreOrder('black')}
-              className="btn-luxury w-full"
-              size="lg"
-            >
-              Pre-order
-            </Button>
-            <p className="text-xs text-muted-foreground mt-4 text-center">
-              Free shipping • 30-day returns
-            </p>
+              </CardContent>
+            </Card>
+            {/* Button below the card (Midnight Black), within same grid item */}
+            <div className="mt-6">
+              <Button 
+                onClick={() => handlePreOrder('black')}
+                className="btn-luxury w-full"
+                size="lg"
+              >
+                Pre-order
+              </Button>
+              <p className="text-xs text-muted-foreground mt-4 text-center">
+                Free shipping • 30-day returns
+              </p>
+            </div>
           </div>
-          
-          {/* Pearl White */}
-          <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
-            <CardContent className="p-8 text-center">
-               <div className="mb-6">
-                <div ref={setWhiteWrapperRef} className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
-                  <video 
-                    ref={whiteVideoRef}
-                    autoPlay
-                    className="w-full h-full object-cover"
-                    loop
-                    muted
-                    playsInline
-                    preload={whiteInView ? "auto" : "none"}
-                    poster="/navi-pearl-white-white-background.png"
-                  >
-                    {whiteInView && (
-                      <source src="/navi-white-v4-white-background.webm" type="video/webm" />
-                    )}
-                    <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
-                  </video>
+
+          {/* Pearl White - wrap card and button together, like WaitlistSection */}
+          <div className="w-full">
+            <Card className="group bg-surface-elevated border-border/50 hover:border-space-gray/30 transition-all duration-500 hover:shadow-[var(--shadow-luxury)] hover:scale-105 reveal-up reveal-delay-2">
+              <CardContent className="p-8 text-center">
+                 <div className="mb-6">
+                  <div ref={setWhiteWrapperRef} className="w-72 h-72 rounded-3xl mx-auto mb-4 overflow-hidden bg-surface">
+                    <video 
+                      ref={whiteVideoRef}
+                      autoPlay
+                      className="w-full h-full object-cover"
+                      loop
+                      muted
+                      playsInline
+                      preload={whiteInView ? "auto" : "none"}
+                      poster="/navi-pearl-white-white-background.png"
+                    >
+                      {whiteInView && (
+                        <source src="/navi-white-v4-white-background.webm" type="video/webm" />
+                      )}
+                      <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
+                    </video>
+                  </div>
+                  <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
+                  <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
                 </div>
-                <h3 className="text-2xl font-semibold mb-2">Pearl White</h3>
-                <p className="text-muted-foreground">Lustrous ceramic-like finish that captures and reflects light</p>
-              </div>
-              
-              <div className="mb-8">
-                <div className="text-3xl font-light tracking-tight">
-                  $199 + 
-                  <Popover open={whitePopoverOpen} onOpenChange={setWhitePopoverOpen}>
-                    <PopoverTrigger asChild>
-                      <span 
-                        className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                
+                <div className="mb-8">
+                  <div className="text-3xl font-light tracking-tight">
+                    $199 + 
+                    <Popover open={whitePopoverOpen} onOpenChange={setWhitePopoverOpen}>
+                      <PopoverTrigger asChild>
+                        <span 
+                          className="text-sm text-primary hover:underline cursor-pointer ml-1 inline-flex items-center gap-1"
+                          onMouseEnter={() => setWhitePopoverOpen(true)}
+                          onMouseLeave={() => setWhitePopoverOpen(false)}
+                        >
+                          service fee
+                          <HelpCircle size={12} />
+                        </span>
+                      </PopoverTrigger>
+                      <PopoverContent 
+                        className="max-w-xs bg-background border shadow-md"
                         onMouseEnter={() => setWhitePopoverOpen(true)}
                         onMouseLeave={() => setWhitePopoverOpen(false)}
                       >
-                        service fee
-                        <HelpCircle size={12} />
-                      </span>
-                    </PopoverTrigger>
-                    <PopoverContent 
-                      className="max-w-xs bg-background border shadow-md"
-                      onMouseEnter={() => setWhitePopoverOpen(true)}
-                      onMouseLeave={() => setWhitePopoverOpen(false)}
-                    >
-                      <div className="text-sm">
-                        <p className="font-medium mb-2">AI Provider Services</p>
-                        <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
-                        <div className="space-y-2">
-                          <div>
-                            <p className="font-medium">Provide Your Own API Keys</p>
-                            <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
+                        <div className="text-sm">
+                          <p className="font-medium mb-2">AI Provider Services</p>
+                          <p className="mb-2">All Navi devices require AI provider services. You have two options:</p>
+                          <div className="space-y-2">
+                            <div>
+                              <p className="font-medium">Provide Your Own API Keys</p>
+                              <p className="text-xs opacity-80">Use your existing OpenAI, Anthropic, or other provider accounts</p>
+                            </div>
+                            <div>
+                              <p className="font-medium">Pay-as-You-Go Service</p>
+                              <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
+                            </div>
                           </div>
-                          <div>
-                            <p className="font-medium">Pay-as-You-Go Service</p>
-                            <p className="text-xs opacity-80">We handle everything at cost with no markup</p>
-                          </div>
+                          <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
                         </div>
-                        <p className="text-xs opacity-60 mt-2">Service charges cover AI provider costs only. We don't profit from this component.</p>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
                 </div>
-              </div>
-              
-              {/* Button moved below card to match waitlist layout */}
-            </CardContent>
-          </Card>
-          {/* Pre-order button below the card (Pearl White) */}
-          <div className="mt-0">
-            <Button 
-              onClick={() => handlePreOrder('white')}
-              className="btn-pearl w-full"
-              size="lg"
-            >
-              Pre-order
-            </Button>
-            <p className="text-xs text-muted-foreground mt-4 text-center">
-              Free shipping • 30-day returns
-            </p>
+              </CardContent>
+            </Card>
+            {/* Button below the card (Pearl White), within same grid item */}
+            <div className="mt-6">
+              <Button 
+                onClick={() => handlePreOrder('white')}
+                className="btn-pearl w-full"
+                size="lg"
+              >
+                Pre-order
+              </Button>
+              <p className="text-xs text-muted-foreground mt-4 text-center">
+                Free shipping • 30-day returns
+              </p>
+            </div>
           </div>
-          
         </div>
         
         <div className="text-center mt-12 reveal-up reveal-delay-3">
