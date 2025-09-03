@@ -130,7 +130,7 @@ const FeaturesSection = () => {
       details: [
         "Change the LLM provider, System Prompt & Voice to create your perfect AI companion.",
         "Connect your own tools to Navi through MCPs, or use tools shared by other devs in our marketplace.",
-        "Navi comes with prebuilt presets to get you up and running with STOA models in an instant."
+        "Navi comes with prebuilt presets to get you up and running with SOTA models in an instant."
       ]
     },
     {
@@ -148,7 +148,7 @@ const FeaturesSection = () => {
       details: [
         "Navi agents break down, measure & iterate towards any long-term goal.",
         "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Navi can take real-world actions on your behalf.",
-        "Each agent runs on a STOA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions."
+        "Each agent runs on a SOTA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions."
       ]
     },
     {
