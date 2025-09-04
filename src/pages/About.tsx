@@ -59,8 +59,10 @@ const About = () => {
                 />
               </div>
               <article className="prose prose-neutral dark:prose-invert max-w-none">
-                <p>
-                  Hi! I'm Andy, the solo founder and builder behind Navi.<br /><br />
+                <p className="not-prose text-muted-foreground leading-relaxed">
+                  Hi! I'm Andy, the solo founder and builder behind Navi.
+                </p>
+                <p className="not-prose text-muted-foreground leading-relaxed mt-4">
                   I'm a passionate software engineer, artist, and creator on a mission to 10x the level of harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.
                 </p>
                 <p className="mt-4">
