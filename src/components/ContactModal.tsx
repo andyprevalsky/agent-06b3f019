@@ -35,8 +35,8 @@ const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="box-border w-[calc(100vw-2rem)] max-w-md max-h-[85svh] sm:max-h-[85vh] overflow-y-auto p-4 sm:p-6 sm:max-w-md top-[50svh] sm:top-1/2 translate-y-[-50%] sm:translate-y-[-50%]">
-        <DialogHeader>
+      <DialogContent className="box-border left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-lg w-[calc(100vw-2rem)] max-w-md max-h-[85svh] sm:max-h-[85vh] overflow-y-auto p-4 sm:p-6 sm:max-w-md">
+        <DialogHeader className="text-left">
           <DialogTitle>Contact Us</DialogTitle>
         </DialogHeader>
         
