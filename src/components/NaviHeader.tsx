@@ -21,8 +21,8 @@ const NaviHeader = () => {
         });
       },
       {
-        threshold: 0.1, // Trigger when 10% of the features section is visible
-        rootMargin: '-50px 0px' // Account for the fixed header height
+        threshold: 0, // show as soon as any part is visible
+        rootMargin: '0px' // no offset for reliability across devices
       }
     );
 
@@ -71,9 +71,9 @@ const NaviHeader = () => {
         </nav>
         
         <div className="flex items-center space-x-3">
-          {/* Mobile Join Waitlist Button - Reserve space to prevent layout shift */}
+          {/* Mobile/Tablet CTA - shows below desktop (<lg) and fades in at Features */}
           <button 
-            className={`relative md:hidden px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 overflow-hidden hover:scale-105 ${
+            className={`relative lg:hidden px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 overflow-hidden hover:scale-105 ${
               showMobileButton ? 'opacity-100 visible' : 'opacity-0 invisible'
             }`}
             onClick={() => {
