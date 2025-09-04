@@ -163,7 +163,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
         
         <div className="text-center mt-12 reveal-up reveal-delay-3">
           <p className="text-sm text-muted-foreground mb-4">
-            Expected launch: Q3 2025 • Join early for exclusive updates
+            Expected launch: Q4 2025 • Join early for exclusive updates
           </p>
         </div>
       </div>
