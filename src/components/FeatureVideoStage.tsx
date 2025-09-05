@@ -92,6 +92,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
   const lastTimeRef = useRef<number>(0);
   const blobUrlRef = useRef<string | null>(null);
   const isHevcRef = useRef<boolean>(false);
+  const isIOSSafariRef = useRef<boolean>(false);
 
   // No freeze detection (removed by request)
 
@@ -158,6 +159,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     const isIOS = /iphone|ipad|ipod/.test(ua);
     const sourceUrl = (isSafari || isIOS) ? MASTER_SRC_HEVC : MASTER_SRC_WEBM;
     isHevcRef.current = (isSafari || isIOS);
+    isIOSSafariRef.current = isSafari && isIOS;
 
     let aborted = false;
     (async () => {
@@ -317,7 +319,22 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
             try { (video as HTMLVideoElement).load(); } catch {}
           } else {
             // Prefer an exact 0.0 when introStart is very close to 0 to avoid keyframe snap past intro
-            const desired = isNearZero ? 0.0 : (targetSeg.introStart + 0.001);
+            let desired = isNearZero ? 0.0 : (targetSeg.introStart + 0.001);
+            // iOS Safari HEVC: snap conversations -> engine transition to IDR at 24.000s
+            if (isIOSSafariRef.current) {
+              if (requested === "engine") {
+                const idrEngineIntro = 24.0;
+                if (desired <= idrEngineIntro + 0.05 && desired >= idrEngineIntro - 0.5) {
+                  desired = idrEngineIntro;
+                }
+              }
+              if (requested === "memory") {
+                const idrMemoryIntro = 40.6;
+                if (desired <= idrMemoryIntro + 0.05 && desired >= idrMemoryIntro - 0.5) {
+                  desired = idrMemoryIntro;
+                }
+              }
+            }
             (video as HTMLVideoElement).currentTime = desired;
             try { (video as HTMLVideoElement).play(); } catch {}
             activeKeyRef.current = requested;
