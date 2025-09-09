@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import VideoLoadingAnimation from "./VideoLoadingAnimation";
 
 type FeatureKey = "customization" | "conversations" | "engine" | "memory" | "privacy";
 
@@ -60,6 +61,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
   const MASTER_SRC_WEBM = "/navi-features.webm"; // cross-browser
   const MASTER_SRC_HEVC = "/navi-features-hevc.mov"; // Safari/iOS
   const [markers, setMarkers] = useState<MarkersFile | null>(null);
+  const [isVideoLoading, setIsVideoLoading] = useState(true);
   const normalized = useMemo<MarkersFile | null>(() => {
     if (!markers) return null;
     return {
@@ -92,6 +94,45 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
   const lastTimeRef = useRef<number>(0);
   const blobUrlRef = useRef<string | null>(null);
   const isHevcRef = useRef<boolean>(false);
+  const isIOSSafariRef = useRef<boolean>(false);
+
+  // Debug / Diagnostics (toggled by ?debugVideo=1 or localStorage.featuresVideoDebug=1)
+  const [debugHud, setDebugHud] = useState(false);
+  const debugEnabledRef = useRef(false);
+  const lastRvfcMsRef = useRef<number>(0);
+  const lastCurrentTimeRef = useRef<number>(0);
+  const lastSampleRef = useRef<any>(null);
+  const freezeReportedUntilRef = useRef<number>(0);
+  const logsRef = useRef<Array<any>>([]);
+
+  const pushLog = (kind: string, extra?: Record<string, any>) => {
+    if (!debugEnabledRef.current) return;
+    const entry = { ts: Date.now(), kind, ...(extra || {}) };
+    logsRef.current.push(entry);
+    if (logsRef.current.length > 400) logsRef.current.splice(0, logsRef.current.length - 400);
+    try { /* eslint-disable no-console */ console.log('[features-video]', kind, extra || ''); } catch {}
+  };
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const enabled = params.get('debugVideo') === '1' || (typeof localStorage !== 'undefined' && localStorage.getItem('featuresVideoDebug') === '1');
+      debugEnabledRef.current = !!enabled;
+      setDebugHud(!!enabled);
+      (window as any).featuresVideoDebug = {
+        dump: () => ({ lastSample: lastSampleRef.current, logs: logsRef.current.slice(-100) }),
+        copy: async () => {
+          try {
+            const payload = JSON.stringify({ lastSample: lastSampleRef.current, logs: logsRef.current }, null, 2);
+            await navigator.clipboard.writeText(payload);
+            alert('Copied features video debug logs to clipboard');
+          } catch {}
+        },
+        enableHud: () => setDebugHud(true),
+        disableHud: () => setDebugHud(false)
+      };
+    } catch {}
+  }, []);
 
   // No freeze detection (removed by request)
 
@@ -118,6 +159,33 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       } })
       .catch(() => {});
     return () => { aborted = true; };
+  }, []);
+
+  // Track video loading state
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const setReady = () => setIsVideoLoading(false);
+    const setLoading = () => setIsVideoLoading(true);
+
+    video.addEventListener('loadstart', setLoading);
+    video.addEventListener('waiting', setLoading);
+    video.addEventListener('stalled', setLoading);
+    video.addEventListener('canplay', setReady);
+    video.addEventListener('canplaythrough', setReady);
+    video.addEventListener('playing', setReady);
+    video.addEventListener('loadeddata', setReady);
+
+    return () => {
+      video.removeEventListener('loadstart', setLoading);
+      video.removeEventListener('waiting', setLoading);
+      video.removeEventListener('stalled', setLoading);
+      video.removeEventListener('canplay', setReady);
+      video.removeEventListener('canplaythrough', setReady);
+      video.removeEventListener('playing', setReady);
+      video.removeEventListener('loadeddata', setReady);
+    };
   }, []);
 
   // Simple background buffering - no UI, no complexity
@@ -158,6 +226,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     const isIOS = /iphone|ipad|ipod/.test(ua);
     const sourceUrl = (isSafari || isIOS) ? MASTER_SRC_HEVC : MASTER_SRC_WEBM;
     isHevcRef.current = (isSafari || isIOS);
+    isIOSSafariRef.current = isSafari && isIOS;
 
     let aborted = false;
     (async () => {
@@ -191,7 +260,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     log('feature-requested', { index: activeIndex, key });
   }, [activeIndex]);
 
-  // Per-frame loop: simple state machine per spec
+  // Per-frame loop: simple state machine per spec + debug sampling
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !normalized) return;
@@ -201,6 +270,36 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       if (!video || !normalized) { schedule(); return; }
       const eps = Math.max(0.005, 1 / (normalized.fps || 30) * 0.9);
       const t = typeof mediaTime === 'number' ? mediaTime : video.currentTime;
+
+      // Debug sample via RVFC/RAF
+      if (debugEnabledRef.current) {
+        const vq = (video as any).getVideoPlaybackQuality?.();
+        const decoded = vq?.totalVideoFrames ?? (video as any).webkitDecodedFrameCount;
+        const dropped = vq?.droppedVideoFrames ?? (video as any).webkitDroppedFrameCount;
+        const ranges: Array<[number, number]> = [];
+        try {
+          for (let i = 0; i < video.buffered.length; i++) {
+            const s = video.buffered.start(i);
+            const e = video.buffered.end(i);
+            ranges.push([Number(s.toFixed(3)), Number(e.toFixed(3))]);
+          }
+        } catch {}
+        lastRvfcMsRef.current = Date.now();
+        const sample = {
+          time: Number(t.toFixed(3)),
+          mediaTime: typeof mediaTime === 'number' ? Number(mediaTime.toFixed(3)) : null,
+          readyState: video.readyState,
+          networkState: (video as any).networkState,
+          paused: video.paused,
+          seeking: video.seeking,
+          rate: video.playbackRate,
+          decoded,
+          dropped,
+          buffered: ranges,
+        };
+        lastSampleRef.current = sample;
+        pushLog('rvfc-sample', sample);
+      }
 
       const where = findContainingFeature(normalized, t);
 
@@ -404,6 +503,23 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     schedule();
     const onTimeUpdate = () => onTick();
     const onSeeked = () => onTick();
+    const onEvent = (name: string) => () => {
+      if (!debugEnabledRef.current) return;
+      try {
+        const v = videoRef.current as HTMLVideoElement | null;
+        if (!v) return;
+        pushLog(`evt:${name}`, {
+          t: Number(v.currentTime.toFixed(3)),
+          readyState: v.readyState,
+          networkState: (v as any).networkState,
+          paused: v.paused,
+          seeking: v.seeking,
+          rate: v.playbackRate
+        });
+      } catch {}
+    };
+    const evs = ['loadedmetadata','loadeddata','canplay','canplaythrough','playing','pause','seeking','seeked','stalled','waiting','timeupdate','ratechange','suspend','error'];
+    evs.forEach(e => v.addEventListener(e as any, onEvent(e)));
     v.addEventListener('timeupdate', onTimeUpdate);
     v.addEventListener('seeked', onSeeked);
     return () => {
@@ -419,11 +535,55 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       try {
         v.removeEventListener('timeupdate', onTimeUpdate);
         v.removeEventListener('seeked', onSeeked);
+        evs.forEach(e => v.removeEventListener(e as any, onEvent(e)));
       } catch {}
     };
   }, [normalized]);
 
-  // Freeze detection removed (by request)
+  // Freeze detection (debug-only)
+  useEffect(() => {
+    if (!debugHud) return;
+    const id = setInterval(() => {
+      if (!debugEnabledRef.current) return;
+      const v = videoRef.current;
+      if (!v) return;
+      const now = Date.now();
+      const t = v.currentTime;
+      const dtMs = now - lastRvfcMsRef.current;
+      const ctStalled = Math.abs(t - lastCurrentTimeRef.current) < 0.001;
+      const shouldBePlaying = !v.paused && !v.seeking && v.playbackRate > 0.0;
+      if (shouldBePlaying) {
+        if ((dtMs > 1200 || ctStalled) && now > freezeReportedUntilRef.current) {
+          freezeReportedUntilRef.current = now + 2000;
+          const vq = (v as any).getVideoPlaybackQuality?.();
+          const decoded = vq?.totalVideoFrames ?? (v as any).webkitDecodedFrameCount;
+          const dropped = vq?.droppedVideoFrames ?? (v as any).webkitDroppedFrameCount;
+          const ranges: Array<[number, number]> = [];
+          try {
+            for (let i = 0; i < v.buffered.length; i++) {
+              const s = v.buffered.start(i);
+              const e = v.buffered.end(i);
+              ranges.push([Number(s.toFixed(3)), Number(e.toFixed(3))]);
+            }
+          } catch {}
+          pushLog('freeze-suspect', {
+            sinceMs: dtMs,
+            time: Number(t.toFixed(3)),
+            readyState: v.readyState,
+            networkState: (v as any).networkState,
+            paused: v.paused,
+            seeking: v.seeking,
+            rate: v.playbackRate,
+            decoded,
+            dropped,
+            buffered: ranges
+          });
+        }
+      }
+      lastCurrentTimeRef.current = t;
+    }, 300);
+    return () => clearInterval(id);
+  }, [debugHud]);
 
   const bindRef = (el: HTMLVideoElement | null) => { videoRef.current = el; };
 
@@ -433,7 +593,11 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         <video
           ref={bindRef}
           className="w-full h-full object-contain"
-          style={{ backgroundColor: 'transparent' }}
+          style={{ 
+            backgroundColor: 'transparent',
+            opacity: isVideoLoading ? 0 : 1,
+            transition: 'opacity 300ms ease-in-out'
+          }}
           playsInline
           muted
           preload="auto"
@@ -442,6 +606,44 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           <source src={MASTER_SRC_HEVC} type='video/mp4; codecs="hvc1"' />
           <source src={MASTER_SRC_WEBM} type='video/webm; codecs="vp9"' />
         </video>
+        <VideoLoadingAnimation isVisible={isVideoLoading} />
+        {debugHud && (
+          <div
+            style={{ position: 'absolute', left: 8, top: 8, zIndex: 50, background: 'rgba(0,0,0,0.6)', color: '#fff', padding: '8px', borderRadius: '6px', fontSize: '12px', lineHeight: '16px', maxWidth: '90%' }}
+          >
+            <div style={{ marginBottom: '4px', fontWeight: 600 }}>Video Debug</div>
+            <div>
+              t: {lastSampleRef.current?.time ?? '-'} | media: {lastSampleRef.current?.mediaTime ?? '-'} | rs: {lastSampleRef.current?.readyState ?? '-'} | rate: {lastSampleRef.current?.rate ?? '-'}
+            </div>
+            <div>
+              decoded: {lastSampleRef.current?.decoded ?? '-'} | dropped: {lastSampleRef.current?.dropped ?? '-'}
+            </div>
+            <div>
+              buffered: {Array.isArray(lastSampleRef.current?.buffered) ? lastSampleRef.current.buffered.map((r: any) => `[${r[0]},${r[1]}]`).join(' ') : '-'}
+            </div>
+            <div style={{ marginTop: 6, display: 'flex', gap: 6 }}>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const payload = JSON.stringify({ lastSample: lastSampleRef.current, logs: logsRef.current }, null, 2);
+                    await navigator.clipboard.writeText(payload);
+                    alert('Copied features video debug logs to clipboard');
+                  } catch {}
+                }}
+                style={{ padding: '4px 8px', background: '#1f2937', color: '#fff', borderRadius: 4 }}
+              >Copy</button>
+              <button
+                type="button"
+                onClick={() => {
+                  pushLog('user-marked-freeze', lastSampleRef.current || {});
+                  alert('Marked freeze in logs');
+                }}
+                style={{ padding: '4px 8px', background: '#7c2d12', color: '#fff', borderRadius: 4 }}
+              >Mark Freeze</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
