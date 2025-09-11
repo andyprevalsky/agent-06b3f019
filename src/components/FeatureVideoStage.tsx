@@ -95,15 +95,58 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
   const blobUrlRef = useRef<string | null>(null);
   const isHevcRef = useRef<boolean>(false);
   const isIOSSafariRef = useRef<boolean>(false);
+  const noBlobRef = useRef<boolean>(false);
+  const disableRampRef = useRef<boolean>(false);
+  const disableWarmupRef = useRef<boolean>(false);
+  const memoryOffsetFramesRef = useRef<number>(2);
 
   // Debug / Diagnostics (toggled by ?debugVideo=1 or localStorage.featuresVideoDebug=1)
-  const [debugHud, setDebugHud] = useState(false);
+  const [debugHud, setDebugHud] = useState(true);
   const debugEnabledRef = useRef(false);
   const lastRvfcMsRef = useRef<number>(0);
   const lastCurrentTimeRef = useRef<number>(0);
   const lastSampleRef = useRef<any>(null);
   const freezeReportedUntilRef = useRef<number>(0);
   const logsRef = useRef<Array<any>>([]);
+  const [debugTick, setDebugTick] = useState(0);
+  const evtCountsRef = useRef<Record<string, number>>({});
+  const lastActionRef = useRef<string>("-");
+  const watchdogEnabledRef = useRef<boolean>(true);
+  const watchdogTripCountRef = useRef<number>(0);
+  const stallTypeRef = useRef<string>('none');
+  const lastDecodedRef = useRef<number>(0);
+  const lastDecodedChangeMsRef = useRef<number>(Date.now());
+  const lastTimeChangeMsRef = useRef<number>(Date.now());
+  const lastClockTRef = useRef<number>(0);
+  const missingMediaStreakRef = useRef<number>(0);
+
+  // For HEVC on iOS/Safari, bias seeks for engine/memory to be closer to I-frames
+  // by moving ~1 frame earlier and adding a tiny jitter to avoid consistently
+  // landing on the same presentation boundary.
+  const computeSeekForKey = (key: FeatureKey | null, baseTime: number): number => {
+    try {
+      const isIOSSafari = isIOSSafariRef.current;
+      const fps = normalized?.fps || 30;
+      if (!isIOSSafari) return baseTime;
+      if (key !== 'engine' && key !== 'memory') return baseTime;
+      const frameSec = 1 / (fps || 30);
+      if (key === 'memory') {
+        // memory: deterministic offset by N frames earlier + tiny fixed offset, no randomness
+        const framesEarlier = Math.max(0, memoryOffsetFramesRef.current || 0);
+        const tinyOffset = 0.003; // avoid exact boundary and keep stable
+        let t = Math.max(0, baseTime - framesEarlier * frameSec + tinyOffset);
+        if (t <= 0.01) t = 0.0;
+        return t;
+      } else {
+        // engine: deterministic 1 frame earlier, no randomness
+        let t = Math.max(0, baseTime - 1.0 * frameSec);
+        if (t <= 0.01) t = 0.0;
+        return t;
+      }
+    } catch {
+      return baseTime;
+    }
+  };
 
   const pushLog = (kind: string, extra?: Record<string, any>) => {
     if (!debugEnabledRef.current) return;
@@ -117,8 +160,16 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     try {
       const params = new URLSearchParams(window.location.search);
       const enabled = params.get('debugVideo') === '1' || (typeof localStorage !== 'undefined' && localStorage.getItem('featuresVideoDebug') === '1');
-      debugEnabledRef.current = !!enabled;
-      setDebugHud(!!enabled);
+      // Force enable HUD for local debugging regardless of flags
+      debugEnabledRef.current = true;
+      setDebugHud(true);
+      // optional flags
+      const noBlob = params.get('noBlob') === '1' || (typeof localStorage !== 'undefined' && localStorage.getItem('featuresVideoNoBlob') === '1');
+      const disableRamp = params.get('disableRamp') === '1' || (typeof localStorage !== 'undefined' && localStorage.getItem('featuresVideoDisableRamp') === '1');
+      const disableWarmup = params.get('disableWarmup') === '1' || (typeof localStorage !== 'undefined' && localStorage.getItem('featuresVideoDisableWarmup') === '1');
+      noBlobRef.current = !!noBlob;
+      disableRampRef.current = !!disableRamp;
+      disableWarmupRef.current = !!disableWarmup;
       (window as any).featuresVideoDebug = {
         dump: () => ({ lastSample: lastSampleRef.current, logs: logsRef.current.slice(-100) }),
         copy: async () => {
@@ -132,6 +183,8 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         disableHud: () => setDebugHud(false)
       };
     } catch {}
+    // Ramping enabled by default (local testing): ensure not forcibly disabled
+    try { disableRampRef.current = false; } catch {}
   }, []);
 
   // No freeze detection (removed by request)
@@ -188,10 +241,11 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     };
   }, []);
 
-  // Simple background buffering - no UI, no complexity
+  // Simple background buffering - no UI, no complexity (can disable via flag)
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !markers) return;
+    if (disableWarmupRef.current) return;
 
     const forceBuffering = () => {
       const duration = video.duration || 0;
@@ -227,6 +281,11 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     const sourceUrl = (isSafari || isIOS) ? MASTER_SRC_HEVC : MASTER_SRC_WEBM;
     isHevcRef.current = (isSafari || isIOS);
     isIOSSafariRef.current = isSafari && isIOS;
+
+    if (noBlobRef.current) {
+      pushLog('prefetch-skip-noBlob');
+      return;
+    }
 
     let aborted = false;
     (async () => {
@@ -284,7 +343,22 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
             ranges.push([Number(s.toFixed(3)), Number(e.toFixed(3))]);
           }
         } catch {}
-        lastRvfcMsRef.current = Date.now();
+        const nowMs = Date.now();
+        lastRvfcMsRef.current = nowMs;
+        if ((decoded ?? 0) !== (lastDecodedRef.current ?? 0)) {
+          lastDecodedChangeMsRef.current = nowMs;
+          lastDecodedRef.current = decoded ?? 0;
+        }
+        if (typeof t === 'number' && Math.abs(t - (lastClockTRef.current ?? 0)) > 0.0005) {
+          lastTimeChangeMsRef.current = nowMs;
+          lastClockTRef.current = t;
+        }
+        // Track consecutive missing mediaTime frames
+        if (typeof mediaTime === 'number') {
+          missingMediaStreakRef.current = 0;
+        } else {
+          missingMediaStreakRef.current = (missingMediaStreakRef.current || 0) + 1;
+        }
         const sample = {
           time: Number(t.toFixed(3)),
           mediaTime: typeof mediaTime === 'number' ? Number(mediaTime.toFixed(3)) : null,
@@ -330,6 +404,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         if (modeRef.current === "idle") {
           if (where.part === "cycle" || where.part === "outro") {
             // P1: ramp to 4x for up to 1s and run until outroEnd
+            // Note: playbackRate will remain 1.0 when disableRampRef.current is true
             modeRef.current = "ramping";
             rampStartMsRef.current = performance.now();
             const curSeg = normalized[where.key];
@@ -351,7 +426,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           if (t >= curSeg.outroStart - eps) {
             video.playbackRate = 1.0;
           } else {
-            video.playbackRate = desiredRate;
+            video.playbackRate = disableRampRef.current ? 1.0 : desiredRate;
           }
           if (t >= stopAtRef.current - eps) {
             video.playbackRate = 1.0;
@@ -416,7 +491,8 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
             try { (video as HTMLVideoElement).load(); } catch {}
           } else {
             // Prefer an exact 0.0 when introStart is very close to 0 to avoid keyframe snap past intro
-            const desired = isNearZero ? 0.0 : (targetSeg.introStart + 0.001);
+            const baseDesired = isNearZero ? 0.0 : (targetSeg.introStart + 0.001);
+            const desired = computeSeekForKey(requested, baseDesired);
             (video as HTMLVideoElement).currentTime = desired;
             try { (video as HTMLVideoElement).play(); } catch {}
             activeKeyRef.current = requested;
@@ -448,7 +524,8 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         } else {
           // Landed past intro: retry seek once to introStart for all segments
           if (seekRetryRef.current < 1) {
-            const desired = seg.introStart <= 0.01 ? 0.0 : (seg.introStart + 0.001);
+            const baseDesired = seg.introStart <= 0.01 ? 0.0 : (seg.introStart + 0.001);
+            const desired = computeSeekForKey(activeKeyRef.current, baseDesired);
             (video as HTMLVideoElement).currentTime = desired;
             try { (video as HTMLVideoElement).play(); } catch {}
             seekRetryRef.current += 1;
@@ -468,7 +545,8 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       if (modeRef.current === "idle" && activeKeyRef.current && !verifyAfterSeekRef.current) {
         const seg = normalized[activeKeyRef.current];
         if (t >= seg.cycleEnd - eps) {
-          video.currentTime = seg.cycleStart + 0.001;
+          const desired = computeSeekForKey(activeKeyRef.current, seg.cycleStart + 0.001);
+          video.currentTime = desired;
           try { video.play(); } catch {}
           log('P2-loop-cycle', { key: activeKeyRef.current, from: Number(seg.cycleEnd.toFixed(3)), to: Number(seg.cycleStart.toFixed(3)) });
           schedule();
@@ -508,6 +586,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       try {
         const v = videoRef.current as HTMLVideoElement | null;
         if (!v) return;
+        evtCountsRef.current[name] = (evtCountsRef.current[name] || 0) + 1;
         pushLog(`evt:${name}`, {
           t: Number(v.currentTime.toFixed(3)),
           readyState: v.readyState,
@@ -519,7 +598,9 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       } catch {}
     };
     const evs = ['loadedmetadata','loadeddata','canplay','canplaythrough','playing','pause','seeking','seeked','stalled','waiting','timeupdate','ratechange','suspend','error'];
+    const extraEvs = ['progress','durationchange','emptied','abort'];
     evs.forEach(e => v.addEventListener(e as any, onEvent(e)));
+    extraEvs.forEach(e => v.addEventListener(e as any, onEvent(e)));
     v.addEventListener('timeupdate', onTimeUpdate);
     v.addEventListener('seeked', onSeeked);
     return () => {
@@ -536,6 +617,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         v.removeEventListener('timeupdate', onTimeUpdate);
         v.removeEventListener('seeked', onSeeked);
         evs.forEach(e => v.removeEventListener(e as any, onEvent(e)));
+        extraEvs.forEach(e => v.removeEventListener(e as any, onEvent(e)));
       } catch {}
     };
   }, [normalized]);
@@ -552,11 +634,29 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       const dtMs = now - lastRvfcMsRef.current;
       const ctStalled = Math.abs(t - lastCurrentTimeRef.current) < 0.001;
       const shouldBePlaying = !v.paused && !v.seeking && v.playbackRate > 0.0;
+      // Classify stall type
+      const vq = (v as any).getVideoPlaybackQuality?.();
+      const decoded = vq?.totalVideoFrames ?? (v as any).webkitDecodedFrameCount;
+      const decodedDelta = (decoded ?? 0) - (lastDecodedRef.current ?? 0);
+      const sinceDecodedChange = now - (lastDecodedChangeMsRef.current || now);
+      const sinceTimeChange = now - (lastTimeChangeMsRef.current || now);
       if (shouldBePlaying) {
-        if ((dtMs > 1200 || ctStalled) && now > freezeReportedUntilRef.current) {
+        const clockAdvancing = sinceTimeChange < 150; // media clock recently advanced
+        if (clockAdvancing && sinceDecodedChange > 150 && !v.seeking && v.readyState >= 2) {
+          stallTypeRef.current = 'presentational';
+        } else if (dtMs > 150 && v.readyState < 2) {
+          stallTypeRef.current = 'buffering';
+        } else if (ctStalled) {
+          stallTypeRef.current = 'time-stalled';
+        } else {
+          stallTypeRef.current = 'none';
+        }
+      } else {
+        stallTypeRef.current = 'none';
+      }
+      if (shouldBePlaying) {
+        if ((dtMs > 600 || ctStalled) && now > freezeReportedUntilRef.current) {
           freezeReportedUntilRef.current = now + 2000;
-          const vq = (v as any).getVideoPlaybackQuality?.();
-          const decoded = vq?.totalVideoFrames ?? (v as any).webkitDecodedFrameCount;
           const dropped = vq?.droppedVideoFrames ?? (v as any).webkitDroppedFrameCount;
           const ranges: Array<[number, number]> = [];
           try {
@@ -578,6 +678,37 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
             dropped,
             buffered: ranges
           });
+          if (watchdogEnabledRef.current) {
+            // Auto-recover watchdog: try micro-seek, then pause/play, then CSS jiggle
+            watchdogTripCountRef.current += 1;
+            lastActionRef.current = `watchdog(${stallTypeRef.current}) trip #${watchdogTripCountRef.current}`;
+            try {
+              v.currentTime = Math.min((v.currentTime || 0) + 0.033, (v.duration || 0) - 0.001);
+              v.playbackRate = 1.0;
+              v.play().catch(() => {});
+              lastActionRef.current += ` | micro-seek @${v.currentTime.toFixed(3)}`;
+            } catch {}
+            try {
+              v.pause();
+              setTimeout(() => { try { v.play(); } catch {} }, 60);
+              lastActionRef.current += ' | pause/play';
+            } catch {}
+            try {
+              const el = v as any;
+              // Force GPU plane rebind without layout: toggle will-change and a tiny scale
+              const prevWill = el.style.willChange || '';
+              const prevTrans = el.style.transform || '';
+              el.style.willChange = 'transform';
+              el.style.transform = `${prevTrans} scale(1.0001)`;
+              setTimeout(() => {
+                try {
+                  el.style.transform = prevTrans;
+                  el.style.willChange = prevWill;
+                } catch {}
+              }, 120);
+              lastActionRef.current += ' | gpu-rebind';
+            } catch {}
+          }
         }
       }
       lastCurrentTimeRef.current = t;
@@ -585,18 +716,26 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     return () => clearInterval(id);
   }, [debugHud]);
 
+  // Keep HUD values live by ticking state
+  useEffect(() => {
+    if (!debugHud) return;
+    const id = setInterval(() => setDebugTick((n) => (n + 1) % 1000000), 250);
+    return () => clearInterval(id);
+  }, [debugHud]);
+
   const bindRef = (el: HTMLVideoElement | null) => { videoRef.current = el; };
 
   return (
-    <div className="w-full h-full relative overflow-hidden rounded-2xl">
-      <div className="absolute inset-0 transform scale-[1] origin-center md:scale-[1] lg:scale-[0.78] scale-100" style={{ transformOrigin: 'center center' }}>
+    <div className="w-full h-full relative overflow-hidden rounded-2xl" style={{ overflow: isIOSSafariRef.current ? 'visible' as any : undefined }}>
+      <div className="absolute inset-0 origin-center lg:scale-[0.78]" style={{ transformOrigin: 'center center' }}>
         <video
           ref={bindRef}
           className="w-full h-full object-contain"
           style={{ 
             backgroundColor: 'transparent',
             opacity: isVideoLoading ? 0 : 1,
-            transition: 'opacity 300ms ease-in-out'
+            transition: 'opacity 300ms ease-in-out',
+            borderRadius: isIOSSafariRef.current ? 16 : undefined
           }}
           playsInline
           muted
@@ -607,43 +746,6 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           <source src={MASTER_SRC_WEBM} type='video/webm; codecs="vp9"' />
         </video>
         <VideoLoadingAnimation isVisible={isVideoLoading} />
-        {debugHud && (
-          <div
-            style={{ position: 'absolute', left: 8, top: 8, zIndex: 50, background: 'rgba(0,0,0,0.6)', color: '#fff', padding: '8px', borderRadius: '6px', fontSize: '12px', lineHeight: '16px', maxWidth: '90%' }}
-          >
-            <div style={{ marginBottom: '4px', fontWeight: 600 }}>Video Debug</div>
-            <div>
-              t: {lastSampleRef.current?.time ?? '-'} | media: {lastSampleRef.current?.mediaTime ?? '-'} | rs: {lastSampleRef.current?.readyState ?? '-'} | rate: {lastSampleRef.current?.rate ?? '-'}
-            </div>
-            <div>
-              decoded: {lastSampleRef.current?.decoded ?? '-'} | dropped: {lastSampleRef.current?.dropped ?? '-'}
-            </div>
-            <div>
-              buffered: {Array.isArray(lastSampleRef.current?.buffered) ? lastSampleRef.current.buffered.map((r: any) => `[${r[0]},${r[1]}]`).join(' ') : '-'}
-            </div>
-            <div style={{ marginTop: 6, display: 'flex', gap: 6 }}>
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const payload = JSON.stringify({ lastSample: lastSampleRef.current, logs: logsRef.current }, null, 2);
-                    await navigator.clipboard.writeText(payload);
-                    alert('Copied features video debug logs to clipboard');
-                  } catch {}
-                }}
-                style={{ padding: '4px 8px', background: '#1f2937', color: '#fff', borderRadius: 4 }}
-              >Copy</button>
-              <button
-                type="button"
-                onClick={() => {
-                  pushLog('user-marked-freeze', lastSampleRef.current || {});
-                  alert('Marked freeze in logs');
-                }}
-                style={{ padding: '4px 8px', background: '#7c2d12', color: '#fff', borderRadius: 4 }}
-              >Mark Freeze</button>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
