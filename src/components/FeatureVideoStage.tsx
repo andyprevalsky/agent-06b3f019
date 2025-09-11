@@ -128,7 +128,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
       const isIOSSafari = isIOSSafariRef.current;
       const fps = normalized?.fps || 30;
       if (!isIOSSafari) return baseTime;
-      if (key !== 'engine' && key !== 'memory') return baseTime;
+      if (key !== 'engine' && key !== 'memory' && key !== 'conversations') return baseTime;
       const frameSec = 1 / (fps || 30);
       if (key === 'memory') {
         // memory: deterministic offset by N frames earlier + tiny fixed offset, no randomness
@@ -137,11 +137,18 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         let t = Math.max(0, baseTime - framesEarlier * frameSec + tinyOffset);
         if (t <= 0.01) t = 0.0;
         return t;
-      } else {
+      } else if (key === 'engine') {
         // engine: deterministic 1 frame earlier, no randomness
         let t = Math.max(0, baseTime - 1.0 * frameSec);
         if (t <= 0.01) t = 0.0;
         return t;
+      } else if (key === 'conversations') {
+        // conversations: tiny forward nudge for seamless intro presentation
+        const tinyForward = 0.003; // 3ms
+        let t = baseTime + tinyForward;
+        return t;
+      } else {
+        return baseTime;
       }
     } catch {
       return baseTime;
