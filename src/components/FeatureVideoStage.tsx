@@ -123,12 +123,12 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
   // For HEVC on iOS/Safari, bias seeks for engine/memory to be closer to I-frames
   // by moving ~1 frame earlier and adding a tiny jitter to avoid consistently
   // landing on the same presentation boundary.
-  const computeSeekForKey = (key: FeatureKey | null, baseTime: number): number => {
+  const computeSeekForKey = (key: FeatureKey | null, baseTime: number, isIntro: boolean = false): number => {
     try {
       const isIOSSafari = isIOSSafariRef.current;
       const fps = normalized?.fps || 30;
       if (!isIOSSafari) return baseTime;
-      if (key !== 'engine' && key !== 'memory' && key !== 'conversations') return baseTime;
+      if (key !== 'engine' && key !== 'memory') return baseTime;
       const frameSec = 1 / (fps || 30);
       if (key === 'memory') {
         // memory: deterministic offset by N frames earlier + tiny fixed offset, no randomness
@@ -141,11 +141,6 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         // engine: deterministic 1 frame earlier, no randomness
         let t = Math.max(0, baseTime - 1.0 * frameSec);
         if (t <= 0.01) t = 0.0;
-        return t;
-      } else if (key === 'conversations') {
-        // conversations: tiny forward nudge for seamless intro presentation
-        const tinyForward = 0.003; // 3ms
-        let t = baseTime + tinyForward;
         return t;
       } else {
         return baseTime;
@@ -289,10 +284,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     isHevcRef.current = (isSafari || isIOS);
     isIOSSafariRef.current = isSafari && isIOS;
 
-    if (noBlobRef.current) {
-      pushLog('prefetch-skip-noBlob');
-      return;
-    }
+    // Always prefetch to Blob; do not rely on public <source> URLs
 
     let aborted = false;
     (async () => {
@@ -303,10 +295,11 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
         if (aborted) return;
         const url = URL.createObjectURL(blob);
         blobUrlRef.current = url;
-        // Swap src to object URL; this makes all seeks local and seamless
+        // Swap src to object URL; use Blob only
         video.src = url;
         video.preload = 'auto';
         try { video.load(); } catch {}
+        try { await video.play(); } catch {}
       } catch {}
     })();
 
@@ -499,7 +492,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           } else {
             // Prefer an exact 0.0 when introStart is very close to 0 to avoid keyframe snap past intro
             const baseDesired = isNearZero ? 0.0 : (targetSeg.introStart + 0.001);
-            const desired = computeSeekForKey(requested, baseDesired);
+            const desired = computeSeekForKey(requested, baseDesired, true);
             (video as HTMLVideoElement).currentTime = desired;
             try { (video as HTMLVideoElement).play(); } catch {}
             activeKeyRef.current = requested;
@@ -532,7 +525,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           // Landed past intro: retry seek once to introStart for all segments
           if (seekRetryRef.current < 1) {
             const baseDesired = seg.introStart <= 0.01 ? 0.0 : (seg.introStart + 0.001);
-            const desired = computeSeekForKey(activeKeyRef.current, baseDesired);
+            const desired = computeSeekForKey(activeKeyRef.current, baseDesired, true);
             (video as HTMLVideoElement).currentTime = desired;
             try { (video as HTMLVideoElement).play(); } catch {}
             seekRetryRef.current += 1;
@@ -748,10 +741,8 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
           muted
           preload="auto"
           autoPlay
-        >
-          <source src={MASTER_SRC_HEVC} type='video/mp4; codecs="hvc1"' />
-          <source src={MASTER_SRC_WEBM} type='video/webm; codecs="vp9"' />
-        </video>
+          src={blobUrlRef.current || ''}
+        />
         <VideoLoadingAnimation isVisible={isVideoLoading} />
       </div>
     </div>
