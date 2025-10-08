@@ -8,6 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 video-to-process/*
 navi-features-master.mov
+archive
 
 node_modules
 dist
