@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { isEarlyAccessEnabled } from "@/lib/utils";
 import { useState, useEffect } from "react";
 import ContactModal from "./ContactModal";
+import LoginButton from "./auth/LoginButton";
 
 const NaviHeader = () => {
   const [showMobileButton, setShowMobileButton] = useState(false);
@@ -90,15 +91,8 @@ const NaviHeader = () => {
             <span className="relative text-white z-10">{earlyAccess ? 'Pre-order' : 'Join Waitlist'}</span>
           </button>
           
-          {/* Desktop Contact Button */}
-          <Button 
-            variant="outline" 
-            size="sm"
-            className="hidden md:flex border-border/50 hover:bg-secondary/50"
-            onClick={() => setContactModalOpen(true)}
-          >
-            Contact
-          </Button>
+          {/* Desktop Login Button */}
+          <LoginButton />
         </div>
       </div>
       

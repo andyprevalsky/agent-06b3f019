@@ -26,6 +26,9 @@ export default {
 				foreground: 'hsl(var(--foreground))',
 				surface: 'hsl(var(--surface))',
 				'surface-elevated': 'hsl(var(--surface-elevated))',
+				'navi-black': '#272725',
+				'navi-light-black': '#323230',
+				'navi-light-light-black': '#3d3d3b',
 				primary: {
 					DEFAULT: 'hsl(var(--primary))',
 					foreground: 'hsl(var(--primary-foreground))'
