@@ -1,8 +1,9 @@
 import { supabase } from './supabase';
 
 // API Configuration
-// Default to localhost for development, can be overridden with VITE_API_URL
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+// Default to localhost for development, can be overridden with VITE_BACKEND_API_URL
+const API_BASE_URL = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
+const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
 // Helper function to get auth headers
 async function getAuthHeaders() {
@@ -66,7 +67,7 @@ export interface CreateAgentPayload {
 export async function getAllAgents(): Promise<Agent[]> {
   const headers = await getAuthHeaders();
   
-  const response = await fetch(`${API_BASE_URL}/agents`, {
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents`, {
     headers,
   });
 
@@ -89,8 +90,8 @@ export async function getAgent(agentId: string, cursor?: string): Promise<{
 }> {
   const headers = await getAuthHeaders();
   const url = cursor 
-    ? `${API_BASE_URL}/agents/${agentId}?cursor=${cursor}`
-    : `${API_BASE_URL}/agents/${agentId}`;
+    ? `${API_BASE_WITH_PATH}/agents/${agentId}?cursor=${cursor}`
+    : `${API_BASE_WITH_PATH}/agents/${agentId}`;
   
   const response = await fetch(url, {
     headers,
@@ -107,7 +108,7 @@ export async function getAgent(agentId: string, cursor?: string): Promise<{
 export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   const headers = await getAuthHeaders();
   
-  const response = await fetch(`${API_BASE_URL}/agents`, {
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents`, {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
@@ -125,7 +126,7 @@ export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
 export async function postMessage(agentId: string, message: string): Promise<Message> {
   const headers = await getAuthHeaders();
   
-  const response = await fetch(`${API_BASE_URL}/agents/${agentId}/messages`, {
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/messages`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ message }),
@@ -143,7 +144,7 @@ export async function postMessage(agentId: string, message: string): Promise<Mes
 export async function deleteAgent(agentId: string): Promise<void> {
   const headers = await getAuthHeaders();
   
-  const response = await fetch(`${API_BASE_URL}/agents/${agentId}`, {
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}`, {
     method: 'DELETE',
     headers,
   });
@@ -157,7 +158,7 @@ export async function deleteAgent(agentId: string): Promise<void> {
 export async function formatLLMJudgePrompt(text: string): Promise<string> {
   const headers = await getAuthHeaders();
   
-  const response = await fetch(`${API_BASE_URL}/format-llm-judge-prompt`, {
+  const response = await fetch(`${API_BASE_WITH_PATH}/format-llm-judge-prompt`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ text }),
@@ -178,7 +179,7 @@ export async function formatLLMJudgePrompt(text: string): Promise<string> {
 export async function getTools(): Promise<Tool[]> {
   const headers = await getAuthHeaders();
   
-  const response = await fetch(`${API_BASE_URL}/tools`, {
+  const response = await fetch(`${API_BASE_WITH_PATH}/tools`, {
     headers,
   });
 
