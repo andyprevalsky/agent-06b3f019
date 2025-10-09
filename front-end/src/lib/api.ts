@@ -2,7 +2,7 @@ import { supabase } from './supabase';
 
 // API Configuration
 // Default to localhost for development, can be overridden with VITE_BACKEND_API_URL
-const API_BASE_URL = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
 // Helper function to get auth headers
