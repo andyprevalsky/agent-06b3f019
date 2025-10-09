@@ -2,6 +2,25 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer utilities {
+  .animate-dots {
+    text-align: left;
+  }
+  
+  .animate-dots::before {
+    content: '.';
+    animation: dots 1.5s infinite;
+    display: inline-block;
+    text-align: left;
+  }
+  
+  @keyframes dots {
+    0%, 100% { content: '.'; }
+    33% { content: '..'; }
+    66% { content: '...'; }
+  }
+}
+
 /* Navi - Luxury Hardware Design System
    Colors inspired by premium materials: pearl white, space gray, midnight black
    All colors MUST be HSL.

@@ -96,3 +96,15 @@ enum MessageRole {
   STATUS
 }
 
+model Waitlist {
+  id            String   @id @default(uuid())
+  name          String
+  email         String   @unique
+  variant       String?
+  referralCode  String?  @map("referral_code")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([email])
+}
+

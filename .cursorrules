@@ -1,5 +1,14 @@
 # Navi Whisper Lux - Project Rules
 
+## General Development Guidelines
+
+### Documentation
+- **Don't create excessive documentation files** - Code should be self-documenting
+- **No auto-generated READMEs** - Only create docs when explicitly requested
+- **Update existing docs** - Prefer updating .cursorrules over creating new files
+- **No summary files** - Don't create implementation summaries or completion reports
+- **Focus on code** - Ship working features, not documentation about features
+
 ## Supabase Configuration
 
 ### Correct API Format (IMPORTANT!)
@@ -70,13 +79,19 @@ curl -X POST "https://kzlurqihzaolhzsbkctf.supabase.co/auth/v1/verify" \
 - **Port**: 3001 (local), configurable for production
 
 ### Endpoints
-- `GET /health` - Health check (no auth)
-- `GET /api/agents` - List user's agents (auth required)
-- `POST /api/agents` - Create agent (auth required)
-- `GET /api/agents/:id` - Get agent + messages (auth required)
-- `POST /api/agents/:id/messages` - Send message (auth required)
-- `DELETE /api/agents/:id` - Soft delete agent (auth required)
-- `POST /api/format-llm-judge-prompt` - Format LLM prompt (auth required)
+
+**Public (No Auth)**:
+- `GET /health` - Health check
+- `POST /api/waitlist` - Join waitlist
+
+**Authenticated (Requires JWT)**:
+- `GET /api/agents` - List user's agents
+- `POST /api/agents` - Create agent
+- `GET /api/agents/:id` - Get agent + messages
+- `POST /api/agents/:id/messages` - Send message
+- `DELETE /api/agents/:id` - Soft delete agent
+- `POST /api/format-llm-judge-prompt` - Format LLM prompt
+- `GET /api/tools` - Get available tools
 
 ### Authentication Middleware
 Location: `src/middleware/auth.ts`
@@ -103,12 +118,22 @@ Use `/back-end/test-auth.sh` for automated testing.
 
 ## Database Schema
 
+**Schema Location:** `/back-end/prisma/schema.prisma` (single source of truth)
+
+All database changes MUST be made through Prisma:
+1. Edit `schema.prisma`
+2. Run `npm run prisma:migrate:dev -- --name your_change`
+3. Never manually edit the database
+
 ### Tables with RLS
 - **Agent**: User's AI agents (users can only see their own)
 - **Message**: Chat messages (users can only see messages from their agents)
 - **Tool**: Available tools (public read)
 - **AgentTool**: Many-to-many junction (users can only see their agent's tools)
 - **Verifier**: Agent verifiers (users can only see their agent's verifiers)
+
+### Public Tables (No RLS)
+- **Waitlist**: Public signups (accessed via backend API only)
 
 ### Agent Statuses
 - `STARTING_UP` - Agent initializing
@@ -126,6 +151,121 @@ Use `/back-end/test-auth.sh` for automated testing.
 
 ### RLS Policies
 All users can only access data where `userId = auth.uid()::text`
+
+## Database Updates & Migrations
+
+### Standard Practice: Prisma Migrations
+
+**ALWAYS use Prisma migrations to update the database schema. Never manually run SQL.**
+
+#### Step 1: Update Prisma Schema
+Edit `/back-end/prisma/schema.prisma` with your changes.
+
+#### Step 2: Create & Apply Migration (Development)
+```bash
+cd back-end
+npm run prisma:migrate:dev -- --name your_migration_name
+```
+
+This will:
+- Create a new migration in `prisma/migrations/`
+- Apply it to your database
+- Regenerate Prisma Client
+
+#### Step 3: Deploy Migration (Production)
+```bash
+cd back-end
+npm run prisma:migrate
+```
+
+This applies pending migrations in production (used in render.yaml).
+
+### Public Endpoints (No Auth)
+
+Some tables don't need RLS because they're accessed via backend API:
+
+**Example: Waitlist**
+- No RLS policy needed
+- Backend API (`POST /api/waitlist`) is public
+- Backend validates and sanitizes all inputs
+
+**When adding public endpoints:**
+1. Add model to Prisma schema (without RLS)
+2. Create migration: `npm run prisma:migrate:dev -- --name add_table_name`
+3. Add route in `/back-end/src/routes/`
+4. Register in `server.ts` BEFORE authenticated routes
+5. Test endpoint with curl or seed script
+
+### Seeding Data
+
+**Test endpoints by hitting them (recommended)**:
+```bash
+cd back-end
+npm run seed:waitlist  # Example: seeds waitlist via API
+```
+
+This approach:
+- Tests the API endpoint
+- Validates business logic
+- Ensures CORS is configured
+- Catches errors early
+
+**Alternative: Direct Prisma seeding**:
+```bash
+cd back-end
+npm run prisma:seed  # Runs prisma/seed.ts
+```
+
+### Migration Files
+
+- Located in: `/back-end/prisma/migrations/`
+- Never edit existing migrations
+- Never delete migrations that have been deployed
+- Migration names: `YYYYMMDDHHMMSS_description/migration.sql`
+
+### Example Workflow (Adding Waitlist)
+
+1. **Update schema**:
+   ```prisma
+   model Waitlist {
+     id           String   @id @default(uuid())
+     email        String   @unique
+     created_at   DateTime @default(now())
+   }
+   ```
+
+2. **Create migration**:
+   ```bash
+   npm run prisma:migrate:dev -- --name add_waitlist
+   ```
+
+3. **Add API route** (`src/routes/waitlist.ts`):
+   ```typescript
+   router.post('/', async (req, res) => {
+     const entry = await prisma.waitlist.create({ data: req.body });
+     res.json(entry);
+   });
+   ```
+
+4. **Register route** (`src/server.ts`):
+   ```typescript
+   app.use('/api/waitlist', waitlistRouter);  // No auth
+   ```
+
+5. **Test with seed script** (`scripts/seed-waitlist.ts`):
+   ```bash
+   npm run seed:waitlist
+   ```
+
+### Prisma Studio (GUI)
+
+View/edit database directly:
+```bash
+cd back-end
+npm run prisma:studio
+```
+
+Opens at `http://localhost:5555`
 
 ## Frontend Architecture
 
@@ -165,7 +305,7 @@ supabase
 DATABASE_URL="postgresql://postgres.kzlurqihzaolhzsbkctf:PASSWORD@aws-1-us-east-2.pooler.supabase.com:5432/postgres"
 SUPABASE_URL="https://kzlurqihzaolhzsbkctf.supabase.co"
 OPENAI_API_KEY="sk-proj-..."
-ALLOWED_ORIGINS="http://localhost:5173,https://hinavi.ai"
+ALLOWED_ORIGINS="http://localhost:8080,https://hinavi.ai"
 PORT=3001
 NODE_ENV="development"
 ```

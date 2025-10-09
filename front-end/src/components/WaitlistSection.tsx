@@ -90,6 +90,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
               {/* Waitlist Form for Midnight Black */}
               <div className="mt-6">
                 <WaitlistForm 
+                  variant="midnight_black"
                   onSuccess={() => console.log('User joined waitlist successfully!')}
                 />
                 <p className="text-xs text-muted-foreground mt-4 text-center">
@@ -123,6 +124,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
               {/* Waitlist Form for Pearl White */}
               <div className="mt-6">
                 <WaitlistForm 
+                  variant="pearl_white"
                   onSuccess={() => console.log('User joined waitlist successfully!')}
                 />
                 <p className="text-xs text-muted-foreground mt-4 text-center">
@@ -151,6 +153,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
             {/* Waitlist Form for Custom */}
             <div className={`mt-6 ${customOnly ? 'max-w-xl mx-auto' : ''}`}>
               <WaitlistForm 
+                variant="custom"
                 onSuccess={() => console.log('User joined waitlist successfully!')}
               />
               <p className="text-xs text-muted-foreground mt-4 text-center">

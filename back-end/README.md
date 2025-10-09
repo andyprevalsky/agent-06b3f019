@@ -67,7 +67,7 @@ PORT=3001
 NODE_ENV="development"
 
 # CORS (comma-separated allowed origins)
-ALLOWED_ORIGINS="http://localhost:5173,https://your-frontend.com"
+ALLOWED_ORIGINS="http://localhost:8080,https://your-frontend.com"
 ```
 
 ### Database Setup

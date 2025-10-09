@@ -29,6 +29,8 @@ export default {
 				'navi-black': '#272725',
 				'navi-light-black': '#323230',
 				'navi-light-light-black': '#3d3d3b',
+				'navi-white': '#f5f5f5',
+				'navi-white-dark': '#e5e5e5',
 				primary: {
 					DEFAULT: 'hsl(var(--primary))',
 					foreground: 'hsl(var(--primary-foreground))'

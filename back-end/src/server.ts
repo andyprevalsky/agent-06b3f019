@@ -5,6 +5,7 @@ import { authenticate } from './middleware/auth';
 import agentsRouter from './routes/agents';
 import formatRouter from './routes/format';
 import toolsRouter from './routes/tools';
+import waitlistRouter from './routes/waitlist';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -17,20 +18,36 @@ const PORT = process.env.PORT || 3001;
 app.use(express.json());
 
 // CORS configuration - allow all localhost origins for development
+const defaultOrigins = [
+  'http://localhost:8080',
+  'http://127.0.0.1:8080',
+  'http://localhost:5173',
+  'http://localhost:8081',
+];
+
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-  : [
-      'http://localhost:8080',
-      'http://127.0.0.1:8080',
-    ];
+  : defaultOrigins;
 
 console.log('🔧 CORS Configuration:');
 console.log('   Allowed origins:', allowedOrigins);
 
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps or curl)
+      if (!origin) return callback(null, true);
+      
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        console.warn(`⚠️  CORS blocked origin: ${origin}`);
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   })
 );
 
@@ -38,6 +55,9 @@ app.use(
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Public routes (no auth required)
+app.use('/api/waitlist', waitlistRouter);
 
 // Routes with authentication
 app.use('/api/agents', authenticate, agentsRouter);
