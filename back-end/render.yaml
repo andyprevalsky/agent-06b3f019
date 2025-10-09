@@ -1,0 +1,24 @@
+services:
+  # Backend API Service
+  - type: web
+    name: navi-agent-backend
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: npm install && npm run prisma:generate && npm run build
+    startCommand: npm run prisma:migrate && npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false  # Set manually - Supabase Session Pooler connection string
+      - key: SUPABASE_URL
+        sync: false  # Set to: https://kzlurqihzaolhzsbkctf.supabase.co
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false  # e.g., https://hinavi.ai,https://www.hinavi.ai
+      - key: PORT
+        value: 10000
+

@@ -1,0 +1,98 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")  // Session pooler (IPv4 compatible)
+}
+
+model Agent {
+  id            String      @id @default(uuid())
+  userId        String      // Supabase user ID
+  goal          String      @db.Text
+  progress      Float       @default(0.0) // 0.0 to 1.0
+  status        AgentStatus @default(STARTING_UP)
+  statusMessage String?     @db.Text
+  deletedAt     DateTime?   // Soft delete
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  verifier  Verifier?
+  tools     AgentTool[]
+  messages  Message[]
+
+  @@index([userId, deletedAt])
+  @@index([createdAt])
+}
+
+model Tool {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  agents AgentTool[]
+}
+
+model AgentTool {
+  agentId    String
+  toolId     String
+  assignedAt DateTime @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  tool  Tool  @relation(fields: [toolId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, toolId])
+  @@index([agentId])
+  @@index([toolId])
+}
+
+model Verifier {
+  id             String       @id @default(uuid())
+  agentId        String       @unique
+  type           VerifierType @default(FLOAT_LLM_JUDGE)
+  llmJudgePrompt String       @db.Text
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+}
+
+model Message {
+  id        String      @id @default(uuid())
+  agentId   String
+  timestamp DateTime    @default(now())
+  text      String      @db.Text
+  role      MessageRole
+  createdAt DateTime    @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, timestamp])
+  @@index([createdAt])
+}
+
+enum AgentStatus {
+  STARTING_UP
+  ACTIVE
+  PAUSED
+  COMPLETED
+  FAILED
+}
+
+enum VerifierType {
+  FLOAT_LLM_JUDGE
+}
+
+enum MessageRole {
+  SYSTEM
+  AGENT
+  USER
+  TOOL
+  STATUS
+}
+

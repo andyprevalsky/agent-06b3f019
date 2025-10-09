@@ -1,0 +1,203 @@
+# Navi Whisper Lux - Project Rules
+
+## Supabase Configuration
+
+### Correct API Format (IMPORTANT!)
+
+**Supabase URL**: `https://kzlurqihzaolhzsbkctf.supabase.co`
+
+**Anon Key Format** (NEW - sb_publishable_ prefix):
+```
+sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp
+```
+
+**NOT the old JWT format!** The anon key is now prefixed with `sb_publishable_` not a long JWT token.
+
+### Authentication API Usage
+
+**Send OTP**:
+```bash
+curl -X POST "https://kzlurqihzaolhzsbkctf.supabase.co/auth/v1/otp" \
+  -H "Authorization: Bearer sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp" \
+  -H "apikey: sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp" \
+  -H "Content-Type: application/json" \
+  -H "X-Supabase-Api-Version: 2024-01-01" \
+  --data-raw '{"phone":"+19729777432","create_user":true,"channel":"sms"}'
+```
+
+**Verify OTP**:
+```bash
+curl -X POST "https://kzlurqihzaolhzsbkctf.supabase.co/auth/v1/verify" \
+  -H "Authorization: Bearer sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp" \
+  -H "apikey: sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp" \
+  -H "Content-Type: application/json" \
+  -H "X-Supabase-Api-Version: 2024-01-01" \
+  --data-raw '{"phone":"+19729777432","token":"181818","type":"sms"}'
+```
+
+**Response includes**:
+- `access_token`: JWT token for authentication (starts with `eyJ...`)
+- `user.id`: User UUID
+- `expires_in`: Token lifetime in seconds
+
+### Test Credentials
+
+**Phone**: `+19729777432`  
+**Test OTP**: `181818`
+
+## Backend Architecture
+
+### Database
+- **Type**: Supabase PostgreSQL
+- **Connection**: Session Pooler (IPv4 compatible)
+- **RLS**: ENABLED on all tables
+- **ORM**: Prisma
+
+### Authentication
+- **Method**: JWKS (JSON Web Key Set)
+- **JWKS Endpoint**: `https://kzlurqihzaolhzsbkctf.supabase.co/auth/v1/.well-known/jwks.json`
+- **Key ID**: `3f646428-da10-4054-9125-309e72d9b2e4`
+- **Algorithm**: ES256 (Elliptic Curve)
+- **No secret keys needed**: Backend fetches public keys from JWKS
+
+### API Structure
+- **REST API Only**: No WebSocket on backend (removed)
+- **Real-time**: Frontend uses Supabase Realtime directly
+- **Port**: 3001 (local), configurable for production
+
+### Endpoints
+- `GET /health` - Health check (no auth)
+- `GET /api/agents` - List user's agents (auth required)
+- `POST /api/agents` - Create agent (auth required)
+- `GET /api/agents/:id` - Get agent + messages (auth required)
+- `POST /api/agents/:id/messages` - Send message (auth required)
+- `DELETE /api/agents/:id` - Soft delete agent (auth required)
+- `POST /api/format-llm-judge-prompt` - Format LLM prompt (auth required)
+
+### Authentication Middleware
+Location: `src/middleware/auth.ts`
+
+**How it works**:
+1. Extracts JWT from `Authorization: Bearer <token>` header
+2. Parses token header to get `kid` (Key ID)
+3. Fetches public key from JWKS endpoint (cached 10 minutes)
+4. Verifies JWT signature using public key
+5. Validates issuer, audience, expiration
+6. Extracts user ID from `sub` claim
+7. Attaches `req.user` with `{ id, email, phone }`
+
+**Testing**:
+```bash
+# Without token (should return 401)
+curl http://localhost:3001/api/agents
+
+# With valid token (should return 200)
+curl -H "Authorization: Bearer <access_token>" http://localhost:3001/api/agents
+```
+
+Use `/back-end/test-auth.sh` for automated testing.
+
+## Database Schema
+
+### Tables with RLS
+- **Agent**: User's AI agents (users can only see their own)
+- **Message**: Chat messages (users can only see messages from their agents)
+- **Tool**: Available tools (public read)
+- **AgentTool**: Many-to-many junction (users can only see their agent's tools)
+- **Verifier**: Agent verifiers (users can only see their agent's verifiers)
+
+### Agent Statuses
+- `STARTING_UP` - Agent initializing
+- `ACTIVE` - Agent running
+- `PAUSED` - Agent paused
+- `COMPLETED` - Agent finished
+- `FAILED` - Agent error
+
+### Message Roles
+- `SYSTEM` - System messages
+- `AGENT` - Agent responses
+- `USER` - User messages
+- `TOOL` - Tool outputs
+- `STATUS` - Status updates
+
+### RLS Policies
+All users can only access data where `userId = auth.uid()::text`
+
+## Frontend Architecture
+
+### Real-time Updates
+- **Use Supabase Realtime** (not backend WebSocket)
+- **Listen to**: `Agent` and `Message` table changes
+- **RLS**: Automatically enforced by database
+
+### Example Supabase Realtime:
+```typescript
+supabase
+  .channel(`agent:${agentId}`)
+  .on('postgres_changes', {
+    event: '*',
+    schema: 'public',
+    table: 'Agent',
+    filter: `id=eq.${agentId}`
+  }, (payload) => {
+    // Handle agent updates
+  })
+  .subscribe();
+```
+
+## Deployment
+
+### Render (Backend)
+- **Config**: `render.yaml`
+- **Database**: Supabase PostgreSQL (external)
+- **Environment Variables**:
+  - `DATABASE_URL`: Supabase session pooler connection string
+  - `SUPABASE_URL`: https://kzlurqihzaolhzsbkctf.supabase.co
+  - `OPENAI_API_KEY`: For LLM prompt formatting
+  - `ALLOWED_ORIGINS`: Frontend URL
+
+### Environment Variables (Backend)
+```env
+DATABASE_URL="postgresql://postgres.kzlurqihzaolhzsbkctf:PASSWORD@aws-1-us-east-2.pooler.supabase.com:5432/postgres"
+SUPABASE_URL="https://kzlurqihzaolhzsbkctf.supabase.co"
+OPENAI_API_KEY="sk-proj-..."
+ALLOWED_ORIGINS="http://localhost:5173,https://hinavi.ai"
+PORT=3001
+NODE_ENV="development"
+```
+
+## Common Mistakes to Avoid
+
+1. ❌ **Using old JWT format for anon key**: Use `sb_publishable_` prefix
+2. ❌ **Missing required headers**: Include `Authorization`, `apikey`, and `X-Supabase-Api-Version`
+3. ❌ **Wrong phone format**: Use `+19729777432` not `"+19729777432"` in JSON
+4. ❌ **Trying to use backend WebSocket**: It's been removed, use Supabase Realtime
+5. ❌ **Forgetting RLS is enabled**: All frontend queries are filtered by user ID
+6. ❌ **Using wrong database connection**: Use Session Pooler (port 5432) not Direct (IPv6 incompatible)
+
+## Testing
+
+### Backend Authentication Test
+```bash
+cd back-end
+./test-auth.sh
+```
+
+### Manual Test with Token
+```bash
+cd back-end
+./test-auth-manual.sh <ACCESS_TOKEN>
+```
+
+### Get Fresh Token
+Use the curl commands at the top of this file with test credentials.
+
+## Key Files
+
+- `back-end/src/server.ts` - Main Express server (REST API only)
+- `back-end/src/middleware/auth.ts` - JWKS authentication
+- `back-end/prisma/schema.prisma` - Database schema
+- `back-end/prisma/migrations/enable_rls.sql` - RLS policies
+- `back-end/test-auth.sh` - Automated auth test
+- `front-end/src/lib/supabase.ts` - Supabase client setup
+
