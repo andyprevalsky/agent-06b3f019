@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { authenticate } from './middleware/auth';
 import agentsRouter from './routes/agents';
 import formatRouter from './routes/format';
+import toolsRouter from './routes/tools';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -14,9 +15,21 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(express.json());
+
+// CORS configuration - allow all localhost origins for development
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  : [
+      'http://localhost:8080',
+      'http://127.0.0.1:8080',
+    ];
+
+console.log('🔧 CORS Configuration:');
+console.log('   Allowed origins:', allowedOrigins);
+
 app.use(
   cors({
-    origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5173'],
+    origin: allowedOrigins,
     credentials: true,
   })
 );
@@ -28,6 +41,7 @@ app.get('/health', (req, res) => {
 
 // Routes with authentication
 app.use('/api/agents', authenticate, agentsRouter);
+app.use('/api/tools', authenticate, toolsRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware

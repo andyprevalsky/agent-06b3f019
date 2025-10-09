@@ -1,5 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
+import { Toaster } from '@/components/ui/toaster'
+import { Toaster as Sonner } from '@/components/ui/sonner'
 import './index.css'
 
 // Fix iOS Safari viewport height issues
@@ -38,4 +40,16 @@ if (/iPad|iPhone|iPod/.test(navigator.userAgent)) {
   });
 }
 
+// Render main app
 createRoot(document.getElementById("root")!).render(<App />);
+
+// Render toasters outside of root to avoid z-index stacking context issues
+const toasterContainer = document.createElement('div');
+toasterContainer.id = 'toaster-portal';
+document.body.appendChild(toasterContainer);
+createRoot(toasterContainer).render(
+  <>
+    <Toaster />
+    <Sonner />
+  </>
+);

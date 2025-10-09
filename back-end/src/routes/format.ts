@@ -24,7 +24,12 @@ router.post('/format-llm-judge-prompt', async (req, res) => {
       return;
     }
     console.error('Format prompt error:', error);
-    res.status(500).json({ error: 'Failed to format prompt' });
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ 
+      error: 'Failed to format prompt',
+      details: errorMessage,
+      hasOpenAIKey: !!process.env.OPENAI_API_KEY 
+    });
   }
 });
 

@@ -21,7 +21,7 @@ Best practices:
 Return ONLY the improved prompt text, nothing else.`;
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4.1',
+    model: 'gpt-4o',
     messages: [
       { role: 'system', content: systemPrompt },
       {
