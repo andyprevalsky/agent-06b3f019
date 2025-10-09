@@ -47,6 +47,10 @@ curl -X POST "https://kzlurqihzaolhzsbkctf.supabase.co/auth/v1/verify" \
 
 ## Backend Architecture
 
+### Deployment
+- **Production URL**: https://navi-j9a9.onrender.com
+- **API Base**: https://navi-j9a9.onrender.com/api
+
 ### Database
 - **Type**: Supabase PostgreSQL
 - **Connection**: Session Pooler (IPv4 compatible)

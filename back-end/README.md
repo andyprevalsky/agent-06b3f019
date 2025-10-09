@@ -2,6 +2,9 @@
 
 TypeScript backend API for managing AI agents with Prisma ORM and PostgreSQL.
 
+**🚀 Production URL**: https://navi-j9a9.onrender.com  
+**📡 API Base**: https://navi-j9a9.onrender.com/api
+
 ## Features
 
 - 🔐 Authentication via Supabase JWT tokens
