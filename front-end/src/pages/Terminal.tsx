@@ -99,11 +99,21 @@ export default function Terminal() {
           filter: `id=eq.${selectedAgentId}`,
         },
         (payload) => {
-          console.log('Agent update:', payload);
-          if (payload.eventType === 'UPDATE') {
-            // Refresh agent detail
-            loadAgentDetail(selectedAgentId);
-            // Also refresh agents list to update progress
+          console.log('🔄 Agent update:', payload);
+          if (payload.eventType === 'UPDATE' && payload.new) {
+            // Update agent detail in state directly (no refetch = no flicker)
+            const updated = payload.new as any;
+            setAgentDetail((prev) => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                progress: updated.progress,
+                status: updated.status,
+                status_message: updated.statusMessage,
+                updated_at: updated.updatedAt,
+              };
+            });
+            // Also refresh agents list to update sidebar
             loadAgents();
           }
         }
@@ -117,25 +127,37 @@ export default function Terminal() {
           filter: `agentId=eq.${selectedAgentId}`,
         },
         (payload) => {
-          console.log('New message:', payload);
+          console.log('💬 New message:', payload);
           // Add new message to list
           const newMessage = payload.new as any;
           setMessages((prev) => [
+            ...prev,
             {
               message_id: newMessage.id,
               timestamp: newMessage.timestamp,
               text: newMessage.text,
               role: newMessage.role,
             },
-            ...prev,
           ]);
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log(`📡 Realtime subscription status for agent ${selectedAgentId}:`, status);
+        if (status === 'SUBSCRIBED') {
+          console.log('✅ Successfully subscribed to realtime updates');
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('❌ Realtime subscription error');
+        } else if (status === 'TIMED_OUT') {
+          console.error('⏱️ Realtime subscription timed out');
+        } else if (status === 'CLOSED') {
+          console.log('🔌 Realtime subscription closed');
+        }
+      });
 
     channelRef.current = channel;
 
     return () => {
+      console.log('🧹 Cleaning up realtime subscription');
       channel.unsubscribe();
     };
   }, [selectedAgentId, user]);
@@ -236,7 +258,8 @@ export default function Terminal() {
   });
 
   const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
-  const showStatusLoader = lastMessage?.role === 'STATUS';
+  // Show loader when agent is working (not used for now since we don't have STATUS role)
+  const showStatusLoader = false;
 
   // Get system messages
   const systemMessages = messages.filter((m) => m.role === 'SYSTEM');

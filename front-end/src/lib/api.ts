@@ -49,7 +49,7 @@ export interface Message {
   message_id: string;
   timestamp: string;
   text: string;
-  role: 'SYSTEM' | 'AGENT' | 'USER' | 'TOOL' | 'STATUS';
+  role: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
 }
 
 export interface CreateAgentPayload {

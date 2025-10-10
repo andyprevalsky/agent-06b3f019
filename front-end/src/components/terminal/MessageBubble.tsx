@@ -1,6 +1,6 @@
 import { Message } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Terminal, Info } from 'lucide-react';
+import { Bot, User, Wrench, Info } from 'lucide-react';
 
 interface MessageBubbleProps {
   message: Message;
@@ -14,7 +14,7 @@ const roleConfig = {
     text: 'text-blue-700 dark:text-blue-300',
     label: 'System',
   },
-  AGENT: {
+  ASSISTANT: {
     icon: Bot,
     bg: 'bg-purple-500/10 dark:bg-purple-500/20',
     border: 'border-purple-500/30',
@@ -34,13 +34,6 @@ const roleConfig = {
     border: 'border-green-500/30',
     text: 'text-green-700 dark:text-green-300',
     label: 'Tool',
-  },
-  STATUS: {
-    icon: Terminal,
-    bg: 'bg-yellow-500/10 dark:bg-yellow-500/20',
-    border: 'border-yellow-500/30',
-    text: 'text-yellow-700 dark:text-yellow-300',
-    label: 'Status',
   },
 };
 
