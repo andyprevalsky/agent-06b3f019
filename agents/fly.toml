@@ -2,7 +2,7 @@
 # 
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 
-app = "navi-temporal-agents"
+app = "navi-whisper-lux"
 primary_region = "iad"  # Ashburn, Virginia
 
 [build]
@@ -15,8 +15,8 @@ primary_region = "iad"  # Ashburn, Virginia
   
   # Temporal Worker Configuration
   # These control concurrency and resource usage
-  MAX_CONCURRENT_ACTIVITIES = "500"
-  MAX_CONCURRENT_WORKFLOWS = "200"
+  MAX_CONCURRENT_ACTIVITIES = "250"
+  MAX_CONCURRENT_WORKFLOWS = "100"
   MAX_CACHED_WORKFLOWS = "1000"
   MAX_CONCURRENT_ACTIVITY_TASK_POLLERS = "5"
   MAX_CONCURRENT_WORKFLOW_TASK_POLLERS = "5"
@@ -81,14 +81,14 @@ primary_region = "iad"  # Ashburn, Virginia
 # VM Resources - adjust based on needs
 [[vm]]
   cpu_kind = "shared"
-  cpus = 2
-  memory_mb = 2048
+  cpus = 1
+  memory_mb = 512
 
 # Auto-scaling configuration (optional - Fly.io will scale based on load)
 # With auto_stop_machines = false, you'll always have min_machines_running active
 # Fly.io can auto-scale up to max_count based on metrics
 [auto_scaling]
-  min_count = 1  # Always keep 1 worker running
+  min_count = 2  # Always keep 2 workers running (for redundancy)
   max_count = 10  # Scale up to 10 workers under heavy load
 
 [metrics]
