@@ -20,11 +20,13 @@
   "license": "ISC",
   "dependencies": {
     "@prisma/client": "^5.20.0",
+    "@temporalio/client": "^1.13.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "jwks-rsa": "^3.2.0",
+    "node-cache": "^5.1.2",
     "openai": "^4.63.0",
     "zod": "^3.23.8"
   },

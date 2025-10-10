@@ -11,15 +11,17 @@ datasource db {
 }
 
 model Agent {
-  id            String      @id @default(uuid())
-  userId        String      // Supabase user ID
-  goal          String      @db.Text
-  progress      Float       @default(0.0) // 0.0 to 1.0
-  status        AgentStatus @default(STARTING_UP)
-  statusMessage String?     @db.Text
-  deletedAt     DateTime?   // Soft delete
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  id                 String      @id @default(uuid())
+  userId             String      // Supabase user ID
+  goal               String      @db.Text
+  model              String      @default("anthropic/claude-sonnet-4.5") // LLM model driving this agent
+  progress           Float       @default(0.0) // 0.0 to 1.0
+  status             AgentStatus @default(STARTING_UP)
+  statusMessage      String?     @db.Text
+  temporalWorkflowId String?     // Links to Temporal workflow
+  deletedAt          DateTime?   // Soft delete
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
 
   verifier  Verifier?
   tools     AgentTool[]
@@ -27,6 +29,7 @@ model Agent {
 
   @@index([userId, deletedAt])
   @@index([createdAt])
+  @@index([temporalWorkflowId])
 }
 
 model Tool {
@@ -90,10 +93,9 @@ enum VerifierType {
 
 enum MessageRole {
   SYSTEM
-  AGENT
+  ASSISTANT
   USER
   TOOL
-  STATUS
 }
 
 model Waitlist {
@@ -106,5 +108,17 @@ model Waitlist {
 
   @@index([createdAt])
   @@index([email])
+}
+
+model GoalBlueprint {
+  id        String   @id @default(uuid())
+  userId    String   // Supabase user ID
+  title     String   @db.Text // Goal description for similarity matching
+  blueprint Json     // Complete execution trace
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([createdAt])
 }
 

@@ -1,0 +1,37 @@
+# Temporal SDK
+temporalio>=1.18.1
+
+# HTTP and async support
+aiohttp>=3.9.0
+httpx>=0.25.0
+
+# Database and backend integration
+supabase>=2.0.0
+psycopg2-binary>=2.9.9
+
+# LLM and AI
+openai>=1.12.0
+instructor>=1.0.0
+
+# SMS (Twilio)
+twilio>=8.11.0
+
+# Web search and scraping
+playwright>=1.40.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+python-dateutil>=2.9.0
+
+# Logging and monitoring
+structlog>=24.1.0
+
+# Health check server
+flask>=3.0.0
+
+# Retry and resilience
+tenacity>=8.2.3
+

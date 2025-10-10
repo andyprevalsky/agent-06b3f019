@@ -1,11 +1,12 @@
 import OpenAI from 'openai';
 
-if (!process.env.OPENAI_API_KEY) {
-  throw new Error('Missing OPENAI_API_KEY environment variable');
+if (!process.env.OPENROUTER_API_KEY) {
+  throw new Error('Missing OPENROUTER_API_KEY environment variable');
 }
 
-export const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+export const openrouter = new OpenAI({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  baseURL: 'https://openrouter.ai/api/v1',
 });
 
 export async function formatLLMJudgePrompt(text: string): Promise<string> {
@@ -20,8 +21,8 @@ Best practices:
 
 Return ONLY the improved prompt text, nothing else.`;
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o',
+  const completion = await openrouter.chat.completions.create({
+    model: 'openai/gpt-4.1',  // OpenRouter format: provider/model
     messages: [
       { role: 'system', content: systemPrompt },
       {

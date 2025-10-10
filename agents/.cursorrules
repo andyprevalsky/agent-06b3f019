@@ -1,0 +1,240 @@
+# Temporal Agents - Development Rules
+
+## Temporal Workflow Patterns
+
+### Activities MUST Be Idempotent
+
+**CRITICAL**: All Temporal activities can execute multiple times due to:
+- Network failures (activity completes but ack lost)
+- Worker crashes (activity runs but result not returned)
+- Timeouts (activity still running when timeout hits)
+
+**Requirements**:
+
+1. **Write operations**: Use idempotency keys, upserts, or check-before-act
+2. **Reads**: Naturally idempotent (safe to repeat)
+3. **External APIs**: Pass deterministic IDs from workflow context
+
+**Example - NOT Idempotent** ❌:
+```python
+@activity.defn
+async def send_sms(to: str, body: str):
+    return await twilio.messages.create(to=to, body=body)
+    # Could send duplicate messages on retry!
+```
+
+**Example - Idempotent** ✅:
+```python
+@activity.defn
+async def send_sms(to: str, body: str, idempotency_key: str):
+    # Check if already sent
+    existing = await db.get_message_by_key(idempotency_key)
+    if existing:
+        return existing
+    
+    result = await twilio.messages.create(to=to, body=body)
+    await db.save_message(idempotency_key, result)
+    return result
+```
+
+**Generate deterministic keys in workflows**:
+```python
+# In workflow (deterministic)
+operation_id = f"{workflow.info().workflow_id}-send-sms-{step_number}"
+await workflow.execute_activity(send_sms, args=[to, body, operation_id])
+```
+
+### Workflows MUST Be Deterministic
+
+**Rules**:
+- ❌ NO `datetime.now()` → Use `workflow.now()`
+- ❌ NO `random.random()` → Use `workflow.random()`
+- ❌ NO `uuid.uuid4()` → Use `workflow.uuid4()`
+- ❌ NO direct I/O (files, network) → Use activities
+- ✅ Same inputs = same execution path on replay
+
+**Why**: Temporal replays workflows from history. Non-deterministic code breaks replay.
+
+### Use `continue_as_new()` for Long-Running Workflows
+
+**Problem**: Infinite loops accumulate unbounded history
+**Solution**: Reset history every N iterations
+
+```python
+@workflow.run
+async def run(self, goal: str, context: str = "", iteration: int = 0):
+    MAX_EVENTS = 100
+    
+    for i in range(MAX_EVENTS):
+        # Do work...
+        pass
+    
+    # Compress state and continue
+    summary = await workflow.execute_activity(compress_context, [context])
+    workflow.continue_as_new(args=[goal, summary, iteration + MAX_EVENTS])
+```
+
+**When to continue-as-new**:
+- Every 100-1000 activity executions
+- When context/state gets large (>100KB)
+- At natural breakpoints (completed sub-goal)
+
+### Activity Retry Configuration
+
+**Use extreme backoff** (configured in fly.toml):
+- 2s → 8s → 16s → 32s → 64s (4x multiplier)
+- 6 attempts maximum
+- Handles transient failures (network, rate limits)
+
+**For operations that shouldn't retry**:
+```python
+await workflow.execute_activity(
+    risky_operation,
+    retry_policy=RetryPolicy(maximum_attempts=1)
+)
+```
+
+### Error Handling Philosophy
+
+**NO workflow timeouts** - workflows run until success or manual termination
+
+**Errors propagate to context**:
+```python
+try:
+    result = await workflow.execute_activity(tool_action)
+except Exception as e:
+    # Add error to agent's message context
+    await workflow.execute_activity(
+        add_message,
+        args=["SYSTEM", f"Error: {e}. Retrying with this context."]
+    )
+    # Continue - no "critical" failures
+```
+
+### Time Handling
+
+**Use Temporal timers** (workflow.sleep) for ALL waits:
+```python
+# ✅ ANY duration - seconds to months
+await workflow.sleep(timedelta(minutes=20))  # Risotto
+await workflow.sleep(timedelta(hours=24))    # Tomorrow
+await workflow.sleep(timedelta(days=365))    # Next year
+```
+
+**Don't use activity-based waits** ❌:
+- Activities consume worker slots
+- Worker must stay running
+- Less efficient than Temporal timers
+
+### State Management
+
+**State must be serializable** for `continue_as_new`:
+- Pass small summaries, not full context
+- Use database for large state (pass IDs)
+- Keep args < 100KB
+
+**Compress aggressively**:
+```python
+# Don't pass 1000 messages to continue_as_new
+# Compress to summary first
+summary = await workflow.execute_activity(summarize_context, [messages])
+workflow.continue_as_new(args=[goal, summary])
+```
+
+### Message Polling (Not Signaling)
+
+**User messages flow**: User → Backend saves to DB → Worker polls DB
+
+**DON'T use Temporal signals for messages** ❌:
+- Couples backend to Temporal
+- Backend needs workflow IDs
+- Adds complexity to both services
+
+**DO poll the database** ✅:
+```python
+# In workflow loop
+new_messages = await workflow.execute_activity(
+    poll_new_messages,
+    args=[agent_id, last_checked_timestamp]
+)
+if new_messages:
+    context.extend(new_messages)
+    last_checked_timestamp = workflow.now()
+
+# Wait before next poll
+await workflow.sleep(5)  # Check every 5 seconds
+```
+
+**Backend is dumb**:
+- `POST /api/agents/:id/messages` → Just saves to DB
+- No Temporal client needed
+- No workflow signaling
+- Worker owns the polling logic
+
+## Code Organization
+
+### Tool Structure
+
+Each tool is one file in `tools/`:
+- `send_sms.py` - SMS operations
+- `knowledge_base.py` - Blueprint queries (cosine similarity)
+- `web_search.py` - Web search
+- `web_task.py` - Browser automation
+- `finished.py` - Task completion
+
+**All tools MUST**:
+- Be Temporal activities (`@activity.defn`)
+- Be idempotent (see above)
+- Send heartbeats for long operations
+- Have proper error handling
+
+### Workflow Structure
+
+Workflows in `workflows/`:
+- `agent_workflow.py` - Main autonomous agent workflow
+
+**Workflows MUST**:
+- Be deterministic (see above)
+- Use `continue_as_new` for long runs
+- Handle errors gracefully (add to context)
+- No timeouts (run indefinitely)
+
+## Testing
+
+**Before deploying**:
+1. Test activities are idempotent (call twice, check no duplicates)
+2. Test workflow replay (kill worker mid-execution, verify resume)
+3. Test `continue_as_new` (verify state transfers correctly)
+4. Test extreme backoff (verify retries at correct intervals)
+
+## Configuration
+
+### fly.toml Settings
+
+```toml
+MAX_CONCURRENT_ACTIVITIES = "500"     # Activities per worker
+MAX_CONCURRENT_WORKFLOWS = "200"      # Workflows per worker
+ACTIVITY_RETRY_BACKOFF_COEFFICIENT = "4.0"  # 4x backoff
+ACTIVITY_RETRY_INITIAL_INTERVAL = "2"       # Start at 2s
+ACTIVITY_RETRY_MAX_INTERVAL = "64"          # Cap at 64s
+# NO WORKFLOW_EXECUTION_TIMEOUT - runs indefinitely
+```
+
+## Common Pitfalls
+
+1. ❌ **Non-idempotent activities** → Duplicates on retry
+2. ❌ **Using datetime.now() in workflows** → Breaks replay
+3. ❌ **Infinite loop without continue_as_new** → Unbounded history
+4. ❌ **Large state in continue_as_new** → Serialization errors
+5. ❌ **Activity-based waits** → Wastes worker slots
+6. ❌ **Workflow timeouts** → Agents can't run for days/weeks
+7. ❌ **Not handling errors** → Single failure kills entire agent
+
+## Key Principle
+
+**Temporal gives you durable, restartable execution**. Don't fight it:
+- Embrace replays (be deterministic)
+- Embrace retries (be idempotent)
+- Embrace long runs (use continue_as_new)
+- Embrace failures (errors are context, not fatals)
+

@@ -1,0 +1,125 @@
+"""Activity for polling new messages from the database."""
+
+from temporalio import activity
+from typing import List, Dict
+from datetime import datetime
+import structlog
+
+logger = structlog.get_logger()
+
+
+@activity.defn
+async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict]:
+    """
+    Poll for new user messages since last check.
+    
+    Args:
+        agent_id: The agent ID
+        last_checked: Timestamp of last check
+        
+    Returns:
+        List of new messages with role=USER
+    """
+    try:
+        activity.heartbeat(f"Polling messages for agent {agent_id}")
+        
+        import httpx
+        from config import load_config
+        
+        config = load_config()
+        
+        async with httpx.AsyncClient() as client:
+            # Get agent with messages
+            response = await client.get(
+                f"{config.backend.api_url}/api/agents/{agent_id}",
+                headers={
+                    "X-API-Key": config.backend.api_key,
+                    "Content-Type": "application/json"
+                },
+                timeout=30.0
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            messages = data.get('messages', [])
+            
+            # Filter for USER messages after last_checked
+            new_messages = [
+                msg for msg in messages
+                if msg['role'] == 'USER' and 
+                datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00')) > last_checked
+            ]
+            
+            if new_messages:
+                logger.info(
+                    "New messages found",
+                    agent_id=agent_id,
+                    count=len(new_messages)
+                )
+            
+            return new_messages
+            
+    except Exception as e:
+        logger.error(
+            "Failed to poll messages",
+            agent_id=agent_id,
+            error=str(e)
+        )
+        return []
+
+
+@activity.defn
+async def post_agent_message(agent_id: str, text: str, role: str = "ASSISTANT") -> Dict:
+    """
+    Post a message from the agent back to the database.
+    
+    Args:
+        agent_id: The agent ID
+        text: Message text
+        role: Message role (ASSISTANT, TOOL, SYSTEM)
+        
+    Returns:
+        Created message data
+    """
+    try:
+        activity.heartbeat(f"Posting message for agent {agent_id}")
+        
+        import httpx
+        from config import load_config
+        
+        config = load_config()
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+                json={
+                    "message": text,
+                    "role": role
+                },
+                headers={
+                    "X-API-Key": config.backend.api_key,
+                    "Content-Type": "application/json"
+                },
+                timeout=30.0
+            )
+            response.raise_for_status()
+            
+            message = response.json()
+            
+            logger.info(
+                "Message posted",
+                agent_id=agent_id,
+                message_id=message.get('message_id'),
+                role=role
+            )
+            
+            return message
+            
+    except Exception as e:
+        logger.error(
+            "Failed to post message",
+            agent_id=agent_id,
+            error=str(e)
+        )
+        raise
+

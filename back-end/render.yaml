@@ -15,8 +15,8 @@ services:
         sync: false  # Set manually - Supabase Session Pooler connection string
       - key: SUPABASE_URL
         sync: false  # Set to: https://kzlurqihzaolhzsbkctf.supabase.co
-      - key: OPENAI_API_KEY
-        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false  # Replaces OPENAI_API_KEY
       - key: ALLOWED_ORIGINS
         sync: false  # e.g., https://hinavi.ai,https://www.hinavi.ai
       - key: PORT

@@ -3,11 +3,12 @@
 ## General Development Guidelines
 
 ### Documentation
-- **Don't create excessive documentation files** - Code should be self-documenting
-- **No auto-generated READMEs** - Only create docs when explicitly requested
-- **Update existing docs** - Prefer updating .cursorrules over creating new files
-- **No summary files** - Don't create implementation summaries or completion reports
-- **Focus on code** - Ship working features, not documentation about features
+- **NEVER create .md files unless explicitly requested** - This means NO .md files, period
+- **No TEMPORAL_INTEGRATION.md, QUICK_TEST.md, SUMMARY.md, or any other .md files**
+- **Code should be self-documenting** - Write clear code, not docs about the code
+- **Update ONLY .cursorrules** - If you need to document something, update THIS file
+- **No completion reports, summaries, guides, or how-to docs** - I'll ask if I want to know something
+- **Focus on shipping code** - Not documentation about code
 
 ## Supabase Configuration
 

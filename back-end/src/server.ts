@@ -6,10 +6,20 @@ import agentsRouter from './routes/agents';
 import formatRouter from './routes/format';
 import toolsRouter from './routes/tools';
 import waitlistRouter from './routes/waitlist';
+import blueprintsRouter from './routes/blueprints';
+import modelsRouter from './routes/models';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
 dotenv.config();
+
+// Verify critical env vars
+if (!process.env.BACKEND_API_KEY) {
+  console.warn('⚠️  WARNING: BACKEND_API_KEY not found in environment');
+  console.warn('   Internal API calls from workers will fail');
+} else {
+  console.log('✓ BACKEND_API_KEY loaded:', process.env.BACKEND_API_KEY.substring(0, 20) + '...');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -46,8 +56,8 @@ app.use(
       }
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
   })
 );
 
@@ -58,10 +68,13 @@ app.get('/health', (req, res) => {
 
 // Public routes (no auth required)
 app.use('/api/waitlist', waitlistRouter);
+app.use('/api/models', modelsRouter);  // Models list is public
+app.use('/api/tools', toolsRouter);  // Tools list is public read
 
 // Routes with authentication
-app.use('/api/agents', authenticate, agentsRouter);
-app.use('/api/tools', authenticate, toolsRouter);
+// Note: Each router handles its own auth per-route
+app.use('/api/agents', agentsRouter);
+app.use('/api/blueprints', authenticate, blueprintsRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware

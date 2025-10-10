@@ -20,6 +20,7 @@ import MessageBubble from '@/components/terminal/MessageBubble';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
 import { useToast } from '@/hooks/use-toast';
+import { useModels } from '@/hooks/useModels';
 import { cn } from '@/lib/utils';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
@@ -43,7 +44,10 @@ export default function Terminal() {
   // Message input state
   const [messageInput, setMessageInput] = useState('');
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('gpt-4o');
+  const [selectedModel, setSelectedModel] = useState('anthropic/claude-sonnet-4.5');
+  
+  // Models from backend
+  const { models, loading: modelsLoading } = useModels();
   
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -413,6 +417,8 @@ export default function Terminal() {
               placeholder="Type your message..."
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
+              availableModels={models}
+              modelsLoading={modelsLoading}
             />
           </div>
         </main>

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { formatLLMJudgePrompt } from '../lib/openai';
+import { formatLLMJudgePrompt } from '../lib/openrouter';
 
 const router = Router();
 
@@ -28,7 +28,7 @@ router.post('/format-llm-judge-prompt', async (req, res) => {
     res.status(500).json({ 
       error: 'Failed to format prompt',
       details: errorMessage,
-      hasOpenAIKey: !!process.env.OPENAI_API_KEY 
+      hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY 
     });
   }
 });

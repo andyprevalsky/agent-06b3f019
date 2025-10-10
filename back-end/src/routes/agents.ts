@@ -1,13 +1,15 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
-import { AuthRequest } from '../middleware/auth';
+import { AuthRequest, authenticate } from '../middleware/auth';
+import { startAgentWorkflow } from '../lib/temporal';
 
 const router = Router();
 
 // Validation schemas
 const createAgentSchema = z.object({
   goal: z.string().min(1),
+  model: z.string().optional().default('anthropic/claude-sonnet-4.5'),
   tool_ids: z.array(z.string().uuid()),
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
@@ -17,10 +19,17 @@ const createAgentSchema = z.object({
 
 const postMessageSchema = z.object({
   message: z.string().min(1),
+  role: z.enum(['USER', 'ASSISTANT', 'TOOL', 'SYSTEM']).optional(),
+});
+
+const updateStatusSchema = z.object({
+  status: z.enum(['STARTING_UP', 'ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED']),
+  statusMessage: z.string().optional(),
+  progress: z.number().min(0).max(1).optional(),
 });
 
 // GET /api/agents - Get all agents for the authenticated user
-router.get('/', async (req: AuthRequest, res) => {
+router.get('/', authenticate, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.id;
 
@@ -32,9 +41,11 @@ router.get('/', async (req: AuthRequest, res) => {
       select: {
         id: true,
         goal: true,
+        model: true,
         progress: true,
         status: true,
         statusMessage: true,
+        temporalWorkflowId: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -46,10 +57,12 @@ router.get('/', async (req: AuthRequest, res) => {
     res.json({
       agents: agents.map((agent) => ({
         agent_id: agent.id,
-        progress: agent.progress,
         goal: agent.goal,
+        model: agent.model,
+        progress: agent.progress,
         status: agent.status,
         status_message: agent.statusMessage,
+        temporal_workflow_id: agent.temporalWorkflowId,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
       })),
@@ -61,7 +74,7 @@ router.get('/', async (req: AuthRequest, res) => {
 });
 
 // POST /api/agents - Create a new agent
-router.post('/', async (req: AuthRequest, res) => {
+router.post('/', authenticate, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.id;
     const body = createAgentSchema.parse(req.body);
@@ -84,6 +97,7 @@ router.post('/', async (req: AuthRequest, res) => {
         data: {
           userId,
           goal: body.goal,
+          model: body.model,
           progress: 0.0,
           status: 'STARTING_UP',
         },
@@ -109,12 +123,63 @@ router.post('/', async (req: AuthRequest, res) => {
       return newAgent;
     });
 
+    // Start Temporal workflow
+    let workflowId: string | null = null;
+    try {
+      // Check if taskQueue is provided in request (for test isolation)
+      const taskQueue = (body as any).task_queue;
+      
+      workflowId = await startAgentWorkflow({
+        agentId: agent.id,
+        userId,
+        goal: body.goal,
+        model: body.model,
+        toolIds: body.tool_ids,
+        verifier: {
+          type: body.verifier.type,
+          llmJudgePrompt: body.verifier.llm_judge_prompt,
+        },
+        ...(taskQueue ? { taskQueue } : {}),
+      });
+
+      // Update agent with workflow ID
+      await prisma.agent.update({
+        where: { id: agent.id },
+        data: { temporalWorkflowId: workflowId },
+      });
+
+      console.log('✅ Agent workflow started', {
+        agentId: agent.id,
+        workflowId,
+        taskQueue: taskQueue || 'default',
+      });
+    } catch (error) {
+      console.error('❌ Failed to start workflow', {
+        agentId: agent.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      
+      // Mark agent as failed
+      await prisma.agent.update({
+        where: { id: agent.id },
+        data: {
+          status: 'FAILED',
+          statusMessage: 'Failed to start workflow: ' + (error instanceof Error ? error.message : String(error)),
+        },
+      });
+
+      throw error;
+    }
+
+    // Return agent with updated workflow ID
     res.status(201).json({
       agent_id: agent.id,
       progress: agent.progress,
       goal: agent.goal,
+      model: agent.model,
       status: agent.status,
       status_message: agent.statusMessage,
+      temporal_workflow_id: workflowId, // Use the workflow ID we just got
       created_at: agent.createdAt,
       updated_at: agent.updatedAt,
     });
@@ -129,18 +194,18 @@ router.post('/', async (req: AuthRequest, res) => {
 });
 
 // GET /api/agents/:id - Get agent details with messages
-router.get('/:id', async (req: AuthRequest, res) => {
+router.get('/:id', authenticate, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user!.id;
+    const userId = req.isInternal ? undefined : req.user!.id;
     const agentId = req.params.id;
     const cursor = req.query.cursor as string | undefined;
     const limit = 50;
 
-    // Verify agent belongs to user and is not deleted
+    // Verify agent belongs to user (or internal) and is not deleted
     const agent = await prisma.agent.findFirst({
       where: {
         id: agentId,
-        userId,
+        ...(userId ? { userId } : {}), // Only filter by userId for user auth
         deletedAt: null,
       },
       include: {
@@ -175,9 +240,11 @@ router.get('/:id', async (req: AuthRequest, res) => {
       agent: {
         agent_id: agent.id,
         goal: agent.goal,
+        model: agent.model,
         progress: agent.progress,
         status: agent.status,
         status_message: agent.statusMessage,
+        temporal_workflow_id: agent.temporalWorkflowId,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
         verifier: agent.verifier
@@ -209,33 +276,64 @@ router.get('/:id', async (req: AuthRequest, res) => {
   }
 });
 
-// POST /api/agents/:id/messages - Post a message to an agent
-router.post('/:id/messages', async (req: AuthRequest, res) => {
+// POST /api/agents/:id/messages - Post a message (user or internal)
+router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user!.id;
     const agentId = req.params.id;
     const body = postMessageSchema.parse(req.body);
+    const isInternal = req.isInternal!;
 
-    // Verify agent belongs to user and is not deleted
-    const agent = await prisma.agent.findFirst({
-      where: {
-        id: agentId,
-        userId,
-        deletedAt: null,
-      },
-    });
-
-    if (!agent) {
-      res.status(404).json({ error: 'Agent not found' });
-      return;
+    // Determine role based on auth type
+    let role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
+    if (isInternal) {
+      // Internal (worker): role must be provided and must be ASSISTANT/TOOL/SYSTEM
+      if (!body.role || body.role === 'USER') {
+        res.status(400).json({ error: 'Internal messages must specify role (ASSISTANT/TOOL/SYSTEM)' });
+        return;
+      }
+      role = body.role as 'ASSISTANT' | 'TOOL' | 'SYSTEM';
+    } else {
+      // User: always USER role, ignore any provided role
+      role = 'USER';
     }
 
-    // Create message with role USER
+    // Verify agent exists
+    if (isInternal) {
+      // Internal: just check agent exists
+      const agent = await prisma.agent.findFirst({
+        where: {
+          id: agentId,
+          deletedAt: null,
+        },
+      });
+
+      if (!agent) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+    } else {
+      // User: verify ownership
+      const userId = req.user!.id;
+      const agent = await prisma.agent.findFirst({
+        where: {
+          id: agentId,
+          userId,
+          deletedAt: null,
+        },
+      });
+
+      if (!agent) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+    }
+
+    // Create message
     const message = await prisma.message.create({
       data: {
         agentId,
         text: body.message,
-        role: 'USER',
+        role,
         timestamp: new Date(),
       },
     });
@@ -246,9 +344,6 @@ router.post('/:id/messages', async (req: AuthRequest, res) => {
       text: message.text,
       role: message.role,
     });
-
-    // TODO: Trigger agent processing here
-    // This is where you would send the message to your agent system
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
@@ -259,17 +354,16 @@ router.post('/:id/messages', async (req: AuthRequest, res) => {
   }
 });
 
-// DELETE /api/agents/:id - Soft delete an agent
-router.delete('/:id', async (req: AuthRequest, res) => {
+// PATCH /api/agents/:id/status - Update agent status (internal/worker only)
+router.patch('/:id/status', authenticate, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user!.id;
     const agentId = req.params.id;
+    const body = updateStatusSchema.parse(req.body);
 
-    // Verify agent belongs to user
+    // Verify agent exists
     const agent = await prisma.agent.findFirst({
       where: {
         id: agentId,
-        userId,
         deletedAt: null,
       },
     });
@@ -277,6 +371,83 @@ router.delete('/:id', async (req: AuthRequest, res) => {
     if (!agent) {
       res.status(404).json({ error: 'Agent not found' });
       return;
+    }
+
+    // Update agent status
+    const updated = await prisma.agent.update({
+      where: { id: agentId },
+      data: {
+        status: body.status,
+        statusMessage: body.statusMessage,
+        progress: body.progress,
+        updatedAt: new Date(),
+      },
+    });
+
+    res.json({
+      agent_id: updated.id,
+      status: updated.status,
+      status_message: updated.statusMessage,
+      progress: updated.progress,
+      updated_at: updated.updatedAt,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request body', details: error.errors });
+      return;
+    }
+    console.error('Update status error:', error);
+    res.status(500).json({ error: 'Failed to update agent status' });
+  }
+});
+
+// DELETE /api/agents/:id - Soft delete an agent and cancel workflow
+router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.isInternal ? undefined : req.user!.id;
+    const agentId = req.params.id;
+
+    // Verify agent belongs to user (or internal)
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        ...(userId ? { userId } : {}),
+        deletedAt: null,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    // Cancel Temporal workflow if it exists
+    if (agent.temporalWorkflowId) {
+      try {
+        const logMsg = `[${new Date().toISOString()}] Attempting to cancel workflow ${agent.temporalWorkflowId} for agent ${agentId}`;
+        console.log(`🔄 ${logMsg}`);
+        await import('fs').then(fs => fs.promises.appendFile('/tmp/workflow-cancel.log', logMsg + '\n'));
+        
+        const { getTemporalClient } = await import('../lib/temporal');
+        const client = await getTemporalClient();
+        const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+        
+        // Terminate the workflow (forceful stop)
+        // Using terminate() instead of cancel() because cancel() is graceful
+        // and may not work if the workflow is stuck in a retry loop
+        await handle.terminate('Agent deleted by user');
+        
+        const successMsg = `[${new Date().toISOString()}] Successfully terminated workflow ${agent.temporalWorkflowId}`;
+        console.log(`✅ ${successMsg}`);
+        await import('fs').then(fs => fs.promises.appendFile('/tmp/workflow-cancel.log', successMsg + '\n'));
+      } catch (error) {
+        const errorMsg = `[${new Date().toISOString()}] Failed to cancel workflow ${agent.temporalWorkflowId}: ${error instanceof Error ? error.message : String(error)}`;
+        console.error(`⚠️  ${errorMsg}`);
+        await import('fs').then(fs => fs.promises.appendFile('/tmp/workflow-cancel.log', errorMsg + '\n'));
+        // Continue with deletion even if cancellation fails
+      }
+    } else {
+      console.log(`ℹ️  No workflow ID for agent ${agentId}, skipping workflow cancellation`);
     }
 
     // Soft delete

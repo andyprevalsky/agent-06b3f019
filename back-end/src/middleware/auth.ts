@@ -30,6 +30,7 @@ export interface AuthRequest extends Request {
     email?: string;
     phone?: string;
   };
+  isInternal?: boolean;
 }
 
 // Function to get the signing key from JWKS
@@ -51,6 +52,18 @@ export async function authenticate(
   next: NextFunction
 ): Promise<void> {
   try {
+    // Try API key first (for internal/worker calls)
+    const apiKey = req.headers['x-api-key'] as string;
+    const expectedKey = process.env.BACKEND_API_KEY;
+
+    if (apiKey && expectedKey && apiKey === expectedKey) {
+      req.isInternal = true;
+      // For internal calls, we don't have a user ID
+      // Routes should check req.isInternal and skip user-specific logic
+      return next();
+    }
+
+    // Fall back to JWT (for user calls)
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -89,6 +102,7 @@ export async function authenticate(
           email: payload.email,
           phone: payload.phone,
         };
+        req.isInternal = false;
 
         next();
       }

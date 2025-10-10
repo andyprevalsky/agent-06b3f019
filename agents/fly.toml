@@ -1,0 +1,119 @@
+# fly.toml app configuration file generated for navi-temporal-agents
+# 
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+
+app = "navi-temporal-agents"
+primary_region = "iad"  # Ashburn, Virginia
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Python configuration
+  PYTHONUNBUFFERED = "1"
+  PYTHON_VERSION = "3.10"
+  
+  # Temporal Worker Configuration
+  # These control concurrency and resource usage
+  MAX_CONCURRENT_ACTIVITIES = "500"
+  MAX_CONCURRENT_WORKFLOWS = "200"
+  MAX_CACHED_WORKFLOWS = "1000"
+  MAX_CONCURRENT_ACTIVITY_TASK_POLLERS = "5"
+  MAX_CONCURRENT_WORKFLOW_TASK_POLLERS = "5"
+  
+  # Worker tuning
+  WORKER_SHUTDOWN_GRACE_PERIOD = "30s"
+  MAX_HEARTBEAT_THROTTLE_INTERVAL = "60s"
+  DEFAULT_HEARTBEAT_THROTTLE_INTERVAL = "30s"
+  
+  # Activity timeouts (in seconds)
+  ACTIVITY_START_TO_CLOSE_TIMEOUT = "300"  # 5 minutes default
+  ACTIVITY_SCHEDULE_TO_CLOSE_TIMEOUT = "600"  # 10 minutes default
+  ACTIVITY_HEARTBEAT_TIMEOUT = "30"
+  
+  # Workflow timeouts - NO EXECUTION TIMEOUT (runs until success or manual termination)
+  WORKFLOW_TASK_TIMEOUT = "10"
+  
+  # Retry policies - EXTREME BACKOFF
+  ACTIVITY_MAX_ATTEMPTS = "6"
+  ACTIVITY_RETRY_BACKOFF_COEFFICIENT = "4.0"  # 4x multiplier
+  ACTIVITY_RETRY_INITIAL_INTERVAL = "2"  # Start at 2 seconds
+  ACTIVITY_RETRY_MAX_INTERVAL = "64"  # Cap at 64 seconds
+  
+  # Task queue
+  TASK_QUEUE = "navi-agent-tasks"
+
+# Secrets (set via: fly secrets set TEMPORAL_API_KEY=...)
+# TEMPORAL_API_KEY
+# TEMPORAL_NAMESPACE
+# TEMPORAL_ADDRESS
+# OPENROUTER_API_KEY (for LLM capabilities - replaces OPENAI_API_KEY)
+# SERPER_API_KEY (for web search)
+# SUPABASE_URL
+# SUPABASE_KEY (for knowledge base)
+# TWILIO_ACCOUNT_SID (for SMS)
+# TWILIO_AUTH_TOKEN
+# TWILIO_PHONE_NUMBER
+# BACKEND_API_URL (optional, defaults to https://navi-j9a9.onrender.com)
+# BACKEND_API_KEY (for blueprint search)
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false  # Keep workers running
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 250
+    soft_limit = 200
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 250
+    soft_limit = 200
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+
+  [[services.http_checks]]
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "15s"
+    method = "get"
+    path = "/health"
+    protocol = "http"
+
+# VM Resources - adjust based on needs
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 2
+  memory_mb = 2048
+
+# Auto-scaling configuration
+[auto_scaling]
+  min_count = 1
+  max_count = 10
+
+[metrics]
+  port = 9091
+  path = "/metrics"
+

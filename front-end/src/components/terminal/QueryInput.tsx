@@ -12,6 +12,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Badge } from '@/components/ui/badge';
 import { getTools, Tool } from '@/lib/api';
+import { Model } from '@/hooks/useModels';
 
 interface QueryInputProps {
   value: string;
@@ -21,13 +22,9 @@ interface QueryInputProps {
   placeholder?: string;
   selectedModel?: string;
   onModelChange?: (model: string) => void;
+  availableModels?: Model[];  // Models from backend
+  modelsLoading?: boolean;
 }
-
-const AVAILABLE_MODELS = [
-  { id: 'gpt-4o', name: 'GPT-4o' },
-  { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-  { id: 'claude-3.5-sonnet', name: 'Claude 3.5 Sonnet' },
-];
 
 export default function QueryInput({
   value,
@@ -35,8 +32,10 @@ export default function QueryInput({
   onSubmit,
   disabled = false,
   placeholder = 'Type your message...',
-  selectedModel = 'gpt-4o',
+  selectedModel = 'anthropic/claude-sonnet-4.5',
   onModelChange,
+  availableModels = [],
+  modelsLoading = false,
 }: QueryInputProps) {
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
@@ -87,7 +86,14 @@ export default function QueryInput({
     setSelectedTools(selectedTools.filter((id) => id !== toolId));
   };
 
-  const selectedModelName = AVAILABLE_MODELS.find((m) => m.id === selectedModel)?.name || selectedModel;
+  // Separate featured (first 6) from rest
+  const featuredModels = availableModels.slice(0, 6);
+  const otherModels = availableModels.slice(6);
+  
+  const selectedModelInfo = availableModels.find((m) => m.id === selectedModel);
+  const selectedModelName = selectedModelInfo 
+    ? `${selectedModelInfo.provider}/${selectedModelInfo.name}`
+    : selectedModel;
 
   return (
     <div className="w-full">
@@ -227,27 +233,65 @@ export default function QueryInput({
                     <span>Change Model</span>
                   </button>
                 </PopoverTrigger>
-                <PopoverContent className="w-[200px] p-0 z-50" align="start">
+                <PopoverContent className="w-[300px] p-0 z-50" align="start">
                   <Command className="bg-white">
-                    <CommandList>
-                      <CommandGroup heading="Select Model">
-                        {AVAILABLE_MODELS.map((model) => (
-                          <CommandItem
-                            key={model.id}
-                            onSelect={() => {
-                              onModelChange?.(model.id);
-                              setShowModelPicker(false);
-                            }}
-                          >
-                            <div className="flex items-center justify-between w-full">
-                              <span>{model.name}</span>
-                              {model.id === selectedModel && (
-                                <span className="text-primary">✓</span>
-                              )}
-                            </div>
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
+                    <CommandInput placeholder="Search models..." />
+                    <CommandList className="max-h-[400px]">
+                      {modelsLoading ? (
+                        <div className="p-4 text-center text-sm text-gray-500">
+                          Loading models...
+                        </div>
+                      ) : availableModels.length === 0 ? (
+                        <CommandEmpty>No models available.</CommandEmpty>
+                      ) : (
+                        <>
+                          {/* Featured Models */}
+                          <CommandGroup heading="⭐ Featured">
+                            {featuredModels.map((model) => (
+                              <CommandItem
+                                key={model.id}
+                                onSelect={() => {
+                                  onModelChange?.(model.id);
+                                  setShowModelPicker(false);
+                                }}
+                              >
+                                <div className="flex items-center justify-between w-full">
+                                  <div className="flex flex-col">
+                                    <span className="font-medium">{model.name}</span>
+                                    <span className="text-xs text-gray-500">{model.provider}</span>
+                                  </div>
+                                  {model.id === selectedModel && (
+                                    <span className="text-primary">✓</span>
+                                  )}
+                                </div>
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+
+                          {/* Other Models */}
+                          <CommandGroup heading="All Models">
+                            {otherModels.map((model) => (
+                              <CommandItem
+                                key={model.id}
+                                onSelect={() => {
+                                  onModelChange?.(model.id);
+                                  setShowModelPicker(false);
+                                }}
+                              >
+                                <div className="flex items-center justify-between w-full">
+                                  <div className="flex flex-col">
+                                    <span className="text-sm">{model.name}</span>
+                                    <span className="text-xs text-gray-500">{model.provider}</span>
+                                  </div>
+                                  {model.id === selectedModel && (
+                                    <span className="text-primary">✓</span>
+                                  )}
+                                </div>
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </>
+                      )}
                     </CommandList>
                   </Command>
                 </PopoverContent>
