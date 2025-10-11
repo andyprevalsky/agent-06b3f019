@@ -8,13 +8,14 @@ echo ""
 # Check if server is running
 if ! curl -s http://localhost:3001/health > /dev/null 2>&1; then
   echo "❌ Backend server not running on localhost:3001"
-  echo "   Please start the server with: npm run dev"
+  echo "   Please start the server with:"
+  echo "   cd back-end && npm run dev"
   echo ""
   exit 1
 fi
 
 # Run the API test suite
-npm run test:api
+cd back-end && npm run test:api
 
 if [ $? -ne 0 ]; then
   echo ""

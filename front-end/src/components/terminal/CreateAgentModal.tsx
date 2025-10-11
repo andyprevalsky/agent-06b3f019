@@ -23,8 +23,14 @@ interface CreateAgentModalProps {
 }
 
 export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgentModalProps) {
-  const [goal, setGoal] = useState('');
-  const [llmJudgePrompt, setLlmJudgePrompt] = useState('');
+  // Default values for local testing (only in development)
+  const defaultGoal = import.meta.env.DEV ? 'count to 10, 1 sec at a time' : '';
+  const defaultLlmJudgePrompt = import.meta.env.DEV 
+    ? 'Evaluate how well the agent counted from 1 to 10, with each number presented approximately 1 second apart. Return a score between 0 and 1, where 0 means the agent did not count to 10 in order or did not observe the 1-second interval, and 1 means the agent counted from 1 to 10 correctly with each number given about 1 second apart. Only provide the numeric score, no explanation.'
+    : '';
+
+  const [goal, setGoal] = useState(defaultGoal);
+  const [llmJudgePrompt, setLlmJudgePrompt] = useState(defaultLlmJudgePrompt);
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -106,8 +112,8 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
       });
 
       // Reset form
-      setGoal('');
-      setLlmJudgePrompt('');
+      setGoal(defaultGoal);
+      setLlmJudgePrompt(defaultLlmJudgePrompt);
       setSelectedTools([]);
       onClose();
     } catch (error) {

@@ -43,6 +43,38 @@ function getContextPercentage(agent: AgentDetail): number {
   return Math.min(100, (agent.context_size / restartThreshold) * 100);
 }
 
+function deduplicateToolMessages(messages: Message[]): Message[] {
+  // Track the most recent message for each tool_call_id
+  const toolMessageMap = new Map<string, Message>();
+  const nonToolMessages: Message[] = [];
+
+  messages.forEach((message) => {
+    if (message.role === 'TOOL') {
+      // Parse tool_call_id from message text (format: tool_call_id|||title|||status|||message)
+      const parts = message.text.split('|||');
+      if (parts.length >= 3) {
+        const toolCallId = parts[0];
+        // Keep only the most recent message (last one wins)
+        toolMessageMap.set(toolCallId, message);
+      } else {
+        // Old format or malformed, keep as-is
+        nonToolMessages.push(message);
+      }
+    } else {
+      nonToolMessages.push(message);
+    }
+  });
+
+  // Combine non-tool messages with deduplicated tool messages
+  // and sort by timestamp to maintain chronological order
+  const deduplicatedMessages = [...nonToolMessages, ...Array.from(toolMessageMap.values())];
+  deduplicatedMessages.sort((a, b) => 
+    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+
+  return deduplicatedMessages;
+}
+
 export default function Terminal() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -491,7 +523,7 @@ export default function Terminal() {
             ) : (
               // Agent selected - show messages
               <div className="max-w-4xl mx-auto space-y-4">
-                {messages.filter((m) => m.role !== 'SYSTEM').map((message) => (
+                {deduplicateToolMessages(messages.filter((m) => m.role !== 'SYSTEM')).map((message) => (
                   <MessageBubble key={message.message_id} message={message} />
                 ))}
                 {showStatusLoader && lastMessage && (

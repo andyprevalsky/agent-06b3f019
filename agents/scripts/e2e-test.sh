@@ -102,7 +102,7 @@ source venv/bin/activate
 
 # Generate unique task queue for this test run to avoid worker collisions
 TEST_TASK_QUEUE="navi-agent-tasks-test-$$"
-export TASK_QUEUE="$TEST_TASK_QUEUE"
+export TEMPORAL_TASK_QUEUE="$TEST_TASK_QUEUE"
 
 python worker.py > "$WORKER_LOG" 2>&1 &
 WORKER_PID=$!

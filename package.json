@@ -1,0 +1,17 @@
+{
+  "name": "navi-whisper-lux",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Navi AI Agent Platform",
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.0.11"
+  },
+  "workspaces": [
+    "back-end",
+    "front-end",
+    "agents"
+  ]
+}

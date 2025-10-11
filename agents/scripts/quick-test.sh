@@ -85,7 +85,7 @@ start_worker() {
   # Start new worker on test queue
   cd /Users/andyprevalsky/Desktop/projects/navi-whisper-lux/agents
   source venv/bin/activate
-  TASK_QUEUE="$TEST_TASK_QUEUE" python worker.py > /tmp/navi-worker.log 2>&1 &
+  TEMPORAL_TASK_QUEUE="$TEST_TASK_QUEUE" python worker.py > /tmp/navi-worker.log 2>&1 &
   WORKER_PID=$!
   
   # Wait for worker to start

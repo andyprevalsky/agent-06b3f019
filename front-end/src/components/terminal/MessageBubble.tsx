@@ -1,9 +1,17 @@
 import { Message } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Info } from 'lucide-react';
+import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
+import { useState } from 'react';
 
 interface MessageBubbleProps {
   message: Message;
+}
+
+interface ParsedToolMessage {
+  toolCallId: string;
+  title: string;
+  status: 'IN_PROGRESS' | 'FINISHED';
+  message: string;
 }
 
 const roleConfig = {
@@ -30,17 +38,92 @@ const roleConfig = {
   },
   TOOL: {
     icon: Wrench,
-    bg: 'bg-green-500/10 dark:bg-green-500/20',
-    border: 'border-green-500/30',
-    text: 'text-green-700 dark:text-green-300',
+    bg: 'bg-muted/50',
+    border: 'border-border',
+    text: 'text-muted-foreground',
     label: 'Tool',
   },
 };
+
+function parseToolMessage(text: string): ParsedToolMessage | null {
+  // Format: tool_call_id|||title|||status|||message
+  const parts = text.split('|||');
+  if (parts.length >= 3) {
+    return {
+      toolCallId: parts[0],
+      title: parts[1],
+      status: (parts[2] === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'FINISHED') as 'IN_PROGRESS' | 'FINISHED',
+      message: parts[3] || '',
+    };
+  }
+  return null;
+}
+
+function ToolMessage({ parsed }: { parsed: ParsedToolMessage }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const hasMessage = parsed.message.trim().length > 0;
+
+  return (
+    <div className="space-y-2">
+      {/* Title row */}
+      <div 
+        className={cn(
+          "flex items-center gap-2",
+          hasMessage && "cursor-pointer hover:opacity-80 transition-opacity"
+        )}
+        onClick={hasMessage ? () => setIsExpanded(!isExpanded) : undefined}
+      >
+        <span className={cn(
+          "text-sm font-medium",
+          parsed.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
+          parsed.status === 'FINISHED' && "text-foreground"
+        )}>
+          {parsed.title}
+        </span>
+        {hasMessage && (
+          <ChevronRight 
+            className={cn(
+              "h-4 w-4 text-muted-foreground transition-transform",
+              isExpanded && "rotate-90"
+            )} 
+          />
+        )}
+      </div>
+
+      {/* Expandable message content */}
+      {hasMessage && isExpanded && (
+        <div className="pl-4 border-l-2 border-border animate-in slide-in-from-top-2 duration-200">
+          <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
+            {parsed.message}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function MessageBubble({ message }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
+  const isTool = message.role === 'TOOL';
+
+  // Parse tool message if applicable
+  const parsedTool = isTool ? parseToolMessage(message.text) : null;
+
+  // Tool messages: plain text, no bubble, no icon
+  if (isTool && parsedTool) {
+    return (
+      <div className="flex gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
+        {/* Empty space where icon would be to align with agent messages */}
+        <div className="flex-shrink-0 w-8" />
+        
+        <div className="flex-1">
+          <ToolMessage parsed={parsedTool} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={cn('flex gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300', isUser && 'flex-row-reverse')}>

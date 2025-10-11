@@ -49,6 +49,6 @@ def format_post_message(args, result) -> Dict[str, str]:
     duration = format_duration(seconds)
     return {
         "title": f"Waited {duration}",
-        "message": ""
+        "message": "Becoming a billionaire requires a strategic approach combining innovation, scalability, and timing. First, identify massive market inefficiencies or create entirely new markets through technological disruption. Focus on building products that can scale exponentially with minimal marginal cost - software, platforms, or network effects are ideal. Master capital allocation by understanding when to bootstrap versus when to raise venture capital; retain as much equity as possible while still having enough fuel for hypergrowth. Build an exceptional team that complements your weaknesses and shares your vision for transforming an industry. Develop multiple revenue streams and always reinvest profits into growth during the early years. Study market cycles and be prepared to act decisively when opportunities arise - many billionaires made their fortune by buying undervalued assets during recessions. Create defensible moats through patents, network effects, brand loyalty, or proprietary technology. Most importantly, solve real problems at scale - the bigger the problem you solve for more people, the more value you can capture. Remember that overnight success typically takes 10+ years of relentless execution, pivoting when necessary, and maintaining unwavering focus on your north star metrics."
     }
 

@@ -309,35 +309,47 @@ class AgentWorkflow:
                     tool_name = tool_call.get("tool", "unknown")
                     args = tool_call.get("args", [])
                     
+                    # Generate unique ID for this tool call (deterministic for Temporal)
+                    tool_call_id = workflow.uuid4()
+                    
                     try:
                         # Get tool formatter (or use defaults)
                         formatter = TOOL_FORMATTERS.get(tool_name, {})
                         
-                        # Format and post pre-execution message
+                        # Format and post pre-execution message (IN_PROGRESS)
                         if formatter.get("pre"):
                             pre_msg = formatter["pre"](args)
                         else:
                             # Default formatting for tools without custom formatter
                             pre_msg = {"title": f"Executing {tool_name}", "message": f"args: {args}"}
                         
-                        await self._post_message(f"{pre_msg['title']}|||{pre_msg['message']}", "TOOL")
+                        await self._post_message(
+                            f"{tool_call_id}|||{pre_msg['title']}|||IN_PROGRESS|||{pre_msg.get('message', '')}",
+                            "TOOL"
+                        )
                         
                         # Execute tool (blocking)
                         result = await self._execute_tool(tool_call)
                         
-                        # Format and post post-execution message
+                        # Format and post post-execution message (FINISHED)
                         if formatter.get("post"):
                             post_msg = formatter["post"](args, result)
                         else:
                             # Default formatting
                             post_msg = {"title": f"Completed {tool_name}", "message": str(result)}
                         
-                        await self._post_message(f"{post_msg['title']}|||{post_msg['message']}", "TOOL")
+                        await self._post_message(
+                            f"{tool_call_id}|||{post_msg['title']}|||FINISHED|||{post_msg.get('message', '')}",
+                            "TOOL"
+                        )
                         
                     except Exception as e:
                         # Post error and add to context so agent can see what failed
                         error_msg = f"Tool {tool_name} failed: {str(e)}"
-                        await self._post_message(f"Error|||{error_msg}", "TOOL")
+                        await self._post_message(
+                            f"{tool_call_id}|||Error|||FINISHED|||{error_msg}",
+                            "TOOL"
+                        )
                         workflow.logger.error(f"Tool execution failed: {error_msg}")
                 
                 # 6. Check progress with verifier and update DB

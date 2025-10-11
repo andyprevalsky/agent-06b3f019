@@ -92,7 +92,7 @@ def load_config() -> AppConfig:
         api_key=os.environ["TEMPORAL_API_KEY"],
         namespace=os.environ["TEMPORAL_NAMESPACE"],
         address=os.environ["TEMPORAL_ADDRESS"],
-        task_queue=os.getenv("TASK_QUEUE", "navi-agent-tasks"),
+        task_queue=os.getenv("TEMPORAL_TASK_QUEUE", "navi-agent-tasks"),
         max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "500")),
         max_concurrent_workflows=int(os.getenv("MAX_CONCURRENT_WORKFLOWS", "200")),
         max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "1000")),

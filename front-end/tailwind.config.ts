@@ -114,12 +114,17 @@ export default {
 				'voice-bar-4': {
 					'0%, 100%': { height: '0.375rem' },
 					'50%': { height: '0.625rem' }
+				},
+				'shimmer': {
+					'0%': { backgroundPosition: '200% center' },
+					'100%': { backgroundPosition: '-200% center' }
 				}
 			},
 			animation: {
 				'accordion-down': 'accordion-down 0.2s ease-out',
 				'accordion-up': 'accordion-up 0.2s ease-out',
-				'gradient-rotate': 'gradient-rotate 8s ease-in-out infinite'
+				'gradient-rotate': 'gradient-rotate 8s ease-in-out infinite',
+				'shimmer': 'shimmer 2s linear infinite'
 			},
 			spacing: {
 				'120': '30rem',
