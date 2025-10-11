@@ -22,6 +22,11 @@ model Agent {
   deletedAt          DateTime?   // Soft delete
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
+  
+  // Metrics
+  tokenCount         Int         @default(0) // Cumulative tokens used
+  contextSize        Int         @default(0) // Current context window usage in tokens
+  messageCount       Int         @default(0) // Total messages in context
 
   verifier  Verifier?
   tools     AgentTool[]

@@ -8,6 +8,7 @@ from .summarize import compress_context
 from .model_info import get_model_context_window
 from .knowledge_base import query_blueprints, save_blueprint
 from .finished import mark_finished
+from .fetch_config import fetch_agent_config
 
 __all__ = [
     "fetch_agent_tools",
@@ -22,5 +23,6 @@ __all__ = [
     "query_blueprints",
     "save_blueprint",
     "mark_finished",
+    "fetch_agent_config",
 ]
 

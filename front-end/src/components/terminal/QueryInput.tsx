@@ -24,6 +24,7 @@ interface QueryInputProps {
   onModelChange?: (model: string) => void;
   availableModels?: Model[];  // Models from backend
   modelsLoading?: boolean;
+  contextPercentage?: number; // Context usage percentage (0-100)
 }
 
 export default function QueryInput({
@@ -36,6 +37,7 @@ export default function QueryInput({
   onModelChange,
   availableModels = [],
   modelsLoading = false,
+  contextPercentage = 0,
 }: QueryInputProps) {
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
@@ -179,9 +181,11 @@ export default function QueryInput({
               </div>
             </div>
 
-            {/* Context Meter - Placeholder for now */}
+            {/* Context Meter */}
             <div className="flex items-center gap-2 text-gray-500 text-xs">
-              <span>0%</span>
+              <span className="font-mono">
+                {contextPercentage.toFixed(0)}%
+              </span>
               <svg className="transform -rotate-90" viewBox="0 0 20 20" width="18" height="18">
                 <circle
                   className="fill-none stroke-gray-300 opacity-70"
@@ -191,14 +195,14 @@ export default function QueryInput({
                   strokeWidth="3"
                 />
                 <circle
-                  className="fill-none stroke-gray-500"
+                  className="fill-none stroke-gray-500 transition-all duration-200"
                   cx="10"
                   cy="10"
                   r="8"
                   strokeWidth="3"
                   strokeLinecap="round"
                   strokeDasharray="50.265"
-                  strokeDashoffset="50.265"
+                  strokeDashoffset={50.265 - (50.265 * contextPercentage / 100)}
                   style={{ transition: 'stroke-dashoffset 200ms ease' }}
                 />
               </svg>

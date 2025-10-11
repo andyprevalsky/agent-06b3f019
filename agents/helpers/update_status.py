@@ -14,17 +14,23 @@ logger = structlog.get_logger()
 async def update_agent_status(
     agent_id: str,
     status: str,
-    progress: Optional[float] = None,
-    status_message: Optional[str] = None
+    progress: float,
+    status_message: str,
+    token_count: int,
+    context_size: int,
+    message_count: int
 ) -> None:
     """
-    Update agent status in the database.
+    Update agent status and metrics in the database.
     
     Args:
         agent_id: Agent ID
         status: Status value (STARTING_UP, ACTIVE, PAUSED, COMPLETED, FAILED)
         progress: Progress as 0.0-1.0
-        status_message: Optional status message
+        status_message: Status message
+        token_count: Cumulative tokens used
+        context_size: Current context window usage in tokens
+        message_count: Total messages in context
     """
     try:
         activity.heartbeat(f"Updating agent status: {status}")
@@ -37,7 +43,10 @@ async def update_agent_status(
                 json={
                     "status": status,
                     "progress": progress,
-                    "statusMessage": status_message
+                    "statusMessage": status_message,
+                    "tokenCount": token_count,
+                    "contextSize": context_size,
+                    "messageCount": message_count
                 },
                 headers={
                     "X-API-Key": config.backend.api_key,
@@ -51,7 +60,10 @@ async def update_agent_status(
                 "Agent status updated",
                 agent_id=agent_id,
                 status=status,
-                progress=progress
+                progress=progress,
+                tokens=token_count,
+                context_size=context_size,
+                messages=message_count
             )
             
     except Exception as e:

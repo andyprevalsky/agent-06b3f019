@@ -322,6 +322,89 @@ NODE_ENV="development"
 
 ## Testing
 
+### Testing Workflow Changes (IMPORTANT!)
+
+**CRITICAL**: Always check for and stop stale workers before testing workflow changes!
+
+#### Step 1: Check for Running Workers
+
+```bash
+# Check if any workers are running
+ps aux | grep "[p]ython worker.py"
+
+# If any workers are found, STOP THEM:
+pkill -9 -f "python worker.py"
+
+# Verify they're stopped
+ps aux | grep python | grep worker || echo "No workers running"
+```
+
+**Why this matters**: Old workers run stale code and will cause confusing bugs where your changes don't appear to work!
+
+#### Step 2: Start Fresh Worker on Test Queue
+
+```bash
+cd agents
+source venv/bin/activate
+TASK_QUEUE="navi-agent-tasks-quicktest" python worker.py > /tmp/navi-worker.log 2>&1 &
+```
+
+**Important**: The test queue (`navi-agent-tasks-quicktest`) isolates your tests from production workers on Render!
+
+#### Step 3: Use Quick Test Script
+
+```bash
+cd agents/scripts
+
+# Create test agent (auto-starts worker on test queue)
+./quick-test.sh          # Creates agent on test queue
+
+# Test features
+./quick-test.sh worker   # Manually restart worker on test queue
+./quick-test.sh pause    # Pause agent
+./quick-test.sh resume   # Resume agent  
+./quick-test.sh status   # Check status (metrics, tokens, etc)
+./quick-test.sh logs     # Watch worker logs (see emoji debug logs)
+
+# Cleanup
+./quick-test.sh delete   # Delete test agent and stop workflow
+```
+
+**Features**:
+- ✅ Auto-starts worker on isolated test queue (navi-agent-tasks-quicktest)
+- ✅ Kills any existing local workers before starting
+- ✅ Caches auth token for 1 hour
+- ✅ Remembers last test agent
+- ✅ Quick pause/resume testing
+- ✅ Live log tailing with debug output
+- ✅ Automatic cleanup
+- ✅ Safe from production workers on Render
+
+#### Step 4: After Code Changes - RESTART THE WORKER!
+
+```bash
+# Stop old worker
+pkill -9 -f "python worker.py"
+
+# Start fresh worker with updated code
+cd agents && source venv/bin/activate
+TASK_QUEUE="navi-agent-tasks-quicktest" python worker.py > /tmp/navi-worker.log 2>&1 &
+
+# Create new test agent (old ones have stale workflow code!)
+cd scripts
+./quick-test.sh delete   # Clean up old agent
+./quick-test.sh          # Create fresh agent with new code
+```
+
+### Full End-to-End Test
+
+```bash
+cd agents/scripts
+./e2e-test.sh  # Starts its own worker, runs full test, cleans up
+```
+
+**Use this for**: Complete validation before deployment (starts its own isolated worker)
+
 ### Backend Authentication Test
 ```bash
 cd back-end
@@ -336,6 +419,13 @@ cd back-end
 
 ### Get Fresh Token
 Use the curl commands at the top of this file with test credentials.
+
+### Common Testing Mistakes
+
+1. ❌ **Forgetting to stop old workers** → Your changes won't run!
+2. ❌ **Using production queue** → Production workers might steal your test workflows
+3. ❌ **Not restarting worker after Python changes** → Stale code continues running
+4. ❌ **Testing with old agents** → They're running old workflow code, create fresh ones!
 
 ## Key Files
 

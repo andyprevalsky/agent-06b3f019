@@ -34,7 +34,7 @@ async def call_llm_structured(
     temperature: float,
     max_tokens: int,
     response_model: type[T]
-) -> T:
+) -> tuple[T, Dict]:
     """
     Call LLM with structured outputs using Instructor.
     
@@ -49,11 +49,12 @@ async def call_llm_structured(
         response_model: Pydantic model class for response structure
         
     Returns:
-        Instance of response_model with validated data
+        Tuple of (response_model instance, usage dict with token counts)
     """
     # Lazy import instructor to avoid loading rich/threading.local in workflow sandbox
     # Instructor must only be imported in activities, not at module level
     import instructor
+    from instructor import Instructor
     
     config = load_config()
     
@@ -72,7 +73,8 @@ async def call_llm_structured(
     client = instructor.from_openai(base_client)
     
     # Call with structured output - Instructor handles everything
-    response = await client.chat.completions.create(
+    # Use create_with_completion to get both the structured response and raw completion
+    response, completion = await client.chat.completions.create_with_completion(
         model=model,
         messages=messages,
         temperature=temperature,
@@ -80,7 +82,14 @@ async def call_llm_structured(
         response_model=response_model,
     )
     
-    return response
+    # Extract usage data from completion
+    usage = {
+        "prompt_tokens": completion.usage.prompt_tokens if completion.usage else 0,
+        "completion_tokens": completion.usage.completion_tokens if completion.usage else 0,
+        "total_tokens": completion.usage.total_tokens if completion.usage else 0
+    }
+    
+    return response, usage
 
 
 @activity.defn
@@ -226,7 +235,7 @@ Be strategic, efficient, and focused on the goal."""
         messages.append({"role": "user", "content": "Based on everything so far, what should I do next?"})
         
         # Use structured output with Pydantic schema
-        result = await call_llm_structured(
+        result, usage = await call_llm_structured(
             messages=messages,
             model=model,
             temperature=0.7,
@@ -237,14 +246,16 @@ Be strategic, efficient, and focused on the goal."""
         logger.info(
             "Action decided",
             tool=result.tool,
-            reasoning=result.reasoning
+            reasoning=result.reasoning,
+            tokens=usage.get("total_tokens", 0)
         )
         
-        # Return as dict for backward compatibility
+        # Return as dict with usage for token tracking
         return {
             "tool": result.tool,
             "args": result.args,
-            "reasoning": result.reasoning
+            "reasoning": result.reasoning,
+            "usage": usage
         }
         
     except Exception as e:
@@ -345,7 +356,7 @@ You MUST respond with valid JSON matching this exact schema:
         )
         
         # Use structured output with Pydantic schema
-        result = await call_llm_structured(
+        result, usage = await call_llm_structured(
             messages=messages,
             model=model,
             temperature=0.3,
@@ -356,18 +367,21 @@ You MUST respond with valid JSON matching this exact schema:
         logger.info(
             "Progress checked",
             progress=result.score,
-            reasoning=result.reasoning
+            reasoning=result.reasoning,
+            tokens=usage.get("total_tokens", 0)
         )
         
         return {
             "score": result.score,
-            "reasoning": result.reasoning
+            "reasoning": result.reasoning,
+            "usage": usage
         }
     except Exception as e:
         logger.error("Failed to check progress", error=str(e))
-        # Return 0.5 on error to keep agent running
+        # Return 0.5 on error to keep agent running, with empty usage
         return {
             "score": 0.5,
-            "reasoning": f"Progress check failed: {str(e)}"
+            "reasoning": f"Progress check failed: {str(e)}",
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
 

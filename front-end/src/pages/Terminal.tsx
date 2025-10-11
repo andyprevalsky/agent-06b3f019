@@ -9,6 +9,7 @@ import {
   getAgent,
   createAgent as createAgentAPI,
   postMessage as postMessageAPI,
+  resumeAgent,
   Agent,
   AgentDetail,
   Message,
@@ -19,10 +20,28 @@ import AgentListItem from '@/components/terminal/AgentListItem';
 import MessageBubble from '@/components/terminal/MessageBubble';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
+import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import { useToast } from '@/hooks/use-toast';
 import { useModels } from '@/hooks/useModels';
 import { cn } from '@/lib/utils';
 import { RealtimeChannel } from '@supabase/supabase-js';
+
+function getModelContextWindow(model: string): number {
+  const contextWindows: Record<string, number> = {
+    'anthropic/claude-sonnet-4.5': 200000,
+    'anthropic/claude-4.5-haiku': 200000,
+    'openai/gpt-4o': 128000,
+    'openai/gpt-4o-mini': 128000,
+    'openai/gpt-4-turbo': 128000,
+  };
+  return contextWindows[model] || 100000;
+}
+
+function getContextPercentage(agent: AgentDetail): number {
+  const maxWindow = getModelContextWindow(agent.model);
+  const restartThreshold = maxWindow * 0.8;
+  return Math.min(100, (agent.context_size / restartThreshold) * 100);
+}
 
 export default function Terminal() {
   const navigate = useNavigate();
@@ -78,6 +97,19 @@ export default function Terminal() {
     }
   }, [user]);
 
+  // Poll agents every 10 seconds
+  useEffect(() => {
+    if (!user) return;
+
+    const intervalId = setInterval(() => {
+      loadAgents();
+    }, 10000); // 10 seconds
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [user]);
+
   // Subscribe to realtime updates when agent is selected
   useEffect(() => {
     if (!selectedAgentId || !user) return;
@@ -110,6 +142,10 @@ export default function Terminal() {
                 progress: updated.progress,
                 status: updated.status,
                 status_message: updated.statusMessage,
+                model: updated.model,
+                token_count: updated.tokenCount,
+                context_size: updated.contextSize,
+                message_count: updated.messageCount,
                 updated_at: updated.updatedAt,
               };
             });
@@ -212,13 +248,30 @@ export default function Terminal() {
     loadAgentDetail(newAgent.agent_id);
   };
 
+  const handleResumeAgent = async (agentId: string) => {
+    try {
+      await resumeAgent(agentId);
+      // Don't manually reload - let Realtime subscription handle the update
+      toast({
+        title: 'Success',
+        description: 'Agent resumed',
+      });
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: 'Failed to resume agent',
+        variant: 'destructive',
+      });
+    }
+  };
+
   const handleSendMessage = async () => {
     if (!messageInput.trim() || !selectedAgentId) return;
 
     try {
       setIsSendingMessage(true);
-      const message = await postMessageAPI(selectedAgentId, messageInput);
-      setMessages((prev) => [...prev, message]);
+      await postMessageAPI(selectedAgentId, messageInput);
+      // Don't add message here - let Realtime subscription handle it to avoid duplicates
       setMessageInput('');
     } catch (error) {
       toast({
@@ -253,7 +306,10 @@ export default function Terminal() {
   });
 
   const sortedAgents = [...filteredAgents].sort((a, b) => {
-    // Sort by progress (descending)
+    // Paused agents go to the bottom
+    if (a.status === 'PAUSED' && b.status !== 'PAUSED') return 1;
+    if (a.status !== 'PAUSED' && b.status === 'PAUSED') return -1;
+    // Otherwise sort by progress (descending)
     return b.progress - a.progress;
   });
 
@@ -331,6 +387,7 @@ export default function Terminal() {
                     agent={agent}
                     isSelected={selectedAgentId === agent.agent_id}
                     onClick={() => handleSelectAgent(agent.agent_id)}
+                    onResume={handleResumeAgent}
                   />
                 ))
               )}
@@ -352,9 +409,16 @@ export default function Terminal() {
 
         {/* Main Content */}
         <main className="flex-1 flex flex-col relative">
+          {/* Settings Button - Top Right */}
+          {selectedAgentId && agentDetail && (
+            <div className="absolute top-4 right-4 z-20">
+              <AgentSettingsDialog agent={agentDetail} onUpdate={() => loadAgentDetail(selectedAgentId)} />
+            </div>
+          )}
+          
           {/* System Messages - Top Right */}
           {selectedAgentId && systemMessages.length > 0 && (
-            <div className="absolute top-4 right-4 max-w-md z-10">
+            <div className="absolute top-4 right-16 max-w-md z-10">
               <div className="bg-card dark:bg-navi-light-black border border-border dark:border-navi-light-light-black rounded-lg p-4 shadow-lg">
                 <h3 className="text-sm font-semibold mb-2">System Messages</h3>
                 <ScrollArea className="max-h-48">
@@ -375,8 +439,8 @@ export default function Terminal() {
 
           {/* Main Content Area */}
           <ScrollArea className="flex-1 px-6 py-4">
-            {!selectedAgentId || isLoadingAgent || agentDetail?.status === 'STARTING_UP' ? (
-              // Show ASCII animation when: no agent selected, loading agent, or agent starting up
+            {(!selectedAgentId || isLoadingAgent || agentDetail?.status === 'STARTING_UP') && !(agentDetail?.status === 'PAUSED' || agentDetail?.status === 'ACTIVE' || agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED') ? (
+              // Show ASCII animation when: no agent selected, loading agent, or agent starting up (but not when paused/active/completed/failed)
               <div className="flex items-center justify-center h-full">
                 <div className="text-center space-y-6">
                   <div className="w-48 h-48 mx-auto flex items-center justify-center">
@@ -407,14 +471,14 @@ export default function Terminal() {
                     ) : (
                       // Agent starting up
                       <p className="text-muted-foreground">
-                        {agentDetail?.status_message || 'agent starting up'} <span className="inline-block w-6 animate-dots" />
+                        agent starting up <span className="inline-block w-6 animate-dots" />
                       </p>
                     )}
                   </div>
                 </div>
               </div>
             ) : (
-              // Agent selected and active - show messages
+              // Agent selected - show messages
               <div className="max-w-4xl mx-auto space-y-4">
                 {messages.filter((m) => m.role !== 'SYSTEM').map((message) => (
                   <MessageBubble key={message.message_id} message={message} />
@@ -430,20 +494,23 @@ export default function Terminal() {
             )}
           </ScrollArea>
 
-          {/* Message Input - Always in DOM, visible when agent is selected */}
-          <div className={cn("p-6", !selectedAgentId && "invisible")}>
-            <QueryInput
-              value={messageInput}
-              onChange={setMessageInput}
-              onSubmit={handleSendMessage}
-              disabled={isSendingMessage || !selectedAgentId}
-              placeholder="Type your message..."
-              selectedModel={selectedModel}
-              onModelChange={setSelectedModel}
-              availableModels={models}
-              modelsLoading={modelsLoading}
-            />
-          </div>
+          {/* Message Input - Only show for active agents */}
+          {selectedAgentId && agentDetail && !['COMPLETED', 'FAILED'].includes(agentDetail.status) && (
+            <div className="p-6">
+              <QueryInput
+                value={messageInput}
+                onChange={setMessageInput}
+                onSubmit={handleSendMessage}
+                disabled={isSendingMessage || !selectedAgentId}
+                placeholder="Type your message..."
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+                availableModels={models}
+                modelsLoading={modelsLoading}
+                contextPercentage={getContextPercentage(agentDetail)}
+              />
+            </div>
+          )}
         </main>
       </div>
 

@@ -24,9 +24,13 @@ async function getAuthHeaders() {
 export interface Agent {
   agent_id: string;
   goal: string;
+  model: string;
   progress: number;
   status: 'STARTING_UP' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED';
   status_message: string | null;
+  token_count: number;
+  context_size: number;
+  message_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -54,7 +58,7 @@ export interface Message {
 
 export interface CreateAgentPayload {
   goal: string;
-  tool_ids: string[];
+  tool_ids?: string[];
   verifier: {
     type: 'FLOAT_LLM_JUDGE';
     llm_judge_prompt: string;
@@ -154,25 +158,25 @@ export async function deleteAgent(agentId: string): Promise<void> {
   }
 }
 
-// Format LLM judge prompt
-export async function formatLLMJudgePrompt(text: string): Promise<string> {
+// Generate LLM judge prompt from goal
+export async function generateLLMJudgePrompt(goal: string): Promise<string> {
   const headers = await getAuthHeaders();
   
-  const response = await fetch(`${API_BASE_WITH_PATH}/format-llm-judge-prompt`, {
+  const response = await fetch(`${API_BASE_WITH_PATH}/generate-llm-judge-prompt`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ goal }),
   });
 
   if (!response.ok) {
     const error = await response.json();
     // Show more detailed error if available
-    const errorMessage = error.details || error.error || 'Failed to format prompt';
+    const errorMessage = error.details || error.error || 'Failed to generate prompt';
     throw new Error(errorMessage);
   }
 
   const data = await response.json();
-  return data.text;
+  return data.prompt;
 }
 
 // Get all available tools
@@ -189,5 +193,58 @@ export async function getTools(): Promise<Tool[]> {
 
   const data = await response.json();
   return data.tools;
+}
+
+// Pause agent
+export async function pauseAgent(agentId: string): Promise<void> {
+  const headers = await getAuthHeaders();
+  
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/pause`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to pause agent');
+  }
+}
+
+// Resume agent
+export async function resumeAgent(agentId: string): Promise<void> {
+  const headers = await getAuthHeaders();
+  
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/resume`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to resume agent');
+  }
+}
+
+// Update agent configuration
+export async function updateAgent(
+  agentId: string,
+  updates: {
+    model?: string;
+    tool_ids?: string[];
+    verifier_prompt?: string;
+  }
+): Promise<AgentDetail> {
+  const headers = await getAuthHeaders();
+  
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify(updates),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to update agent');
+  }
+
+  const data = await response.json();
+  return data.agent;
 }
 

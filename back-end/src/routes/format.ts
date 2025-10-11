@@ -1,32 +1,32 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { formatLLMJudgePrompt } from '../lib/openrouter';
+import { generateLLMJudgePrompt } from '../lib/openrouter';
 
 const router = Router();
 
-const formatPromptSchema = z.object({
-  text: z.string().min(1),
+const generatePromptSchema = z.object({
+  goal: z.string().min(1),
 });
 
-// POST /api/format-llm-judge-prompt - Format an LLM judge prompt
-router.post('/format-llm-judge-prompt', async (req, res) => {
+// POST /api/generate-llm-judge-prompt - Generate an LLM judge prompt from a goal
+router.post('/generate-llm-judge-prompt', async (req, res) => {
   try {
-    const body = formatPromptSchema.parse(req.body);
+    const body = generatePromptSchema.parse(req.body);
 
-    const formattedText = await formatLLMJudgePrompt(body.text);
+    const generatedPrompt = await generateLLMJudgePrompt(body.goal);
 
     res.json({
-      text: formattedText,
+      prompt: generatedPrompt,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error('Format prompt error:', error);
+    console.error('Generate prompt error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     res.status(500).json({ 
-      error: 'Failed to format prompt',
+      error: 'Failed to generate prompt',
       details: errorMessage,
       hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY 
     });

@@ -6,7 +6,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Loader2, Sparkles, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { getTools, formatLLMJudgePrompt, Tool } from '@/lib/api';
+import { getTools, generateLLMJudgePrompt, Tool } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 
 interface CreateAgentModalProps {
@@ -46,11 +46,11 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
     );
   };
 
-  const handleFormatPrompt = async () => {
-    if (!llmJudgePrompt.trim()) {
+  const handleGeneratePrompt = async () => {
+    if (!goal.trim()) {
       toast({
         title: 'Error',
-        description: 'Please enter a prompt to format',
+        description: 'Please enter a goal first',
         variant: 'destructive',
       });
       return;
@@ -58,16 +58,16 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
 
     setIsFormatting(true);
     try {
-      const formatted = await formatLLMJudgePrompt(llmJudgePrompt);
-      setLlmJudgePrompt(formatted);
+      const generated = await generateLLMJudgePrompt(goal.trim());
+      setLlmJudgePrompt(generated);
       toast({
         title: 'Success',
-        description: 'Prompt formatted successfully',
+        description: 'Prompt generated successfully',
       });
     } catch (error) {
       toast({
         title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to format prompt',
+        description: error instanceof Error ? error.message : 'Failed to generate prompt',
         variant: 'destructive',
       });
     } finally {
@@ -89,15 +89,6 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
       toast({
         title: 'Error',
         description: 'Please enter an LLM judge prompt',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    if (selectedTools.length === 0) {
-      toast({
-        title: 'Error',
-        description: 'Please select at least one tool',
         variant: 'destructive',
       });
       return;
@@ -157,26 +148,26 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
               <Button
                 size="sm"
                 variant="outline"
-                onClick={handleFormatPrompt}
-                disabled={isFormatting}
+                onClick={handleGeneratePrompt}
+                disabled={isFormatting || !goal.trim()}
                 className="h-7 text-xs"
               >
                 {isFormatting ? (
                   <>
                     <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                    Formatting...
+                    Generating...
                   </>
                 ) : (
                   <>
                     <Sparkles className="h-3 w-3 mr-1" />
-                    Format Prompt
+                    Generate from Goal
                   </>
                 )}
               </Button>
             </div>
             <Textarea
               id="llm-prompt"
-              placeholder="Enter the criteria for judging agent success..."
+              placeholder="Click 'Generate from Goal' to auto-generate, or enter manually..."
               value={llmJudgePrompt}
               onChange={(e) => setLlmJudgePrompt(e.target.value)}
               className="min-h-[120px] bg-background dark:bg-navi-light-black border-border"

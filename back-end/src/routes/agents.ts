@@ -10,7 +10,8 @@ const router = Router();
 const createAgentSchema = z.object({
   goal: z.string().min(1),
   model: z.string().optional().default('anthropic/claude-sonnet-4.5'),
-  tool_ids: z.array(z.string().uuid()),
+  tool_ids: z.array(z.string().uuid()).optional().default([]),
+  task_queue: z.string().optional(), // Optional: for test isolation
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
     llm_judge_prompt: z.string().min(1),
@@ -25,7 +26,10 @@ const postMessageSchema = z.object({
 const updateStatusSchema = z.object({
   status: z.enum(['STARTING_UP', 'ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED']),
   statusMessage: z.string().optional(),
-  progress: z.number().min(0).max(1).optional(),
+  progress: z.number().min(0).max(1),
+  tokenCount: z.number().int().min(0),
+  contextSize: z.number().int().min(0),
+  messageCount: z.number().int().min(0),
 });
 
 // GET /api/agents - Get all agents for the authenticated user
@@ -46,6 +50,9 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         status: true,
         statusMessage: true,
         temporalWorkflowId: true,
+        tokenCount: true,
+        contextSize: true,
+        messageCount: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -63,6 +70,9 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         status: agent.status,
         status_message: agent.statusMessage,
         temporal_workflow_id: agent.temporalWorkflowId,
+        token_count: agent.tokenCount,
+        context_size: agent.contextSize,
+        message_count: agent.messageCount,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
       })),
@@ -126,9 +136,6 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
     // Start Temporal workflow
     let workflowId: string | null = null;
     try {
-      // Check if taskQueue is provided in request (for test isolation)
-      const taskQueue = (body as any).task_queue;
-      
       workflowId = await startAgentWorkflow({
         agentId: agent.id,
         userId,
@@ -139,7 +146,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
           type: body.verifier.type,
           llmJudgePrompt: body.verifier.llm_judge_prompt,
         },
-        ...(taskQueue ? { taskQueue } : {}),
+        ...(body.task_queue ? { taskQueue: body.task_queue } : {}),
       });
 
       // Update agent with workflow ID
@@ -151,7 +158,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       console.log('✅ Agent workflow started', {
         agentId: agent.id,
         workflowId,
-        taskQueue: taskQueue || 'default',
+        taskQueue: body.task_queue || 'default',
       });
     } catch (error) {
       console.error('❌ Failed to start workflow', {
@@ -245,6 +252,9 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
         status: agent.status,
         status_message: agent.statusMessage,
         temporal_workflow_id: agent.temporalWorkflowId,
+        token_count: agent.tokenCount,
+        context_size: agent.contextSize,
+        message_count: agent.messageCount,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
         verifier: agent.verifier
@@ -380,6 +390,9 @@ router.patch('/:id/status', authenticate, async (req: AuthRequest, res) => {
         status: body.status,
         statusMessage: body.statusMessage,
         progress: body.progress,
+        tokenCount: body.tokenCount,
+        contextSize: body.contextSize,
+        messageCount: body.messageCount,
         updatedAt: new Date(),
       },
     });
@@ -389,6 +402,9 @@ router.patch('/:id/status', authenticate, async (req: AuthRequest, res) => {
       status: updated.status,
       status_message: updated.statusMessage,
       progress: updated.progress,
+      token_count: updated.tokenCount,
+      context_size: updated.contextSize,
+      message_count: updated.messageCount,
       updated_at: updated.updatedAt,
     });
   } catch (error) {
@@ -460,6 +476,211 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error('Delete agent error:', error);
     res.status(500).json({ error: 'Failed to delete agent' });
+  }
+});
+
+// POST /api/agents/:id/pause - Pause workflow
+router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.id;
+    const agentId = req.params.id;
+
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        userId,
+        deletedAt: null,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    if (!agent.temporalWorkflowId) {
+      res.status(400).json({ error: 'No workflow running' });
+      return;
+    }
+
+    // Update DB first (source of truth)
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { status: 'PAUSED' },
+    });
+
+    // Try to send signal (best effort for instant response)
+    try {
+      const { getTemporalClient } = await import('../lib/temporal');
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.signal('pause');
+    } catch (error) {
+      console.warn('Pause signal failed, but DB updated. Workflow will sync next iteration:', error);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Pause agent error:', error);
+    res.status(500).json({ error: 'Failed to pause agent' });
+  }
+});
+
+// POST /api/agents/:id/resume - Resume workflow
+router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.id;
+    const agentId = req.params.id;
+
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        userId,
+        deletedAt: null,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    if (!agent.temporalWorkflowId) {
+      res.status(400).json({ error: 'No workflow running' });
+      return;
+    }
+
+    // Update DB first (source of truth)
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { status: 'ACTIVE' },
+    });
+
+    // Try to send signal (best effort for instant response)
+    try {
+      const { getTemporalClient } = await import('../lib/temporal');
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.signal('resume');
+    } catch (error) {
+      console.warn('Resume signal failed, but DB updated. Workflow will sync next iteration:', error);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Resume agent error:', error);
+    res.status(500).json({ error: 'Failed to resume agent' });
+  }
+});
+
+// PATCH /api/agents/:id - Update agent configuration
+const updateAgentSchema = z.object({
+  model: z.string().optional(),
+  tool_ids: z.array(z.string().uuid()).optional(),
+  verifier_prompt: z.string().min(1).optional(),
+});
+
+router.patch('/:id', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.id;
+    const agentId = req.params.id;
+    const body = updateAgentSchema.parse(req.body);
+
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        userId,
+        deletedAt: null,
+      },
+      include: {
+        verifier: true,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    // Update agent model if provided
+    if (body.model) {
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { model: body.model },
+      });
+    }
+
+    // Update tools if provided
+    if (body.tool_ids) {
+      // Delete existing tool assignments
+      await prisma.agentTool.deleteMany({
+        where: { agentId },
+      });
+
+      // Create new tool assignments
+      await prisma.agentTool.createMany({
+        data: body.tool_ids.map((toolId) => ({
+          agentId,
+          toolId,
+        })),
+      });
+    }
+
+    // Update verifier prompt if provided
+    if (body.verifier_prompt && agent.verifier) {
+      await prisma.verifier.update({
+        where: { id: agent.verifier.id },
+        data: { llmJudgePrompt: body.verifier_prompt },
+      });
+    }
+
+    // Fetch updated agent
+    const updatedAgent = await prisma.agent.findUnique({
+      where: { id: agentId },
+      include: {
+        verifier: true,
+        tools: {
+          include: {
+            tool: true,
+          },
+        },
+      },
+    });
+
+    res.json({
+      agent: {
+        agent_id: updatedAgent!.id,
+        goal: updatedAgent!.goal,
+        model: updatedAgent!.model,
+        progress: updatedAgent!.progress,
+        status: updatedAgent!.status,
+        status_message: updatedAgent!.statusMessage,
+        temporal_workflow_id: updatedAgent!.temporalWorkflowId,
+        token_count: updatedAgent!.tokenCount,
+        context_size: updatedAgent!.contextSize,
+        message_count: updatedAgent!.messageCount,
+        created_at: updatedAgent!.createdAt,
+        updated_at: updatedAgent!.updatedAt,
+        verifier: updatedAgent!.verifier
+          ? {
+              type: updatedAgent!.verifier.type,
+              llm_judge_prompt: updatedAgent!.verifier.llmJudgePrompt,
+            }
+          : null,
+        tools: updatedAgent!.tools.map((at) => ({
+          id: at.tool.id,
+          name: at.tool.name,
+          description: at.tool.description,
+        })),
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request body', details: error.errors });
+      return;
+    }
+    console.error('Update agent error:', error);
+    res.status(500).json({ error: 'Failed to update agent' });
   }
 });
 

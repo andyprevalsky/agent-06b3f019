@@ -42,6 +42,7 @@ from helpers import (
     query_blueprints,
     save_blueprint,
     mark_finished,
+    fetch_agent_config,
 )
 from health_server import run_health_server, set_worker_status
 
@@ -123,7 +124,8 @@ async def main():
             fetch_agent_tools,
             query_blueprints,
             save_blueprint,
-            mark_finished
+            mark_finished,
+            fetch_agent_config
         ],
         max_concurrent_activities=config.temporal.max_concurrent_activities,
         max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,

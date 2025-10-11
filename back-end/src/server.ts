@@ -93,9 +93,12 @@ app.listen(PORT, () => {
 });
 
 // Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, closing server...');
+const shutdown = async (signal: string) => {
+  console.log(`\n${signal} received, closing server...`);
   await prisma.$disconnect();
   process.exit(0);
-});
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 

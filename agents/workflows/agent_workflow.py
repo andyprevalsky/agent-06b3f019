@@ -4,6 +4,8 @@ from datetime import timedelta, datetime
 from typing import Dict, List, Optional, Any
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+import asyncio
 import structlog
 
 with workflow.unsafe.imports_passed_through():
@@ -27,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
         query_blueprints,
         save_blueprint,
         mark_finished,
+        fetch_agent_config,
     )
 
 logger = structlog.get_logger()
@@ -83,6 +86,20 @@ class AgentWorkflow:
         self.iteration_count: int = 0
         self.context_tokens: int = 0
         self.max_context_tokens: Optional[int] = None  # Fetched from OpenRouter
+        self.token_count: int = 0  # Cumulative tokens used
+        self.is_paused: bool = False  # Pause state
+    
+    @workflow.signal
+    async def pause(self):
+        """Pause workflow execution (instant via signal)."""
+        workflow.logger.info("🔴 Received PAUSE signal")
+        self.is_paused = True
+    
+    @workflow.signal
+    async def resume(self):
+        """Resume workflow execution (instant via signal)."""
+        workflow.logger.info("🟢 Received RESUME signal")
+        self.is_paused = False
         
     @workflow.run
     async def run(
@@ -193,7 +210,7 @@ class AgentWorkflow:
         try:
             await workflow.execute_activity(
                 update_agent_status,
-                args=[agent_id, "ACTIVE", 0.0, "Agent started"],
+                args=[agent_id, "ACTIVE", 0.0, "Agent started", 0, 0, len(self.context)],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
@@ -203,6 +220,45 @@ class AgentWorkflow:
         try:
             # Main agent loop
             while True:
+                # Poll config at start of each iteration (syncs pause state, model, tools)
+                try:
+                    config = await workflow.execute_activity(
+                        fetch_agent_config,
+                        args=[agent_id],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=3)
+                    )
+                    was_paused = self.is_paused
+                    self.is_paused = (config['status'] == 'PAUSED')
+                    
+                    if was_paused != self.is_paused:
+                        workflow.logger.info(f"⏸️  Pause state changed from DB: {was_paused} -> {self.is_paused}")
+                    
+                    self.model = config['model']
+                    if config.get('verifier_prompt'):
+                        self.verifier['llmJudgePrompt'] = config['verifier_prompt']
+                except Exception as e:
+                    workflow.logger.warning(f"Failed to fetch config: {str(e)}")
+                
+                # Green-light check: wait if paused (with timeout to re-check DB)
+                if self.is_paused:
+                    workflow.logger.info("⏸️  Agent is PAUSED, waiting for resume...")
+                
+                try:
+                    await workflow.wait_condition(
+                        lambda: not self.is_paused,
+                        timeout=timedelta(seconds=30)
+                    )
+                    
+                    if self.is_paused:
+                        # Still paused after timeout, will loop back
+                        workflow.logger.info("⏸️  Still paused after 30s, re-checking config...")
+                    else:
+                        workflow.logger.info("▶️  Agent resumed, continuing execution")
+                except (asyncio.TimeoutError, TemporalTimeoutError):
+                    # Timeout = still paused, loop back to re-poll config
+                    workflow.logger.info("⏸️  Timeout while paused, re-checking config...")
+                    continue
                 # 1. Query blueprints on first iteration
                 if self.iteration_count == 0:
                     blueprints = await self._query_blueprints()
@@ -215,14 +271,23 @@ class AgentWorkflow:
                                 "timestamp": workflow.now().isoformat()
                             })
                 
-                # 2. Poll for new user messages
+                # 2. Poll for new user messages (already in DB, just add to context)
                 new_messages = await self._poll_messages()
                 if new_messages:
-                    self.context.extend(new_messages)
-                    await self._post_message(f"Received {len(new_messages)} new messages", "ASSISTANT")
+                    for message in new_messages:
+                        # Messages are already in DB, just add to context (no re-insertion)
+                        self.context.append({
+                            "role": message["role"],
+                            "text": message["text"],
+                            "timestamp": message["timestamp"]
+                        })
+                    # Sort context by timestamp to maintain chronological order
+                    self.context.sort(key=lambda x: x.get("timestamp", ""))
                 
                 # 3. Decide next action using LLM
                 action = await self._decide_next_action()
+                # Track tokens from LLM call (usage is always present)
+                self.token_count += action["usage"].get("total_tokens", 0)
                 
                 # 4. Execute action (if LLM decided on one)
                 if action.get("tool"):
@@ -239,6 +304,8 @@ class AgentWorkflow:
                 
                 # 5. Check progress with verifier and update DB
                 progress_result = await self._check_progress()
+                # Track tokens from verifier LLM call (usage is always present)
+                self.token_count += progress_result["usage"].get("total_tokens", 0)
                 progress_score = progress_result.get("score", 0.0)
                 progress_reasoning = progress_result.get("reasoning", "No reasoning provided")
                 
@@ -248,10 +315,24 @@ class AgentWorkflow:
                     "ASSISTANT"
                 )
                 
-                # Update agent progress in DB
+                # Calculate context metrics before updating
+                context_text = "\n".join([msg.get('text', '') for msg in self.context])
+                self.context_tokens = estimate_token_count(context_text)
+                
+                # Update agent progress in DB with metrics
+                # Use current pause state, not hardcoded status
+                current_status = "PAUSED" if self.is_paused else "ACTIVE"
                 await workflow.execute_activity(
                     update_agent_status,
-                    args=[self.agent_id, "ACTIVE", progress_score, f"Iteration {self.iteration_count}: {progress_score*100:.1f}% complete"],
+                    args=[
+                        self.agent_id,
+                        current_status,
+                        progress_score,
+                        f"Iteration {self.iteration_count}: {progress_score*100:.1f}% complete",
+                        self.token_count,
+                        self.context_tokens,
+                        len(self.context)
+                    ],
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(
                         maximum_attempts=6,
@@ -445,11 +526,12 @@ class AgentWorkflow:
             
         except Exception as e:
             workflow.logger.error(f"Failed to decide action: {str(e)}")
-            # Fallback: wait and try again
+            # Fallback: wait and try again, with empty usage
             return {
                 "tool": None,
                 "args": [],
-                "reasoning": f"Decision failed: {str(e)}, will retry"
+                "reasoning": f"Decision failed: {str(e)}, will retry",
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
     
     async def _execute_action(self, action: Dict) -> Any:
