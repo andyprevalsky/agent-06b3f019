@@ -1,6 +1,8 @@
 ---
 description: >
   Do not add unnecessary fallbacks in order to fix an issue; most commonly, we should fix the implementation to create a simpler, more elegant solution. This does not apply for retry fallbacks when sensible.
+  
+  MANDATORY: When adding ANY new backend API endpoint, you MUST add a corresponding test to /back-end/src/tests/api-test-suite.ts. The test must validate HTTP status codes, response structure, authentication/authorization, and error handling. Add tests to the appropriate group (publicTests, authTests, agentWorkflowTests, or blueprintWorkflowTests). Run `npm run test:api` to verify all tests pass. The pre-commit hook will automatically run all tests and block commits if any fail.
 globs:
 alwaysApply: true
 ---
