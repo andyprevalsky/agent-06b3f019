@@ -15,11 +15,16 @@ T = TypeVar('T', bound=BaseModel)
 
 
 # Pydantic models for structured LLM outputs
-class AgentAction(BaseModel):
-    """Schema for agent's next action decision."""
+class ToolCall(BaseModel):
+    """Single tool call."""
     tool: str = Field(description="Name of the tool to use (e.g., 'wait_seconds', 'web_search')")
     args: List[str] = Field(description="Arguments to pass to the tool")
-    reasoning: str = Field(description="Explanation of why this action was chosen")
+
+
+class AgentAction(BaseModel):
+    """Schema for agent's next action decision."""
+    reasoning: str = Field(description="Your thinking about what you're doing and why. This will be shown to the user, so communicate clearly what you're doing.")
+    tool_calls: List[ToolCall] = Field(default_factory=list, description="List of tools to call in sequence. Can be empty if you're just communicating without taking action.")
 
 
 class ProgressScore(BaseModel):
@@ -204,14 +209,22 @@ async def decide_next_action(
 You have access to these tools:
 {tools_list}
 
-Your job is to decide the NEXT SINGLE ACTION to take toward the goal.
+IMPORTANT:
+- Your reasoning will be shown to the user, so communicate clearly what you're doing
+- You can call MULTIPLE tools in one turn (they'll execute sequentially)
+- As you work, you'll receive feedback messages to help you stay on course
+- Use this feedback to adjust your approach and track progress
 
 Respond in JSON format:
 {{
-  "tool": "tool_name",
-  "args": ["arg1", "arg2"],
-  "reasoning": "why you're taking this action"
+  "reasoning": "explain what you're doing and why",
+  "tool_calls": [
+    {{"tool": "tool_name", "args": ["arg1", "arg2"]}},
+    {{"tool": "another_tool", "args": ["arg"]}}
+  ]
 }}
+
+You can also respond with just reasoning and no tool_calls if you want to communicate without taking action.
 
 Be strategic, efficient, and focused on the goal."""
         
@@ -245,16 +258,15 @@ Be strategic, efficient, and focused on the goal."""
         
         logger.info(
             "Action decided",
-            tool=result.tool,
             reasoning=result.reasoning,
+            tool_calls_count=len(result.tool_calls),
             tokens=usage.get("total_tokens", 0)
         )
         
         # Return as dict with usage for token tracking
         return {
-            "tool": result.tool,
-            "args": result.args,
             "reasoning": result.reasoning,
+            "tool_calls": [{"tool": tc.tool, "args": tc.args} for tc in result.tool_calls],
             "usage": usage
         }
         

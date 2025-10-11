@@ -3,14 +3,14 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from '@/components/ui/command';
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Badge } from '@/components/ui/badge';
 import { Settings, Loader2, Play, Pause, Check, ChevronsUpDown, X } from 'lucide-react';
-import { AgentDetail, pauseAgent, resumeAgent, updateAgent, getTools, Tool } from '@/lib/api';
+import { AgentDetail, pauseAgent, resumeAgent, updateAgent } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Progress } from '@/components/ui/progress';
-import { useModels } from '@/hooks/useModels';
+import { useAppData } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 
 interface AgentSettingsDialogProps {
@@ -35,24 +35,47 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   const [verifierPrompt, setVerifierPrompt] = useState(agent.verifier?.llm_judge_prompt || '');
   const [selectedModel, setSelectedModel] = useState(agent.model);
   const [selectedTools, setSelectedTools] = useState<string[]>(agent.tools.map(t => t.id));
-  const [availableTools, setAvailableTools] = useState<Tool[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
   const [toolSearch, setToolSearch] = useState('');
+  const [modalPosition, setModalPosition] = useState<{ top: number; right: number }>({ top: 80, right: 16 });
   const { toast } = useToast();
-  const { models = [] } = useModels();
+  const { models, modelsLoading, tools, toolsLoading } = useAppData();
   const triggerRef = React.useRef<HTMLButtonElement>(null);
-  
-  useEffect(() => {
-    getTools().then(setAvailableTools).catch(console.error);
-  }, []);
+  const modelTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const toolTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const [modelTriggerWidth, setModelTriggerWidth] = useState<number>(0);
+  const [toolTriggerWidth, setToolTriggerWidth] = useState<number>(0);
   
   useEffect(() => {
     setVerifierPrompt(agent.verifier?.llm_judge_prompt || '');
     setSelectedModel(agent.model);
     setSelectedTools(agent.tools.map(t => t.id));
   }, [agent]);
+
+  useEffect(() => {
+    if (open && triggerRef.current) {
+      const rect = triggerRef.current.getBoundingClientRect();
+      const gap = 8; // Gap between button and modal
+      setModalPosition({
+        top: rect.bottom + gap,
+        right: window.innerWidth - rect.right,
+      });
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (modelOpen && modelTriggerRef.current) {
+      setModelTriggerWidth(modelTriggerRef.current.offsetWidth);
+    }
+  }, [modelOpen]);
+
+  useEffect(() => {
+    if (toolOpen && toolTriggerRef.current) {
+      setToolTriggerWidth(toolTriggerRef.current.offsetWidth);
+    }
+  }, [toolOpen]);
 
   const handlePauseResume = async () => {
     console.log('Pause/Resume clicked, current status:', agent.status);
@@ -128,11 +151,12 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   const restartThreshold = maxWindow * 0.8;
   const contextPercentage = Math.min(100, (agent.context_size / restartThreshold) * 100);
 
-  const modelsList = models || [];
-  const toolsList = availableTools || [];
-  const selectedModelData = modelsList.find(m => m.id === selectedModel);
-  const selectedToolsData = toolsList.filter(t => selectedTools.includes(t.id));
-  const availableToolsFiltered = toolsList.filter(t => !selectedTools.includes(t.id));
+  // Ensure arrays are always defined
+  const modelsList = Array.isArray(models) ? models : [];
+  const toolsList = Array.isArray(tools) ? tools : [];
+  const selectedModelData = modelsList.find(m => m?.id === selectedModel);
+  const selectedToolsData = toolsList.filter(t => t && selectedTools.includes(t.id));
+  const availableToolsFiltered = toolsList.filter(t => t && !selectedTools.includes(t.id));
 
   return (
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
@@ -145,8 +169,8 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
         className="p-0 border border-gray-300 dark:border-gray-700 shadow-lg [&>button]:hidden overflow-hidden"
         style={{ 
           position: 'fixed',
-          top: '5rem',
-          right: '1rem',
+          top: `${modalPosition.top}px`,
+          right: `${modalPosition.right}px`,
           left: 'auto',
           transform: 'none',
           width: '420px',
@@ -204,8 +228,7 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
                 </div>
                 <Progress value={contextPercentage} className="h-2" />
                 <p className="text-xs text-muted-foreground">
-                  {agent.context_size.toLocaleString()} / {restartThreshold.toLocaleString()} tokens
-                  (restarts at 100%)
+                  {agent.context_size.toLocaleString()} / {restartThreshold.toLocaleString()} context used
                 </p>
               </div>
             </div>
@@ -217,6 +240,7 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
             <Popover open={modelOpen} onOpenChange={setModelOpen}>
               <PopoverTrigger asChild>
                 <Button
+                  ref={modelTriggerRef}
                   variant="outline"
                   role="combobox"
                   aria-expanded={modelOpen}
@@ -228,35 +252,38 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent className="w-[400px] p-0 z-[60]" align="start">
-                <Command>
+              <PopoverContent className="p-0 z-[60] bg-[#EEEFF2]/80 dark:bg-[#1a1a1a]/80 backdrop-blur-[12px]" align="start" style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', width: modelTriggerWidth > 0 ? `${modelTriggerWidth}px` : 'auto' }}>
+                <Command className="bg-transparent w-full">
                   <CommandInput 
                     placeholder="Search models..." 
                     value={modelSearch}
                     onValueChange={setModelSearch}
                   />
-                  <CommandEmpty>No model found.</CommandEmpty>
-                  <CommandGroup className="max-h-64 overflow-auto">
-                    {modelsList.map((model) => (
-                      <CommandItem
-                        key={model.id}
-                        value={`${model.provider}/${model.name}`}
-                        onSelect={() => {
-                          setSelectedModel(model.id);
-                          setModelOpen(false);
-                          setModelSearch('');
-                        }}
-                      >
-                        <Check
-                          className={cn(
-                            "mr-2 h-4 w-4",
-                            selectedModel === model.id ? "opacity-100" : "opacity-0"
-                          )}
-                        />
-                        <span className="truncate">{model.provider}/{model.name}</span>
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
+                  <CommandList className="max-h-64 overflow-x-hidden w-full">
+                    <CommandEmpty>No model found.</CommandEmpty>
+                    <CommandGroup className="overflow-x-hidden w-full">
+                      {modelsList.map((model) => (
+                        <CommandItem
+                          key={model.id}
+                          value={`${model.provider}/${model.name}`}
+                          onSelect={() => {
+                            setSelectedModel(model.id);
+                            setModelOpen(false);
+                            setModelSearch('');
+                          }}
+                          className="cursor-pointer overflow-hidden w-full"
+                        >
+                          <Check
+                            className={cn(
+                              "mr-2 h-4 w-4 shrink-0",
+                              selectedModel === model.id ? "opacity-100" : "opacity-0"
+                            )}
+                          />
+                          <span className="truncate flex-1 min-w-0">{model.provider}/{model.name}</span>
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  </CommandList>
                 </Command>
               </PopoverContent>
             </Popover>
@@ -291,6 +318,7 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
             <Popover open={toolOpen} onOpenChange={setToolOpen}>
               <PopoverTrigger asChild>
                 <Button
+                  ref={toolTriggerRef}
                   variant="outline"
                   role="combobox"
                   aria-expanded={toolOpen}
@@ -302,33 +330,36 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent className="w-[400px] p-0 z-[60]" align="start">
-                <Command>
+              <PopoverContent className="p-0 z-[60] bg-[#EEEFF2]/80 dark:bg-[#1a1a1a]/80 backdrop-blur-[12px]" align="start" style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', width: toolTriggerWidth > 0 ? `${toolTriggerWidth}px` : 'auto' }}>
+                <Command className="bg-transparent w-full">
                   <CommandInput 
                     placeholder="Search tools..." 
                     value={toolSearch}
                     onValueChange={setToolSearch}
                   />
-                  <CommandEmpty>No tool found.</CommandEmpty>
-                  <CommandGroup className="max-h-64 overflow-auto">
-                    {availableToolsFiltered.map((tool) => (
-                      <CommandItem
-                        key={tool.id}
-                        value={tool.name}
-                        onSelect={() => {
-                          setSelectedTools([...selectedTools, tool.id]);
-                          setToolSearch('');
-                        }}
-                      >
-                        <span className="truncate">{tool.name}</span>
-                        {tool.description && (
-                          <span className="ml-2 text-xs text-muted-foreground truncate">
-                            {tool.description}
-                          </span>
-                        )}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
+                  <CommandList className="max-h-64 overflow-x-hidden w-full">
+                    <CommandEmpty>No tool found.</CommandEmpty>
+                    <CommandGroup className="overflow-x-hidden w-full">
+                      {availableToolsFiltered.map((tool) => (
+                        <CommandItem
+                          key={tool.id}
+                          value={`${tool.name} ${tool.description || ''}`}
+                          onSelect={() => {
+                            setSelectedTools([...selectedTools, tool.id]);
+                            setToolSearch('');
+                          }}
+                          className="cursor-pointer flex-col items-start overflow-hidden w-full"
+                        >
+                          <div className="font-medium truncate w-full">{tool.name}</div>
+                          {tool.description && (
+                            <div className="text-xs text-muted-foreground whitespace-normal break-words w-full">
+                              {tool.description}
+                            </div>
+                          )}
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  </CommandList>
                 </Command>
               </PopoverContent>
             </Popover>

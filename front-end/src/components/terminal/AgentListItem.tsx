@@ -1,15 +1,16 @@
 import { Agent } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Play } from 'lucide-react';
+import { Play, Loader2 } from 'lucide-react';
 
 interface AgentListItemProps {
   agent: Agent;
   isSelected: boolean;
   onClick: () => void;
   onResume?: (agentId: string) => void;
+  isResuming?: boolean;
 }
 
-export default function AgentListItem({ agent, isSelected, onClick, onResume }: AgentListItemProps) {
+export default function AgentListItem({ agent, isSelected, onClick, onResume, isResuming = false }: AgentListItemProps) {
   // Calculate the progress arc for the circular progress wheel
   const radius = 8;
   const circumference = 2 * Math.PI * radius;
@@ -26,7 +27,7 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume }: 
     <button
       onClick={onClick}
       className={cn(
-        'w-full text-left p-3 rounded-lg transition-all border',
+        'w-full text-left p-3 rounded-lg transition-all border cursor-pointer',
         isSelected
           ? 'bg-navi-white-dark dark:bg-navi-light-light-black border-border'
           : 'bg-navi-white dark:bg-navi-light-black hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black border-border'
@@ -36,14 +37,24 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume }: 
         <div className="flex items-center justify-between gap-2">
           <h3 className="font-medium text-sm line-clamp-2 flex-1">{agent.goal}</h3>
           
-          {/* Show play button if paused, otherwise show progress */}
+          {/* Show play button if paused (or spinner if resuming), otherwise show progress */}
           {agent.status === 'PAUSED' ? (
             <button
               onClick={handlePlayClick}
-              className="flex-shrink-0 p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors"
-              title="Resume agent"
+              disabled={isResuming}
+              className={cn(
+                "flex-shrink-0 p-1.5 rounded-full transition-colors border-2 border-gray-300 dark:border-gray-600",
+                isResuming 
+                  ? "cursor-not-allowed opacity-70" 
+                  : "hover:bg-gray-200 dark:hover:bg-gray-700 cursor-pointer"
+              )}
+              title={isResuming ? "Resuming agent..." : "Resume agent"}
             >
-              <Play className="w-4 h-4 text-gray-500" fill="currentColor" />
+              {isResuming ? (
+                <Loader2 className="w-3.5 h-3.5 text-gray-500 animate-spin" />
+              ) : (
+                <Play className="w-3.5 h-3.5 text-gray-500" fill="currentColor" />
+              )}
             </button>
           ) : (
             <div className="flex items-center gap-2 flex-shrink-0">

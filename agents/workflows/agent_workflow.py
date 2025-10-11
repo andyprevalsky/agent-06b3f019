@@ -16,6 +16,11 @@ with workflow.unsafe.imports_passed_through():
         web_search,
         accomplish_web_task,
     )
+    # Tool formatters
+    from tools.wait_seconds import (
+        format_pre_message as wait_seconds_pre,
+        format_post_message as wait_seconds_post,
+    )
     # Helper activities (workflow orchestration, not exposed to LLM)
     from helpers import (
         poll_new_messages,
@@ -38,12 +43,16 @@ logger = structlog.get_logger()
 # Trigger continue_as_new at 80% context usage
 CONTEXT_THRESHOLD_PERCENTAGE = 0.8
 
+# Tool formatter registry (maps tool names to their formatters)
+TOOL_FORMATTERS = {
+    "wait_seconds": {
+        "pre": wait_seconds_pre,
+        "post": wait_seconds_post
+    }
+}
+
 # System tools that are always available (don't need to be in DB)
 SYSTEM_TOOLS = [
-    {
-        "name": "post_message",
-        "description": "Post a message to the user. Use this to communicate progress, results, or any information. Takes one argument: the message text."
-    },
     {
         "name": "wait_seconds",
         "description": "Pause execution for a specified number of seconds (1-3600). Use this when you need to wait for time-dependent results or real-world delays."
@@ -289,20 +298,49 @@ class AgentWorkflow:
                 # Track tokens from LLM call (usage is always present)
                 self.token_count += action["usage"].get("total_tokens", 0)
                 
-                # 4. Execute action (if LLM decided on one)
-                if action.get("tool"):
-                    result = await self._execute_action(action)
-                    # Add action result to context so LLM can see what happened
-                    self.context.append({
-                        "role": "TOOL",
-                        "text": f"Action result: {result}",
-                        "timestamp": workflow.now().isoformat()
-                    })
-                else:
-                    # LLM didn't decide or errored - skip this iteration
-                    workflow.logger.info("No action to execute, continuing")
+                # 4. Post reasoning to user (visible in UI and added to context)
+                reasoning = action.get("reasoning", "")
+                if reasoning:
+                    await self._post_message(reasoning, "ASSISTANT")
                 
-                # 5. Check progress with verifier and update DB
+                # 5. Execute all tools sequentially
+                tool_calls = action.get("tool_calls", [])
+                for tool_call in tool_calls:
+                    tool_name = tool_call.get("tool", "unknown")
+                    args = tool_call.get("args", [])
+                    
+                    try:
+                        # Get tool formatter (or use defaults)
+                        formatter = TOOL_FORMATTERS.get(tool_name, {})
+                        
+                        # Format and post pre-execution message
+                        if formatter.get("pre"):
+                            pre_msg = formatter["pre"](args)
+                        else:
+                            # Default formatting for tools without custom formatter
+                            pre_msg = {"title": f"Executing {tool_name}", "message": f"args: {args}"}
+                        
+                        await self._post_message(f"{pre_msg['title']}|||{pre_msg['message']}", "TOOL")
+                        
+                        # Execute tool (blocking)
+                        result = await self._execute_tool(tool_call)
+                        
+                        # Format and post post-execution message
+                        if formatter.get("post"):
+                            post_msg = formatter["post"](args, result)
+                        else:
+                            # Default formatting
+                            post_msg = {"title": f"Completed {tool_name}", "message": str(result)}
+                        
+                        await self._post_message(f"{post_msg['title']}|||{post_msg['message']}", "TOOL")
+                        
+                    except Exception as e:
+                        # Post error and add to context so agent can see what failed
+                        error_msg = f"Tool {tool_name} failed: {str(e)}"
+                        await self._post_message(f"Error|||{error_msg}", "TOOL")
+                        workflow.logger.error(f"Tool execution failed: {error_msg}")
+                
+                # 6. Check progress with verifier and update DB
                 progress_result = await self._check_progress()
                 # Track tokens from verifier LLM call (usage is always present)
                 self.token_count += progress_result["usage"].get("total_tokens", 0)
@@ -342,12 +380,12 @@ class AgentWorkflow:
                     )
                 )
                 
-                # 6. If complete, mark finished and exit
+                # 7. If complete, mark finished and exit
                 if progress_score >= 1.0:
                     await self._mark_complete()
                     return {"status": "completed", "goal": self.goal}
                 
-                # 7. Update iteration count and token usage
+                # 8. Update iteration count and token usage
                 self.iteration_count += 1
                 
                 # Calculate current context token usage
@@ -357,7 +395,7 @@ class AgentWorkflow:
                 # Calculate threshold based on model's actual context window
                 threshold_tokens = int(self.max_context_tokens * CONTEXT_THRESHOLD_PERCENTAGE)
                 
-                # 8. Continue as new if context is at 80% capacity
+                # 9. Continue as new if context is at 80% capacity
                 # This keeps the SAME workflow ID but resets event history to prevent unbounded growth
                 if self.context_tokens >= threshold_tokens:
                     workflow.logger.info(
@@ -521,40 +559,28 @@ class AgentWorkflow:
                 )
             )
             
-            workflow.logger.info(f"LLM decided: {action.get('tool')} - {action.get('reasoning')}")
+            tool_calls_count = len(action.get('tool_calls', []))
+            workflow.logger.info(f"LLM decided: {tool_calls_count} tools - {action.get('reasoning')[:100]}")
             return action
             
         except Exception as e:
             workflow.logger.error(f"Failed to decide action: {str(e)}")
-            # Fallback: wait and try again, with empty usage
+            # Fallback: return empty reasoning and no tools, with empty usage
             return {
-                "tool": None,
-                "args": [],
                 "reasoning": f"Decision failed: {str(e)}, will retry",
+                "tool_calls": [],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
     
-    async def _execute_action(self, action: Dict) -> Any:
-        """Execute an action using the specified tool."""
-        tool = action.get("tool")
-        args = action.get("args", [])
+    async def _execute_tool(self, tool_call: Dict) -> str:
+        """
+        Execute a single tool call. Returns result string.
+        Does NOT post messages - main loop handles all posting.
+        """
+        tool = tool_call.get("tool")
+        args = tool_call.get("args", [])
         
-        workflow.logger.info(f"Executing action: {tool}")
-        
-        # Special handling for post_message: just post to the agent
-        if tool == "post_message":
-            try:
-                message = args[0] if args else ""
-                if not message:
-                    raise ValueError("Message text is required")
-                
-                await self._post_message(message, "ASSISTANT")
-                return f"Posted message: {message}"
-                
-            except (ValueError, IndexError) as e:
-                error_msg = f"Invalid message: {str(e)}"
-                await self._post_message(error_msg, "TOOL")
-                raise ValueError(error_msg)
+        workflow.logger.info(f"Executing tool: {tool}")
         
         # Special handling for wait_seconds: it's not an activity, just workflow.sleep()
         if tool == "wait_seconds":
@@ -567,17 +593,14 @@ class AgentWorkflow:
                 if seconds < 1 or seconds > 3600:
                     raise ValueError(f"Wait time must be between 1 and 3600 seconds, got {seconds}")
                 
-                workflow.logger.info(f"Starting wait for {seconds} seconds")
-                await self._post_message(f"Waiting for {seconds} seconds...", "TOOL")
+                workflow.logger.info(f"Waiting {seconds} seconds")
                 await workflow.sleep(seconds)
-                await self._post_message(f"Finished waiting {seconds} seconds", "TOOL")
                 
-                return f"Waited for {seconds} seconds"
+                # Return simple result (formatter will handle the message)
+                return f"completed"
                 
             except (ValueError, TypeError) as e:
-                error_msg = f"Invalid wait time: {str(e)}"
-                await self._post_message(error_msg, "TOOL")
-                raise ValueError(error_msg)
+                raise ValueError(f"Invalid wait time: {str(e)}")
         
         # Map tool to activity (for all non-system tools)
         activity_map = {
@@ -589,43 +612,28 @@ class AgentWorkflow:
         
         activity_fn = activity_map.get(tool)
         if not activity_fn:
-            error_msg = f"Unknown tool: {tool}"
-            await self._post_message(error_msg, "ASSISTANT")
-            raise ValueError(error_msg)
+            raise ValueError(f"Unknown tool: {tool}")
         
         # Check if tool is available
         available_tool_names = [t['name'] for t in self.tools]
         if tool not in available_tool_names:
-            error_msg = f"Tool not available: {tool}"
-            await self._post_message(error_msg, "ASSISTANT")
-            raise ValueError(error_msg)
+            raise ValueError(f"Tool not available: {tool}")
         
         # Execute with extreme backoff
-        try:
-            result = await workflow.execute_activity(
-                activity_fn,
-                args=args,
-                start_to_close_timeout=timedelta(minutes=5),
-                heartbeat_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=6,
-                    backoff_coefficient=4.0,
-                    initial_interval=timedelta(seconds=2),
-                    maximum_interval=timedelta(seconds=64)
-                )
+        result = await workflow.execute_activity(
+            activity_fn,
+            args=args,
+            start_to_close_timeout=timedelta(minutes=5),
+            heartbeat_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(
+                maximum_attempts=6,
+                backoff_coefficient=4.0,
+                initial_interval=timedelta(seconds=2),
+                maximum_interval=timedelta(seconds=64)
             )
-            
-            # Add result to context
-            result_msg = f"Executed {tool}: {result}"
-            await self._post_message(result_msg, "TOOL")
-            
-            return result
-            
-        except Exception as e:
-            # Error gets propagated to context
-            error_msg = f"Tool {tool} failed: {str(e)}"
-            await self._post_message(error_msg, "ASSISTANT")
-            raise
+        )
+        
+        return str(result)
     
     async def _check_progress(self) -> Dict[str, Any]:
         """
@@ -681,7 +689,14 @@ class AgentWorkflow:
             # Mark as finished in the database
             await workflow.execute_activity(
                 mark_finished,
-                args=[self.agent_id, self.goal, steps],
+                args=[
+                    self.agent_id,
+                    self.goal,
+                    steps,
+                    self.token_count,
+                    self.context_tokens,
+                    len(self.context)
+                ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,

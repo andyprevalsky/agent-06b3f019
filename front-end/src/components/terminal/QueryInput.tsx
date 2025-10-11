@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Command as CommandIcon } from 'lucide-react';
+import { Command as CommandIcon, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Command,
@@ -11,8 +11,12 @@ import {
 } from '@/components/ui/command';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Badge } from '@/components/ui/badge';
-import { getTools, Tool } from '@/lib/api';
-import { Model } from '@/hooks/useModels';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { useAppData, Model } from '@/hooks/useAppData';
 
 interface QueryInputProps {
   value: string;
@@ -25,6 +29,8 @@ interface QueryInputProps {
   availableModels?: Model[];  // Models from backend
   modelsLoading?: boolean;
   contextPercentage?: number; // Context usage percentage (0-100)
+  contextSize?: number; // Current context size
+  restartThreshold?: number; // Threshold for context restart
 }
 
 export default function QueryInput({
@@ -38,22 +44,23 @@ export default function QueryInput({
   availableModels = [],
   modelsLoading = false,
   contextPercentage = 0,
+  contextSize = 0,
+  restartThreshold = 100000,
 }: QueryInputProps) {
-  const [availableTools, setAvailableTools] = useState<Tool[]>([]);
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [showToolPicker, setShowToolPicker] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [cursorPosition, setCursorPosition] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    // Load available tools
-    getTools().then(setAvailableTools).catch(console.error);
-  }, []);
+  const { tools, toolsLoading } = useAppData();
+  
+  // Ensure tools is always an array
+  const availableTools = Array.isArray(tools) ? tools : [];
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Check for @ symbol to show tool picker
     if (e.key === '@') {
+      e.preventDefault(); // Prevent @ from being typed
       setShowToolPicker(true);
     }
 
@@ -82,6 +89,11 @@ export default function QueryInput({
     } else {
       setSelectedTools([...selectedTools, toolId]);
     }
+    // Close modal and refocus textarea
+    setShowToolPicker(false);
+    setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 100);
   };
 
   const handleToolRemove = (toolId: string) => {
@@ -101,7 +113,7 @@ export default function QueryInput({
     <div className="w-full">
       <div className="max-w-4xl mx-auto">
         {/* Query Wrap - Light glassy pane with dark tints */}
-        <div className="relative rounded-xl p-3 overflow-hidden">
+        <div className="relative rounded-xl p-3 overflow-hidden shadow-lg">
           {/* Light gray gradient background behind the blur */}
           <div className="absolute inset-0 bg-gradient-to-br from-gray-400/25 via-gray-300/20 to-gray-400/25" />
           
@@ -182,31 +194,42 @@ export default function QueryInput({
             </div>
 
             {/* Context Meter */}
-            <div className="flex items-center gap-2 text-gray-500 text-xs">
-              <span className="font-mono">
-                {contextPercentage.toFixed(0)}%
-              </span>
-              <svg className="transform -rotate-90" viewBox="0 0 20 20" width="18" height="18">
-                <circle
-                  className="fill-none stroke-gray-300 opacity-70"
-                  cx="10"
-                  cy="10"
-                  r="8"
-                  strokeWidth="3"
-                />
-                <circle
-                  className="fill-none stroke-gray-500 transition-all duration-200"
-                  cx="10"
-                  cy="10"
-                  r="8"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeDasharray="50.265"
-                  strokeDashoffset={50.265 - (50.265 * contextPercentage / 100)}
-                  style={{ transition: 'stroke-dashoffset 200ms ease' }}
-                />
-              </svg>
-            </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div>
+                  <Badge variant="outline" className="flex items-center gap-2 text-gray-500 text-xs font-mono px-2 py-1">
+                    <span>
+                      {contextPercentage.toFixed(0)}%
+                    </span>
+                    <svg className="transform -rotate-90" viewBox="0 0 20 20" width="16" height="16">
+                      <circle
+                        className="fill-none stroke-gray-300 opacity-70"
+                        cx="10"
+                        cy="10"
+                        r="8"
+                        strokeWidth="3"
+                      />
+                      <circle
+                        className="fill-none stroke-gray-500 transition-all duration-200"
+                        cx="10"
+                        cy="10"
+                        r="8"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        strokeDasharray="50.265"
+                        strokeDashoffset={50.265 - (50.265 * contextPercentage / 100)}
+                        style={{ transition: 'stroke-dashoffset 200ms ease' }}
+                      />
+                    </svg>
+                  </Badge>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p className="text-xs font-mono">
+                  {contextSize.toLocaleString()} / {restartThreshold.toLocaleString()} context used
+                </p>
+              </TooltipContent>
+            </Tooltip>
           </div>
 
           {/* Textarea Input */}
@@ -241,61 +264,52 @@ export default function QueryInput({
                   <Command className="bg-white">
                     <CommandInput placeholder="Search models..." />
                     <CommandList className="max-h-[400px]">
-                      {modelsLoading ? (
-                        <div className="p-4 text-center text-sm text-gray-500">
-                          Loading models...
-                        </div>
-                      ) : availableModels.length === 0 ? (
-                        <CommandEmpty>No models available.</CommandEmpty>
-                      ) : (
-                        <>
-                          {/* Featured Models */}
-                          <CommandGroup heading="⭐ Featured">
-                            {featuredModels.map((model) => (
-                              <CommandItem
-                                key={model.id}
-                                onSelect={() => {
-                                  onModelChange?.(model.id);
-                                  setShowModelPicker(false);
-                                }}
-                              >
-                                <div className="flex items-center justify-between w-full">
-                                  <div className="flex flex-col">
-                                    <span className="font-medium">{model.name}</span>
-                                    <span className="text-xs text-gray-500">{model.provider}</span>
-                                  </div>
-                                  {model.id === selectedModel && (
-                                    <span className="text-primary">✓</span>
-                                  )}
-                                </div>
-                              </CommandItem>
-                            ))}
-                          </CommandGroup>
+                      <CommandEmpty>No models available.</CommandEmpty>
+                      {/* Featured Models */}
+                      <CommandGroup heading="⭐ Featured">
+                        {featuredModels.map((model) => (
+                          <CommandItem
+                            key={model.id}
+                            onSelect={() => {
+                              onModelChange?.(model.id);
+                              setShowModelPicker(false);
+                            }}
+                          >
+                            <div className="flex items-center justify-between w-full">
+                              <div className="flex flex-col">
+                                <span className="font-medium">{model.name}</span>
+                                <span className="text-xs text-gray-500">{model.provider}</span>
+                              </div>
+                              {model.id === selectedModel && (
+                                <span className="text-primary">✓</span>
+                              )}
+                            </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
 
-                          {/* Other Models */}
-                          <CommandGroup heading="All Models">
-                            {otherModels.map((model) => (
-                              <CommandItem
-                                key={model.id}
-                                onSelect={() => {
-                                  onModelChange?.(model.id);
-                                  setShowModelPicker(false);
-                                }}
-                              >
-                                <div className="flex items-center justify-between w-full">
-                                  <div className="flex flex-col">
-                                    <span className="text-sm">{model.name}</span>
-                                    <span className="text-xs text-gray-500">{model.provider}</span>
-                                  </div>
-                                  {model.id === selectedModel && (
-                                    <span className="text-primary">✓</span>
-                                  )}
-                                </div>
-                              </CommandItem>
-                            ))}
-                          </CommandGroup>
-                        </>
-                      )}
+                      {/* Other Models */}
+                      <CommandGroup heading="All Models">
+                        {otherModels.map((model) => (
+                          <CommandItem
+                            key={model.id}
+                            onSelect={() => {
+                              onModelChange?.(model.id);
+                              setShowModelPicker(false);
+                            }}
+                          >
+                            <div className="flex items-center justify-between w-full">
+                              <div className="flex flex-col">
+                                <span className="text-sm">{model.name}</span>
+                                <span className="text-xs text-gray-500">{model.provider}</span>
+                              </div>
+                            {model.id === selectedModel && (
+                              <span className="text-primary">✓</span>
+                            )}
+                          </div>
+                        </CommandItem>
+                        ))}
+                      </CommandGroup>
                     </CommandList>
                   </Command>
                 </PopoverContent>

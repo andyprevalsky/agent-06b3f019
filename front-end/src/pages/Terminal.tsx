@@ -22,7 +22,7 @@ import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
 import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import { useToast } from '@/hooks/use-toast';
-import { useModels } from '@/hooks/useModels';
+import { useAppData } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
@@ -53,6 +53,7 @@ export default function Terminal() {
   const [isLoadingAgents, setIsLoadingAgents] = useState(true);
   const [showCompleted, setShowCompleted] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
   
   // Selected agent state
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -65,8 +66,8 @@ export default function Terminal() {
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState('anthropic/claude-sonnet-4.5');
   
-  // Models from backend
-  const { models, loading: modelsLoading } = useModels();
+  // Models and tools from cached context
+  const { models, modelsLoading } = useAppData();
   
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -224,7 +225,7 @@ export default function Terminal() {
       setIsLoadingAgent(true);
       const data = await getAgent(agentId);
       setAgentDetail(data.agent);
-      setMessages(data.messages.reverse()); // Reverse to show oldest first
+      setMessages(data.messages); // Already in chronological order (oldest first)
     } catch (error) {
       toast({
         title: 'Error',
@@ -250,8 +251,15 @@ export default function Terminal() {
 
   const handleResumeAgent = async (agentId: string) => {
     try {
+      setResumingAgentId(agentId);
       await resumeAgent(agentId);
-      // Don't manually reload - let Realtime subscription handle the update
+      
+      // Sequentially fetch the updated agent to get the latest status
+      await getAgent(agentId);
+      
+      // Refresh the agents list to show updated status
+      await loadAgents();
+      
       toast({
         title: 'Success',
         description: 'Agent resumed',
@@ -262,6 +270,8 @@ export default function Terminal() {
         description: 'Failed to resume agent',
         variant: 'destructive',
       });
+    } finally {
+      setResumingAgentId(null);
     }
   };
 
@@ -388,6 +398,7 @@ export default function Terminal() {
                     isSelected={selectedAgentId === agent.agent_id}
                     onClick={() => handleSelectAgent(agent.agent_id)}
                     onResume={handleResumeAgent}
+                    isResuming={resumingAgentId === agent.agent_id}
                   />
                 ))
               )}
@@ -508,6 +519,8 @@ export default function Terminal() {
                 availableModels={models}
                 modelsLoading={modelsLoading}
                 contextPercentage={getContextPercentage(agentDetail)}
+                contextSize={agentDetail.context_size}
+                restartThreshold={getModelContextWindow(agentDetail.model) * 0.8}
               />
             </div>
           )}

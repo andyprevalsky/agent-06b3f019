@@ -1,7 +1,27 @@
 #!/bin/bash
 # End-to-end test: Start worker, create agent, validate completion
+#
+# Usage:
+#   ./e2e-test.sh              # Run test with automatic cleanup
+#   ./e2e-test.sh --no-cleanup # Skip cleanup to inspect database after test
+#
+# With --no-cleanup:
+#   - Agent and workflow remain in database
+#   - Worker keeps running
+#   - You can manually inspect tables and clean up later
 
 set -e
+
+# Parse arguments
+NO_CLEANUP=false
+for arg in "$@"; do
+  case $arg in
+    --no-cleanup)
+      NO_CLEANUP=true
+      shift
+      ;;
+  esac
+done
 
 # Configuration
 BACKEND_URL="http://localhost:3001"
@@ -17,10 +37,22 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
 
 # Cleanup function
 cleanup() {
+  if [ "$NO_CLEANUP" = true ]; then
+    echo ""
+    echo -e "${YELLOW}⏭️  Skipping cleanup (--no-cleanup flag set)${NC}"
+    echo -e "   Agent ID: $AGENT_ID"
+    echo -e "   Workflow ID: $WORKFLOW_ID"
+    echo -e "   Worker PID: $WORKER_PID (still running)"
+    echo -e "   ${CYAN}💡 You can inspect the database and manually clean up later${NC}"
+    return
+  fi
+  
   echo ""
   echo -e "${YELLOW}🧹 Cleaning up...${NC}"
   
@@ -70,7 +102,7 @@ source venv/bin/activate
 
 # Generate unique task queue for this test run to avoid worker collisions
 TEST_TASK_QUEUE="navi-agent-tasks-test-$$"
-export TEMPORAL_TASK_QUEUE="$TEST_TASK_QUEUE"
+export TASK_QUEUE="$TEST_TASK_QUEUE"
 
 python worker.py > "$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
@@ -142,13 +174,13 @@ AGENT_RESPONSE=$(curl -s "$BACKEND_URL/api/agents" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
-    \"goal\": \"Count to 10 1 message at a time\",
+    \"goal\": \"Count to 5, one message at a time. Wait 1 second between each number.\",
     \"model\": \"anthropic/claude-sonnet-4.5\",
     \"tool_ids\": [],
     \"task_queue\": \"$TEST_TASK_QUEUE\",
     \"verifier\": {
       \"type\": \"FLOAT_LLM_JUDGE\",
-      \"llm_judge_prompt\": \"Evaluate the response for correctly generating 10 consecutive messages, each containing the next integer in sequence from 1 to 10 (i.e., the first message is \\\"1\\\", the second is \\\"2\\\", ..., the tenth is \\\"10\\\"). Score the response as follows: 1.0 if all 10 messages are present, in the correct order, with each message containing only the correct integer. 0.0 if none of the messages are correct. For partial correctness, assign a proportional score based on the number of correctly sequenced messages out of 10. Return only a single float score between 0 (worst) and 1 (best). Do not provide any explanation.\"
+      \"llm_judge_prompt\": \"Evaluate the response for correctly generating 5 consecutive counting messages (1, 2, 3, 4, 5) with 1 second waits between each. Score: 1.0 if all 5 numbers are posted with proper waits. Partial credit based on count/5. Return only a float between 0 and 1.\"
     }
   }")
 
@@ -168,7 +200,7 @@ echo -e "      Workflow ID: $WORKFLOW_ID"
 # Step 6: Monitor agent execution  
 echo ""
 echo -e "${BLUE}[6/7]${NC} 👀 Monitoring agent execution..."
-echo -e "      Goal: Count to 10, 1 message at a time"
+echo -e "      Goal: Count to 5, wait 1 second between each number"
 echo -e "      Agent ID: $AGENT_ID"
 echo ""
 
@@ -201,8 +233,44 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
   # Display new messages (includes verifier assessments as ASSISTANT messages)
   if [ "$MESSAGE_COUNT" -gt "$PREV_MESSAGE_COUNT" ]; then
     echo "" # New line before showing messages
-    NEW_MESSAGES=$(echo "$AGENT_DATA" | jq -r ".messages[0:$(($MESSAGE_COUNT - $PREV_MESSAGE_COUNT))] | .[] | \"      📨 [\(.role)] \(.text)\"")
-    echo "$NEW_MESSAGES"
+    # Process each message individually to apply color coding
+    # Messages are now returned oldest-first, so new messages are at the end
+    NEW_MSG_COUNT=$(($MESSAGE_COUNT - $PREV_MESSAGE_COUNT))
+    for i in $(seq 0 $(($NEW_MSG_COUNT - 1))); do
+      MSG_IDX=$(($PREV_MESSAGE_COUNT + $i))
+      MSG_DATA=$(echo "$AGENT_DATA" | jq -r ".messages[$MSG_IDX]")
+      ROLE=$(echo "$MSG_DATA" | jq -r '.role')
+      TEXT=$(echo "$MSG_DATA" | jq -r '.text')
+      TIMESTAMP=$(echo "$MSG_DATA" | jq -r '.timestamp')
+      
+      # Format timestamp (convert from ISO to readable format)
+      if command -v gdate &> /dev/null; then
+        # macOS with GNU coreutils
+        FORMATTED_TIME=$(gdate -d "$TIMESTAMP" +"%H:%M:%S.%3N" 2>/dev/null || echo "$TIMESTAMP")
+      else
+        # Use Python if available for cross-platform compatibility
+        FORMATTED_TIME=$(python3 -c "from datetime import datetime; dt = datetime.fromisoformat('$TIMESTAMP'.replace('Z', '+00:00')); print(dt.strftime('%H:%M:%S.%f')[:-3])" 2>/dev/null || echo "$TIMESTAMP")
+      fi
+      
+      # Color code by role
+      case $ROLE in
+        ASSISTANT)
+          echo -e "      ${CYAN}[$FORMATTED_TIME]${NC} ${MAGENTA}[ASSISTANT]${NC} $TEXT"
+          ;;
+        TOOL)
+          echo -e "      ${CYAN}[$FORMATTED_TIME]${NC} ${YELLOW}[TOOL]${NC} $TEXT"
+          ;;
+        USER)
+          echo -e "      ${CYAN}[$FORMATTED_TIME]${NC} ${GREEN}[USER]${NC} $TEXT"
+          ;;
+        SYSTEM)
+          echo -e "      ${CYAN}[$FORMATTED_TIME]${NC} ${BLUE}[SYSTEM]${NC} $TEXT"
+          ;;
+        *)
+          echo -e "      ${CYAN}[$FORMATTED_TIME]${NC} [$ROLE] $TEXT"
+          ;;
+      esac
+    done
     PREV_MESSAGE_COUNT=$MESSAGE_COUNT
   fi
   

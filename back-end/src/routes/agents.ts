@@ -231,14 +231,15 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Fetch messages with pagination (cursor-based)
-    // Cursor is the timestamp of the oldest message we've seen
+    // Returns oldest messages first (chronological order)
+    // Cursor is the timestamp of the newest message we've seen
     const messages = await prisma.message.findMany({
       where: {
         agentId,
-        ...(cursor ? { timestamp: { lt: new Date(cursor) } } : {}),
+        ...(cursor ? { timestamp: { gt: new Date(cursor) } } : {}),
       },
       orderBy: {
-        timestamp: 'desc',
+        timestamp: 'asc',
       },
       take: limit,
     });

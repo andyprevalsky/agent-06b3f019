@@ -15,7 +15,10 @@ logger = structlog.get_logger()
 async def mark_finished(
     agent_id: str,
     goal: str,
-    steps_taken: List[Dict]
+    steps_taken: List[Dict],
+    token_count: int = 0,
+    context_size: int = 0,
+    message_count: int = 0
 ) -> Dict:
     """
     Activity: Mark an agent task as finished.
@@ -43,7 +46,10 @@ async def mark_finished(
                 json={
                     "status": "COMPLETED",
                     "statusMessage": f"Successfully completed: {goal}",
-                    "progress": 1.0
+                    "progress": 1.0,
+                    "tokenCount": token_count,
+                    "contextSize": context_size,
+                    "messageCount": message_count
                 },
                 headers={
                     "X-API-Key": config.backend.api_key,
