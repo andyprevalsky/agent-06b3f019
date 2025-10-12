@@ -372,9 +372,10 @@ export default function Terminal() {
     const clientHeight = scrollContainer.clientHeight;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
 
-    // Only snap to bottom if user was already near bottom (within 150px)
+    // Only snap to bottom if user was already near bottom (within 500px)
     // This preserves scroll position if user is reading old messages
-    if (distanceFromBottom < 150) {
+    // Larger threshold prevents new messages from pushing user out of auto-scroll
+    if (distanceFromBottom < 500) {
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
     }
   }, [messages]);
