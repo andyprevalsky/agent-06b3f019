@@ -22,24 +22,24 @@ import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
 import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import { useToast } from '@/hooks/use-toast';
-import { useAppData } from '@/hooks/useAppData';
+import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
-function getModelContextWindow(model: string): number {
-  const contextWindows: Record<string, number> = {
-    'anthropic/claude-sonnet-4.5': 200000,
-    'anthropic/claude-4.5-haiku': 200000,
-    'openai/gpt-4o': 128000,
-    'openai/gpt-4o-mini': 128000,
-    'openai/gpt-4-turbo': 128000,
-  };
-  return contextWindows[model] || 100000;
+function getModelContextWindow(model: string, models: Model[]): number {
+  // Look up the actual context length from the models data
+  const modelData = models.find(m => m.id === model);
+  if (modelData?.contextLength) {
+    return modelData.contextLength;
+  }
+  
+  // Fallback to default if model not found
+  return 100000;
 }
 
-function getContextPercentage(agent: AgentDetail): number {
-  const maxWindow = getModelContextWindow(agent.model);
-  const restartThreshold = maxWindow * 0.8;
+function getContextPercentage(agent: AgentDetail, models: Model[]): number {
+  const maxWindow = getModelContextWindow(agent.model, models);
+  const restartThreshold = Math.round(maxWindow * 0.8);
   return Math.min(100, (agent.context_size / restartThreshold) * 100);
 }
 
@@ -211,6 +211,8 @@ export default function Terminal() {
                 status_message: updated.statusMessage,
                 model: updated.model,
                 token_count: updated.tokenCount,
+                tokens_in: updated.tokensIn,
+                tokens_out: updated.tokensOut,
                 context_size: updated.contextSize,
                 message_count: updated.messageCount,
                 updated_at: updated.updatedAt,
@@ -814,9 +816,9 @@ export default function Terminal() {
                 onModelChange={setSelectedModel}
                 availableModels={models}
                 modelsLoading={modelsLoading}
-                contextPercentage={getContextPercentage(agentDetail)}
+                contextPercentage={getContextPercentage(agentDetail, models)}
                 contextSize={agentDetail.context_size}
-                restartThreshold={getModelContextWindow(agentDetail.model) * 0.8}
+                restartThreshold={Math.round(getModelContextWindow(agentDetail.model, models) * 0.8)}
               />
             </div>
           )}

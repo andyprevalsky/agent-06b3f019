@@ -10,7 +10,7 @@ import { Settings, Loader2, Play, Pause, Check, ChevronsUpDown, X } from 'lucide
 import { AgentDetail, pauseAgent, resumeAgent, updateAgent } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Progress } from '@/components/ui/progress';
-import { useAppData } from '@/hooks/useAppData';
+import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 
 interface AgentSettingsDialogProps {
@@ -18,15 +18,15 @@ interface AgentSettingsDialogProps {
   onUpdate?: () => void;
 }
 
-function getModelContextWindow(model: string): number {
-  const contextWindows: Record<string, number> = {
-    'anthropic/claude-sonnet-4.5': 200000,
-    'anthropic/claude-4.5-haiku': 200000,
-    'openai/gpt-4o': 128000,
-    'openai/gpt-4o-mini': 128000,
-    'openai/gpt-4-turbo': 128000,
-  };
-  return contextWindows[model] || 100000;
+function getModelContextWindow(model: string, models: Model[]): number {
+  // Look up the actual context length from the models data
+  const modelData = models.find(m => m.id === model);
+  if (modelData?.contextLength) {
+    return modelData.contextLength;
+  }
+  
+  // Fallback to default if model not found
+  return 100000;
 }
 
 function calculateCost(tokensIn: number, tokensOut: number, promptPrice?: string, completionPrice?: string): string {
@@ -164,12 +164,12 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
     );
   };
 
-  const maxWindow = getModelContextWindow(agent.model);
-  const restartThreshold = maxWindow * 0.8;
-  const contextPercentage = Math.min(100, (agent.context_size / restartThreshold) * 100);
-
   // Ensure arrays are always defined
   const modelsList = Array.isArray(models) ? models : [];
+  
+  const maxWindow = getModelContextWindow(agent.model, modelsList);
+  const restartThreshold = Math.round(maxWindow * 0.8);
+  const contextPercentage = Math.min(100, (agent.context_size / restartThreshold) * 100);
   const toolsList = Array.isArray(tools) ? tools : [];
   const selectedModelData = modelsList.find(m => m?.id === selectedModel);
   const selectedToolsData = toolsList.filter(t => t && selectedTools.includes(t.id));
