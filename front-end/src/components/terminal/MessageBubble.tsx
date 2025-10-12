@@ -10,18 +10,6 @@ interface AnimatedTextProps {
 }
 
 function AnimatedText({ text, shouldAnimate, onComplete }: AnimatedTextProps) {
-  useEffect(() => {
-    if (shouldAnimate && onComplete) {
-      // Split into words to calculate total animation time
-      const words = text.split(' ');
-      const chunkSize = 5;
-      const numChunks = Math.ceil(words.length / chunkSize);
-      const totalTime = numChunks * 40 + 200; // 40ms per chunk + 200ms for final fade
-      const timeout = setTimeout(onComplete, totalTime);
-      return () => clearTimeout(timeout);
-    }
-  }, [shouldAnimate, text, onComplete]);
-
   if (!shouldAnimate) {
     return <>{text}</>;
   }
@@ -36,6 +24,13 @@ function AnimatedText({ text, shouldAnimate, onComplete }: AnimatedTextProps) {
     chunks.push(chunk);
   }
 
+  // Handler for when the LAST chunk finishes animating
+  const handleLastChunkAnimationEnd = () => {
+    if (onComplete) {
+      onComplete();
+    }
+  };
+
   return (
     <>
       {chunks.map((chunk, index) => (
@@ -46,6 +41,7 @@ function AnimatedText({ text, shouldAnimate, onComplete }: AnimatedTextProps) {
             animation: 'fadeIn 200ms ease-out forwards',
             animationDelay: `${index * 40}ms`,
           }}
+          onAnimationEnd={index === chunks.length - 1 ? handleLastChunkAnimationEnd : undefined}
         >
           {chunk}
           {index < chunks.length - 1 ? ' ' : ''}
@@ -123,15 +119,39 @@ function parseToolMessage(text: string): ParsedToolMessage | null {
   return null;
 }
 
-function ToolMessage({ parsed }: { 
+function ToolMessage({ 
+  parsed, 
+  shouldType = false, 
+  onComplete 
+}: { 
   parsed: ParsedToolMessage; 
+  shouldType?: boolean;
+  onComplete?: () => void;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [hasAnimated, setHasAnimated] = useState(false);
   const hasMessage = parsed.message.trim().length > 0;
   const isFinished = parsed.status === 'FINISHED';
 
   // Show chevron if: has message AND is finished
   const showChevron = hasMessage && isFinished;
+
+  // If we should animate and haven't animated yet, start expanded
+  const shouldBeExpanded = (shouldType && !hasAnimated) || isExpanded;
+
+  // Handle animation completion - collapse after animating
+  const handleAnimationComplete = () => {
+    console.log(`[${performance.now().toFixed(2)}] 🔽 COLLAPSE: Tool message collapsing`);
+    setHasAnimated(true);
+    setIsExpanded(false); // Collapse after animation
+    
+    // Use requestAnimationFrame to ensure DOM updates before unlocking queue
+    if (onComplete) {
+      requestAnimationFrame(() => {
+        onComplete();
+      });
+    }
+  };
 
   return (
     <div className="space-y-2">
@@ -153,19 +173,27 @@ function ToolMessage({ parsed }: {
         {showChevron && (
           <ChevronRight 
             className={cn(
-              "h-4 w-4 text-muted-foreground transition-transform duration-200",
-              isExpanded && "rotate-90"
+              "h-4 w-4 text-muted-foreground transition-transform duration-75",
+              shouldBeExpanded && "rotate-90"
             )} 
           />
         )}
       </div>
 
       {/* Expandable message content */}
-      {hasMessage && isExpanded && (
+      {hasMessage && shouldBeExpanded && (
         <div className="overflow-hidden">
           <div className="pl-4 border-l-2 border-border">
             <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
-              {parsed.message}
+              {shouldType && !hasAnimated ? (
+                <AnimatedText 
+                  text={parsed.message} 
+                  shouldAnimate={true}
+                  onComplete={handleAnimationComplete}
+                />
+              ) : (
+                parsed.message
+              )}
             </p>
           </div>
         </div>
@@ -193,7 +221,11 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
         <div className="flex-shrink-0 w-8" />
         
         <div className="flex-1">
-          <ToolMessage parsed={parsedTool} />
+          <ToolMessage 
+            parsed={parsedTool} 
+            shouldType={shouldType}
+            onComplete={onTypingComplete}
+          />
         </div>
       </div>
     );

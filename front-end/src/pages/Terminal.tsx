@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -120,6 +120,7 @@ export default function Terminal() {
   const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
   const isInitialLoadRef = useRef<boolean>(false);
   const [forceResubscribe, setForceResubscribe] = useState<number>(0);
+
 
   // Check authentication
   useEffect(() => {
@@ -380,7 +381,6 @@ export default function Terminal() {
 
   // Handler for when animation completes
   const handleAnimationComplete = () => {
-    console.log('✅ Animation complete');
     setIsAnimating(false);
     setCurrentAnimatingId(null);
   };
@@ -390,7 +390,6 @@ export default function Terminal() {
     // Only process if: buffer has messages AND we're not currently animating
     if (messageBuffer.length > 0 && !isAnimating) {
       const nextMessage = messageBuffer[0];
-      console.log('▶️ Displaying message:', nextMessage.message_id.substring(0, 8), 'Role:', nextMessage.role);
       
       // Add to displayed messages
       setMessages((prev) => [...prev, nextMessage]);
@@ -398,12 +397,31 @@ export default function Terminal() {
       // Remove from buffer
       setMessageBuffer((prev) => prev.slice(1));
       
-      // If ASSISTANT message, mark as animating (TOOL messages don't animate)
+      // Check if this message should animate
+      let shouldAnimate = false;
+      
+      // ASSISTANT messages always animate
       if (nextMessage.role === 'ASSISTANT') {
+        shouldAnimate = true;
+      }
+      
+      // TOOL messages animate if they are FINISHED and have a message
+      if (nextMessage.role === 'TOOL') {
+        const parts = nextMessage.text.split('|||');
+        if (parts.length >= 4) {
+          const status = parts[2];
+          const message = parts[3] || '';
+          if (status === 'FINISHED' && message.trim().length > 0) {
+            shouldAnimate = true;
+            console.log(`[${performance.now().toFixed(2)}] 🎯 SHOULD COLLAPSE: FINISHED tool with message detected`);
+          }
+        }
+      }
+      
+      if (shouldAnimate) {
         setIsAnimating(true);
         setCurrentAnimatingId(nextMessage.message_id);
       }
-      // TOOL messages don't trigger animation lock, so next message processes immediately
     }
   }, [messageBuffer, isAnimating]);
 
@@ -603,6 +621,11 @@ export default function Terminal() {
     return b.progress - a.progress;
   });
 
+  // Memoize deduplicated messages to prevent unnecessary re-renders
+  const displayedMessages = useMemo(() => {
+    return deduplicateToolMessages(messages.filter((m) => m.role !== 'SYSTEM'));
+  }, [messages]);
+
   // Get system messages
   const systemMessages = messages.filter((m) => m.role === 'SYSTEM');
 
@@ -765,7 +788,7 @@ export default function Terminal() {
             ) : (
               // Agent selected - show messages
               <div className="max-w-4xl mx-auto space-y-4 pb-32">
-                {deduplicateToolMessages(messages.filter((m) => m.role !== 'SYSTEM')).map((message) => (
+                {displayedMessages.map((message) => (
                   <MessageBubble 
                     key={message.message_id} 
                     message={message}
