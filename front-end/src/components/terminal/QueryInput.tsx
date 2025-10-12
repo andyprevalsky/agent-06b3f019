@@ -39,7 +39,7 @@ export default function QueryInput({
   onSubmit,
   disabled = false,
   placeholder = 'Type your message...',
-  selectedModel = 'anthropic/claude-sonnet-4.5',
+  selectedModel = 'google/gemini-2.5-flash',
   onModelChange,
   availableModels = [],
   modelsLoading = false,

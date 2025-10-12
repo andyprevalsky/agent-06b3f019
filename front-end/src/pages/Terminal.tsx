@@ -102,7 +102,7 @@ export default function Terminal() {
   // Message input state
   const [messageInput, setMessageInput] = useState('');
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('anthropic/claude-sonnet-4.5');
+  const [selectedModel, setSelectedModel] = useState('google/gemini-2.5-flash');
   
   // Models and tools from cached context
   const { models, modelsLoading } = useAppData();

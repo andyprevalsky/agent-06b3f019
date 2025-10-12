@@ -37,7 +37,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
 
   const [goal, setGoal] = useState(defaultGoal);
   const [llmJudgePrompt, setLlmJudgePrompt] = useState(defaultLlmJudgePrompt);
-  const [selectedModel, setSelectedModel] = useState('z-ai/glm-4.5');
+  const [selectedModel, setSelectedModel] = useState('google/gemini-2.5-flash');
   const [reasoningEffort, setReasoningEffort] = useState<'off' | 'low' | 'medium' | 'high'>('off');
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
@@ -127,7 +127,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
       // Reset form
       setGoal(defaultGoal);
       setLlmJudgePrompt(defaultLlmJudgePrompt);
-      setSelectedModel('z-ai/glm-4.5');
+      setSelectedModel('google/gemini-2.5-flash');
       setReasoningEffort('off');
       setSelectedTools([]);
       onClose();
