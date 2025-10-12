@@ -38,6 +38,11 @@ const updateStatusSchema = z.object({
 // GET /api/agents - Get all agents for the authenticated user
 router.get('/', authenticate, async (req: AuthRequest, res) => {
   try {
+    // Prevent caching - agent statuses change in real-time
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    
     const userId = req.user!.id;
 
     const agents = await prisma.agent.findMany({
@@ -225,6 +230,11 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
 // GET /api/agents/:id - Get agent details with messages
 router.get('/:id', authenticate, async (req: AuthRequest, res) => {
   try {
+    // Prevent caching - data changes in real-time
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    
     const userId = req.isInternal ? undefined : req.user!.id;
     const agentId = req.params.id;
     const before = req.query.before as string | undefined; // Load messages BEFORE this timestamp (scroll up)
@@ -253,21 +263,22 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Fetch messages with pagination (cursor-based)
-    // If 'before' cursor: load older messages (for scroll up pagination)
-    // Otherwise: load most recent messages
+    // Strategy: Fetch newest-first, then reverse to chronological order
+    // - Initial load (no 'before'): Get 50 most recent messages
+    // - Pagination (with 'before'): Get 50 messages before cursor
     const messages = await prisma.message.findMany({
       where: {
         agentId,
         ...(before ? { timestamp: { lt: new Date(before) } } : {}),
       },
       orderBy: {
-        timestamp: 'asc', // Always return chronological order (oldest first)
+        timestamp: 'desc', // Newest first (to get most recent X messages)
       },
       take: limit,
     });
 
-    // Messages are already in chronological order
-    const orderedMessages = messages;
+    // Reverse to chronological order (oldest first) for display
+    const orderedMessages = messages.reverse();
 
     res.json({
       agent: {

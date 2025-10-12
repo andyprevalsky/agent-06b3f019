@@ -24,7 +24,7 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
   };
 
   return (
-    <button
+    <div
       onClick={onClick}
       className={cn(
         'w-full text-left p-3 rounded-lg transition-all border cursor-pointer',
@@ -98,7 +98,7 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
           )}
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 

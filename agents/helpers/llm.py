@@ -219,10 +219,11 @@ You have access to these tools:
 
 IMPORTANT:
 - Use "reasoning" for your internal thinking (logged, not shown to user)
-- Use "response" to communicate directly with the user (REQUIRED - always explain what you're doing)
+- Use "response" to communicate directly with the user
 - You can call MULTIPLE tools in one turn (they'll execute sequentially)
-- As you work, you'll receive feedback messages to help you stay on course
-- Use this feedback to adjust your approach and track progress
+- As you work, you'll receive messages from a verifier who will check your progress and give you reasoning for the score you are at.
+- you may also receive a blueprint in your system messages, a blueprint synthesizes key learnings from successful task completions for related goals. Use them to inform your decision making.
+- Your goal is to get to 100% progress.
 
 Respond in JSON format:
 {{
@@ -347,12 +348,7 @@ async def check_progress(
 Evaluation criteria:
 {verifier_prompt}
 
-Based on the agent's actions and the conversation so far, provide a progress score from 0.0 to 1.0:
-- 0.0 = No progress at all
-- 0.25 = Made some initial progress
-- 0.5 = Halfway to completion
-- 0.75 = Nearly complete
-- 1.0 = Task fully achieved
+Based on the agent's actions and the conversation so far, provide a progress score from 0.0 to 1.0.
 
 You MUST respond with valid JSON matching this exact schema:
 {{

@@ -109,17 +109,15 @@ export default function Terminal() {
   
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const reconnectAttemptRef = useRef<number>(0);
   const reconnectTimeoutRef = useRef<number | null>(null);
   const isReconnectingRef = useRef<boolean>(false);
   
-  // Track which message should be animated (only the most recent agent/tool message)
-  const [animatingMessageId, setAnimatingMessageId] = useState<string | null>(null);
-  const [messageQueue, setMessageQueue] = useState<string[]>([]);
-  const lastAnimationStartRef = useRef<number>(0);
-  const animatedMessagesRef = useRef<Set<string>>(new Set());
+  // Message buffer queue - messages wait here before being displayed
+  const [messageBuffer, setMessageBuffer] = useState<Message[]>([]);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
   const isInitialLoadRef = useRef<boolean>(false);
   const [forceResubscribe, setForceResubscribe] = useState<number>(0);
 
@@ -234,26 +232,15 @@ export default function Terminal() {
         (payload) => {
           console.log('💬 New message:', payload);
           const newMessage = payload.new as any;
-          const messageId = newMessage.id;
-          const role = newMessage.role;
+          const message: Message = {
+            message_id: newMessage.id,
+            timestamp: newMessage.timestamp,
+            text: newMessage.text,
+            role: newMessage.role,
+          };
           
-          setMessages((prev) => [
-            ...prev,
-            {
-              message_id: messageId,
-              timestamp: newMessage.timestamp,
-              text: newMessage.text,
-              role: role,
-            },
-          ]);
-          
-          // Only queue ASSISTANT messages for animation
-          // TOOL messages update instantly with no animation
-          if (role === 'ASSISTANT' && !animatedMessagesRef.current.has(messageId)) {
-            console.log('🎬 Queuing ASSISTANT message:', messageId.substring(0, 8));
-            animatedMessagesRef.current.add(messageId);
-            setMessageQueue((prev) => [...prev, messageId]);
-          }
+          // Add to buffer queue - it will be displayed when ready
+          setMessageBuffer((prev) => [...prev, message]);
         }
       )
       .subscribe((status) => {
@@ -392,46 +379,31 @@ export default function Terminal() {
   // Handler for when animation completes
   const handleAnimationComplete = () => {
     console.log('✅ Animation complete');
-    // Remove from queue FIRST, then clear animating ID
-    setMessageQueue((prev) => {
-      if (prev.length > 0) {
-        console.log('🗑️ Removing from queue, remaining:', prev.length - 1);
-        return prev.slice(1);
-      }
-      return prev;
-    });
-    // Delay before clearing to ensure queue update processes
-    setTimeout(() => {
-      setAnimatingMessageId(null);
-    }, 1000);
+    setIsAnimating(false);
+    setCurrentAnimatingId(null);
   };
 
-  // Process message queue with minimum 200ms delay between animations
+  // Process message buffer - pull one message at a time and display it
   useEffect(() => {
-    if (messageQueue.length > 0 && !animatingMessageId) {
-      const now = Date.now();
-      const timeSinceLastAnimation = now - lastAnimationStartRef.current;
-      const minDelay = 200;
-
-      if (timeSinceLastAnimation >= minDelay || lastAnimationStartRef.current === 0) {
-        // Start animating immediately
-        lastAnimationStartRef.current = now;
-        const msgId = messageQueue[0];
-        console.log('▶️ Starting animation:', msgId.substring(0, 8));
-        setAnimatingMessageId(msgId);
-      } else {
-        // Wait for remaining time
-        const remainingDelay = minDelay - timeSinceLastAnimation;
-        const timeout = setTimeout(() => {
-          lastAnimationStartRef.current = Date.now();
-          const msgId = messageQueue[0];
-          console.log('▶️ Starting animation (delayed):', msgId.substring(0, 8));
-          setAnimatingMessageId(msgId);
-        }, remainingDelay);
-        return () => clearTimeout(timeout);
+    // Only process if: buffer has messages AND we're not currently animating
+    if (messageBuffer.length > 0 && !isAnimating) {
+      const nextMessage = messageBuffer[0];
+      console.log('▶️ Displaying message:', nextMessage.message_id.substring(0, 8), 'Role:', nextMessage.role);
+      
+      // Add to displayed messages
+      setMessages((prev) => [...prev, nextMessage]);
+      
+      // Remove from buffer
+      setMessageBuffer((prev) => prev.slice(1));
+      
+      // If ASSISTANT message, mark as animating (TOOL messages don't animate)
+      if (nextMessage.role === 'ASSISTANT') {
+        setIsAnimating(true);
+        setCurrentAnimatingId(nextMessage.message_id);
       }
+      // TOOL messages don't trigger animation lock, so next message processes immediately
     }
-  }, [messageQueue, animatingMessageId]);
+  }, [messageBuffer, isAnimating]);
 
   // Check if we should show the loader (agent is thinking)
   const [showThinkingLoader, setShowThinkingLoader] = useState(false);
@@ -439,13 +411,15 @@ export default function Terminal() {
   useEffect(() => {
     // Don't show loader if:
     // - No agent detail
-    // - Agent is not active
+    // - Agent is not active (paused, completed, failed)
+    // - We have messages in the buffer waiting to display
     // - We're currently animating a message
     if (!agentDetail || 
         agentDetail.status === 'COMPLETED' || 
         agentDetail.status === 'FAILED' || 
         agentDetail.status === 'PAUSED' ||
-        animatingMessageId) {
+        messageBuffer.length > 0 ||
+        isAnimating) {
       setShowThinkingLoader(false);
       return;
     }
@@ -482,7 +456,7 @@ export default function Terminal() {
     const interval = setInterval(checkThreshold, 100);
     
     return () => clearInterval(interval);
-  }, [messages, agentDetail, animatingMessageId]);
+  }, [messages, agentDetail, isAnimating, messageBuffer]);
 
   const loadAgents = async () => {
     try {
@@ -517,11 +491,10 @@ export default function Terminal() {
       // Mark this as an initial load so we can scroll to bottom
       isInitialLoadRef.current = true;
       
-      // Clear animation state and queue when loading a different agent
-      setAnimatingMessageId(null);
-      setMessageQueue([]);
-      lastAnimationStartRef.current = 0;
-      animatedMessagesRef.current.clear();
+      // Clear animation state and buffer when loading a different agent
+      setIsAnimating(false);
+      setCurrentAnimatingId(null);
+      setMessageBuffer([]);
       
       // Reset reconnection state when switching agents
       reconnectAttemptRef.current = 0;
@@ -627,10 +600,6 @@ export default function Terminal() {
     // Otherwise sort by progress (descending)
     return b.progress - a.progress;
   });
-
-  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
-  // Show loader when agent is working (not used for now since we don't have STATUS role)
-  const showStatusLoader = false;
 
   // Get system messages
   const systemMessages = messages.filter((m) => m.role === 'SYSTEM');
@@ -798,7 +767,7 @@ export default function Terminal() {
                   <MessageBubble 
                     key={message.message_id} 
                     message={message}
-                    shouldType={message.message_id === animatingMessageId}
+                    shouldType={message.message_id === currentAnimatingId}
                     onTypingComplete={handleAnimationComplete}
                   />
                 ))}
