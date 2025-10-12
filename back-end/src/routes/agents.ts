@@ -9,7 +9,7 @@ const router = Router();
 // Validation schemas
 const createAgentSchema = z.object({
   goal: z.string().min(1),
-  model: z.string().optional().default('anthropic/claude-sonnet-4.5'),
+  model: z.string().optional().default('z-ai/glm-4.5-air:free'),
   tool_ids: z.array(z.string().uuid()).optional().default([]),
   task_queue: z.string().optional(), // Optional: for test isolation
   verifier: z.object({
@@ -205,7 +205,7 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
   try {
     const userId = req.isInternal ? undefined : req.user!.id;
     const agentId = req.params.id;
-    const cursor = req.query.cursor as string | undefined;
+    const before = req.query.before as string | undefined; // Load messages BEFORE this timestamp (scroll up)
     const limit = 50;
 
     // Verify agent belongs to user (or internal) and is not deleted
@@ -231,18 +231,21 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Fetch messages with pagination (cursor-based)
-    // Returns oldest messages first (chronological order)
-    // Cursor is the timestamp of the newest message we've seen
+    // If 'before' cursor: load older messages (for scroll up pagination)
+    // Otherwise: load most recent messages
     const messages = await prisma.message.findMany({
       where: {
         agentId,
-        ...(cursor ? { timestamp: { gt: new Date(cursor) } } : {}),
+        ...(before ? { timestamp: { lt: new Date(before) } } : {}),
       },
       orderBy: {
-        timestamp: 'asc',
+        timestamp: before ? 'desc' : 'desc', // Always get latest first, then reverse if needed
       },
       take: limit,
     });
+
+    // Reverse messages to chronological order if we fetched older messages
+    const orderedMessages = before ? messages.reverse() : messages;
 
     res.json({
       agent: {
@@ -270,15 +273,15 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
           description: at.tool.description,
         })),
       },
-      messages: messages.map((msg) => ({
+      messages: orderedMessages.map((msg) => ({
         message_id: msg.id,
         timestamp: msg.timestamp,
         text: msg.text,
         role: msg.role,
       })),
       pagination: {
-        next_cursor: messages.length === limit ? messages[messages.length - 1].timestamp.toISOString() : null,
         has_more: messages.length === limit,
+        oldest_timestamp: orderedMessages.length > 0 ? orderedMessages[0].timestamp.toISOString() : null,
       },
     });
   } catch (error) {

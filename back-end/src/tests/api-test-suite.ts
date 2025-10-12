@@ -741,9 +741,8 @@ async function runAllTests() {
 
   if (failed > 0) {
     console.log('❌ FAILED TESTS:');
-    allResults
-      .filter(r => !r.passed)
-      .forEach(r => console.log(`   • ${r.name}: ${r.error}`));
+    const failedTests: TestResult[] = allResults.filter(r => !r.passed);
+    failedTests.forEach(r => console.log(`   • ${r.name}: ${r.error || 'Unknown error'}`));
     console.log('');
     process.exit(1);
   }

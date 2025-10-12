@@ -20,6 +20,7 @@ interface OpenRouterModel {
     max_completion_tokens?: number;
     is_moderated?: boolean;
   };
+  supported_parameters?: string[];
 }
 
 interface SortedModel {
@@ -35,8 +36,17 @@ interface SortedModel {
 }
 
 /**
+ * DELETE /api/models/cache - Clear model cache (useful for testing)
+ */
+router.delete('/cache', (req: Request, res: Response) => {
+  modelCache.del('models');
+  res.json({ message: 'Model cache cleared' });
+});
+
+/**
  * GET /api/models - Get available OpenRouter models
  * Returns cached list of models sorted by provider and capability
+ * Filters to only models that support tool use
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
@@ -60,10 +70,15 @@ router.get('/', async (req: Request, res: Response) => {
     }
 
     const data = await response.json() as { data?: OpenRouterModel[] };
-    const models: OpenRouterModel[] = data.data || [];
+    const allModels: OpenRouterModel[] = data.data || [];
+
+    // Filter to only models that support tool use
+    const toolSupportedModels = allModels.filter(model => 
+      model.supported_parameters?.includes('tools')
+    );
 
     // Transform and sort models
-    const sortedModels = sortModels(models);
+    const sortedModels = sortModels(toolSupportedModels);
 
     // Cache the results
     modelCache.set('models', sortedModels);
@@ -102,12 +117,13 @@ function sortModels(models: OpenRouterModel[]): SortedModel[] {
 
   // Define featured models (exact order matters)
   const featuredModels = [
+    'z-ai/glm-4.6',  // Newest GLM - 200K context
+    'z-ai/glm-4.5',  // Flagship GLM - 128K context
+    'z-ai/glm-4.5-air:free',  // FREE - Default
     'anthropic/claude-sonnet-4.5',
-    'openai/gpt-5',
-    'deepseek/deepseek-chat-v3.1',  // Closest to v3.1
-    'openai/gpt-4.1',
-    'x-ai/grok-4',
     'google/gemini-2.5-flash',
+    'deepseek/deepseek-chat',
+    'openai/gpt-4o',
   ];
 
   // Separate featured and non-featured

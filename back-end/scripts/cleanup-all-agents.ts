@@ -4,19 +4,52 @@
  * Cleanup Script: Delete All Agents and Terminate Workflows
  * 
  * This script will:
- * 1. Find all non-deleted agents in the database
- * 2. Terminate their Temporal workflows
- * 3. Soft-delete them from the database
+ * 1. Kill any local workers running on the test queue
+ * 2. Find all non-deleted agents in the database
+ * 3. Terminate their Temporal workflows
+ * 4. Soft-delete them from the database
  */
 
 import { prisma } from '../src/lib/prisma';
 import { getTemporalClient } from '../src/lib/temporal';
 import * as dotenv from 'dotenv';
+import { execSync } from 'child_process';
 
 dotenv.config();
 
+async function killTestQueueWorkers() {
+  // Kill workers on test queue
+  const testQueue = process.env.TEST_TASK_QUEUE || 'navi-agent-tasks-quicktest';
+  console.log(`🔪 Killing workers on test queue: ${testQueue}...\n`);
+
+  try {
+    // Check if any workers are running
+    const checkCmd = 'ps aux | grep "[p]ython worker.py" || true';
+    const runningWorkers = execSync(checkCmd, { encoding: 'utf-8' }).trim();
+
+    if (runningWorkers) {
+      console.log('📍 Found running workers:');
+      console.log(runningWorkers);
+      console.log('');
+
+      // Kill the workers
+      const killCmd = 'pkill -9 -f "python worker.py" || true';
+      execSync(killCmd);
+      console.log('✅ Killed all Python workers\n');
+    } else {
+      console.log('✅ No workers running\n');
+    }
+  } catch (error: any) {
+    console.log('⚠️  Error checking/killing workers:', error.message);
+    console.log('⚠️  Continuing with cleanup...\n');
+  }
+}
+
 async function cleanupAllAgents() {
   console.log('🧹 Starting cleanup of all agents...\n');
+
+  // First kill any local workers
+  await killTestQueueWorkers();
 
   try {
     // Get all non-deleted agents

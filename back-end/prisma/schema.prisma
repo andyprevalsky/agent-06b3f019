@@ -14,7 +14,7 @@ model Agent {
   id                 String      @id @default(uuid())
   userId             String      // Supabase user ID
   goal               String      @db.Text
-  model              String      @default("anthropic/claude-sonnet-4.5") // LLM model driving this agent
+  model              String      @default("z-ai/glm-4.5-air:free") // LLM model driving this agent
   progress           Float       @default(0.0) // 0.0 to 1.0
   status             AgentStatus @default(STARTING_UP)
   statusMessage      String?     @db.Text
