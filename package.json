@@ -4,7 +4,7 @@
   "private": true,
   "description": "Navi AI Agent Platform",
   "scripts": {
-    "prepare": "husky"
+    "prepare": "node -e \"if (process.env.CI !== 'true') { try { require('husky').install() } catch (e) {} }\""
   },
   "devDependencies": {
     "husky": "^9.0.11"
