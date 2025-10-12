@@ -22,6 +22,13 @@ with workflow.unsafe.imports_passed_through():
         format_pre_message as wait_seconds_pre,
         format_post_message as wait_seconds_post,
     )
+    # Activity formatters
+    from helpers.formatters import (
+        format_query_blueprints_pre,
+        format_query_blueprints_post,
+        format_save_blueprint_pre,
+        format_save_blueprint_post,
+    )
     # Helper activities (workflow orchestration, not exposed to LLM)
     from helpers import (
         poll_new_messages,
@@ -49,6 +56,18 @@ TOOL_FORMATTERS = {
     "wait_seconds": {
         "pre": wait_seconds_pre,
         "post": wait_seconds_post
+    }
+}
+
+# Activity formatter registry (for workflow activities that aren't tools)
+ACTIVITY_FORMATTERS = {
+    "query_blueprints": {
+        "pre": format_query_blueprints_pre,
+        "post": format_query_blueprints_post
+    },
+    "save_blueprint": {
+        "pre": format_save_blueprint_pre,
+        "post": format_save_blueprint_post
     }
 }
 
@@ -560,7 +579,19 @@ class AgentWorkflow:
     
     async def _query_blueprints(self) -> List[Dict]:
         """Query knowledge base for similar goals."""
+        activity_id = workflow.uuid4()
+        
         try:
+            # Get formatter
+            formatter = ACTIVITY_FORMATTERS.get("query_blueprints", {})
+            
+            # Post pre-execution message
+            pre_msg = formatter["pre"]([])
+            await self._post_message(
+                f"{activity_id}|||{pre_msg['title']}|||IN_PROGRESS|||{pre_msg.get('message', '')}",
+                "TOOL"
+            )
+            
             workflow.logger.info("🔍 Calling query_blueprints", 
                 context_type=type(self.context).__name__, 
                 context_len=len(self.context),
@@ -581,10 +612,23 @@ class AgentWorkflow:
             )
             
             workflow.logger.info(f"Found {len(blueprints)} blueprints")
+            
+            # Post post-execution message
+            post_msg = formatter["post"]([], blueprints)
+            await self._post_message(
+                f"{activity_id}|||{post_msg['title']}|||FINISHED|||{post_msg.get('message', '')}",
+                "TOOL"
+            )
+            
             return blueprints
             
         except Exception as e:
             workflow.logger.error(f"Failed to query blueprints: {str(e)}")
+            # Post error message
+            await self._post_message(
+                f"{activity_id}|||Error|||FINISHED|||Failed to query blueprints: {str(e)}",
+                "TOOL"
+            )
             return []
     
     async def _decide_next_action(self) -> Dict:
@@ -723,10 +767,21 @@ class AgentWorkflow:
     async def _mark_complete(self) -> None:
         """Mark the task as complete and save blueprint."""
         workflow.logger.info("Marking task as complete")
+        activity_id = workflow.uuid4()
         
         try:
             # Include all messages in blueprint (USER, ASSISTANT, TOOL, SYSTEM)
             steps = self.context
+            
+            # Get formatter
+            formatter = ACTIVITY_FORMATTERS.get("save_blueprint", {})
+            
+            # Post pre-execution message
+            pre_msg = formatter["pre"]([])
+            await self._post_message(
+                f"{activity_id}|||{pre_msg['title']}|||IN_PROGRESS|||{pre_msg.get('message', '')}",
+                "TOOL"
+            )
             
             # Save blueprint (uses LLM to extract key points)
             blueprint_result = await workflow.execute_activity(
@@ -752,6 +807,13 @@ class AgentWorkflow:
                 tokens_used=blueprint_usage.get("total_tokens", 0)
             )
             
+            # Post post-execution message
+            post_msg = formatter["post"]([], blueprint_result)
+            await self._post_message(
+                f"{activity_id}|||{post_msg['title']}|||FINISHED|||{post_msg.get('message', '')}",
+                "TOOL"
+            )
+            
             # Mark as finished in the database (with updated token counts)
             await workflow.execute_activity(
                 mark_finished,
@@ -772,8 +834,6 @@ class AgentWorkflow:
                     maximum_interval=timedelta(seconds=64)
                 )
             )
-            
-            await self._post_message("Task completed successfully!", "ASSISTANT")
             
         except Exception as e:
             error_msg = f"Failed to mark complete: {str(e)}"

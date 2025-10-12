@@ -87,34 +87,6 @@ async def mark_finished(
             response.raise_for_status()
             
             logger.info("Agent status updated to COMPLETED", agent_id=agent_id)
-            
-            # Post completion message
-            completion_message = f"""Task completed successfully!
-
-Goal: {goal}
-Steps taken: {len(steps_taken)}"""
-            
-            response = await client.post(
-                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                json={
-                    "message": completion_message,
-                    "role": "ASSISTANT"
-                },
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json"
-                },
-                timeout=30.0
-            )
-            response.raise_for_status()
-            
-            message = response.json()
-            
-            logger.info(
-                "Completion message posted",
-                agent_id=agent_id,
-                message_id=message.get("message_id")
-            )
         
         result = {
             "agent_id": agent_id,
