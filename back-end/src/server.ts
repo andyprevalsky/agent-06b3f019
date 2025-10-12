@@ -48,12 +48,20 @@ app.use(
       // Allow requests with no origin (like mobile apps or curl)
       if (!origin) return callback(null, true);
       
+      // Check exact matches
       if (allowedOrigins.indexOf(origin) !== -1) {
-        callback(null, true);
-      } else {
-        console.warn(`⚠️  CORS blocked origin: ${origin}`);
-        callback(new Error('Not allowed by CORS'));
+        return callback(null, true);
       }
+      
+      // Allow Vercel preview URLs (*.vercel.app)
+      if (origin.endsWith('.vercel.app')) {
+        console.log('✅ Allowed Vercel preview origin:', origin);
+        return callback(null, true);
+      }
+      
+      // Reject other origins (don't throw error, just return false)
+      console.warn(`⚠️  CORS rejected origin: ${origin}`);
+      callback(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -79,8 +87,20 @@ app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  // Don't crash on errors, just log and respond appropriately
+  console.error('❌ Error in request:', {
+    message: err.message,
+    path: req.path,
+    method: req.method,
+    stack: err.stack
+  });
+  
+  // Return appropriate status code
+  const statusCode = err.statusCode || err.status || 500;
+  res.status(statusCode).json({ 
+    error: err.message || 'Internal server error',
+    path: req.path 
+  });
 });
 
 // Start server

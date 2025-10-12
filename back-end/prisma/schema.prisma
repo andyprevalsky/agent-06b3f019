@@ -14,7 +14,7 @@ model Agent {
   id                 String          @id @default(uuid())
   userId             String          // Supabase user ID
   goal               String          @db.Text
-  model              String          @default("z-ai/glm-4.5") // LLM model driving this agent
+  model              String          @default("google/gemini-2.5-flash") // LLM model driving this agent
   reasoningEffort    ReasoningEffort @default(low) // OpenRouter reasoning effort level
   progress           Float           @default(0.0) // 0.0 to 1.0
   status             AgentStatus     @default(STARTING_UP)

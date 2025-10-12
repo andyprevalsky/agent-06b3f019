@@ -9,7 +9,7 @@ const router = Router();
 // Validation schemas
 const createAgentSchema = z.object({
   goal: z.string().min(1),
-  model: z.string().optional().default('z-ai/glm-4.5'),
+  model: z.string().optional().default('google/gemini-2.5-flash'),
   reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional().default('low'),
   tool_ids: z.array(z.string().uuid()).optional().default([]),
   task_queue: z.string().optional(), // Optional: for test isolation
