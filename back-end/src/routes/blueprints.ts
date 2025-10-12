@@ -1,9 +1,24 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
-import { openrouter } from '../lib/openrouter';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import OpenAI from 'openai';
 
 const router = Router();
+
+// OpenAI client for embeddings
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// Helper function to get embeddings
+async function getEmbedding(text: string): Promise<number[]> {
+  const response = await openai.embeddings.create({
+    model: 'text-embedding-3-small',
+    input: text,
+  });
+
+  return response.data[0].embedding;
+}
 
 /**
  * Search blueprints by goal similarity using embeddings
@@ -25,70 +40,57 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
       return res.status(400).json({ error: 'Goal is required' });
     }
 
-    // For now, fetch all user's blueprints and do similarity in-memory
-    // TODO: Use pgvector extension for efficient similarity search
+    // Fetch all user's blueprints with embeddings for similarity search
     const blueprints = await prisma.goalBlueprint.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
       take: 100, // Limit to recent 100
+      select: {
+        id: true,
+        userId: true,
+        title: true,
+        embedding: true,
+        blueprint: true,
+        createdAt: true,
+        updatedAt: true,
+      },
     });
 
     if (blueprints.length === 0) {
       return res.json([]);
     }
 
-    // Try semantic search with embeddings, fall back to simple text matching
+    // Semantic search using pre-computed embeddings
     try {
-      // Generate embedding for the query goal
-      const embeddingResponse = await openrouter.embeddings.create({
-        model: 'openai/text-embedding-3-small',
-        input: goal,
+      // Generate embedding for the query goal only
+      const queryEmbedding = await getEmbedding(goal);
+
+      // Filter blueprints that have embeddings (skip any without)
+      const blueprintsWithEmbeddings = blueprints.filter(bp => bp.embedding);
+
+      if (blueprintsWithEmbeddings.length === 0) {
+        return res.json([]);
+      }
+
+      // Calculate cosine similarity using pre-computed embeddings
+      const withSimilarity = blueprintsWithEmbeddings.map((bp) => {
+        const similarity = cosineSimilarity(queryEmbedding, bp.embedding as number[]);
+        return { ...bp, similarity };
       });
 
-      const queryEmbedding = embeddingResponse.data[0].embedding;
-
-      // Generate embeddings for all blueprint titles and calculate cosine similarity
-      const blueprintEmbeddings = await Promise.all(
-        blueprints.map(async (bp) => {
-          const response = await openrouter.embeddings.create({
-            model: 'openai/text-embedding-3-small',
-            input: bp.title,
-          });
-          return {
-            blueprint: bp,
-            embedding: response.data[0].embedding,
-          };
-        })
-      );
-
-      // Calculate cosine similarity
-      const withSimilarity = blueprintEmbeddings.map(({ blueprint, embedding }) => {
-        const similarity = cosineSimilarity(queryEmbedding, embedding);
-        return { ...blueprint, similarity };
-      });
-
-      // Sort by similarity and return top K
+      // Filter by minimum similarity threshold and return top K
+      const SIMILARITY_THRESHOLD = 0.38;
       const topResults = withSimilarity
+        .filter(bp => bp.similarity >= SIMILARITY_THRESHOLD)
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, limit)
-        .map(({ similarity, ...bp }) => bp); // Remove similarity score from response
+        .map(({ similarity, embedding, ...bp }) => bp); // Remove similarity score and embedding from response
 
       res.json(topResults);
     } catch (embeddingError) {
-      console.warn('Embeddings not available, falling back to simple search:', embeddingError);
-      
-      // Fall back to simple keyword matching
-      const goalLower = goal.toLowerCase();
-      const matchingBlueprints = blueprints
-        .filter(bp => bp.title.toLowerCase().includes(goalLower))
-        .slice(0, limit);
-      
-      // If no keyword matches, return most recent blueprints
-      if (matchingBlueprints.length === 0) {
-        return res.json(blueprints.slice(0, limit));
-      }
-      
-      res.json(matchingBlueprints);
+      console.error('Embeddings failed:', embeddingError);
+      // Return empty array if embeddings fail
+      res.json([]);
     }
   } catch (error) {
     console.error('Blueprint search error:', error);
@@ -116,10 +118,20 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Title and blueprint are required' });
     }
 
+    // Generate and store embedding for the goal/title (required)
+    let embedding: number[];
+    try {
+      embedding = await getEmbedding(title);
+    } catch (embeddingError) {
+      console.error('Failed to generate embedding for blueprint:', embeddingError);
+      return res.status(500).json({ error: 'Failed to generate embedding for blueprint' });
+    }
+
     const saved = await prisma.goalBlueprint.create({
       data: {
         userId,
         title,
+        embedding: embedding,
         blueprint,
       },
     });

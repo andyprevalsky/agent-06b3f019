@@ -283,7 +283,7 @@ async def save_blueprint(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": conversation_text}
             ],
-            model="google/gemini-2.5-flash",
+            model="google/gemini-flash-2.5",
             temperature=0.3,  # Lower temperature for more focused extraction
             max_tokens=2000   # Allow enough tokens for detailed blueprint
         )

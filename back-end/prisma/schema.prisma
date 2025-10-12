@@ -129,6 +129,7 @@ model GoalBlueprint {
   id        String   @id @default(uuid())
   userId    String   // Supabase user ID
   title     String   @db.Text // Goal description for similarity matching
+  embedding Json?    // Pre-computed embedding vector for similarity search (openai/text-embedding-3-small)
   blueprint Json     // Complete execution trace
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
