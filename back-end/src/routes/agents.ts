@@ -9,7 +9,8 @@ const router = Router();
 // Validation schemas
 const createAgentSchema = z.object({
   goal: z.string().min(1),
-  model: z.string().optional().default('z-ai/glm-4.5-air:free'),
+  model: z.string().optional().default('z-ai/glm-4.5'),
+  reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional().default('low'),
   tool_ids: z.array(z.string().uuid()).optional().default([]),
   task_queue: z.string().optional(), // Optional: for test isolation
   verifier: z.object({
@@ -46,6 +47,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         id: true,
         goal: true,
         model: true,
+        reasoningEffort: true,
         progress: true,
         status: true,
         statusMessage: true,
@@ -66,6 +68,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         agent_id: agent.id,
         goal: agent.goal,
         model: agent.model,
+        reasoning_effort: agent.reasoningEffort,
         progress: agent.progress,
         status: agent.status,
         status_message: agent.statusMessage,
@@ -108,6 +111,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
           userId,
           goal: body.goal,
           model: body.model,
+          reasoningEffort: body.reasoning_effort,
           progress: 0.0,
           status: 'STARTING_UP',
         },
@@ -130,17 +134,28 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
         })),
       });
 
-      return newAgent;
+      // Insert goal as the first USER message in the chat
+      const goalMessage = await tx.message.create({
+        data: {
+          agentId: newAgent.id,
+          text: body.goal,
+          role: 'USER',
+          timestamp: new Date(),
+        },
+      });
+
+      return { agent: newAgent, goalMessage };
     });
 
-    // Start Temporal workflow
+    // Start Temporal workflow with initial context containing goal message
     let workflowId: string | null = null;
     try {
       workflowId = await startAgentWorkflow({
-        agentId: agent.id,
+        agentId: agent.agent.id,
         userId,
         goal: body.goal,
         model: body.model,
+        reasoningEffort: body.reasoning_effort,
         toolIds: body.tool_ids,
         verifier: {
           type: body.verifier.type,
@@ -151,24 +166,24 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
 
       // Update agent with workflow ID
       await prisma.agent.update({
-        where: { id: agent.id },
+        where: { id: agent.agent.id },
         data: { temporalWorkflowId: workflowId },
       });
 
       console.log('✅ Agent workflow started', {
-        agentId: agent.id,
+        agentId: agent.agent.id,
         workflowId,
         taskQueue: body.task_queue || 'default',
       });
     } catch (error) {
       console.error('❌ Failed to start workflow', {
-        agentId: agent.id,
+        agentId: agent.agent.id,
         error: error instanceof Error ? error.message : String(error),
       });
       
       // Mark agent as failed
       await prisma.agent.update({
-        where: { id: agent.id },
+        where: { id: agent.agent.id },
         data: {
           status: 'FAILED',
           statusMessage: 'Failed to start workflow: ' + (error instanceof Error ? error.message : String(error)),
@@ -180,15 +195,16 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
 
     // Return agent with updated workflow ID
     res.status(201).json({
-      agent_id: agent.id,
-      progress: agent.progress,
-      goal: agent.goal,
-      model: agent.model,
-      status: agent.status,
-      status_message: agent.statusMessage,
+      agent_id: agent.agent.id,
+      progress: agent.agent.progress,
+      goal: agent.agent.goal,
+      model: agent.agent.model,
+      reasoning_effort: body.reasoning_effort,
+      status: agent.agent.status,
+      status_message: agent.agent.statusMessage,
       temporal_workflow_id: workflowId, // Use the workflow ID we just got
-      created_at: agent.createdAt,
-      updated_at: agent.updatedAt,
+      created_at: agent.agent.createdAt,
+      updated_at: agent.agent.updatedAt,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -239,19 +255,20 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
         ...(before ? { timestamp: { lt: new Date(before) } } : {}),
       },
       orderBy: {
-        timestamp: before ? 'desc' : 'desc', // Always get latest first, then reverse if needed
+        timestamp: 'asc', // Always return chronological order (oldest first)
       },
       take: limit,
     });
 
-    // Reverse messages to chronological order if we fetched older messages
-    const orderedMessages = before ? messages.reverse() : messages;
+    // Messages are already in chronological order
+    const orderedMessages = messages;
 
     res.json({
       agent: {
         agent_id: agent.id,
         goal: agent.goal,
         model: agent.model,
+        reasoning_effort: agent.reasoningEffort,
         progress: agent.progress,
         status: agent.status,
         status_message: agent.statusMessage,
@@ -580,6 +597,7 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
 // PATCH /api/agents/:id - Update agent configuration
 const updateAgentSchema = z.object({
   model: z.string().optional(),
+  reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional(),
   tool_ids: z.array(z.string().uuid()).optional(),
   verifier_prompt: z.string().min(1).optional(),
 });
@@ -606,11 +624,18 @@ router.patch('/:id', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Update agent model if provided
+    // Update agent model and/or reasoning effort if provided
+    const agentUpdateData: any = {};
     if (body.model) {
+      agentUpdateData.model = body.model;
+    }
+    if (body.reasoning_effort) {
+      agentUpdateData.reasoningEffort = body.reasoning_effort;
+    }
+    if (Object.keys(agentUpdateData).length > 0) {
       await prisma.agent.update({
         where: { id: agentId },
-        data: { model: body.model },
+        data: agentUpdateData,
       });
     }
 
@@ -656,6 +681,7 @@ router.patch('/:id', authenticate, async (req: AuthRequest, res) => {
         agent_id: updatedAgent!.id,
         goal: updatedAgent!.goal,
         model: updatedAgent!.model,
+        reasoning_effort: updatedAgent!.reasoningEffort,
         progress: updatedAgent!.progress,
         status: updatedAgent!.status,
         status_message: updatedAgent!.statusMessage,

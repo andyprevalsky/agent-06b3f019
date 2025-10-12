@@ -12,7 +12,6 @@ logger = structlog.get_logger()
 
 @activity.defn
 async def compress_context(
-    goal: str,
     context: List[Dict],
     iteration_count: int,
     model: str = "anthropic/claude-sonnet-4.5"
@@ -21,8 +20,7 @@ async def compress_context(
     Use LLM to compress context into key learnings.
     
     Args:
-        goal: The agent's goal
-        context: Full message history
+        context: Full message history (first USER message is the goal)
         iteration_count: Current iteration number
         model: LLM model to use for compression
         
@@ -45,8 +43,6 @@ async def compress_context(
         ])
         
         prompt = f"""You are analyzing an autonomous AI agent's execution history to extract key learnings.
-
-GOAL: {goal}
 
 EXECUTION HISTORY ({len(context)} messages, {iteration_count} iterations):
 {full_context}
@@ -98,8 +94,6 @@ Format your response as:
         # Fallback: just return a simple summary
         return f"""## Context Reset After {iteration_count} Iterations
 
-Goal: {goal}
-
 Previous execution had {len(context)} messages. Context has been reset to prevent memory overflow.
-Continue working toward the goal with a fresh start."""
+Continue working toward the task with a fresh start."""
 

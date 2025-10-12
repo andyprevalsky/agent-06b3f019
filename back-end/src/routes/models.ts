@@ -117,13 +117,11 @@ function sortModels(models: OpenRouterModel[]): SortedModel[] {
 
   // Define featured models (exact order matters)
   const featuredModels = [
+    'z-ai/glm-4.5',  // DEFAULT - Flagship GLM - 128K context
     'z-ai/glm-4.6',  // Newest GLM - 200K context
-    'z-ai/glm-4.5',  // Flagship GLM - 128K context
-    'z-ai/glm-4.5-air:free',  // FREE - Default
-    'anthropic/claude-sonnet-4.5',
-    'google/gemini-2.5-flash',
-    'deepseek/deepseek-chat',
-    'openai/gpt-4o',
+    'openai/gpt-5-codex',  // GPT-5 Codex
+    'anthropic/claude-sonnet-4.5',  // Claude Sonnet 4.5
+    'xai/grok-4-fast',  // Grok 4 Fast
   ];
 
   // Separate featured and non-featured

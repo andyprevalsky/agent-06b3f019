@@ -298,7 +298,7 @@ async function testAgentsCreateEndpoint() {
       goal: 'Test agent for API test suite',
       model: 'anthropic/claude-sonnet-4.5',
       tool_ids: context.toolIds?.slice(0, 2) || [],
-      task_queue: 'navi-agent-tasks-quicktest', // Use test queue
+      task_queue: 'navi-agent-tasks-test', // Use test queue
       verifier: {
         type: 'FLOAT_LLM_JUDGE',
         llm_judge_prompt: 'Evaluate if the goal is achieved',
@@ -535,19 +535,13 @@ async function testBlueprintsSearchEndpoint() {
     }),
   });
   
-  // Search requires OpenRouter API key for embeddings
-  // Accept 200 (success) or 500 (no API key) as valid
+  // Accept 200 (success) or 500 (missing OPENROUTER_API_KEY) as valid
   if (response.status !== 200 && response.status !== 500) {
     throw new Error(`Expected 200 or 500, got ${response.status}: ${JSON.stringify(response.data)}`);
   }
   
   if (response.status === 200 && !Array.isArray(response.data)) {
     throw new Error('Blueprints search response should be an array');
-  }
-  
-  // If 500, it's likely due to missing OPENROUTER_API_KEY which is acceptable
-  if (response.status === 500) {
-    console.log('   ⚠️  Blueprint search requires OPENROUTER_API_KEY (optional)');
   }
 }
 

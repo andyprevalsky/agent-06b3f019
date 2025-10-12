@@ -175,7 +175,8 @@ AGENT_RESPONSE=$(curl -s "$BACKEND_URL/api/agents" \
   -H "Content-Type: application/json" \
   -d "{
     \"goal\": \"Count to 5, one message at a time. Wait 1 second between each number.\",
-    \"model\": \"anthropic/claude-sonnet-4.5\",
+    \"model\": \"x-ai/grok-4-fast\",
+    \"reasoning_effort\": \"off\",
     \"tool_ids\": [],
     \"task_queue\": \"$TEST_TASK_QUEUE\",
     \"verifier\": {
@@ -206,10 +207,12 @@ echo ""
 
 MAX_WAIT=180  # 3 minutes total
 STATUS_TIMEOUT=120  # 120 seconds without progress change (each iteration takes ~3-5s)
+MESSAGE_TIMEOUT=20  # 20 seconds without new messages = failure
 ELAPSED=0
 STATUS=""
 PREV_STATUS=""
 STATUS_UNCHANGED_FOR=0
+MESSAGE_UNCHANGED_FOR=0
 
 PREV_MESSAGE_COUNT=0
 
@@ -228,6 +231,13 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     PREV_STATUS="$STATUS"
   else
     STATUS_UNCHANGED_FOR=$((STATUS_UNCHANGED_FOR + 2))
+  fi
+  
+  # Check if message count changed
+  if [ "$MESSAGE_COUNT" -gt "$PREV_MESSAGE_COUNT" ]; then
+    MESSAGE_UNCHANGED_FOR=0
+  else
+    MESSAGE_UNCHANGED_FOR=$((MESSAGE_UNCHANGED_FOR + 2))
   fi
   
   # Display new messages (includes verifier assessments as ASSISTANT messages)
@@ -274,7 +284,7 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     PREV_MESSAGE_COUNT=$MESSAGE_COUNT
   fi
   
-  echo -ne "\r      Status: $STATUS | Progress: $(printf "%.0f" $(echo "$PROGRESS * 100" | bc))% | Messages: $MESSAGE_COUNT | Elapsed: ${ELAPSED}s | Unchanged: ${STATUS_UNCHANGED_FOR}s"
+  echo -ne "\r      Status: $STATUS | Progress: $(printf "%.0f" $(echo "$PROGRESS * 100" | bc))% | Messages: $MESSAGE_COUNT | Elapsed: ${ELAPSED}s | No update: ${MESSAGE_UNCHANGED_FOR}s"
   
   # Check for terminal states
   if [ "$STATUS" = "COMPLETED" ]; then
@@ -288,6 +298,20 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     echo ""
     echo -e "${YELLOW}Last 30 lines of worker log:${NC}"
     tail -30 "$WORKER_LOG" | grep -A5 -B5 "$AGENT_ID" || tail -30 "$WORKER_LOG"
+    break
+  fi
+  
+  # Check for message timeout (no new messages in MESSAGE_TIMEOUT seconds)
+  # Allow first iteration to complete before checking timeout
+  if [ $MESSAGE_UNCHANGED_FOR -ge $MESSAGE_TIMEOUT ] && [ $ELAPSED -gt $MESSAGE_TIMEOUT ]; then
+    echo ""
+    echo -e "${RED}✗ No new messages for 15 seconds - agent appears stuck${NC}"
+    echo -e "      Final status: $STATUS"
+    echo -e "      Message count: $MESSAGE_COUNT"
+    echo ""
+    echo -e "${YELLOW}Last 50 lines of worker log:${NC}"
+    tail -50 "$WORKER_LOG"
+    STATUS="FAILED"  # Force failed status so validation section exits with code 1
     break
   fi
   

@@ -47,6 +47,7 @@ export async function startAgentWorkflow(params: {
   userId: string;
   goal: string;
   model: string;
+  reasoningEffort: string;
   toolIds: string[];
   verifier: {
     type: string;
@@ -62,7 +63,6 @@ export async function startAgentWorkflow(params: {
   console.log('🚀 Starting agent workflow', {
     workflowId,
     taskQueue,
-    goal: params.goal,
   });
 
   const handle = await client.workflow.start('AgentWorkflow', {
@@ -73,11 +73,13 @@ export async function startAgentWorkflow(params: {
       params.userId,
       params.goal,
       params.model,
+      params.reasoningEffort,
       params.toolIds,
       {
         type: params.verifier.type,
         llmJudgePrompt: params.verifier.llmJudgePrompt,
       },
+      [], // Start with empty context, workflow will poll for goal message
     ],
   });
 

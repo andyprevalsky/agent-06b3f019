@@ -25,9 +25,11 @@ export interface Agent {
   agent_id: string;
   goal: string;
   model: string;
+  reasoning_effort: 'off' | 'low' | 'medium' | 'high';
   progress: number;
   status: 'STARTING_UP' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED';
   status_message: string | null;
+  temporal_workflow_id: string | null;
   token_count: number;
   context_size: number;
   message_count: number;
@@ -58,6 +60,7 @@ export interface Message {
 
 export interface CreateAgentPayload {
   goal: string;
+  model?: string;
   tool_ids?: string[];
   verifier: {
     type: 'FLOAT_LLM_JUDGE';
@@ -84,17 +87,17 @@ export async function getAllAgents(): Promise<Agent[]> {
 }
 
 // Get agent details with messages
-export async function getAgent(agentId: string, cursor?: string): Promise<{
+export async function getAgent(agentId: string, before?: string): Promise<{
   agent: AgentDetail;
   messages: Message[];
   pagination: {
-    next_cursor: string | null;
     has_more: boolean;
+    oldest_timestamp: string | null;
   };
 }> {
   const headers = await getAuthHeaders();
-  const url = cursor 
-    ? `${API_BASE_WITH_PATH}/agents/${agentId}?cursor=${cursor}`
+  const url = before 
+    ? `${API_BASE_WITH_PATH}/agents/${agentId}?before=${before}`
     : `${API_BASE_WITH_PATH}/agents/${agentId}`;
   
   const response = await fetch(url, {

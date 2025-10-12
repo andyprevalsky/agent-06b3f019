@@ -1,10 +1,74 @@
 import { Message } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+
+interface AnimatedTextProps {
+  text: string;
+  shouldAnimate: boolean;
+  onComplete?: () => void;
+}
+
+function AnimatedText({ text, shouldAnimate, onComplete }: AnimatedTextProps) {
+  useEffect(() => {
+    if (shouldAnimate && onComplete) {
+      // Split into words to calculate total animation time
+      const words = text.split(' ');
+      const chunkSize = 5;
+      const numChunks = Math.ceil(words.length / chunkSize);
+      const totalTime = numChunks * 40 + 200; // 40ms per chunk + 200ms for final fade
+      const timeout = setTimeout(onComplete, totalTime);
+      return () => clearTimeout(timeout);
+    }
+  }, [shouldAnimate, text, onComplete]);
+
+  if (!shouldAnimate) {
+    return <>{text}</>;
+  }
+
+  // Split into words and chunk them
+  const words = text.split(' ');
+  const chunkSize = 5;
+  const chunks: string[] = [];
+  
+  for (let i = 0; i < words.length; i += chunkSize) {
+    const chunk = words.slice(i, i + chunkSize).join(' ');
+    chunks.push(chunk);
+  }
+
+  return (
+    <>
+      {chunks.map((chunk, index) => (
+        <span
+          key={index}
+          className="opacity-0"
+          style={{
+            animation: 'fadeIn 200ms ease-out forwards',
+            animationDelay: `${index * 40}ms`,
+          }}
+        >
+          {chunk}
+          {index < chunks.length - 1 ? ' ' : ''}
+        </span>
+      ))}
+      <style>{`
+        @keyframes fadeIn {
+          from {
+            opacity: 0;
+          }
+          to {
+            opacity: 1;
+          }
+        }
+      `}</style>
+    </>
+  );
+}
 
 interface MessageBubbleProps {
   message: Message;
+  shouldType?: boolean;
+  onTypingComplete?: () => void;
 }
 
 interface ParsedToolMessage {
@@ -59,9 +123,15 @@ function parseToolMessage(text: string): ParsedToolMessage | null {
   return null;
 }
 
-function ToolMessage({ parsed }: { parsed: ParsedToolMessage }) {
+function ToolMessage({ parsed }: { 
+  parsed: ParsedToolMessage; 
+}) {
   const [isExpanded, setIsExpanded] = useState(false);
   const hasMessage = parsed.message.trim().length > 0;
+  const isFinished = parsed.status === 'FINISHED';
+
+  // Show chevron if: has message AND is finished
+  const showChevron = hasMessage && isFinished;
 
   return (
     <div className="space-y-2">
@@ -69,9 +139,9 @@ function ToolMessage({ parsed }: { parsed: ParsedToolMessage }) {
       <div 
         className={cn(
           "flex items-center gap-2",
-          hasMessage && "cursor-pointer hover:opacity-80 transition-opacity"
+          hasMessage && isFinished && "cursor-pointer hover:opacity-80 transition-opacity"
         )}
-        onClick={hasMessage ? () => setIsExpanded(!isExpanded) : undefined}
+        onClick={hasMessage && isFinished ? () => setIsExpanded(!isExpanded) : undefined}
       >
         <span className={cn(
           "text-sm font-medium",
@@ -80,10 +150,10 @@ function ToolMessage({ parsed }: { parsed: ParsedToolMessage }) {
         )}>
           {parsed.title}
         </span>
-        {hasMessage && (
+        {showChevron && (
           <ChevronRight 
             className={cn(
-              "h-4 w-4 text-muted-foreground transition-transform",
+              "h-4 w-4 text-muted-foreground transition-transform duration-200",
               isExpanded && "rotate-90"
             )} 
           />
@@ -92,21 +162,25 @@ function ToolMessage({ parsed }: { parsed: ParsedToolMessage }) {
 
       {/* Expandable message content */}
       {hasMessage && isExpanded && (
-        <div className="pl-4 border-l-2 border-border animate-in slide-in-from-top-2 duration-200">
-          <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
-            {parsed.message}
-          </p>
+        <div className="overflow-hidden">
+          <div className="pl-4 border-l-2 border-border">
+            <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
+              {parsed.message}
+            </p>
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-export default function MessageBubble({ message }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
   const isTool = message.role === 'TOOL';
+  const isAssistant = message.role === 'ASSISTANT';
+  const isSystem = message.role === 'SYSTEM';
 
   // Parse tool message if applicable
   const parsedTool = isTool ? parseToolMessage(message.text) : null;
@@ -114,7 +188,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
   // Tool messages: plain text, no bubble, no icon
   if (isTool && parsedTool) {
     return (
-      <div className="flex gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
+      <div className="flex gap-3 animate-in fade-in duration-300">
         {/* Empty space where icon would be to align with agent messages */}
         <div className="flex-shrink-0 w-8" />
         
@@ -125,8 +199,48 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     );
   }
 
+  // Assistant messages: plain text, no bubble, no icon
+  if (isAssistant) {
+    return (
+      <div className="flex gap-3 animate-in fade-in duration-300">
+        {/* Empty space where icon would be to align with other content */}
+        <div className="flex-shrink-0 w-8" />
+        
+        <div className="flex-1">
+          <p className="text-sm whitespace-pre-wrap break-words text-foreground">
+            {shouldType ? (
+              <AnimatedText 
+                text={message.text} 
+                shouldAnimate={true}
+                onComplete={onTypingComplete}
+              />
+            ) : (
+              message.text
+            )}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // User messages: right-aligned, with bubble, no icon, no label
+  if (isUser) {
+    return (
+      <div className="flex justify-end animate-in fade-in duration-300">
+        <div className={cn(
+          'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
+          config.bg,
+          config.border
+        )}>
+          <p className="text-sm whitespace-pre-wrap break-words">{message.text}</p>
+        </div>
+      </div>
+    );
+  }
+
+  // System messages: keep original style with icon and label
   return (
-    <div className={cn('flex gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300', isUser && 'flex-row-reverse')}>
+    <div className="flex gap-3 animate-in fade-in duration-300">
       <div className={cn(
         'flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center border',
         config.bg,
@@ -135,7 +249,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         <Icon className="h-4 w-4" />
       </div>
       
-      <div className={cn('flex-1 space-y-1', isUser && 'flex flex-col items-end')}>
+      <div className="flex-1 space-y-1">
         <div className="flex items-center gap-2">
           <span className={cn('text-xs font-medium', config.text)}>
             {config.label}
@@ -156,4 +270,3 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     </div>
   );
 }
-

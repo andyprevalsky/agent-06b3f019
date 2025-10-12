@@ -19,7 +19,7 @@ dotenv.config();
 
 async function killTestQueueWorkers() {
   // Kill workers on test queue
-  const testQueue = process.env.TEST_TASK_QUEUE || 'navi-agent-tasks-quicktest';
+  const testQueue = process.env.TEST_TASK_QUEUE || 'navi-agent-tasks-test';
   console.log(`🔪 Killing workers on test queue: ${testQueue}...\n`);
 
   try {

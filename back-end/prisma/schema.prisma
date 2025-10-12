@@ -11,22 +11,23 @@ datasource db {
 }
 
 model Agent {
-  id                 String      @id @default(uuid())
-  userId             String      // Supabase user ID
-  goal               String      @db.Text
-  model              String      @default("z-ai/glm-4.5-air:free") // LLM model driving this agent
-  progress           Float       @default(0.0) // 0.0 to 1.0
-  status             AgentStatus @default(STARTING_UP)
-  statusMessage      String?     @db.Text
-  temporalWorkflowId String?     // Links to Temporal workflow
-  deletedAt          DateTime?   // Soft delete
-  createdAt          DateTime    @default(now())
-  updatedAt          DateTime    @updatedAt
+  id                 String          @id @default(uuid())
+  userId             String          // Supabase user ID
+  goal               String          @db.Text
+  model              String          @default("z-ai/glm-4.5") // LLM model driving this agent
+  reasoningEffort    ReasoningEffort @default(low) // OpenRouter reasoning effort level
+  progress           Float           @default(0.0) // 0.0 to 1.0
+  status             AgentStatus     @default(STARTING_UP)
+  statusMessage      String?         @db.Text
+  temporalWorkflowId String?         // Links to Temporal workflow
+  deletedAt          DateTime?       // Soft delete
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
   
   // Metrics
-  tokenCount         Int         @default(0) // Cumulative tokens used
-  contextSize        Int         @default(0) // Current context window usage in tokens
-  messageCount       Int         @default(0) // Total messages in context
+  tokenCount         Int             @default(0) // Cumulative tokens used
+  contextSize        Int             @default(0) // Current context window usage in tokens
+  messageCount       Int             @default(0) // Total messages in context
 
   verifier  Verifier?
   tools     AgentTool[]
@@ -90,6 +91,13 @@ enum AgentStatus {
   PAUSED
   COMPLETED
   FAILED
+}
+
+enum ReasoningEffort {
+  off
+  low
+  medium
+  high
 }
 
 enum VerifierType {

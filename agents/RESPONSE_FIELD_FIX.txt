@@ -1,0 +1,72 @@
+✅ FIXED: THREE-FIELD STRUCTURE FOR DECIDE_NEXT_ACTION
+═══════════════════════════════════════════════════════════════════════════
+
+CORRECT STRUCTURE:
+------------------
+The Pydantic model AgentAction now has THREE fields:
+
+  - reasoning: str               → Internal thinking (for logging)
+  - response: str                → Message to communicate to user (optional)
+  - tool_calls: List[ToolCall]   → Array of tools to execute
+
+This allows the agent to:
+  1. Think internally (reasoning)
+  2. Communicate with the user (response)
+  3. Take actions (tool_calls)
+
+
+SOLUTION:
+---------
+✅ Updated helpers/llm.py:
+   - Line 27: Added response: str field
+   - Line 28: Renamed to tool_calls: List[ToolCall]
+   - Line 227: Updated prompt to show "response" and "tool_calls"
+   - Line 284: Return all three fields
+
+✅ Updated workflows/agent_workflow.py:
+   - Line 299: Uses action.get("tool_calls", [])
+   - Line 566-569: Logs all three fields
+   - Line 577-578: Fallback includes all three fields
+
+
+WHAT THIS FIXES:
+----------------
+Now the LLM returns proper structure:
+  1. ✅ Pydantic schema (reasoning, response, tool_calls)
+  2. ✅ System prompt (tells LLM to use all three fields correctly)
+  3. ✅ Activity return value (returns all three)
+  4. ✅ Workflow posts "response" as ASSISTANT message to user
+  5. ✅ Workflow executes "tool_calls"
+  6. ✅ Verifier concatenates reasoning + response (score) in message
+
+MESSAGE FLOW:
+-------------
+decide_next_action:
+  - reasoning: logged only (not shown to user)
+  - response: posted as ASSISTANT message to user ✅
+  - tool_calls: executed as actions
+
+check_progress (verifier):
+  - reasoning: logged + included in message
+  - response: the score (0.0-1.0)
+  - message: f"{reasoning}\n\nScore: {response}" ✅
+
+
+NEXT STEPS:
+-----------
+1. Restart any running workers to pick up the changes:
+   pkill -9 -f "python worker.py"
+
+2. The workflow code is cached by Temporal, so:
+   - New workflows will use the new code ✅
+   - Existing workflows will continue with old code ⚠️
+
+3. Clean up any existing workflows:
+   cd /Users/andyprevalsky/Desktop/projects/navi-whisper-lux/back-end
+   npm run cleanup:all
+
+
+═══════════════════════════════════════════════════════════════════════════
+Fixed on: 2025-10-12
+═══════════════════════════════════════════════════════════════════════════
+

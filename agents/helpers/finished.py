@@ -11,10 +11,26 @@ from config import load_config
 logger = structlog.get_logger()
 
 
+def extract_goal_from_context(steps_taken: List[Dict]) -> str:
+    """
+    Extract the goal from the first USER message in context.
+    
+    Args:
+        steps_taken: Message history
+        
+    Returns:
+        The goal text, or a default message if not found
+    """
+    for msg in steps_taken:
+        if msg.get('role') == 'USER':
+            return msg.get('text', 'No goal specified')
+    
+    return 'No goal specified'
+
+
 @activity.defn
 async def mark_finished(
     agent_id: str,
-    goal: str,
     steps_taken: List[Dict],
     token_count: int = 0,
     context_size: int = 0,
@@ -27,14 +43,19 @@ async def mark_finished(
     
     Args:
         agent_id: Agent ID
-        goal: The goal that was being pursued
-        steps_taken: Detailed steps taken
+        steps_taken: Detailed steps taken (first USER message is the goal)
+        token_count: Total tokens used
+        context_size: Context size in tokens
+        message_count: Total messages
         
     Returns:
         Dict with completion details
     """
     try:
         activity.heartbeat("Marking task as finished")
+        
+        # Extract goal from first USER message
+        goal = extract_goal_from_context(steps_taken)
         
         config = load_config()
         

@@ -420,6 +420,29 @@ cd back-end
 ### Get Fresh Token
 Use the curl commands at the top of this file with test credentials.
 
+### Cleanup All Agents and Workers
+
+**Clean up everything at once**:
+```bash
+cd back-end
+npm run cleanup:all
+```
+
+**What it does**:
+1. 🔪 Kills any local Python workers (on test queue or any queue)
+2. 🔍 Finds all non-deleted agents in database
+3. ⏹️  Terminates their Temporal workflows
+4. 🗑️  Soft-deletes agents from database
+
+**Environment variable**:
+- `TEST_TASK_QUEUE`: Queue name to kill workers on (defaults to `navi-agent-tasks-quicktest`)
+
+**Use this when**:
+- Starting fresh after testing
+- Cleaning up before deployment
+- Workers are stuck or misbehaving
+- You have orphaned agents in the database
+
 ### Common Testing Mistakes
 
 1. ❌ **Forgetting to stop old workers** → Your changes won't run!

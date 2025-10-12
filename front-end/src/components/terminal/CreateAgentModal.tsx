@@ -4,16 +4,22 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
-import { Loader2, Sparkles, X } from 'lucide-react';
+import { Loader2, Sparkles, X, Check, ChevronsUpDown } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { getTools, generateLLMJudgePrompt, Tool } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import { useAppData } from '@/hooks/useAppData';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
+import { cn } from '@/lib/utils';
 
 interface CreateAgentModalProps {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: {
     goal: string;
+    model?: string;
+    reasoning_effort?: 'off' | 'low' | 'medium' | 'high';
     tool_ids: string[];
     verifier: {
       type: 'FLOAT_LLM_JUDGE';
@@ -24,18 +30,23 @@ interface CreateAgentModalProps {
 
 export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgentModalProps) {
   // Default values for local testing (only in development)
-  const defaultGoal = import.meta.env.DEV ? 'count to 10, 1 sec at a time' : '';
+  const defaultGoal = import.meta.env.DEV ? 'count to 100, 1 sec at a time, no batching' : '';
   const defaultLlmJudgePrompt = import.meta.env.DEV 
-    ? 'Evaluate how well the agent counted from 1 to 10, with each number presented approximately 1 second apart. Return a score between 0 and 1, where 0 means the agent did not count to 10 in order or did not observe the 1-second interval, and 1 means the agent counted from 1 to 10 correctly with each number given about 1 second apart. Only provide the numeric score, no explanation.'
+    ? 'Evaluate how well the agent counted from 1 to 100, with each number presented approximately 1 second apart without batching multiple numbers together. Return a score between 0 and 1, where 0 means the agent did not count to 100 in order, batched numbers together, or did not observe the 1-second interval, and 1 means the agent counted from 1 to 100 correctly with each number given individually about 1 second apart. Only provide the numeric score, no explanation.'
     : '';
 
   const [goal, setGoal] = useState(defaultGoal);
   const [llmJudgePrompt, setLlmJudgePrompt] = useState(defaultLlmJudgePrompt);
+  const [selectedModel, setSelectedModel] = useState('z-ai/glm-4.5');
+  const [reasoningEffort, setReasoningEffort] = useState<'off' | 'low' | 'medium' | 'high'>('off');
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isFormatting, setIsFormatting] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
   const { toast } = useToast();
+  const { models } = useAppData();
 
   // Load available tools
   useEffect(() => {
@@ -104,6 +115,8 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
     try {
       await onSubmit({
         goal,
+        model: selectedModel,
+        reasoning_effort: reasoningEffort,
         tool_ids: selectedTools,
         verifier: {
           type: 'FLOAT_LLM_JUDGE',
@@ -114,6 +127,8 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
       // Reset form
       setGoal(defaultGoal);
       setLlmJudgePrompt(defaultLlmJudgePrompt);
+      setSelectedModel('z-ai/glm-4.5');
+      setReasoningEffort('off');
       setSelectedTools([]);
       onClose();
     } catch (error) {
@@ -178,6 +193,133 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
               onChange={(e) => setLlmJudgePrompt(e.target.value)}
               className="min-h-[120px] bg-background dark:bg-navi-light-black border-border"
             />
+          </div>
+
+          {/* Reasoning Effort Selector */}
+          <div className="space-y-2">
+            <Label htmlFor="reasoning-effort">Reasoning Effort</Label>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  role="combobox"
+                  className="w-full justify-between bg-background dark:bg-navi-light-black border-border"
+                >
+                  <span className="capitalize">{reasoningEffort}</span>
+                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent 
+                className="p-0 bg-card dark:bg-navi-black border-border" 
+                align="start"
+                style={{ width: 'var(--radix-popover-trigger-width)' }}
+              >
+                <Command className="bg-transparent">
+                  <CommandList>
+                    <CommandGroup>
+                      {(['off', 'low', 'medium', 'high'] as const).map((effort) => (
+                        <CommandItem
+                          key={effort}
+                          value={effort}
+                          onSelect={() => setReasoningEffort(effort)}
+                          className="cursor-pointer"
+                        >
+                          <Check
+                            className={cn(
+                              "mr-2 h-4 w-4",
+                              reasoningEffort === effort ? "opacity-100" : "opacity-0"
+                            )}
+                          />
+                          <span className="capitalize">{effort}</span>
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
+          </div>
+
+          {/* Model Selector */}
+          <div className="space-y-2">
+            <Label htmlFor="model">Model</Label>
+            <Popover open={modelOpen} onOpenChange={setModelOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  role="combobox"
+                  aria-expanded={modelOpen}
+                  className="w-full justify-between bg-background dark:bg-navi-light-black border-border"
+                >
+                  <span className="truncate">
+                    {models.find((m) => m.id === selectedModel)?.provider || 'Unknown'}/
+                    {models.find((m) => m.id === selectedModel)?.name || 'Select model...'}
+                  </span>
+                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent 
+                className="p-0 bg-card dark:bg-navi-black border-border" 
+                align="start"
+                style={{ width: 'var(--radix-popover-trigger-width)' }}
+              >
+                <Command className="bg-transparent">
+                  <CommandInput 
+                    placeholder="Search models..." 
+                    value={modelSearch}
+                    onValueChange={setModelSearch}
+                  />
+                  <CommandList className="max-h-64">
+                    <CommandEmpty>No model found.</CommandEmpty>
+                    <CommandGroup>
+                      {models
+                        .filter(m => 
+                          modelSearch === '' || 
+                          `${m.provider}/${m.name}`.toLowerCase().includes(modelSearch.toLowerCase())
+                        )
+                        .map((model) => {
+                          const formatPrice = (price?: string) => {
+                            if (!price) return null;
+                            const num = parseFloat(price);
+                            if (num === 0) return 'FREE';
+                            return `$${(num * 1000000).toFixed(2)}/M`;
+                          };
+                          
+                          const inputPrice = formatPrice(model.pricing?.prompt);
+                          const outputPrice = formatPrice(model.pricing?.completion);
+                          const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
+                          
+                          return (
+                            <CommandItem
+                              key={model.id}
+                              value={`${model.provider}/${model.name}`}
+                              onSelect={() => {
+                                setSelectedModel(model.id);
+                                setModelOpen(false);
+                                setModelSearch('');
+                              }}
+                              className="cursor-pointer"
+                            >
+                              <Check
+                                className={cn(
+                                  "mr-2 h-4 w-4 shrink-0",
+                                  selectedModel === model.id ? "opacity-100" : "opacity-0"
+                                )}
+                              />
+                              <div className="flex flex-col flex-1 min-w-0 gap-0.5">
+                                <span className="truncate">{model.provider}/{model.name}</span>
+                                {priceText && (
+                                  <span className="text-[10px] text-muted-foreground truncate">{priceText}</span>
+                                )}
+                              </div>
+                            </CommandItem>
+                          );
+                        })}
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
           </div>
 
           {/* Tool Selector */}

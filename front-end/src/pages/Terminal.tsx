@@ -44,17 +44,22 @@ function getContextPercentage(agent: AgentDetail): number {
 }
 
 function deduplicateToolMessages(messages: Message[]): Message[] {
+  // Sort messages by timestamp FIRST to ensure correct deduplication order
+  const sortedMessages = [...messages].sort((a, b) => 
+    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+
   // Track the most recent message for each tool_call_id
   const toolMessageMap = new Map<string, Message>();
   const nonToolMessages: Message[] = [];
 
-  messages.forEach((message) => {
+  sortedMessages.forEach((message) => {
     if (message.role === 'TOOL') {
       // Parse tool_call_id from message text (format: tool_call_id|||title|||status|||message)
       const parts = message.text.split('|||');
       if (parts.length >= 3) {
         const toolCallId = parts[0];
-        // Keep only the most recent message (last one wins)
+        // Keep only the most recent message (last one wins, since we sorted chronologically)
         toolMessageMap.set(toolCallId, message);
       } else {
         // Old format or malformed, keep as-is
@@ -66,7 +71,7 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
   });
 
   // Combine non-tool messages with deduplicated tool messages
-  // and sort by timestamp to maintain chronological order
+  // Already sorted chronologically from the initial sort
   const deduplicatedMessages = [...nonToolMessages, ...Array.from(toolMessageMap.values())];
   deduplicatedMessages.sort((a, b) => 
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
@@ -83,6 +88,7 @@ export default function Terminal() {
   // Agent list state
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isLoadingAgents, setIsLoadingAgents] = useState(true);
+  const [isFirstLoad, setIsFirstLoad] = useState(true);
   const [showCompleted, setShowCompleted] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
@@ -103,7 +109,15 @@ export default function Terminal() {
   
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
+  
+  // Track which message should be animated (only the most recent agent/tool message)
+  const [animatingMessageId, setAnimatingMessageId] = useState<string | null>(null);
+  const [messageQueue, setMessageQueue] = useState<string[]>([]);
+  const lastAnimationStartRef = useRef<number>(0);
+  const animatedMessagesRef = useRef<Set<string>>(new Set());
+  const isInitialLoadRef = useRef<boolean>(false);
 
   // Check authentication
   useEffect(() => {
@@ -197,17 +211,27 @@ export default function Terminal() {
         },
         (payload) => {
           console.log('💬 New message:', payload);
-          // Add new message to list
           const newMessage = payload.new as any;
+          const messageId = newMessage.id;
+          const role = newMessage.role;
+          
           setMessages((prev) => [
             ...prev,
             {
-              message_id: newMessage.id,
+              message_id: messageId,
               timestamp: newMessage.timestamp,
               text: newMessage.text,
-              role: newMessage.role,
+              role: role,
             },
           ]);
+          
+          // Only queue ASSISTANT messages for animation
+          // TOOL messages update instantly with no animation
+          if (role === 'ASSISTANT' && !animatedMessagesRef.current.has(messageId)) {
+            console.log('🎬 Queuing ASSISTANT message:', messageId.substring(0, 8));
+            animatedMessagesRef.current.add(messageId);
+            setMessageQueue((prev) => [...prev, messageId]);
+          }
         }
       )
       .subscribe((status) => {
@@ -231,14 +255,139 @@ export default function Terminal() {
     };
   }, [selectedAgentId, user]);
 
-  // Scroll to bottom when messages change
+  // Snap to bottom when messages change (only if user was already near bottom)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!messagesEndRef.current) return;
+
+    // Find the radix scroll area viewport
+    const scrollContainer = messagesEndRef.current.closest('[data-radix-scroll-area-viewport]');
+    if (!scrollContainer) return;
+
+    // If this is an initial load, SNAP to bottom instantly (no smooth scroll)
+    if (isInitialLoadRef.current) {
+      // Use requestAnimationFrame to ensure DOM has fully updated
+      requestAnimationFrame(() => {
+        // Force instant snap by setting scrollTop directly
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        isInitialLoadRef.current = false; // Reset flag after scrolling
+      });
+      return;
+    }
+
+    // Calculate distance from bottom
+    const scrollHeight = scrollContainer.scrollHeight;
+    const scrollTop = scrollContainer.scrollTop;
+    const clientHeight = scrollContainer.clientHeight;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+
+    // Only snap to bottom if user was already near bottom (within 150px)
+    // This preserves scroll position if user is reading old messages
+    if (distanceFromBottom < 150) {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    }
   }, [messages]);
+
+  // Handler for when animation completes
+  const handleAnimationComplete = () => {
+    console.log('✅ Animation complete');
+    // Remove from queue FIRST, then clear animating ID
+    setMessageQueue((prev) => {
+      if (prev.length > 0) {
+        console.log('🗑️ Removing from queue, remaining:', prev.length - 1);
+        return prev.slice(1);
+      }
+      return prev;
+    });
+    // Delay before clearing to ensure queue update processes
+    setTimeout(() => {
+      setAnimatingMessageId(null);
+    }, 1000);
+  };
+
+  // Process message queue with minimum 200ms delay between animations
+  useEffect(() => {
+    if (messageQueue.length > 0 && !animatingMessageId) {
+      const now = Date.now();
+      const timeSinceLastAnimation = now - lastAnimationStartRef.current;
+      const minDelay = 200;
+
+      if (timeSinceLastAnimation >= minDelay || lastAnimationStartRef.current === 0) {
+        // Start animating immediately
+        lastAnimationStartRef.current = now;
+        const msgId = messageQueue[0];
+        console.log('▶️ Starting animation:', msgId.substring(0, 8));
+        setAnimatingMessageId(msgId);
+      } else {
+        // Wait for remaining time
+        const remainingDelay = minDelay - timeSinceLastAnimation;
+        const timeout = setTimeout(() => {
+          lastAnimationStartRef.current = Date.now();
+          const msgId = messageQueue[0];
+          console.log('▶️ Starting animation (delayed):', msgId.substring(0, 8));
+          setAnimatingMessageId(msgId);
+        }, remainingDelay);
+        return () => clearTimeout(timeout);
+      }
+    }
+  }, [messageQueue, animatingMessageId]);
+
+  // Check if we should show the loader (agent is thinking)
+  const [showThinkingLoader, setShowThinkingLoader] = useState(false);
+  
+  useEffect(() => {
+    // Don't show loader if:
+    // - No agent detail
+    // - Agent is not active
+    // - We're currently animating a message
+    if (!agentDetail || 
+        agentDetail.status === 'COMPLETED' || 
+        agentDetail.status === 'FAILED' || 
+        agentDetail.status === 'PAUSED' ||
+        animatingMessageId) {
+      setShowThinkingLoader(false);
+      return;
+    }
+
+    const lastMessage = messages[messages.length - 1];
+    if (!lastMessage) {
+      setShowThinkingLoader(false);
+      return;
+    }
+
+    // Check if last message is a tool with IN_PROGRESS status
+    if (lastMessage.role === 'TOOL') {
+      const parts = lastMessage.text.split('|||');
+      if (parts.length >= 3 && parts[2] === 'IN_PROGRESS') {
+        setShowThinkingLoader(false);
+        return;
+      }
+    }
+
+    // Track when we last saw this message (use local time to avoid clock sync issues)
+    let lastSeenTime = Date.now();
+
+    // Check every 100ms to ensure we don't miss the threshold
+    const checkThreshold = () => {
+      const timeSinceWeFirstSawMessage = Date.now() - lastSeenTime;
+      const shouldShow = timeSinceWeFirstSawMessage > 500;
+      setShowThinkingLoader(shouldShow);
+    };
+
+    // Check immediately
+    checkThreshold();
+
+    // Then check every 100ms
+    const interval = setInterval(checkThreshold, 100);
+    
+    return () => clearInterval(interval);
+  }, [messages, agentDetail, animatingMessageId]);
 
   const loadAgents = async () => {
     try {
-      setIsLoadingAgents(true);
+      // Only show loading state on first load
+      if (isFirstLoad) {
+        setIsLoadingAgents(true);
+      }
       const fetchedAgents = await getAllAgents();
       setAgents(fetchedAgents);
     } catch (error) {
@@ -248,7 +397,10 @@ export default function Terminal() {
         variant: 'destructive',
       });
     } finally {
-      setIsLoadingAgents(false);
+      if (isFirstLoad) {
+        setIsLoadingAgents(false);
+        setIsFirstLoad(false);
+      }
     }
   };
 
@@ -258,6 +410,16 @@ export default function Terminal() {
       const data = await getAgent(agentId);
       setAgentDetail(data.agent);
       setMessages(data.messages); // Already in chronological order (oldest first)
+      setSelectedModel(data.agent.model); // Sync UI model with agent's actual model
+      
+      // Mark this as an initial load so we can scroll to bottom
+      isInitialLoadRef.current = true;
+      
+      // Clear animation state and queue when loading a different agent
+      setAnimatingMessageId(null);
+      setMessageQueue([]);
+      lastAnimationStartRef.current = 0;
+      animatedMessagesRef.current.clear();
     } catch (error) {
       toast({
         title: 'Error',
@@ -286,8 +448,10 @@ export default function Terminal() {
       setResumingAgentId(agentId);
       await resumeAgent(agentId);
       
-      // Sequentially fetch the updated agent to get the latest status
-      await getAgent(agentId);
+      // If this is the currently selected agent, reload its details
+      if (agentId === selectedAgentId) {
+        await loadAgentDetail(agentId);
+      }
       
       // Refresh the agents list to show updated status
       await loadAgents();
@@ -486,9 +650,7 @@ export default function Terminal() {
               // Show ASCII animation when: no agent selected, loading agent, or agent starting up (but not when paused/active/completed/failed)
               <div className="flex items-center justify-center h-full">
                 <div className="text-center space-y-6">
-                  <div className="w-48 h-48 mx-auto flex items-center justify-center">
-                    <AsciiLoader showWarmingUp={false} size="normal" />
-                  </div>
+                    <AsciiLoader showWarmingUp={false} size="large" variant="engine" />
                   <div>
                     {!selectedAgentId ? (
                       // No agent selected states
@@ -522,16 +684,40 @@ export default function Terminal() {
               </div>
             ) : (
               // Agent selected - show messages
-              <div className="max-w-4xl mx-auto space-y-4">
+              <div className="max-w-4xl mx-auto space-y-4 pb-32">
                 {deduplicateToolMessages(messages.filter((m) => m.role !== 'SYSTEM')).map((message) => (
-                  <MessageBubble key={message.message_id} message={message} />
+                  <MessageBubble 
+                    key={message.message_id} 
+                    message={message}
+                    shouldType={message.message_id === animatingMessageId}
+                    onTypingComplete={handleAnimationComplete}
+                  />
                 ))}
-                {showStatusLoader && lastMessage && (
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span className="text-sm">{lastMessage.text}</span>
+                
+                {/* Show paused text when agent is paused */}
+                {agentDetail?.status === 'PAUSED' && (
+                  <div className="flex gap-3">
+                    <div className="flex-shrink-0 w-8" />
+                    <p className="text-sm text-muted-foreground">agent is paused</p>
                   </div>
                 )}
+                
+                {/* Show completed text when agent is complete */}
+                {agentDetail?.status === 'COMPLETED' && (
+                  <div className="flex gap-3">
+                    <div className="flex-shrink-0 w-8" />
+                    <p className="text-sm text-muted-foreground">your goal is complete</p>
+                  </div>
+                )}
+                
+                {/* Show small ASCII loader when agent is thinking */}
+                {showThinkingLoader && (
+                  <div className="flex gap-3">
+                    <div className="flex-shrink-0 w-8" />
+                    <AsciiLoader showWarmingUp={false} size="icon" fitContainer />
+                  </div>
+                )}
+                
                 <div ref={messagesEndRef} />
               </div>
             )}

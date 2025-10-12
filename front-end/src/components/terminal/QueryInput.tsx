@@ -267,48 +267,80 @@ export default function QueryInput({
                       <CommandEmpty>No models available.</CommandEmpty>
                       {/* Featured Models */}
                       <CommandGroup heading="⭐ Featured">
-                        {featuredModels.map((model) => (
-                          <CommandItem
-                            key={model.id}
-                            onSelect={() => {
-                              onModelChange?.(model.id);
-                              setShowModelPicker(false);
-                            }}
-                          >
-                            <div className="flex items-center justify-between w-full">
-                              <div className="flex flex-col">
-                                <span className="font-medium">{model.name}</span>
-                                <span className="text-xs text-gray-500">{model.provider}</span>
+                        {featuredModels.map((model) => {
+                          const formatPrice = (price?: string) => {
+                            if (!price) return null;
+                            const num = parseFloat(price);
+                            if (num === 0) return 'FREE';
+                            return `$${(num * 1000000).toFixed(2)}/M`;
+                          };
+                          
+                          const inputPrice = formatPrice(model.pricing?.prompt);
+                          const outputPrice = formatPrice(model.pricing?.completion);
+                          const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
+                          
+                          return (
+                            <CommandItem
+                              key={model.id}
+                              onSelect={() => {
+                                onModelChange?.(model.id);
+                                setShowModelPicker(false);
+                              }}
+                            >
+                              <div className="flex items-center justify-between w-full">
+                                <div className="flex flex-col gap-0.5">
+                                  <span className="font-medium">{model.name}</span>
+                                  <span className="text-xs text-gray-500">{model.provider}</span>
+                                  {priceText && (
+                                    <span className="text-[10px] text-gray-400">{priceText}</span>
+                                  )}
+                                </div>
+                                {model.id === selectedModel && (
+                                  <span className="text-primary">✓</span>
+                                )}
                               </div>
-                              {model.id === selectedModel && (
-                                <span className="text-primary">✓</span>
-                              )}
-                            </div>
-                          </CommandItem>
-                        ))}
+                            </CommandItem>
+                          );
+                        })}
                       </CommandGroup>
 
                       {/* Other Models */}
                       <CommandGroup heading="All Models">
-                        {otherModels.map((model) => (
-                          <CommandItem
-                            key={model.id}
-                            onSelect={() => {
-                              onModelChange?.(model.id);
-                              setShowModelPicker(false);
-                            }}
-                          >
-                            <div className="flex items-center justify-between w-full">
-                              <div className="flex flex-col">
-                                <span className="text-sm">{model.name}</span>
-                                <span className="text-xs text-gray-500">{model.provider}</span>
+                        {otherModels.map((model) => {
+                          const formatPrice = (price?: string) => {
+                            if (!price) return null;
+                            const num = parseFloat(price);
+                            if (num === 0) return 'FREE';
+                            return `$${(num * 1000000).toFixed(2)}/M`;
+                          };
+                          
+                          const inputPrice = formatPrice(model.pricing?.prompt);
+                          const outputPrice = formatPrice(model.pricing?.completion);
+                          const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
+                          
+                          return (
+                            <CommandItem
+                              key={model.id}
+                              onSelect={() => {
+                                onModelChange?.(model.id);
+                                setShowModelPicker(false);
+                              }}
+                            >
+                              <div className="flex items-center justify-between w-full">
+                                <div className="flex flex-col gap-0.5">
+                                  <span className="text-sm">{model.name}</span>
+                                  <span className="text-xs text-gray-500">{model.provider}</span>
+                                  {priceText && (
+                                    <span className="text-[10px] text-gray-400">{priceText}</span>
+                                  )}
+                                </div>
+                                {model.id === selectedModel && (
+                                  <span className="text-primary">✓</span>
+                                )}
                               </div>
-                            {model.id === selectedModel && (
-                              <span className="text-primary">✓</span>
-                            )}
-                          </div>
-                        </CommandItem>
-                        ))}
+                            </CommandItem>
+                          );
+                        })}
                       </CommandGroup>
                     </CommandList>
                   </Command>

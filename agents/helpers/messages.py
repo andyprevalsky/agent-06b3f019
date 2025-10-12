@@ -1,7 +1,7 @@
 """Activity for polling new messages from the database."""
 
 from temporalio import activity
-from typing import List, Dict
+from typing import List, Dict, Any
 from datetime import datetime
 import structlog
 
@@ -9,7 +9,7 @@ logger = structlog.get_logger()
 
 
 @activity.defn
-async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict]:
+async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
     """
     Poll for new user messages since last check.
     
@@ -22,6 +22,12 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict]
     """
     try:
         activity.heartbeat(f"Polling messages for agent {agent_id}")
+        
+        logger.info(
+            "Polling for new messages",
+            agent_id=agent_id,
+            last_checked=last_checked.isoformat()
+        )
         
         import httpx
         from config import load_config
@@ -69,7 +75,7 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict]
 
 
 @activity.defn
-async def post_agent_message(agent_id: str, text: str, role: str = "ASSISTANT") -> Dict:
+async def post_agent_message(agent_id: str, text: str, role: str = "ASSISTANT") -> Dict[str, Any]:
     """
     Post a message from the agent back to the database.
     

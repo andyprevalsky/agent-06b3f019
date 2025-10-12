@@ -26,14 +26,6 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
       return res.status(400).json({ error: 'Goal is required' });
     }
 
-    // Generate embedding for the query goal
-    const embeddingResponse = await openrouter.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: goal,
-    });
-
-    const queryEmbedding = embeddingResponse.data[0].embedding;
-
     // For now, fetch all user's blueprints and do similarity in-memory
     // TODO: Use pgvector extension for efficient similarity search
     const blueprints = await prisma.goalBlueprint.findMany({
@@ -46,33 +38,59 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
       return res.json([]);
     }
 
-    // Generate embeddings for all blueprint titles and calculate cosine similarity
-    const blueprintEmbeddings = await Promise.all(
-      blueprints.map(async (bp) => {
-        const response = await openrouter.embeddings.create({
-          model: 'text-embedding-3-small',
-          input: bp.title,
-        });
-        return {
-          blueprint: bp,
-          embedding: response.data[0].embedding,
-        };
-      })
-    );
+    // Try semantic search with embeddings, fall back to simple text matching
+    try {
+      // Generate embedding for the query goal
+      const embeddingResponse = await openrouter.embeddings.create({
+        model: 'openai/text-embedding-3-small',
+        input: goal,
+      });
 
-    // Calculate cosine similarity
-    const withSimilarity = blueprintEmbeddings.map(({ blueprint, embedding }) => {
-      const similarity = cosineSimilarity(queryEmbedding, embedding);
-      return { ...blueprint, similarity };
-    });
+      const queryEmbedding = embeddingResponse.data[0].embedding;
 
-    // Sort by similarity and return top K
-    const topResults = withSimilarity
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, limit)
-      .map(({ similarity, ...bp }) => bp); // Remove similarity score from response
+      // Generate embeddings for all blueprint titles and calculate cosine similarity
+      const blueprintEmbeddings = await Promise.all(
+        blueprints.map(async (bp) => {
+          const response = await openrouter.embeddings.create({
+            model: 'openai/text-embedding-3-small',
+            input: bp.title,
+          });
+          return {
+            blueprint: bp,
+            embedding: response.data[0].embedding,
+          };
+        })
+      );
 
-    res.json(topResults);
+      // Calculate cosine similarity
+      const withSimilarity = blueprintEmbeddings.map(({ blueprint, embedding }) => {
+        const similarity = cosineSimilarity(queryEmbedding, embedding);
+        return { ...blueprint, similarity };
+      });
+
+      // Sort by similarity and return top K
+      const topResults = withSimilarity
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, limit)
+        .map(({ similarity, ...bp }) => bp); // Remove similarity score from response
+
+      res.json(topResults);
+    } catch (embeddingError) {
+      console.warn('Embeddings not available, falling back to simple search:', embeddingError);
+      
+      // Fall back to simple keyword matching
+      const goalLower = goal.toLowerCase();
+      const matchingBlueprints = blueprints
+        .filter(bp => bp.title.toLowerCase().includes(goalLower))
+        .slice(0, limit);
+      
+      // If no keyword matches, return most recent blueprints
+      if (matchingBlueprints.length === 0) {
+        return res.json(blueprints.slice(0, limit));
+      }
+      
+      res.json(matchingBlueprints);
+    }
   } catch (error) {
     console.error('Blueprint search error:', error);
     res.status(500).json({ error: 'Failed to search blueprints' });

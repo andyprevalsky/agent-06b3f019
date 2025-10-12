@@ -2,6 +2,7 @@
 
 from datetime import timedelta, datetime
 from typing import Dict, List, Optional, Any
+from datetime import timezone
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
@@ -87,11 +88,12 @@ class AgentWorkflow:
         self.user_id: Optional[str] = None
         self.goal: Optional[str] = None
         self.model: str = "anthropic/claude-sonnet-4.5"
+        self.reasoning_effort: str = "low"  # OpenRouter reasoning effort
         self.tool_ids: List[str] = []
         self.tools: List[Dict[str, str]] = []  # Tools with descriptions from DB
         self.verifier: Optional[Dict] = None
         self.context: List[Dict] = []
-        self.last_message_check: Optional[datetime] = None
+        self.last_message_check: Optional[datetime] = datetime(1970, 1, 1).replace(tzinfo=timezone.utc)
         self.iteration_count: int = 0
         self.context_tokens: int = 0
         self.max_context_tokens: Optional[int] = None  # Fetched from OpenRouter
@@ -117,6 +119,7 @@ class AgentWorkflow:
         user_id: str,
         goal: str,
         model: str,
+        reasoning_effort: str,
         tool_ids: List[str],
         verifier: Dict,
         context: Optional[List[Dict]] = None,
@@ -129,9 +132,9 @@ class AgentWorkflow:
             user_id: User ID who owns this agent
             goal: What the agent should accomplish
             model: LLM model to use for reasoning (e.g., anthropic/claude-sonnet-4.5)
+            reasoning_effort: OpenRouter reasoning effort level (low, medium, high)
             tool_ids: List of tool IDs available to this agent
             verifier: Verification config (type: FLOAT_LLM_JUDGE, llmJudgePrompt: str)
-            context: Message history
             
         Returns:
             Task completion details or continues as new
@@ -140,13 +143,13 @@ class AgentWorkflow:
         self.user_id = user_id
         self.goal = goal
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.tool_ids = tool_ids
         self.verifier = verifier
         self.context = context or []
         
-        # Initialize last message check time (must use workflow.now() for determinism)
-        if self.last_message_check is None:
-            self.last_message_check = workflow.now()
+        # Initialize last message check time to 1 hour ago so we fetch the goal message
+        # (must use workflow.now() for determinism)
         
         workflow.logger.info(
             f"Agent iteration {self.iteration_count}",
@@ -159,6 +162,7 @@ class AgentWorkflow:
         # Fetch model's context window and tools from backend (only on first iteration)
         if self.max_context_tokens is None:
             try:
+                workflow.logger.info("🔍 Calling get_model_context_window", model=model)
                 self.max_context_tokens = await workflow.execute_activity(
                     get_model_context_window,
                     args=[model],
@@ -187,6 +191,7 @@ class AgentWorkflow:
         # This fetches tools assigned to this agent via AgentTool junction table
         if not self.tools:
             try:
+                workflow.logger.info("🔍 Calling fetch_agent_tools", agent_id=agent_id)
                 db_tools = await workflow.execute_activity(
                     fetch_agent_tools,
                     args=[agent_id],
@@ -217,6 +222,7 @@ class AgentWorkflow:
         
         # Update status to ACTIVE
         try:
+            workflow.logger.info("🔍 Calling update_agent_status (initial)", agent_id=agent_id, status="ACTIVE", progress=0.0, msg_count=len(self.context))
             await workflow.execute_activity(
                 update_agent_status,
                 args=[agent_id, "ACTIVE", 0.0, "Agent started", 0, 0, len(self.context)],
@@ -268,19 +274,8 @@ class AgentWorkflow:
                     # Timeout = still paused, loop back to re-poll config
                     workflow.logger.info("⏸️  Timeout while paused, re-checking config...")
                     continue
-                # 1. Query blueprints on first iteration
-                if self.iteration_count == 0:
-                    blueprints = await self._query_blueprints()
-                    if blueprints:
-                        # Insert blueprints directly into context
-                        for bp in blueprints:
-                            self.context.append({
-                                "role": "SYSTEM",
-                                "text": f"Blueprint for similar goal:\n{bp['blueprint']}",
-                                "timestamp": workflow.now().isoformat()
-                            })
                 
-                # 2. Poll for new user messages (already in DB, just add to context)
+                # 1. Poll for new user messages (already in DB, just add to context)
                 new_messages = await self._poll_messages()
                 if new_messages:
                     for message in new_messages:
@@ -292,16 +287,35 @@ class AgentWorkflow:
                         })
                     # Sort context by timestamp to maintain chronological order
                     self.context.sort(key=lambda x: x.get("timestamp", ""))
+
+                # 2. Query blueprints on first iteration
+                if self.iteration_count == 0:
+                    blueprints = await self._query_blueprints()
+                    if blueprints:
+                        # Insert blueprints directly into context with clear delimiters
+                        for bp in blueprints:
+                            formatted_blueprint = (
+                                f"=== BLUEPRINT START ===\n"
+                                f"Goal: {bp['title']}\n\n"
+                                f"{bp['blueprint']}\n"
+                                f"=== BLUEPRINT END ==="
+                            )
+                            self.context.append({
+                                "role": "SYSTEM",
+                                "text": formatted_blueprint,
+                                "timestamp": workflow.now().isoformat()
+                            })
                 
                 # 3. Decide next action using LLM
                 action = await self._decide_next_action()
                 # Track tokens from LLM call (usage is always present)
                 self.token_count += action["usage"].get("total_tokens", 0)
                 
-                # 4. Post reasoning to user (visible in UI and added to context)
-                reasoning = action.get("reasoning", "")
-                if reasoning:
-                    await self._post_message(reasoning, "ASSISTANT")
+                # 4. Post response to user (visible in UI and added to context)
+                # Reasoning is logged but not posted to chat
+                response = action.get("response", "")
+                if response:
+                    await self._post_message(response, "ASSISTANT")
                 
                 # 5. Execute all tools sequentially
                 tool_calls = action.get("tool_calls", [])
@@ -421,7 +435,7 @@ class AgentWorkflow:
                     # Use Claude 4.5 Sonnet to extract key learnings
                     learnings = await workflow.execute_activity(
                         compress_context,
-                        args=[self.goal, self.context, self.iteration_count, self.model],
+                        args=[self.context, self.iteration_count, self.model],
                         start_to_close_timeout=timedelta(seconds=60),
                         retry_policy=RetryPolicy(
                             maximum_attempts=6,
@@ -451,6 +465,7 @@ class AgentWorkflow:
                         user_id=self.user_id,
                         goal=self.goal,
                         model=self.model,
+                        reasoning_effort=self.reasoning_effort,
                         tool_ids=self.tool_ids,
                         verifier=self.verifier,
                         context=compressed_context
@@ -477,6 +492,10 @@ class AgentWorkflow:
     async def _poll_messages(self) -> List[Dict]:
         """Poll for new user messages since last check."""
         try:
+            workflow.logger.info("🔍 Calling poll_new_messages", 
+                agent_id=self.agent_id, 
+                last_message_check=self.last_message_check
+            )
             messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, self.last_message_check],
@@ -489,8 +508,7 @@ class AgentWorkflow:
                 )
             )
             
-            if messages:
-                self.last_message_check = workflow.now()
+            self.last_message_check = workflow.now()
             
             return messages
             
@@ -502,6 +520,11 @@ class AgentWorkflow:
     async def _post_message(self, text: str, role: str = "ASSISTANT") -> None:
         """Post a message from the agent."""
         try:
+            workflow.logger.info("🔍 Calling post_agent_message", 
+                agent_id=self.agent_id, 
+                role=role, 
+                text_preview=text[:50] if len(text) > 50 else text
+            )
             await workflow.execute_activity(
                 post_agent_message,
                 args=[self.agent_id, text, role],
@@ -528,11 +551,16 @@ class AgentWorkflow:
     async def _query_blueprints(self) -> List[Dict]:
         """Query knowledge base for similar goals."""
         try:
-            workflow.logger.info("Querying blueprints")
+            workflow.logger.info("🔍 Calling query_blueprints", 
+                context_type=type(self.context).__name__, 
+                context_len=len(self.context),
+                user_id=self.user_id,
+                limit=3
+            )
             
             blueprints = await workflow.execute_activity(
                 query_blueprints,
-                args=[self.goal, self.user_id, 3],
+                args=[self.context, self.user_id, 3],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
@@ -561,7 +589,7 @@ class AgentWorkflow:
         try:
             action = await workflow.execute_activity(
                 decide_next_action,
-                args=[self.goal, self.context, self.tools, self.iteration_count, self.model],
+                args=[self.context, self.tools, self.iteration_count, self.model, self.reasoning_effort],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
@@ -654,12 +682,17 @@ class AgentWorkflow:
         Returns:
             Dict with 'score' (float 0.0-1.0) and 'reasoning' (str)
         """
-        workflow.logger.info("Checking progress")
+        workflow.logger.info("🔍 Calling check_progress", 
+            context_type=type(self.context).__name__,
+            context_len=len(self.context),
+            verifier_prompt=self.verifier["llmJudgePrompt"][:50],
+            model=self.model
+        )
         
         try:
             result = await workflow.execute_activity(
                 check_progress,
-                args=[self.goal, self.context, self.verifier["llmJudgePrompt"], self.model],
+                args=[self.context, self.verifier["llmJudgePrompt"], self.model],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
@@ -688,7 +721,7 @@ class AgentWorkflow:
             # Save blueprint
             await workflow.execute_activity(
                 save_blueprint,
-                args=[self.user_id, self.goal, steps],
+                args=[self.user_id, steps],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
@@ -703,7 +736,6 @@ class AgentWorkflow:
                 mark_finished,
                 args=[
                     self.agent_id,
-                    self.goal,
                     steps,
                     self.token_count,
                     self.context_tokens,

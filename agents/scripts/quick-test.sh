@@ -11,7 +11,7 @@ SUPABASE_KEY="sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp"
 TEST_PHONE="+19729777432"
 TEST_OTP="181818"
 STATE_FILE="/tmp/navi-quick-test-state.json"
-TEST_TASK_QUEUE="navi-agent-tasks-quicktest"
+TEST_TASK_QUEUE="navi-agent-tasks-test"
 
 # Colors
 RED='\033[0;31m'
