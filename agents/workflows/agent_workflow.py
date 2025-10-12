@@ -97,7 +97,9 @@ class AgentWorkflow:
         self.iteration_count: int = 0
         self.context_tokens: int = 0
         self.max_context_tokens: Optional[int] = None  # Fetched from OpenRouter
-        self.token_count: int = 0  # Cumulative tokens used
+        self.token_count: int = 0  # Cumulative tokens used (total)
+        self.tokens_in: int = 0  # Cumulative input tokens (prompt)
+        self.tokens_out: int = 0  # Cumulative output tokens (completion)
         self.is_paused: bool = False  # Pause state
     
     @workflow.signal
@@ -225,7 +227,7 @@ class AgentWorkflow:
             workflow.logger.info("🔍 Calling update_agent_status (initial)", agent_id=agent_id, status="ACTIVE", progress=0.0, msg_count=len(self.context))
             await workflow.execute_activity(
                 update_agent_status,
-                args=[agent_id, "ACTIVE", 0.0, "Agent started", 0, 0, len(self.context)],
+                args=[agent_id, "ACTIVE", 0.0, "Agent started", 0, 0, len(self.context), 0, 0],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
@@ -309,7 +311,10 @@ class AgentWorkflow:
                 # 3. Decide next action using LLM
                 action = await self._decide_next_action()
                 # Track tokens from LLM call (usage is always present)
-                self.token_count += action["usage"].get("total_tokens", 0)
+                usage = action["usage"]
+                self.tokens_in += usage.get("prompt_tokens", 0)
+                self.tokens_out += usage.get("completion_tokens", 0)
+                self.token_count += usage.get("total_tokens", 0)
                 
                 # 4. Post response to user (visible in UI and added to context)
                 # Reasoning is logged but not posted to chat
@@ -369,7 +374,10 @@ class AgentWorkflow:
                 # 6. Check progress with verifier and update DB
                 progress_result = await self._check_progress()
                 # Track tokens from verifier LLM call (usage is always present)
-                self.token_count += progress_result["usage"].get("total_tokens", 0)
+                verifier_usage = progress_result["usage"]
+                self.tokens_in += verifier_usage.get("prompt_tokens", 0)
+                self.tokens_out += verifier_usage.get("completion_tokens", 0)
+                self.token_count += verifier_usage.get("total_tokens", 0)
                 progress_score = progress_result.get("score", 0.0)
                 progress_reasoning = progress_result.get("reasoning", "No reasoning provided")
                 
@@ -395,7 +403,9 @@ class AgentWorkflow:
                         f"Iteration {self.iteration_count}: {progress_score*100:.1f}% complete",
                         self.token_count,
                         self.context_tokens,
-                        len(self.context)
+                        len(self.context),
+                        self.tokens_in,
+                        self.tokens_out
                     ],
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(
@@ -718,8 +728,8 @@ class AgentWorkflow:
             # Include all messages in blueprint (USER, ASSISTANT, TOOL, SYSTEM)
             steps = self.context
             
-            # Save blueprint
-            await workflow.execute_activity(
+            # Save blueprint (uses LLM to extract key points)
+            blueprint_result = await workflow.execute_activity(
                 save_blueprint,
                 args=[self.user_id, steps],
                 start_to_close_timeout=timedelta(seconds=60),
@@ -731,7 +741,18 @@ class AgentWorkflow:
                 )
             )
             
-            # Mark as finished in the database
+            # Track tokens from blueprint extraction LLM call
+            blueprint_usage = blueprint_result.get("usage", {})
+            self.tokens_in += blueprint_usage.get("prompt_tokens", 0)
+            self.tokens_out += blueprint_usage.get("completion_tokens", 0)
+            self.token_count += blueprint_usage.get("total_tokens", 0)
+            
+            workflow.logger.info(
+                "Blueprint extracted and saved",
+                tokens_used=blueprint_usage.get("total_tokens", 0)
+            )
+            
+            # Mark as finished in the database (with updated token counts)
             await workflow.execute_activity(
                 mark_finished,
                 args=[
@@ -739,7 +760,9 @@ class AgentWorkflow:
                     steps,
                     self.token_count,
                     self.context_tokens,
-                    len(self.context)
+                    len(self.context),
+                    self.tokens_in,
+                    self.tokens_out
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(

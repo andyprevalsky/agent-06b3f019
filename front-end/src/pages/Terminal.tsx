@@ -111,6 +111,9 @@ export default function Terminal() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
+  const reconnectAttemptRef = useRef<number>(0);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const isReconnectingRef = useRef<boolean>(false);
   
   // Track which message should be animated (only the most recent agent/tool message)
   const [animatingMessageId, setAnimatingMessageId] = useState<string | null>(null);
@@ -118,6 +121,7 @@ export default function Terminal() {
   const lastAnimationStartRef = useRef<number>(0);
   const animatedMessagesRef = useRef<Set<string>>(new Set());
   const isInitialLoadRef = useRef<boolean>(false);
+  const [forceResubscribe, setForceResubscribe] = useState<number>(0);
 
   // Check authentication
   useEffect(() => {
@@ -161,14 +165,32 @@ export default function Terminal() {
   useEffect(() => {
     if (!selectedAgentId || !user) return;
 
+    // Prevent concurrent reconnection attempts
+    if (isReconnectingRef.current) {
+      console.log('⏳ Reconnection already in progress, skipping...');
+      return;
+    }
+
+    isReconnectingRef.current = true;
+
     // Clean up previous channel
     if (channelRef.current) {
+      console.log('🧹 Unsubscribing from previous channel');
       channelRef.current.unsubscribe();
+      channelRef.current = null;
     }
+
+    // Clear any pending reconnection timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    console.log(`📡 Creating new realtime channel for agent ${selectedAgentId}`);
 
     // Create new channel for selected agent
     const channel = supabase
-      .channel(`agent:${selectedAgentId}`)
+      .channel(`agent:${selectedAgentId}:${Date.now()}`) // Add timestamp to force new channel
       .on(
         'postgres_changes',
         {
@@ -236,24 +258,104 @@ export default function Terminal() {
       )
       .subscribe((status) => {
         console.log(`📡 Realtime subscription status for agent ${selectedAgentId}:`, status);
+        
         if (status === 'SUBSCRIBED') {
           console.log('✅ Successfully subscribed to realtime updates');
+          // Reset reconnection attempts on successful connection
+          reconnectAttemptRef.current = 0;
+          isReconnectingRef.current = false;
         } else if (status === 'CHANNEL_ERROR') {
-          console.error('❌ Realtime subscription error');
+          console.error('❌ Realtime subscription error - will attempt to reconnect');
+          isReconnectingRef.current = false;
+          scheduleReconnect();
         } else if (status === 'TIMED_OUT') {
-          console.error('⏱️ Realtime subscription timed out');
+          console.error('⏱️ Realtime subscription timed out - will attempt to reconnect');
+          isReconnectingRef.current = false;
+          scheduleReconnect();
         } else if (status === 'CLOSED') {
-          console.log('🔌 Realtime subscription closed');
+          console.log('🔌 Realtime subscription closed - will attempt to reconnect');
+          isReconnectingRef.current = false;
+          scheduleReconnect();
         }
       });
 
     channelRef.current = channel;
 
+    // Helper function to schedule reconnection with exponential backoff
+    function scheduleReconnect() {
+      // Don't reconnect if we've switched agents or logged out
+      if (!selectedAgentId || !user) return;
+
+      // Clear any existing timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+
+      // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+      const attempt = reconnectAttemptRef.current;
+      const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+      
+      console.log(`🔄 Scheduling reconnection attempt ${attempt + 1} in ${delay}ms...`);
+      reconnectAttemptRef.current += 1;
+
+      reconnectTimeoutRef.current = window.setTimeout(() => {
+        console.log(`🔄 Attempting to reconnect (attempt ${attempt + 1})...`);
+        // Trigger re-subscription by updating the force counter
+        setForceResubscribe(prev => prev + 1);
+      }, delay);
+    }
+
     return () => {
       console.log('🧹 Cleaning up realtime subscription');
+      isReconnectingRef.current = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
       channel.unsubscribe();
     };
-  }, [selectedAgentId, user]);
+  }, [selectedAgentId, user, forceResubscribe]);
+
+  // Handle tab visibility changes - reconnect when tab becomes visible
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden && selectedAgentId) {
+        // Tab became visible
+        console.log('👀 Tab became visible, ensuring fresh connection...');
+        
+        // Wait a bit to ensure browser has resumed network activity
+        setTimeout(() => {
+          if (selectedAgentId) {
+            console.log('🔄 Forcing reconnection after tab visibility change');
+            setForceResubscribe(prev => prev + 1);
+          }
+        }, 1000);
+      } else if (document.hidden) {
+        console.log('😴 Tab hidden - connection may be suspended by browser');
+      }
+    };
+
+    const handleFocus = () => {
+      if (selectedAgentId) {
+        console.log('🎯 Window focused, ensuring connection is alive...');
+        // Check connection health when window gets focus
+        setTimeout(() => {
+          if (selectedAgentId) {
+            setForceResubscribe(prev => prev + 1);
+          }
+        }, 500);
+      }
+    };
+
+    // Listen for visibility changes and focus events
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [selectedAgentId]);
 
   // Snap to bottom when messages change (only if user was already near bottom)
   useEffect(() => {
@@ -420,6 +522,13 @@ export default function Terminal() {
       setMessageQueue([]);
       lastAnimationStartRef.current = 0;
       animatedMessagesRef.current.clear();
+      
+      // Reset reconnection state when switching agents
+      reconnectAttemptRef.current = 0;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
     } catch (error) {
       toast({
         title: 'Error',

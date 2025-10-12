@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Agent" ADD COLUMN     "tokensIn" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN     "tokensOut" INTEGER NOT NULL DEFAULT 0;

@@ -18,7 +18,9 @@ async def update_agent_status(
     status_message: str,
     token_count: int,
     context_size: int,
-    message_count: int
+    message_count: int,
+    tokens_in: int = 0,
+    tokens_out: int = 0
 ) -> None:
     """
     Update agent status and metrics in the database.
@@ -28,9 +30,11 @@ async def update_agent_status(
         status: Status value (STARTING_UP, ACTIVE, PAUSED, COMPLETED, FAILED)
         progress: Progress as 0.0-1.0
         status_message: Status message
-        token_count: Cumulative tokens used
+        token_count: Cumulative tokens used (total)
         context_size: Current context window usage in tokens
         message_count: Total messages in context
+        tokens_in: Input tokens (prompt)
+        tokens_out: Output tokens (completion)
     """
     try:
         activity.heartbeat(f"Updating agent status: {status}")
@@ -45,6 +49,8 @@ async def update_agent_status(
                     "progress": progress,
                     "statusMessage": status_message,
                     "tokenCount": token_count,
+                    "tokensIn": tokens_in,
+                    "tokensOut": tokens_out,
                     "contextSize": context_size,
                     "messageCount": message_count
                 },
@@ -62,6 +68,8 @@ async def update_agent_status(
                 status=status,
                 progress=progress,
                 tokens=token_count,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
                 context_size=context_size,
                 messages=message_count
             )

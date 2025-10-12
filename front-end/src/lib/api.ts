@@ -31,6 +31,8 @@ export interface Agent {
   status_message: string | null;
   temporal_workflow_id: string | null;
   token_count: number;
+  tokens_in: number;
+  tokens_out: number;
   context_size: number;
   message_count: number;
   created_at: string;

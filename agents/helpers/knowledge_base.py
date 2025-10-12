@@ -6,8 +6,59 @@ from temporalio import activity
 import structlog
 
 from config import load_config
+from helpers.llm import call_llm
 
 logger = structlog.get_logger()
+
+# Prompt for extracting actionable blueprints from conversation history
+BLUEPRINT_EXTRACTION_PROMPT = """You are analyzing a conversation between a user and an AI agent that successfully achieved a specific goal.
+
+Your task is to extract a concise, actionable blueprint that captures the essential steps, decisions, and learnings from this conversation.
+
+## Input
+- **Goal**: {goal_description}
+- **Outcome**: Successfully completed
+- **Full Conversation**: See below
+
+## What to Extract
+
+### 1. Core Approach (2-3 sentences)
+Summarize the overall strategy that was used to achieve the goal.
+
+### 2. Key Steps (ordered list)
+Extract the specific actions taken that directly contributed to success. Include:
+- What was done
+- Why it was necessary
+- Any important parameters or decisions
+
+### 3. Critical Decisions
+Highlight important choices made during execution, especially:
+- Trade-offs considered
+- Why one approach was chosen over alternatives
+- Pivots or course corrections that proved valuable
+
+### 4. Success Factors
+What made this approach work? Include:
+- Specific tools or techniques used
+- Important insights discovered
+- Context-specific considerations
+
+### 5. Pitfalls Avoided (if any)
+Briefly note any dead-ends or failed attempts that were overcome, and what was learned.
+
+## What to Exclude
+- Greeting/closing pleasantries
+- Repetitive confirmations or status updates
+- Failed attempts that didn't lead anywhere
+- Debugging steps unless they revealed critical insights
+- Tool outputs unless they contain key information
+
+## Output Format
+Provide a structured, scannable blueprint in markdown format that another agent could reference when tackling a similar goal.
+
+Be concise but specific. Use technical terminology when appropriate. Focus on reproducibility.
+
+Generate ONLY the blueprint content - no preamble, no "Here's the blueprint:", just the structured markdown."""
 
 
 def extract_goal_from_context(context: List[Dict]) -> str:
@@ -96,7 +147,7 @@ class BlueprintManager:
         self,
         user_id: str,
         title: str,
-        blueprint: List[Dict]
+        blueprint: str | List[Dict]
     ) -> Dict:
         """
         Save a new blueprint.
@@ -104,7 +155,7 @@ class BlueprintManager:
         Args:
             user_id: User ID
             title: Goal description (used for similarity matching)
-            blueprint: Complete execution trace
+            blueprint: Extracted blueprint (string) or complete execution trace (list of messages)
             
         Returns:
             Created blueprint entry
@@ -196,16 +247,84 @@ async def save_blueprint(
     """
     Activity: Save a new blueprint.
     
+    Uses LLM to extract key points from the conversation history into a concise,
+    actionable blueprint that can be used by future agents.
+    
     Args:
         user_id: User ID
         blueprint: List of messages (execution trace, first USER message is the goal)
         
     Returns:
-        Created blueprint
+        Dict with 'saved_blueprint' and 'usage' (token counts)
     """
-    # Extract goal from first USER message to use as title
-    title = extract_goal_from_context(blueprint)
-    
-    manager = get_blueprint_manager()
-    return await manager.save(user_id, title, blueprint)
+    try:
+        activity.heartbeat("Extracting blueprint with LLM")
+        
+        # Extract goal from first USER message to use as title
+        title = extract_goal_from_context(blueprint)
+        
+        # Format conversation history for the LLM
+        conversation_text = ""
+        for msg in blueprint:
+            role = msg.get('role', 'ASSISTANT')
+            text = msg.get('text', '')
+            timestamp = msg.get('timestamp', '')
+            conversation_text += f"[{role}] {text}\n\n"
+        
+        # Build the extraction prompt
+        system_prompt = BLUEPRINT_EXTRACTION_PROMPT.format(
+            goal_description=title
+        )
+        
+        # Call LLM to extract actionable blueprint
+        logger.info("Calling LLM to extract blueprint", goal=title)
+        result = await call_llm(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": conversation_text}
+            ],
+            model="anthropic/claude-sonnet-4.5",
+            temperature=0.3,  # Lower temperature for more focused extraction
+            max_tokens=2000   # Allow enough tokens for detailed blueprint
+        )
+        
+        # Extract the blueprint content from LLM response
+        extracted_blueprint = result.get("content", "")
+        usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        
+        if not extracted_blueprint:
+            logger.warning("LLM returned empty blueprint, falling back to raw messages")
+            extracted_blueprint = conversation_text
+        
+        logger.info(
+            "Blueprint extracted",
+            goal=title,
+            original_messages=len(blueprint),
+            extracted_length=len(extracted_blueprint),
+            tokens_used=usage.get("total_tokens", 0)
+        )
+        
+        # Save the extracted blueprint (as string, not list of messages)
+        manager = get_blueprint_manager()
+        saved_blueprint = await manager.save(user_id, title, extracted_blueprint)
+        
+        # Return both the saved blueprint and usage data
+        return {
+            "saved_blueprint": saved_blueprint,
+            "usage": usage
+        }
+        
+    except Exception as e:
+        logger.error(
+            "Blueprint extraction failed, saving raw messages as fallback",
+            error=str(e),
+            goal=title
+        )
+        # Fallback: save raw messages if extraction fails (no token usage)
+        manager = get_blueprint_manager()
+        saved_blueprint = await manager.save(user_id, title, blueprint)
+        return {
+            "saved_blueprint": saved_blueprint,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
 

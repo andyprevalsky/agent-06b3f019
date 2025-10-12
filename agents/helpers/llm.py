@@ -393,7 +393,7 @@ You MUST respond with valid JSON matching this exact schema:
             messages=messages,
             model=model,
             temperature=0.3,
-            max_tokens=300,
+            max_tokens=4096,  # Generous limit for verifier reasoning
             response_model=ProgressScore
         )
         

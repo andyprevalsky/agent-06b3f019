@@ -34,7 +34,9 @@ async def mark_finished(
     steps_taken: List[Dict],
     token_count: int = 0,
     context_size: int = 0,
-    message_count: int = 0
+    message_count: int = 0,
+    tokens_in: int = 0,
+    tokens_out: int = 0
 ) -> Dict:
     """
     Activity: Mark an agent task as finished.
@@ -47,6 +49,8 @@ async def mark_finished(
         token_count: Total tokens used
         context_size: Context size in tokens
         message_count: Total messages
+        tokens_in: Input tokens (prompt)
+        tokens_out: Output tokens (completion)
         
     Returns:
         Dict with completion details
@@ -69,6 +73,8 @@ async def mark_finished(
                     "statusMessage": f"Successfully completed: {goal}",
                     "progress": 1.0,
                     "tokenCount": token_count,
+                    "tokensIn": tokens_in,
+                    "tokensOut": tokens_out,
                     "contextSize": context_size,
                     "messageCount": message_count
                 },

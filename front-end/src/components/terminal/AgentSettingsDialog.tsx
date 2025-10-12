@@ -29,15 +29,11 @@ function getModelContextWindow(model: string): number {
   return contextWindows[model] || 100000;
 }
 
-function calculateCost(tokenCount: number, promptPrice?: string, completionPrice?: string): string {
-  // Estimate: assume 60% prompt, 40% completion (typical LLM usage pattern)
-  const promptTokens = tokenCount * 0.6;
-  const completionTokens = tokenCount * 0.4;
-  
+function calculateCost(tokensIn: number, tokensOut: number, promptPrice?: string, completionPrice?: string): string {
   const promptPricePerToken = promptPrice ? parseFloat(promptPrice) : 0;
   const completionPricePerToken = completionPrice ? parseFloat(completionPrice) : 0;
   
-  const cost = (promptTokens * promptPricePerToken) + (completionTokens * completionPricePerToken);
+  const cost = (tokensIn * promptPricePerToken) + (tokensOut * completionPricePerToken);
   
   if (cost === 0) return '$0.00';
   if (cost < 0.01) return `$${cost.toFixed(4)}`;
@@ -182,7 +178,8 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   // Calculate cost based on current model pricing
   const currentModelData = modelsList.find(m => m?.id === agent.model);
   const estimatedCost = calculateCost(
-    agent.token_count,
+    agent.tokens_in,
+    agent.tokens_out,
     currentModelData?.pricing?.prompt,
     currentModelData?.pricing?.completion
   );
@@ -246,8 +243,8 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
               </div>
               
               <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Tokens Used</span>
-                <span className="font-mono">{agent.token_count.toLocaleString()}</span>
+                <span className="text-muted-foreground">Tokens In/Out</span>
+                <span className="font-mono">{agent.tokens_in.toLocaleString()} / {agent.tokens_out.toLocaleString()}</span>
               </div>
               
               <div className="flex justify-between text-sm">

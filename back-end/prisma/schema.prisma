@@ -25,7 +25,9 @@ model Agent {
   updatedAt          DateTime        @updatedAt
   
   // Metrics
-  tokenCount         Int             @default(0) // Cumulative tokens used
+  tokenCount         Int             @default(0) // Cumulative tokens used (total)
+  tokensIn           Int             @default(0) // Input tokens (prompt)
+  tokensOut          Int             @default(0) // Output tokens (completion)
   contextSize        Int             @default(0) // Current context window usage in tokens
   messageCount       Int             @default(0) // Total messages in context
 
