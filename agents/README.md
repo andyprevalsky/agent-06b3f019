@@ -58,12 +58,19 @@ Each tool is a Temporal Activity in the `tools/` folder:
    - LLM-powered task planning
    - Execute multi-step web workflows
 
-5. **wait_time** (`tools/wait.py`)
-   - Wait for specified duration
-   - Handles real-world time requirements (e.g., "cook risotto for 20 minutes")
-   - Uses heartbeats for long waits
+5. **wait_seconds** (`tools/wait_seconds.py`)
+   - Wait for specified duration (1-3600 seconds)
+   - Handles real-world time requirements
+   - Uses workflow.sleep() for deterministic waits
 
-6. **mark_finished** (`tools/finished.py`)
+6. **spawn_sub_agents** (`tools/spawn_sub_agents.py`)
+   - Spawn multiple sub-agents to work on parallel subtasks
+   - Each sub-agent runs independently with its own goal, model, tools, and verifier
+   - Parent agent waits for all sub-agents to complete concurrently
+   - Aggregates results from all sub-agents
+   - Useful for dividing complex tasks into parallel workstreams
+
+7. **mark_finished** (`tools/finished.py`)
    - Mark task completion
    - Update knowledge base with blueprint/failure
    - Add message to voice AI chat log
@@ -306,6 +313,76 @@ curl https://navi-temporal-agents.fly.dev/metrics
 
 # Temporal Web UI
 # Visit: https://cloud.temporal.io
+```
+
+## Sub-Agent Spawning
+
+The `spawn_sub_agents` tool allows agents to delegate work to multiple child agents that execute concurrently:
+
+### Example: Parallel Research
+
+```python
+# Agent receives goal: "Research AI, quantum computing, and space exploration"
+# Agent decides to spawn 3 sub-agents
+
+sub_agents = [
+    {
+        "goal": "Research latest AI developments and summarize",
+        "model": "google/gemini-2.0-flash-exp",
+        "reasoning_effort": "low",
+        "tool_ids": ["<web_search_tool_id>"],
+        "verifier": {
+            "type": "FLOAT_LLM_JUDGE",
+            "llm_judge_prompt": "Has the agent found and summarized recent AI news?"
+        }
+    },
+    {
+        "goal": "Research quantum computing breakthroughs",
+        "model": "google/gemini-2.0-flash-exp",
+        "tool_ids": ["<web_search_tool_id>"],
+        "verifier": {
+            "type": "FLOAT_LLM_JUDGE",
+            "llm_judge_prompt": "Has the agent found quantum computing news?"
+        }
+    },
+    {
+        "goal": "Research space exploration updates",
+        "model": "google/gemini-2.0-flash-exp",
+        "tool_ids": ["<web_search_tool_id>"],
+        "verifier": {
+            "type": "FLOAT_LLM_JUDGE",
+            "llm_judge_prompt": "Has the agent found space news?"
+        }
+    }
+]
+
+# Spawn and wait for all to complete
+result = await spawn_sub_agents(user_id, sub_agents)
+# result contains: {"spawned": 3, "completed": 3, "failed": 0, "results": [...]}
+```
+
+### How It Works
+
+1. **Parent agent calls spawn_sub_agents tool** with list of sub-agent configs
+2. **Activity creates agents via backend API** (using internal API key auth)
+3. **Workflow monitors child workflows** via Temporal's `get_external_workflow_handle()`
+4. **Parent waits concurrently** for all children using `asyncio.gather()`
+5. **Results aggregated** and returned to parent agent
+6. **Parent continues** with next steps using sub-agent results
+
+### Benefits
+
+- **Parallelism**: Sub-agents run concurrently (10x faster than sequential)
+- **Isolation**: Each sub-agent has its own context, tools, and verifier
+- **Reliability**: If one sub-agent fails, others continue
+- **Scalability**: Can spawn dozens of sub-agents simultaneously
+
+### Testing
+
+```bash
+# Test spawning sub-agents
+cd agents/scripts
+./test-spawn-sub-agents.sh
 ```
 
 ## Agent Usage

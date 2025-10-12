@@ -13,6 +13,10 @@ const createAgentSchema = z.object({
   reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional().default('low'),
   tool_ids: z.array(z.string().uuid()).optional().default([]),
   task_queue: z.string().optional(), // Optional: for test isolation
+  user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
+  parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)
+  parent_workflow_id: z.string().optional(), // Optional: for sub-agents to signal parent
+  depth: z.number().int().min(0).max(1).optional().default(0), // Nesting depth
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
     llm_judge_prompt: z.string().min(1),
@@ -45,10 +49,12 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
     
     const userId = req.user!.id;
 
+    // Only get top-level agents (no parent)
     const agents = await prisma.agent.findMany({
       where: {
         userId,
-        deletedAt: null, // Only non-deleted agents
+        parentAgentId: null, // Only top-level agents
+        deletedAt: null,
       },
       select: {
         id: true,
@@ -66,6 +72,22 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         messageCount: true,
         createdAt: true,
         updatedAt: true,
+        // Include children
+        children: {
+          where: {
+            deletedAt: null,
+          },
+          select: {
+            id: true,
+            goal: true,
+            progress: true,
+            status: true,
+            createdAt: true,
+          },
+          orderBy: {
+            createdAt: 'asc',
+          },
+        },
       },
       orderBy: {
         createdAt: 'desc',
@@ -89,6 +111,13 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         message_count: agent.messageCount,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
+        children: agent.children.map((child) => ({
+          agent_id: child.id,
+          goal: child.goal,
+          progress: child.progress,
+          status: child.status,
+          created_at: child.createdAt,
+        })),
       })),
     });
   } catch (error) {
@@ -100,8 +129,15 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
 // POST /api/agents - Create a new agent
 router.post('/', authenticate, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user!.id;
     const body = createAgentSchema.parse(req.body);
+    // For internal calls (API key), accept user_id from body
+    // For user calls (JWT), extract from token
+    const userId = req.isInternal ? body.user_id : req.user!.id;
+    
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized: user_id required for internal auth' });
+      return;
+    }
 
     // Verify all tools exist
     const tools = await prisma.tool.findMany({
@@ -120,6 +156,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       const newAgent = await tx.agent.create({
         data: {
           userId,
+          parentAgentId: body.parent_agent_id || null,
           goal: body.goal,
           model: body.model,
           reasoningEffort: body.reasoning_effort,
@@ -173,6 +210,8 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
           llmJudgePrompt: body.verifier.llm_judge_prompt,
         },
         ...(body.task_queue ? { taskQueue: body.task_queue } : {}),
+        ...(body.parent_workflow_id ? { parentWorkflowId: body.parent_workflow_id } : {}),
+        ...(body.depth !== undefined ? { depth: body.depth } : {}),
       });
 
       // Update agent with workflow ID
@@ -283,6 +322,7 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
     res.json({
       agent: {
         agent_id: agent.id,
+        parentAgentId: agent.parentAgentId,
         goal: agent.goal,
         model: agent.model,
         reasoning_effort: agent.reasoningEffort,

@@ -7,37 +7,42 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")  // Session pooler (IPv4 compatible)
+  url      = env("DATABASE_URL") // Session pooler (IPv4 compatible)
 }
 
 model Agent {
   id                 String          @id @default(uuid())
-  userId             String          // Supabase user ID
+  userId             String // Supabase user ID
+  parentAgentId      String? // Parent agent ID (for sub-agents)
   goal               String          @db.Text
   model              String          @default("google/gemini-2.5-flash") // LLM model driving this agent
   reasoningEffort    ReasoningEffort @default(low) // OpenRouter reasoning effort level
   progress           Float           @default(0.0) // 0.0 to 1.0
   status             AgentStatus     @default(STARTING_UP)
   statusMessage      String?         @db.Text
-  temporalWorkflowId String?         // Links to Temporal workflow
-  deletedAt          DateTime?       // Soft delete
+  temporalWorkflowId String? // Links to Temporal workflow
+  deletedAt          DateTime? // Soft delete
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
-  
-  // Metrics
-  tokenCount         Int             @default(0) // Cumulative tokens used (total)
-  tokensIn           Int             @default(0) // Input tokens (prompt)
-  tokensOut          Int             @default(0) // Output tokens (completion)
-  contextSize        Int             @default(0) // Current context window usage in tokens
-  messageCount       Int             @default(0) // Total messages in context
 
-  verifier  Verifier?
-  tools     AgentTool[]
-  messages  Message[]
+  // Metrics
+  tokenCount   Int @default(0) // Cumulative tokens used (total)
+  tokensIn     Int @default(0) // Input tokens (prompt)
+  tokensOut    Int @default(0) // Output tokens (completion)
+  contextSize  Int @default(0) // Current context window usage in tokens
+  messageCount Int @default(0) // Total messages in context
+
+  // Relations
+  parent   Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id], onDelete: SetNull)
+  children Agent[]     @relation("AgentHierarchy")
+  verifier Verifier?
+  tools    AgentTool[]
+  messages Message[]
 
   @@index([userId, deletedAt])
   @@index([createdAt])
   @@index([temporalWorkflowId])
+  @@index([parentAgentId])
 }
 
 model Tool {
@@ -114,12 +119,12 @@ enum MessageRole {
 }
 
 model Waitlist {
-  id            String   @id @default(uuid())
-  name          String
-  email         String   @unique
-  variant       String?
-  referralCode  String?  @map("referral_code")
-  createdAt     DateTime @default(now()) @map("created_at")
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  variant      String?
+  referralCode String?  @map("referral_code")
+  createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([createdAt])
   @@index([email])
@@ -127,14 +132,13 @@ model Waitlist {
 
 model GoalBlueprint {
   id        String   @id @default(uuid())
-  userId    String   // Supabase user ID
+  userId    String // Supabase user ID
   title     String   @db.Text // Goal description for similarity matching
-  embedding Json?    // Pre-computed embedding vector for similarity search (openai/text-embedding-3-small)
-  blueprint Json     // Complete execution trace
+  embedding Json? // Pre-computed embedding vector for similarity search (openai/text-embedding-3-small)
+  blueprint Json // Complete execution trace
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([userId])
   @@index([createdAt])
 }
-

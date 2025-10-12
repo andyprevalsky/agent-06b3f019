@@ -30,9 +30,11 @@ interface CreateAgentModalProps {
 
 export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgentModalProps) {
   // Default values for local testing (only in development)
-  const defaultGoal = import.meta.env.DEV ? 'count to 100, 1 sec at a time, no batching' : '';
+  const defaultGoal = import.meta.env.DEV 
+    ? 'Count from 1 to 100 by spawning one sub-agent for each number. Batch them 5 at a time: spawn 5 sub-agents (for numbers 1-5), wait for all to complete, then spawn the next 5 (6-10), and so on until you reach 100. Each sub-agent should have a goal like "Output the number X" where X is the number it represents. Use spawn_sub_agents tool for each batch of 5.'
+    : '';
   const defaultLlmJudgePrompt = import.meta.env.DEV 
-    ? 'Evaluate how well the agent counted from 1 to 100, with each number presented approximately 1 second apart without batching multiple numbers together. Return a score between 0 and 1, where 0 means the agent did not count to 100 in order, batched numbers together, or did not observe the 1-second interval, and 1 means the agent counted from 1 to 100 correctly with each number given individually about 1 second apart. Only provide the numeric score, no explanation.'
+    ? 'Evaluate how well the agent counted from 1 to 100 by spawning sub-agents in batches of 5. Return a score between 0 and 1, where 0 means the agent did not successfully spawn sub-agents for all numbers or did not batch them properly, and 1 means the agent successfully spawned 20 batches (5 sub-agents each) covering numbers 1-100. Only provide the numeric score, no explanation.'
     : '';
 
   const [goal, setGoal] = useState(defaultGoal);
@@ -51,7 +53,9 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
   // Load available tools
   useEffect(() => {
     if (open) {
-      getTools().then(setAvailableTools);
+      getTools().then((tools) => {
+        setAvailableTools(tools);
+      });
     }
   }, [open]);
 

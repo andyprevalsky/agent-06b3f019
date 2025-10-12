@@ -42,6 +42,7 @@ async def fetch_agent_config(agent_id: str) -> Dict:
                 "status": agent["status"],
                 "tool_ids": [tool["id"] for tool in agent["tools"]],
                 "verifier_prompt": agent["verifier"]["llm_judge_prompt"] if agent.get("verifier") else None,
+                "parent_agent_id": agent.get("parentAgentId"),  # None if top-level agent
             }
             
             logger.info(

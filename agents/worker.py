@@ -28,6 +28,7 @@ from tools import (
     web_search,
     accomplish_web_task,
 )
+from tools.spawn_sub_agents import spawn_sub_agents
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     poll_new_messages,
@@ -113,6 +114,7 @@ async def main():
             list_contacts,
             web_search,
             accomplish_web_task,
+            spawn_sub_agents,
             poll_new_messages,
             post_agent_message,
             call_llm,

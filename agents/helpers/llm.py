@@ -1,11 +1,11 @@
 """LLM tool for agent reasoning and decision making."""
 
-from typing import List, Dict, Optional, Any, TypeVar
+from typing import List, Dict, Optional, Any, TypeVar, Union, Type, Literal
 from temporalio import activity
 import structlog
 import json
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from config import load_config
 
@@ -14,19 +14,196 @@ logger = structlog.get_logger()
 T = TypeVar('T', bound=BaseModel)
 
 
-# Pydantic models for structured LLM outputs
-class ToolCall(BaseModel):
-    """Single tool call."""
-    tool: str = Field(description="Name of the tool to use (e.g., 'wait_seconds', 'web_search')")
-    args: List[str] = Field(description="Arguments to pass to the tool")
+# ============================================================================
+# Individual Tool Pydantic Models
+# ============================================================================
+
+class VerifierConfig(BaseModel):
+    """Verifier configuration for evaluating agent success."""
+    type: Literal["FLOAT_LLM_JUDGE"] = Field(description="Must be 'FLOAT_LLM_JUDGE'")
+    llm_judge_prompt: str = Field(description="Prompt for the LLM judge to evaluate the agent's performance")
 
 
-class AgentAction(BaseModel):
-    """Schema for agent's next action decision."""
-    reasoning: str = Field(description="Your internal thinking process (not shown to user)")
-    response: str = Field(description="Message to communicate to the user (REQUIRED - always explain what you're doing)")
-    tool_calls: List[ToolCall] = Field(default_factory=list, description="List of tools to call in sequence. Can be empty if you're just communicating without taking action.")
+class SubAgentConfig(BaseModel):
+    """Configuration for a single sub-agent."""
+    goal: str = Field(description="The goal/task for this sub-agent")
+    model: Optional[str] = Field(None, description="LLM model to use (inherits from parent if not specified)")
+    reasoning_effort: Optional[str] = Field(None, description="Reasoning effort: 'off', 'low', 'medium', 'high'")
+    tool_ids: Optional[List[str]] = Field(default_factory=list, description="List of tool UUIDs this sub-agent can use")
+    verifier: VerifierConfig = Field(description="Verifier config with type='FLOAT_LLM_JUDGE' and llm_judge_prompt")
 
+
+class SpawnSubAgentsTool(BaseModel):
+    """Tool call for spawning multiple sub-agents to work on parallel subtasks."""
+    tool: Literal["spawn_sub_agents"]
+    sub_agents: List[SubAgentConfig] = Field(description="List of sub-agent configurations to spawn")
+
+
+class WaitSecondsTool(BaseModel):
+    """Tool call for pausing execution."""
+    tool: Literal["wait_seconds"]
+    seconds: int = Field(ge=1, le=3600, description="Number of seconds to wait (1-3600)")
+
+
+class WebSearchTool(BaseModel):
+    """Tool call for searching the web."""
+    tool: Literal["web_search"]
+    query: str = Field(description="Search query")
+
+
+class WebTaskTool(BaseModel):
+    """Tool call for accomplishing a task on the web."""
+    tool: Literal["accomplish_web_task"]
+    task: str = Field(description="Description of the web task to accomplish")
+
+
+class SendSMSTool(BaseModel):
+    """Tool call for sending an SMS."""
+    tool: Literal["send_sms"]
+    to: str = Field(description="Phone number to send to (E.164 format)")
+    message: str = Field(description="Message content to send")
+
+
+class ListContactsTool(BaseModel):
+    """Tool call for listing available contacts."""
+    tool: Literal["list_contacts"]
+
+
+# Map tool names to their Pydantic models
+TOOL_MODELS = {
+    "spawn_sub_agents": SpawnSubAgentsTool,
+    "wait_seconds": WaitSecondsTool,
+    "web_search": WebSearchTool,
+    "accomplish_web_task": WebTaskTool,
+    "send_sms": SendSMSTool,
+    "list_contacts": ListContactsTool,
+}
+
+
+# ============================================================================
+# Dynamic Tool Documentation Generation
+# ============================================================================
+
+def generate_tool_parameter_docs(available_tool_names: List[str]) -> str:
+    """
+    Dynamically generate tool parameter documentation from Pydantic models.
+    
+    This ensures tool docs never get out of sync with actual implementations.
+    
+    Args:
+        available_tool_names: List of tool names to document
+        
+    Returns:
+        Formatted string documenting each tool's parameters
+    """
+    docs_lines = []
+    
+    for tool_name in available_tool_names:
+        if tool_name not in TOOL_MODELS:
+            continue
+            
+        model = TOOL_MODELS[tool_name]
+        
+        # Get field info from Pydantic model
+        fields_info = []
+        for field_name, field in model.model_fields.items():
+            # Skip the 'tool' field (it's just the literal name)
+            if field_name == 'tool':
+                continue
+                
+            # Get description from Field metadata
+            description = field.description or "No description"
+            
+            # Get type hint
+            field_type = field.annotation
+            
+            # Format type name nicely
+            type_name = str(field_type)
+            if 'List[' in type_name:
+                type_name = 'list'
+            elif 'str' in type_name:
+                type_name = 'string'
+            elif 'int' in type_name:
+                type_name = 'integer'
+            elif 'float' in type_name:
+                type_name = 'float'
+            
+            # Add constraints if present
+            constraints = []
+            if hasattr(field, 'ge') and field.ge is not None:
+                constraints.append(f"min: {field.ge}")
+            if hasattr(field, 'le') and field.le is not None:
+                constraints.append(f"max: {field.le}")
+            
+            constraint_str = f" ({', '.join(constraints)})" if constraints else ""
+            
+            fields_info.append(f'"{field_name}" ({type_name}{constraint_str}): {description}')
+        
+        # Format documentation for this tool
+        if fields_info:
+            docs_lines.append(f"- {tool_name}: {', '.join(fields_info)}")
+        else:
+            docs_lines.append(f"- {tool_name}: no parameters needed")
+    
+    return "\n".join(docs_lines)
+
+
+# ============================================================================
+# Dynamic AgentAction Model Generation
+# ============================================================================
+
+def create_agent_action_model(available_tool_names: List[str]) -> Type[BaseModel]:
+    """
+    Dynamically create an AgentAction Pydantic model based on available tools.
+    
+    This ensures:
+    - Only available tools are in the schema (better LLM guidance)
+    - Type-safe tool calls (Pydantic validates structure)
+    - No JSON string parsing hacks needed
+    
+    Args:
+        available_tool_names: List of tool names this agent can use
+        
+    Returns:
+        Pydantic model class for AgentAction with proper tool union
+    """
+    # Build list of tool models for available tools
+    tool_types = []
+    for name in available_tool_names:
+        if name in TOOL_MODELS:
+            tool_types.append(TOOL_MODELS[name])
+        else:
+            logger.warning(f"Tool '{name}' not found in TOOL_MODELS, skipping")
+    
+    # Create union type for tool calls
+    if not tool_types:
+        # No tools available - agent can only communicate
+        ToolCallUnion = type(None)  # Empty type
+        tool_calls_field = (List[ToolCallUnion], Field(default_factory=list, description="No tools available for this agent"))
+    elif len(tool_types) == 1:
+        # Single tool type - no union needed
+        ToolCallUnion = tool_types[0]
+        tool_calls_field = (List[ToolCallUnion], Field(default_factory=list, description="List of tools to call in sequence"))
+    else:
+        # Multiple tools - create union
+        ToolCallUnion = Union[tuple(tool_types)]
+        tool_calls_field = (List[ToolCallUnion], Field(default_factory=list, description="List of tools to call in sequence"))
+    
+    # Dynamically create the AgentAction model
+    AgentAction = create_model(
+        'AgentAction',
+        reasoning=(str, Field(description="Your internal thinking process (not shown to user)")),
+        response=(str, Field(description="Message to communicate to the user (REQUIRED - always explain what you're doing)")),
+        tool_calls=tool_calls_field,
+        __base__=BaseModel
+    )
+    
+    return AgentAction
+
+
+# ============================================================================
+# Static Models (not tool-specific)
+# ============================================================================
 
 class ProgressScore(BaseModel):
     """Schema for progress evaluation."""
@@ -186,6 +363,7 @@ async def call_llm(
 async def decide_next_action(
     context: List[Dict[str, Any]],
     available_tools: List[Dict[str, str]],
+    available_tool_names: List[str],
     iteration: int,
     model: str = "anthropic/claude-sonnet-4.5",
     reasoning_effort: str = "low"
@@ -212,6 +390,9 @@ async def decide_next_action(
             for tool in available_tools
         ])
         
+        # Generate parameter documentation dynamically from Pydantic models
+        tool_params_docs = generate_tool_parameter_docs(available_tool_names)
+        
         system_prompt = f"""You are an autonomous AI agent working on the task described in the conversation history.
 
 You have access to these tools:
@@ -225,15 +406,8 @@ IMPORTANT:
 - you may also receive a blueprint in your system messages, a blueprint synthesizes key learnings from successful task completions for related goals. Use them to inform your decision making.
 - Your goal is to get to 100% progress.
 
-Respond in JSON format:
-{{
-  "reasoning": "your internal thinking (for logging)",
-  "response": "message to show the user explaining what you're doing (REQUIRED)",
-  "tool_calls": [
-    {{"tool": "tool_name", "args": ["arg1", "arg2"]}},
-    {{"tool": "another_tool", "args": ["arg"]}}
-  ]
-}}
+Each tool has its own parameter structure - follow the schema exactly:
+{tool_params_docs}
 
 You can call multiple tools, or just communicate, or both.
 
@@ -259,9 +433,11 @@ Be strategic, efficient, and focused on accomplishing the task."""
         # Add final prompt
         messages.append({"role": "user", "content": "Based on everything so far, what should I do next?"})
         
+        # Create custom AgentAction model based on available tools
+        AgentActionModel = create_agent_action_model(available_tool_names)
+        
         # Use structured output with Pydantic schema
         # Use the reasoning effort from agent settings (None if "off")
-        
         effort = reasoning_effort if reasoning_effort != "off" else None
         if effort:
             logger.info(f"🧠 Using {effort} reasoning for {model}")
@@ -272,8 +448,8 @@ Be strategic, efficient, and focused on accomplishing the task."""
             messages=messages,
             model=model,
             temperature=0.7,
-            max_tokens=500,
-            response_model=AgentAction,
+            max_tokens=4096,
+            response_model=AgentActionModel,
             reasoning_effort=effort
         )
         
@@ -285,11 +461,19 @@ Be strategic, efficient, and focused on accomplishing the task."""
             tokens=usage.get("total_tokens", 0)
         )
         
+        # Convert tool calls to dict format for workflow
+        # Each tool model has different fields, so we serialize to dict
+        tool_calls_dict = []
+        for tc in result.tool_calls:
+            # Convert Pydantic model to dict
+            tc_dict = tc.model_dump() if hasattr(tc, 'model_dump') else tc.dict()
+            tool_calls_dict.append(tc_dict)
+        
         # Return as dict with usage for token tracking
         return {
             "reasoning": result.reasoning,
             "response": result.response,
-            "tool_calls": [{"tool": tc.tool, "args": tc.args} for tc in result.tool_calls],
+            "tool_calls": tool_calls_dict,
             "usage": usage
         }
         

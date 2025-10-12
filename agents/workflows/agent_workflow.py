@@ -17,10 +17,16 @@ with workflow.unsafe.imports_passed_through():
         web_search,
         accomplish_web_task,
     )
+    # Sub-agent spawning
+    from tools.spawn_sub_agents import spawn_sub_agents
     # Tool formatters
     from tools.wait_seconds import (
         format_pre_message as wait_seconds_pre,
         format_post_message as wait_seconds_post,
+    )
+    from tools.spawn_sub_agents_formatters import (
+        format_pre_message as spawn_sub_agents_pre,
+        format_post_message as spawn_sub_agents_post,
     )
     # Activity formatters
     from helpers.formatters import (
@@ -56,6 +62,10 @@ TOOL_FORMATTERS = {
     "wait_seconds": {
         "pre": wait_seconds_pre,
         "post": wait_seconds_post
+    },
+    "spawn_sub_agents": {
+        "pre": spawn_sub_agents_pre,
+        "post": spawn_sub_agents_post
     }
 }
 
@@ -76,6 +86,10 @@ SYSTEM_TOOLS = [
     {
         "name": "wait_seconds",
         "description": "Pause execution for a specified number of seconds (1-3600). Use this when you need to wait for time-dependent results or real-world delays."
+    },
+    {
+        "name": "spawn_sub_agents",
+        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Each sub-agent runs independently with its own goal, model, tools, and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_effort (optional), tool_ids (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
     },
 ]
 
@@ -120,6 +134,12 @@ class AgentWorkflow:
         self.tokens_in: int = 0  # Cumulative input tokens (prompt)
         self.tokens_out: int = 0  # Cumulative output tokens (completion)
         self.is_paused: bool = False  # Pause state
+        
+        # Sub-agent tracking (for parent workflows)
+        self.parent_workflow_id: Optional[str] = None
+        self.pending_children: Set[str] = set()
+        self.child_tool_ids: Dict[str, str] = {}  # Map child_agent_id -> tool_call_id
+        self.depth: int = 0  # Agent nesting depth (0 = top-level, 1 = sub-agent, etc.)
     
     @workflow.signal
     async def pause(self):
@@ -132,6 +152,66 @@ class AgentWorkflow:
         """Resume workflow execution (instant via signal)."""
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
+    
+    @workflow.signal
+    async def child_message(self, data: dict):
+        """
+        Receive formatted, readable message from child agent and re-post.
+        This makes child's messages appear in parent's message stream.
+        
+        Args:
+            data: Dict with "child_agent_id" and "formatted_message"
+        
+        Original Args:
+            child_agent_id: Child's agent ID
+            formatted_message: Already formatted, human-readable message (not splittable format)
+        """
+        child_agent_id = data.get("child_agent_id", "")
+        formatted_message = data.get("formatted_message", "")
+        
+        workflow.logger.info(f"📨 Received message from child {child_agent_id[:8]}")
+        
+        # Get child's tool_call_id
+        child_tool_id = self.child_tool_ids.get(child_agent_id)
+        if not child_tool_id:
+            workflow.logger.warning(f"No tool_call_id for child {child_agent_id}")
+            return
+        
+        # Re-post formatted message using child's tool_call_id
+        # Format: {tool_call_id}|||{title}|||{status}|||{message}
+        await self._post_message(
+            f"{child_tool_id}|||Sub-agent working|||IN_PROGRESS|||{formatted_message}",
+            "TOOL"
+        )
+    
+    @workflow.signal
+    async def child_completed(self, data: dict):
+        """
+        Receive completion signal from child agent.
+        Mark child's tool as FINISHED.
+        
+        Args:
+            data: Dict with "child_agent_id" and "result"
+        """
+        child_agent_id = data.get("child_agent_id", "")
+        result = data.get("result", {})
+        
+        workflow.logger.info(f"✅ Child {child_agent_id[:8]} completed")
+        
+        # Remove from pending
+        self.pending_children.discard(child_agent_id)
+        
+        # Get child's tool_call_id
+        child_tool_id = self.child_tool_ids.get(child_agent_id)
+        if child_tool_id:
+            status = result.get("status", "completed")
+            goal_text = result.get("goal", "")
+            
+            # Post FINISHED message
+            await self._post_message(
+                f"{child_tool_id}|||Sub-agent completed|||FINISHED|||Goal: {goal_text[:100]}",
+                "TOOL"
+            )
         
     @workflow.run
     async def run(
@@ -144,6 +224,8 @@ class AgentWorkflow:
         tool_ids: List[str],
         verifier: Dict,
         context: Optional[List[Dict]] = None,
+        parent_workflow_id: Optional[str] = None,  # Parent workflow ID for signaling
+        depth: int = 0,  # Nesting depth (0 = top-level, 1 = sub-agent, 2 = max)
     ) -> Dict:
         """
         Execute an autonomous agent task.
@@ -167,6 +249,8 @@ class AgentWorkflow:
         self.reasoning_effort = reasoning_effort
         self.tool_ids = tool_ids
         self.verifier = verifier
+        self.parent_workflow_id = parent_workflow_id  # Store parent ID for signaling
+        self.depth = depth  # Store nesting depth
         self.context = context or []
         
         # Initialize last message check time to 1 hour ago so we fetch the goal message
@@ -211,6 +295,28 @@ class AgentWorkflow:
         # Fetch tool descriptions from backend (only on first iteration)
         # This fetches tools assigned to this agent via AgentTool junction table
         if not self.tools:
+            # First, fetch agent config to check if this is a sub-agent
+            is_sub_agent = False
+            try:
+                workflow.logger.info("🔍 Fetching agent config to check parent status", agent_id=agent_id)
+                initial_config = await workflow.execute_activity(
+                    fetch_agent_config,
+                    args=[agent_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3)
+                )
+                is_sub_agent = initial_config.get('parent_agent_id') is not None
+                if is_sub_agent:
+                    workflow.logger.info("🔗 Sub-agent detected, excluding spawn_sub_agents tool", parent_id=initial_config.get('parent_agent_id'))
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch initial config for parent check: {str(e)}")
+            
+            # Filter system tools: exclude spawn_sub_agents for sub-agents
+            system_tools = [
+                tool for tool in SYSTEM_TOOLS 
+                if not (is_sub_agent and tool["name"] == "spawn_sub_agents")
+            ]
+            
             try:
                 workflow.logger.info("🔍 Calling fetch_agent_tools", agent_id=agent_id)
                 db_tools = await workflow.execute_activity(
@@ -225,21 +331,22 @@ class AgentWorkflow:
                     )
                 )
                 
-                # Merge system tools (always available) with user's assigned tools
-                self.tools = SYSTEM_TOOLS + db_tools
+                # Merge filtered system tools with user's assigned tools
+                self.tools = system_tools + db_tools
                 
                 workflow.logger.info(
                     "Agent tools fetched",
-                    system_tools=len(SYSTEM_TOOLS),
+                    system_tools=len(system_tools),
                     db_tools=len(db_tools),
-                    total_tools=len(self.tools)
+                    total_tools=len(self.tools),
+                    is_sub_agent=is_sub_agent
                 )
             except Exception as e:
                 workflow.logger.error(
                     f"Failed to fetch agent tools: {str(e)}"
                 )
-                # Fall back to just system tools
-                self.tools = SYSTEM_TOOLS
+                # Fall back to just filtered system tools
+                self.tools = system_tools
         
         # Update status to ACTIVE
         try:
@@ -356,10 +463,10 @@ class AgentWorkflow:
                         
                         # Format and post pre-execution message (IN_PROGRESS)
                         if formatter.get("pre"):
-                            pre_msg = formatter["pre"](args)
+                            pre_msg = formatter["pre"](tool_call)
                         else:
                             # Default formatting for tools without custom formatter
-                            pre_msg = {"title": f"Executing {tool_name}", "message": f"args: {args}"}
+                            pre_msg = {"title": f"Executing {tool_name}", "message": f"params: {tool_call}"}
                         
                         await self._post_message(
                             f"{tool_call_id}|||{pre_msg['title']}|||IN_PROGRESS|||{pre_msg.get('message', '')}",
@@ -371,7 +478,7 @@ class AgentWorkflow:
                         
                         # Format and post post-execution message (FINISHED)
                         if formatter.get("post"):
-                            post_msg = formatter["post"](args, result)
+                            post_msg = formatter["post"](tool_call, result)
                         else:
                             # Default formatting
                             post_msg = {"title": f"Completed {tool_name}", "message": str(result)}
@@ -437,7 +544,9 @@ class AgentWorkflow:
                 
                 # 7. If complete, mark finished and exit
                 if progress_score >= 1.0:
+                    workflow.logger.info("🎯 Agent reached 100% completion, calling _mark_complete()")
                     await self._mark_complete()
+                    workflow.logger.info("✅ _mark_complete() finished successfully")
                     return {"status": "completed", "goal": self.goal}
                 
                 # 8. Update iteration count and token usage
@@ -547,7 +656,7 @@ class AgentWorkflow:
             return []
     
     async def _post_message(self, text: str, role: str = "ASSISTANT") -> None:
-        """Post a message from the agent."""
+        """Post a message from the agent and signal parent if this is a sub-agent."""
         try:
             workflow.logger.info("🔍 Calling post_agent_message", 
                 agent_id=self.agent_id, 
@@ -573,9 +682,49 @@ class AgentWorkflow:
                 "timestamp": workflow.now().isoformat()
             })
             
+            # If this is a sub-agent, signal parent with FORMATTED message
+            if self.parent_workflow_id:
+                try:
+                    # Format the message for parent (extract readable content)
+                    formatted_message = self._format_message_for_parent(text, role)
+                    
+                    parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                    # Signal takes signal_name and a single argument (dict with multiple values)
+                    await parent_handle.signal("child_message", {
+                        "child_agent_id": self.agent_id,
+                        "formatted_message": formatted_message
+                    })
+                    workflow.logger.info(f"📤 Signaled parent {self.parent_workflow_id[:8]}")
+                except Exception as signal_error:
+                    workflow.logger.warning(f"Failed to signal parent: {signal_error}")
+                    # Non-fatal - continue even if signal fails
+            
         except Exception as e:
             workflow.logger.error(f"Failed to post message: {str(e)}")
             # Non-fatal - continue
+    
+    def _format_message_for_parent(self, text: str, role: str) -> str:
+        """
+        Format a message to send to parent (extract readable content).
+        
+        For TOOL messages with format: tool_id|||title|||status|||message
+        Extract: "title\n\nmessage"
+        
+        For other roles, return as-is.
+        """
+        if role == "TOOL" and "|||" in text:
+            # Parse splittable format
+            parts = text.split("|||", 3)
+            if len(parts) >= 4:
+                tool_call_id, title, status, message = parts
+                # Return formatted with double line break
+                return f"{title}\n\n{message}" if message else title
+            elif len(parts) >= 2:
+                # Fallback: just title
+                return parts[1]
+        
+        # For ASSISTANT, USER, SYSTEM: return as-is
+        return text
     
     async def _query_blueprints(self) -> List[Dict]:
         """Query knowledge base for similar goals."""
@@ -641,9 +790,12 @@ class AgentWorkflow:
         workflow.logger.info("Deciding next action")
         
         try:
+            # Extract tool names from tools list
+            tool_names = [tool["name"] for tool in self.tools]
+            
             action = await workflow.execute_activity(
                 decide_next_action,
-                args=[self.context, self.tools, self.iteration_count, self.model, self.reasoning_effort],
+                args=[self.context, self.tools, tool_names, self.iteration_count, self.model, self.reasoning_effort],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
@@ -679,9 +831,8 @@ class AgentWorkflow:
         # Special handling for wait_seconds: it's not an activity, just workflow.sleep()
         if tool == "wait_seconds":
             try:
-                # Validate and convert seconds
-                seconds_raw = args[0] if args else 1
-                seconds = int(seconds_raw) if isinstance(seconds_raw, str) else int(seconds_raw)
+                # Get seconds from tool_call dict (new Pydantic model format)
+                seconds = tool_call.get("seconds", 1)
                 
                 # Validate range
                 if seconds < 1 or seconds > 3600:
@@ -695,6 +846,91 @@ class AgentWorkflow:
                 
             except (ValueError, TypeError) as e:
                 raise ValueError(f"Invalid wait time: {str(e)}")
+        
+        # Special handling for spawn_sub_agents: spawn + wait for signal-based completion
+        if tool == "spawn_sub_agents":
+            try:
+                # Check depth limit (max 2 levels: 0=parent, 1=child, 2=not allowed)
+                MAX_DEPTH = 1  # Sub-agents can't create sub-agents
+                if self.depth >= MAX_DEPTH:
+                    raise ValueError(
+                        f"Cannot spawn sub-agents: maximum nesting depth ({MAX_DEPTH}) reached. "
+                        f"Sub-agents cannot create their own sub-agents."
+                    )
+                
+                # Get sub_agents from tool_call dict (new Pydantic model format)
+                sub_agents = tool_call.get("sub_agents", [])
+                
+                if not sub_agents or not isinstance(sub_agents, list):
+                    raise ValueError("spawn_sub_agents requires a list of sub-agent configs")
+                
+                # Inherit parent model if not specified for each sub-agent
+                for sub_agent in sub_agents:
+                    if "model" not in sub_agent:
+                        sub_agent["model"] = self.model
+                    if "reasoning_effort" not in sub_agent:
+                        sub_agent["reasoning_effort"] = self.reasoning_effort
+                
+                workflow.logger.info(f"🚀 Spawning {len(sub_agents)} sub-agents at depth {self.depth+1} (model: {self.model})")
+                
+                # Get parent workflow ID (this workflow)
+                parent_workflow_id = workflow.info().workflow_id
+                
+                # Calculate child depth
+                child_depth = self.depth + 1
+                
+                # Step 1: Spawn all children via activity, passing parent agent ID, workflow ID, and depth
+                spawned = await workflow.execute_activity(
+                    spawn_sub_agents,
+                    args=[self.user_id, sub_agents, self.agent_id, parent_workflow_id, child_depth],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3,
+                        backoff_coefficient=2.0,
+                        initial_interval=timedelta(seconds=1),
+                        maximum_interval=timedelta(seconds=10)
+                    )
+                )
+                
+                workflow.logger.info(f"✅ Spawned {len(spawned)} sub-agents, waiting for signals...")
+                
+                # Step 2: Track children and create tool_call_id mapping
+                for i, child_info in enumerate(spawned):
+                    if "error" not in child_info:
+                        # Generate unique tool call ID for this sub-agent
+                        child_tool_id = workflow.uuid4()
+                        child_agent_id = child_info["agent_id"]
+                        
+                        # Store mapping: agent_id -> tool_call_id
+                        self.child_tool_ids[child_agent_id] = child_tool_id
+                        self.pending_children.add(child_agent_id)
+                        
+                        # Post initial IN_PROGRESS message
+                        await self._post_message(
+                            f"{child_tool_id}|||Sub-agent starting|||IN_PROGRESS|||{child_info['goal']}",
+                            "TOOL"
+                        )
+                
+                # Step 3: Wait for all children to signal completion
+                # Using workflow.wait_condition (Temporal primitive - parent goes dormant)
+                workflow.logger.info(f"⏳ Waiting for {len(self.pending_children)} sub-agents to complete (via signals)...")
+                
+                await workflow.wait_condition(
+                    lambda: len(self.pending_children) == 0
+                    # No timeout - can wait indefinitely (months/years)
+                )
+                
+                workflow.logger.info(f"🎉 All {len(spawned)} sub-agents completed!")
+                
+                # Return summary (detailed results already posted via signals)
+                return {
+                    "spawned": len(spawned),
+                    "completed": len(spawned) - len(self.pending_children),
+                    "message": "All sub-agents completed. Check individual results above."
+                }
+                
+            except Exception as e:
+                raise ValueError(f"spawn_sub_agents failed: {str(e)}")
         
         # Map tool to activity (for all non-system tools)
         activity_map = {
@@ -713,10 +949,24 @@ class AgentWorkflow:
         if tool not in available_tool_names:
             raise ValueError(f"Tool not available: {tool}")
         
+        # Extract arguments from tool_call dict based on tool type
+        # Each tool has its own Pydantic model with specific fields
+        if tool == "send_sms":
+            activity_args = [tool_call.get("to"), tool_call.get("message")]
+        elif tool == "web_search":
+            activity_args = [tool_call.get("query")]
+        elif tool == "accomplish_web_task":
+            activity_args = [tool_call.get("task")]
+        elif tool == "list_contacts":
+            activity_args = []
+        else:
+            # Fallback to args if present (for backward compatibility)
+            activity_args = args
+        
         # Execute with extreme backoff
         result = await workflow.execute_activity(
             activity_fn,
-            args=args,
+            args=activity_args,
             start_to_close_timeout=timedelta(minutes=5),
             heartbeat_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(
@@ -765,10 +1015,10 @@ class AgentWorkflow:
             return {"score": 0.5, "reasoning": f"Error checking progress: {str(e)}"}
     
     async def _mark_complete(self) -> None:
-        """Mark the task as complete and save blueprint."""
-        workflow.logger.info("Marking task as complete")
+        """Mark the task as complete, save blueprint, and signal parent if sub-agent."""
+        workflow.logger.info("Marking task as complete", parent_workflow_id=self.parent_workflow_id, depth=self.depth)
         activity_id = workflow.uuid4()
-        
+
         try:
             # Include all messages in blueprint (USER, ASSISTANT, TOOL, SYSTEM)
             steps = self.context
@@ -840,6 +1090,23 @@ class AgentWorkflow:
             workflow.logger.error(error_msg)
             await self._post_message(error_msg, "ASSISTANT")
             raise
+
+                # Signal parent if this is a sub-agent
+        if self.parent_workflow_id:
+            try:
+                parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                # Signal takes signal_name and a single argument (dict with multiple values)
+                await parent_handle.signal("child_completed", {
+                    "child_agent_id": self.agent_id,
+                    "result": {
+                        "status": "completed",
+                        "goal": self.goal
+                    }
+                })
+                workflow.logger.info(f"📤 Signaled parent completion: {self.parent_workflow_id[:8]}")
+            except Exception as signal_error:
+                workflow.logger.warning(f"Failed to signal parent completion: {signal_error}")
+        
     
     @workflow.query
     def get_status(self) -> Dict:

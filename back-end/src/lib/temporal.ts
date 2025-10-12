@@ -54,6 +54,8 @@ export async function startAgentWorkflow(params: {
     llmJudgePrompt: string;
   };
   taskQueue?: string; // Optional: override task queue (for testing isolation)
+  parentWorkflowId?: string; // Optional: parent workflow ID for sub-agents
+  depth?: number; // Optional: nesting depth
 }): Promise<string> {
   const client = await getTemporalClient();
   // Use provided task queue or default to environment-specific queue
@@ -80,6 +82,8 @@ export async function startAgentWorkflow(params: {
         llmJudgePrompt: params.verifier.llmJudgePrompt,
       },
       [], // Start with empty context, workflow will poll for goal message
+      params.parentWorkflowId || null, // Parent workflow ID for signaling
+      params.depth || 0, // Nesting depth
     ],
   });
 

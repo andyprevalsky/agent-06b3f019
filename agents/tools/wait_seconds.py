@@ -1,6 +1,6 @@
 """Wait/sleep tool - built-in system tool."""
 
-from typing import Dict
+from typing import Dict, Any
 
 
 def format_duration(seconds: int) -> str:
@@ -33,9 +33,9 @@ def format_duration(seconds: int) -> str:
             return f"{days:.1f} days"
 
 
-def format_pre_message(args) -> Dict[str, str]:
+def format_pre_message(tool_call: Dict[str, Any]) -> Dict[str, str]:
     """Format pre-execution message for wait_seconds"""
-    seconds = int(args[0]) if args else 1
+    seconds = tool_call.get("seconds", 1)
     duration = format_duration(seconds)
     return {
         "title": f"Waiting {duration}",
@@ -43,9 +43,9 @@ def format_pre_message(args) -> Dict[str, str]:
     }
 
 
-def format_post_message(args, result) -> Dict[str, str]:
+def format_post_message(tool_call: Dict[str, Any], result: Any) -> Dict[str, str]:
     """Format post-execution message for wait_seconds"""
-    seconds = int(args[0]) if args else 1
+    seconds = tool_call.get("seconds", 1)
     duration = format_duration(seconds)
     return {
         "title": f"Waited {duration}",
