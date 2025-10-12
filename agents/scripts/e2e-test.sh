@@ -24,6 +24,7 @@ for arg in "$@"; do
 done
 
 # Configuration
+# Note: URLs without trailing slashes to prevent double-slash issues
 BACKEND_URL="http://localhost:3001"
 SUPABASE_URL="https://kzlurqihzaolhzsbkctf.supabase.co"
 SUPABASE_KEY="sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp"
@@ -175,7 +176,7 @@ AGENT_RESPONSE=$(curl -s "$BACKEND_URL/api/agents" \
   -H "Content-Type: application/json" \
   -d "{
     \"goal\": \"Count to 5, one message at a time. Wait 1 second between each number.\",
-    \"model\": \"x-ai/grok-4-fast\",
+    \"model\": \"qwen/qwen-2.5-7b-instruct\",
     \"reasoning_effort\": \"off\",
     \"tool_ids\": [],
     \"task_queue\": \"$TEST_TASK_QUEUE\",

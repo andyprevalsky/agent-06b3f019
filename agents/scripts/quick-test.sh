@@ -5,6 +5,7 @@
 set -e
 
 # Configuration
+# Note: URLs without trailing slashes to prevent double-slash issues
 BACKEND_URL="http://localhost:3001"
 SUPABASE_URL="https://kzlurqihzaolhzsbkctf.supabase.co"
 SUPABASE_KEY="sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp"

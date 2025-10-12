@@ -29,7 +29,8 @@ interface AppDataContextType {
 
 const AppDataContext = createContext<AppDataContextType | undefined>(undefined);
 
-const BACKEND_API_URL = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
+// Normalize URL - strip trailing slash to prevent double slashes
+const BACKEND_API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 
 export function AppDataProvider({ children }: { children: ReactNode }) {
   const [models, setModels] = useState<Model[]>([]);

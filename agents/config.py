@@ -108,8 +108,12 @@ def load_config() -> AppConfig:
         activity_retry_max_interval=int(os.getenv("ACTIVITY_RETRY_MAX_INTERVAL", "64")),
     )
     
+    # Normalize URL - strip trailing slash to prevent double slashes
+    backend_url = os.getenv("BACKEND_API_URL", "https://navi-j9a9.onrender.com")
+    backend_url = backend_url.rstrip('/') if backend_url else "https://navi-j9a9.onrender.com"
+    
     backend = BackendConfig(
-        api_url=os.getenv("BACKEND_API_URL", "https://navi-j9a9.onrender.com"),
+        api_url=backend_url,
         api_key=os.getenv("BACKEND_API_KEY"),
     )
     

@@ -311,6 +311,58 @@ PORT=3001
 NODE_ENV="development"
 ```
 
+## URL Handling Standards
+
+### CRITICAL: Always Normalize Base URLs
+
+**Problem**: Double slashes (`//api/models`) break URLs and look unprofessional.
+
+**Solution**: Always strip trailing slashes from base URLs before concatenating paths.
+
+#### Frontend (TypeScript/JavaScript)
+```typescript
+// ✅ CORRECT - Always normalize
+const API_BASE = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const response = await fetch(`${API_BASE}/api/models`);
+```
+
+```typescript
+// ❌ WRONG - Don't use URL directly
+const API_BASE = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
+const response = await fetch(`${API_BASE}/api/models`);  // Creates double slash if env has trailing slash!
+```
+
+#### Backend (Python)
+```python
+# ✅ CORRECT - Strip trailing slashes
+backend_url = os.getenv("BACKEND_API_URL", "https://navi-j9a9.onrender.com")
+backend_url = backend_url.rstrip('/') if backend_url else "https://navi-j9a9.onrender.com"
+
+# Then use it
+f"{backend_url}/api/agents"
+```
+
+```python
+# ❌ WRONG - Don't use URL directly
+backend_url = os.getenv("BACKEND_API_URL", "https://navi-j9a9.onrender.com")
+f"{backend_url}/api/agents"  # Creates double slash if env has trailing slash!
+```
+
+#### Shell Scripts
+```bash
+# ✅ CORRECT - No trailing slashes in URLs
+BACKEND_URL="http://localhost:3001"
+
+# ❌ WRONG - Don't add trailing slash
+BACKEND_URL="http://localhost:3001/"
+```
+
+### Standard URL Formats
+
+**Production**: `https://navi-j9a9.onrender.com` (no trailing slash)  
+**Localhost**: `http://localhost:3001` (no trailing slash)  
+**Consistency**: All base URLs follow the same pattern
+
 ## Common Mistakes to Avoid
 
 1. ❌ **Using old JWT format for anon key**: Use `sb_publishable_` prefix
@@ -319,6 +371,7 @@ NODE_ENV="development"
 4. ❌ **Trying to use backend WebSocket**: It's been removed, use Supabase Realtime
 5. ❌ **Forgetting RLS is enabled**: All frontend queries are filtered by user ID
 6. ❌ **Using wrong database connection**: Use Session Pooler (port 5432) not Direct (IPv6 incompatible)
+7. ❌ **Not normalizing base URLs**: Always strip trailing slashes to prevent double-slash bugs
 
 ## Testing
 
