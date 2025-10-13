@@ -24,6 +24,7 @@ def convert_context_to_messages(
     Handles:
     - SYSTEM messages (blueprints): included if include_system=True
     - ASSISTANT messages with tool_calls metadata: converted to proper OpenAI format
+    - TOOL messages with verifierMessage=True: converted to ASSISTANT role for conversation flow
     - TOOL messages: converted to tool role only if preceded by matching ASSISTANT tool_call,
       otherwise converted to SYSTEM role
     - Skips IN_PROGRESS tool messages (only sends FINISHED results)
@@ -102,6 +103,15 @@ def convert_context_to_messages(
         elif role == 'TOOL':
             # Skip IN_PROGRESS messages - only send FINISHED results to LLM
             if metadata.get('toolStatus') == 'IN_PROGRESS':
+                continue
+            
+            # Special handling for verifier messages: convert to ASSISTANT
+            # These need to be in the conversation flow for the agent to see them
+            if metadata.get('verifierMessage'):
+                assistant_content = content
+                if metadata.get('title'):
+                    assistant_content = f"{metadata['title']}: {content}"
+                messages.append({"role": "assistant", "content": assistant_content})
                 continue
             
             tool_call_id = str(metadata.get('toolCallId', ''))

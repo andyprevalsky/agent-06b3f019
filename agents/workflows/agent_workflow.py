@@ -582,6 +582,22 @@ class AgentWorkflow:
                         workflow.logger.error(f"Tool execution failed: {error_msg}")
                 
                 # 6. Check progress with verifier and update DB
+                # Generate a unique ID for this verifier call
+                verifier_call_id = workflow.uuid4()
+                
+                # Post IN_PROGRESS message
+                await self._post_message(
+                    "",
+                    "TOOL",
+                    metadata={
+                        "toolCallId": verifier_call_id,
+                        "toolName": "check_progress",
+                        "toolStatus": "IN_PROGRESS",
+                        "title": "⚖️ Calculating progress towards Goal",
+                        "verifierMessage": True
+                    }
+                )
+                
                 progress_result = await self._check_progress()
                 # Track tokens from verifier LLM call (usage is always present)
                 verifier_usage = progress_result["usage"]
@@ -591,10 +607,17 @@ class AgentWorkflow:
                 progress_score = progress_result.get("score", 0.0)
                 progress_reasoning = progress_result.get("reasoning", "No reasoning provided")
                 
-                # Post verifier's reasoning as an ASSISTANT message so the agent can see it
+                # Post FINISHED message with verifier's reasoning
                 await self._post_message(
-                    f"Verifier assessment: {progress_reasoning} (Progress: {progress_score*100:.0f}%)",
-                    "ASSISTANT"
+                    progress_reasoning,
+                    "TOOL",
+                    metadata={
+                        "toolCallId": verifier_call_id,
+                        "toolName": "check_progress",
+                        "toolStatus": "FINISHED",
+                        "title": f"⚖️ Goal progress is {progress_score*100:.0f}%",
+                        "verifierMessage": True
+                    }
                 )
                 
                 # If this is a sub-agent, signal parent with progress update AND token usage
@@ -1020,7 +1043,7 @@ class AgentWorkflow:
                             "toolCallId": tool_call_id,
                             "toolName": "spawn_sub_agents",
                             "toolStatus": "FINISHED",  # Still in progress (waiting for children)
-                            "title": f"🎯 Spawned {len(spawned)} sub-agent{'s' if len(spawned) != 1 else ''}"
+                            "title": f"⭐ Spawned {len(spawned)} sub-agent{'s' if len(spawned) != 1 else ''}"
                         }
                     )
                 

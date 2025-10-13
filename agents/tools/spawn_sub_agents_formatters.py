@@ -59,7 +59,7 @@ def format_post_message(args: List[Any], result: Any) -> Dict[str, str]:
     
     # Build summary message (detailed results already shown above)
     if failed == 0:
-        title = f"🎉 All {spawned} sub-agent{'s' if spawned != 1 else ''} completed"
+        title = f"⭐ All {spawned} sub-agent{'s' if spawned != 1 else ''} completed"
         message = f"All parallel subtasks finished successfully. Review individual results above."
     else:
         title = f"⚠️ Sub-agents finished: {completed} succeeded, {failed} failed"

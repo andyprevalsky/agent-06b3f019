@@ -79,7 +79,8 @@ interface ToolMessageData {
 
 // Extract emoji from start of text and return {emoji, text}
 function extractEmoji(text: string): { emoji: string; text: string } {
-  const emojiRegex = /^([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+)\s*/gu;
+  // Comprehensive emoji regex including variant selectors and ZWJ sequences
+  const emojiRegex = /^([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2B00}-\u{2BFF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+)\s*/gu;
   const match = text.match(emojiRegex);
   
   if (match) {
@@ -170,22 +171,25 @@ const ToolMessage = memo(function ToolMessage({
         )}
         onClick={hasMessage && isFinished ? () => setIsExpanded(!isExpanded) : undefined}
       >
+        {/* Emoji with grayscale filter - separate from text to avoid bg-clip-text interference */}
+        {emoji && (
+          <span 
+            className="text-sm font-medium"
+            style={{ filter: 'grayscale(1) brightness(0)' }}
+          >
+            {emoji}
+          </span>
+        )}
+        {/* Text with shimmer animation */}
         <span 
           className={cn(
-            "text-sm font-medium inline-flex items-center gap-1",
+            "text-sm font-medium",
             data.error && "text-red-600 dark:text-red-400",
             !data.error && data.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
             !data.error && data.status === 'FINISHED' && "text-foreground"
           )}
         >
-          {/* Emoji with grayscale filter (but shimmer still applies via parent) */}
-          {emoji && (
-            <span style={{ filter: 'grayscale(1) brightness(0)' }}>
-              {emoji}
-            </span>
-          )}
-          {/* Text without filter (shimmer applies via parent) */}
-          <span>{titleText}</span>
+          {titleText}
         </span>
         {showChevron && (
           <ChevronRight 
@@ -291,9 +295,11 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       );
     }
 
+    // Verifier messages: no indent (align with user messages)
+    const isVerifierMessage = message.metadata.verifierMessage === true;
+
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
-        {/* Empty space where icon would be to align with agent messages */}
         <div className="flex-shrink-0 w-8" />
         
         <div className="flex-1">
