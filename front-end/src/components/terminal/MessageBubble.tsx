@@ -77,6 +77,20 @@ interface ToolMessageData {
   error?: boolean;
 }
 
+// Extract emoji from start of text and return {emoji, text}
+function extractEmoji(text: string): { emoji: string; text: string } {
+  const emojiRegex = /^([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+)\s*/gu;
+  const match = text.match(emojiRegex);
+  
+  if (match) {
+    const emoji = match[0];
+    const remainingText = text.slice(emoji.length).trim();
+    return { emoji, text: remainingText };
+  }
+  
+  return { emoji: '', text };
+}
+
 const roleConfig = {
   SYSTEM: {
     icon: Info,
@@ -120,6 +134,9 @@ const ToolMessage = memo(function ToolMessage({
   const [isExpanded, setIsExpanded] = useState(false);
   const [hasAnimated, setHasAnimated] = useState(false);
   
+  // Extract emoji from title (memoized)
+  const { emoji, text: titleText } = useMemo(() => extractEmoji(data.title), [data.title]);
+  
   // Memoize computed values
   const hasMessage = useMemo(() => data.message.trim().length > 0, [data.message]);
   const isFinished = useMemo(() => data.status === 'FINISHED', [data.status]);
@@ -155,14 +172,20 @@ const ToolMessage = memo(function ToolMessage({
       >
         <span 
           className={cn(
-            "text-sm font-medium",
+            "text-sm font-medium inline-flex items-center gap-1",
             data.error && "text-red-600 dark:text-red-400",
             !data.error && data.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
             !data.error && data.status === 'FINISHED' && "text-foreground"
           )}
-          style={{ filter: 'grayscale(1) brightness(0)' }}
         >
-          {data.title}
+          {/* Emoji with grayscale filter (but shimmer still applies via parent) */}
+          {emoji && (
+            <span style={{ filter: 'grayscale(1) brightness(0)' }}>
+              {emoji}
+            </span>
+          )}
+          {/* Text without filter (shimmer applies via parent) */}
+          <span>{titleText}</span>
         </span>
         {showChevron && (
           <ChevronRight 

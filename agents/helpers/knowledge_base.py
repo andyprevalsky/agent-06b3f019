@@ -52,12 +52,16 @@ Return a valid JSON array of message objects. Each message must have:
 - `role`: "USER", "ASSISTANT", "TOOL", or "SYSTEM"
 - `text`: The message content (compressed if needed)
 - `timestamp`: ISO 8601 timestamp string (preserve from original or generate if missing)
+- `metadata` (optional): Contains tool execution data like:
+  - For ASSISTANT messages: `tool_calls` array with tool names and arguments
+  - For TOOL messages: `toolCallId`, `toolName`, `toolStatus`, `title`
 
 Example output:
 ```json
 [
   {{"role": "USER", "text": "Search for Python tutorials", "timestamp": "2025-01-15T10:00:00Z"}},
-  {{"role": "TOOL", "text": "web_search(query='Python tutorials') → Found RealPython.com (4.8★), LearnPython.org, Official Docs", "timestamp": "2025-01-15T10:00:05Z"}},
+  {{"role": "ASSISTANT", "text": "I'll search for that", "timestamp": "2025-01-15T10:00:03Z", "metadata": {{"tool_calls": [{{"tool": "web_search", "query": "Python tutorials", "tool_call_id": "abc123"}}]}}}},
+  {{"role": "TOOL", "text": "web_search(query='Python tutorials') → Found RealPython.com (4.8★), LearnPython.org, Official Docs", "timestamp": "2025-01-15T10:00:05Z", "metadata": {{"toolCallId": "abc123", "toolName": "web_search", "toolStatus": "FINISHED", "title": "🔍 Web Search"}}}},
   {{"role": "ASSISTANT", "text": "Found 3 high-quality resources. RealPython.com is best for beginners.", "timestamp": "2025-01-15T10:00:10Z"}}
 ]
 ```

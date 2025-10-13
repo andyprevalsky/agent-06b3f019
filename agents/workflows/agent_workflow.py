@@ -493,18 +493,26 @@ class AgentWorkflow:
                 
                 # 4. Post response to user (visible in UI and added to context)
                 # Reasoning is logged but not posted to chat
+                # Include tool_calls in metadata for proper OpenAI format reconstruction
                 response = action.get("response", "")
+                tool_calls = action.get("tool_calls", [])
+                
+                # Generate IDs for all tool calls upfront (so they match in assistant message + tool results)
+                for tool_call in tool_calls:
+                    if 'tool_call_id' not in tool_call:
+                        tool_call['tool_call_id'] = workflow.uuid4()
+                
                 if response:
-                    await self._post_message(response, "ASSISTANT")
+                    metadata = {"tool_calls": tool_calls} if tool_calls else None
+                    await self._post_message(response, "ASSISTANT", metadata=metadata)
                 
                 # 5. Execute all tools sequentially
-                tool_calls = action.get("tool_calls", [])
                 for tool_call in tool_calls:
                     tool_name = tool_call.get("tool", "unknown")
                     args = tool_call.get("args", [])
                     
-                    # Generate unique ID for this tool call (deterministic for Temporal)
-                    tool_call_id = workflow.uuid4()
+                    # Use the pre-generated ID from step 4
+                    tool_call_id = tool_call['tool_call_id']
                     
                     try:
                         # Get tool formatter (or use defaults)
@@ -773,12 +781,15 @@ class AgentWorkflow:
                 )
             )
             
-            # Add to local context too
-            self.context.append({
+            # Add to local context too (include metadata for LLM formatting)
+            context_entry = {
                 "role": role,
                 "text": text,
                 "timestamp": workflow.now().isoformat()
-            })
+            }
+            if metadata:
+                context_entry["metadata"] = metadata
+            self.context.append(context_entry)
             
         except Exception as e:
             workflow.logger.error(f"Failed to post message: {str(e)}")

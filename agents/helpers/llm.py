@@ -14,6 +14,122 @@ logger = structlog.get_logger()
 T = TypeVar('T', bound=BaseModel)
 
 
+def convert_context_to_messages(
+    context: List[Dict[str, Any]], 
+    include_system: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Convert workflow context to OpenAI/OpenRouter message format.
+    
+    Handles:
+    - SYSTEM messages (blueprints): included if include_system=True
+    - ASSISTANT messages with tool_calls metadata: converted to proper OpenAI format
+    - TOOL messages: converted to tool role only if preceded by matching ASSISTANT tool_call,
+      otherwise converted to SYSTEM role
+    - Skips IN_PROGRESS tool messages (only sends FINISHED results)
+    - Sorts messages by timestamp to ensure chronological order
+    
+    Args:
+        context: List of message dicts with role/text/metadata
+        include_system: Whether to include SYSTEM messages (e.g. blueprints)
+        
+    Returns:
+        List of OpenAI-formatted messages in chronological order
+    """
+    messages = []
+    
+    # Sort context by timestamp to ensure chronological order
+    # This is critical after polling for new user messages or continue-as-new
+    from datetime import datetime
+    def get_timestamp(msg: Dict[str, Any]) -> datetime:
+        """Parse ISO timestamp, defaulting to epoch if missing/invalid."""
+        ts = msg.get('timestamp', '1970-01-01T00:00:00Z')
+        try:
+            # Handle both with and without timezone
+            if ts.endswith('Z'):
+                ts = ts[:-1] + '+00:00'
+            return datetime.fromisoformat(ts)
+        except (ValueError, AttributeError):
+            return datetime(1970, 1, 1)
+    
+    # Sort with SYSTEM messages first (but chronological among themselves),
+    # then all other messages chronologically
+    def sort_key(msg: Dict[str, Any]) -> tuple:
+        """Sort key: (is_not_system, timestamp) so SYSTEM messages come first."""
+        is_system = msg.get('role') == 'SYSTEM'
+        timestamp = get_timestamp(msg)
+        return (not is_system, timestamp)  # False sorts before True, so SYSTEM first
+    
+    sorted_context = sorted(context, key=sort_key)
+    
+    # Track which tool_call_ids have been declared by ASSISTANT messages
+    declared_tool_ids = set()
+    
+    for msg in sorted_context:
+        role = msg.get('role', 'ASSISTANT')
+        content = msg.get('text', '')
+        metadata = msg.get('metadata', {})
+        
+        if role == 'SYSTEM':
+            if include_system:
+                messages.append({"role": "system", "content": content})
+                
+        elif role == 'USER':
+            messages.append({"role": "user", "content": content})
+            
+        elif role == 'ASSISTANT':
+            # Include tool_calls if present in metadata
+            assistant_msg = {"role": "assistant", "content": content}
+            if metadata.get('tool_calls'):
+                # Convert our tool call format to OpenAI format
+                import uuid
+                tool_calls = []
+                for tc in metadata['tool_calls']:
+                    # Get or generate tool_call_id
+                    tc_id = str(tc.get('tool_call_id', uuid.uuid4()))
+                    declared_tool_ids.add(tc_id)  # Track this ID
+                    tool_calls.append({
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.get('tool'),
+                            "arguments": json.dumps({k: v for k, v in tc.items() if k not in ['tool', 'tool_call_id']})
+                        }
+                    })
+                assistant_msg["tool_calls"] = tool_calls
+            messages.append(assistant_msg)
+            
+        elif role == 'TOOL':
+            # Skip IN_PROGRESS messages - only send FINISHED results to LLM
+            if metadata.get('toolStatus') == 'IN_PROGRESS':
+                continue
+            
+            tool_call_id = str(metadata.get('toolCallId', ''))
+            
+            # Only use tool role if this tool_call_id was declared by a preceding ASSISTANT message
+            if tool_call_id and tool_call_id in declared_tool_ids:
+                # Use proper tool role with tool_call_id and name
+                # Prefix content with title (what user sees in UI) for context
+                tool_content = content
+                if metadata.get('title'):
+                    tool_content = f"{metadata['title']}: {content}"
+                tool_msg = {"role": "tool", "content": tool_content}
+                tool_msg["tool_call_id"] = tool_call_id
+                if metadata.get('toolName'):
+                    tool_msg["name"] = metadata['toolName']
+                messages.append(tool_msg)
+            else:
+                # No matching ASSISTANT tool_call - convert to SYSTEM message
+                # This handles workflow activities like query_blueprints that post TOOL messages
+                # but aren't user-declared tool calls
+                system_content = content
+                if metadata.get('title'):
+                    system_content = f"{metadata['title']}: {content}"
+                messages.append({"role": "system", "content": system_content})
+    
+    return messages
+
+
 # ============================================================================
 # Individual Tool Pydantic Models
 # ============================================================================
@@ -398,13 +514,21 @@ async def decide_next_action(
 You have access to these tools:
 {tools_list}
 
-IMPORTANT:
+HOW THIS WORKS:
+- You are in a continuous loop that will run until the task is complete (100% progress)
+- Each turn, you think, respond, and/or use tools
+- After EVERY response you make, a verifier evaluates your progress and gives you feedback
+- The verifier provides a score (0-100%) and reasoning about what you've accomplished so far
+- Use this feedback to guide your next actions and course-correct if needed
+- This conversation continues until the verifier confirms you've reached 100%
+
+YOUR RESPONSES:
 - Use "reasoning" for your internal thinking (logged, not shown to user)
 - Use "response" to communicate directly with the user
 - You can call MULTIPLE tools in one turn (they'll execute sequentially)
-- As you work, you'll receive messages from a verifier who will check your progress and give you reasoning for the score you are at.
-- you may also receive a blueprint in your system messages, a blueprint synthesizes key learnings from successful task completions for related goals. Use them to inform your decision making.
-- Your goal is to get to 100% progress.
+
+ADDITIONAL CONTEXT:
+- You may receive a blueprint in your system messages - a synthesis of key learnings from successful task completions for similar goals. Use them to inform your decision making.
 
 Each tool has its own parameter structure - follow the schema exactly:
 {tool_params_docs}
@@ -415,22 +539,8 @@ Be strategic, efficient, and focused on accomplishing the task."""
         
         # Convert full context to OpenAI message format (no truncation)
         # NOTE: SYSTEM messages (like blueprints) ARE included for decide_next_action
-        # Role mapping: SYSTEM -> system, ASSISTANT -> assistant, USER -> user, TOOL -> assistant
         messages = [{"role": "system", "content": system_prompt}]
-        
-        for msg in context:
-            role = msg.get('role', 'ASSISTANT')
-            content = msg.get('text', '')
-            
-            # Map our roles to OpenAI/OpenRouter format (includes system messages like blueprints)
-            if role == 'SYSTEM':
-                messages.append({"role": "system", "content": content})
-            elif role == 'USER':
-                messages.append({"role": "user", "content": content})
-            else:  # ASSISTANT or TOOL
-                messages.append({"role": "assistant", "content": content})
-        
-        # Add final prompt
+        messages.extend(convert_context_to_messages(context, include_system=True))
         messages.append({"role": "user", "content": "Based on everything so far, what should I do next?"})
         
         # Create custom AgentAction model based on available tools
@@ -543,20 +653,7 @@ You MUST respond with valid JSON matching this exact schema:
         # Convert full context to OpenAI message format (no truncation)
         # NOTE: SYSTEM messages (like blueprints) are excluded from verifier - they're only for decide_next_action
         messages = [{"role": "system", "content": system_prompt}]
-        
-        for msg in context:
-            role = msg.get('role', 'ASSISTANT')
-            content = msg.get('text', '')
-            
-            # Map our roles to OpenAI/OpenRouter format (SKIP system messages like blueprints)
-            if role == 'SYSTEM':
-                continue  # Don't send blueprints or other system messages to verifier
-            elif role == 'USER':
-                messages.append({"role": "user", "content": content})
-            else:  # ASSISTANT or TOOL
-                messages.append({"role": "assistant", "content": content})
-        
-        # Add final evaluation prompt
+        messages.extend(convert_context_to_messages(context, include_system=False))
         messages.append({"role": "user", "content": "Evaluate the agent's progress as JSON."})
         
         # Debug: Log context size to detect contamination

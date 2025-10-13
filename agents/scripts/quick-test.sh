@@ -120,13 +120,13 @@ create_agent() {
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{
-      \"goal\": \"Count to 100, one number at a time. After each number, wait 3 seconds before continuing.\",
+      \"goal\": \"Count from 1 to 3, with 1 second waits between each number\",
       \"model\": \"anthropic/claude-sonnet-4.5\",
       \"tool_ids\": [],
       \"task_queue\": \"$TEST_TASK_QUEUE\",
       \"verifier\": {
         \"type\": \"FLOAT_LLM_JUDGE\",
-        \"llm_judge_prompt\": \"Return 1 if the agent has counted to 100, otherwise return the current count / 100.\"
+        \"llm_judge_prompt\": \"Return 1.0 if the agent has counted from 1 to 3 with 1-second waits, otherwise return (current count) / 3.\"
       }
     }")
   
