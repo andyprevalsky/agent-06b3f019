@@ -139,6 +139,7 @@ class AgentWorkflow:
         self.parent_workflow_id: Optional[str] = None
         self.pending_children: Set[str] = set()
         self.child_tool_ids: Dict[str, str] = {}  # Map child_agent_id -> tool_call_id
+        self.child_last_tokens: Dict[str, Dict[str, int]] = {}  # Track last token counts from each child
         self.depth: int = 0  # Agent nesting depth (0 = top-level, 1 = sub-agent, etc.)
     
     @workflow.signal
@@ -154,22 +155,55 @@ class AgentWorkflow:
         self.is_paused = False
     
     @workflow.signal
-    async def child_message(self, data: dict):
+    async def child_progress(self, data: dict):
         """
-        Receive formatted, readable message from child agent and re-post.
-        This makes child's messages appear in parent's message stream.
+        Receive progress update from child agent.
+        Updates the sub-agent's tool message with current progress.
+        Also accumulates token usage from child.
         
         Args:
-            data: Dict with "child_agent_id" and "formatted_message"
-        
-        Original Args:
-            child_agent_id: Child's agent ID
-            formatted_message: Already formatted, human-readable message (not splittable format)
+            data: Dict with "child_agent_id", "progress" (float 0.0-1.0), 
+                  and optional "tokens_in", "tokens_out", "token_count", "goal"
         """
         child_agent_id = data.get("child_agent_id", "")
-        formatted_message = data.get("formatted_message", "")
+        progress = data.get("progress", 0.0)
+        tokens_in = data.get("tokens_in", 0)
+        tokens_out = data.get("tokens_out", 0)
+        token_count = data.get("token_count", 0)
+        goal = data.get("goal", "")
         
-        workflow.logger.info(f"📨 Received message from child {child_agent_id[:8]}")
+        workflow.logger.info(
+            f"📊 Progress update from child {child_agent_id[:8]}: "
+            f"{progress*100:.1f}%, tokens: {token_count}"
+        )
+        
+        # Calculate delta from last token count (only add new tokens)
+        last_tokens = self.child_last_tokens.get(child_agent_id, {
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "token_count": 0
+        })
+        
+        delta_in = tokens_in - last_tokens["tokens_in"]
+        delta_out = tokens_out - last_tokens["tokens_out"]
+        delta_total = token_count - last_tokens["token_count"]
+        
+        # Update last known token counts for this child
+        self.child_last_tokens[child_agent_id] = {
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "token_count": token_count
+        }
+        
+        # Accumulate only the delta into parent's counters
+        if delta_in > 0 or delta_out > 0 or delta_total > 0:
+            self.tokens_in += delta_in
+            self.tokens_out += delta_out
+            self.token_count += delta_total
+            workflow.logger.info(
+                f"💰 Accumulated child token delta: "
+                f"+{delta_total} total (+{delta_in} in, +{delta_out} out)"
+            )
         
         # Get child's tool_call_id
         child_tool_id = self.child_tool_ids.get(child_agent_id)
@@ -177,11 +211,24 @@ class AgentWorkflow:
             workflow.logger.warning(f"No tool_call_id for child {child_agent_id}")
             return
         
-        # Re-post formatted message using child's tool_call_id
-        # Format: {tool_call_id}|||{title}|||{status}|||{message}
+        # Format title with truncated goal (first 30 chars)
+        goal_text = goal[:30] if goal else "Unknown goal"
+        if goal and len(goal) > 30:
+            goal_text += "..."
+        title = f"Sub-agent working: {goal_text}"
+        
+        # Post progress update with metadata
         await self._post_message(
-            f"{child_tool_id}|||Sub-agent working|||IN_PROGRESS|||{formatted_message}",
-            "TOOL"
+            f"Progress: {int(progress * 100)}%",
+            "TOOL",
+            metadata={
+                "toolCallId": child_tool_id,
+                "toolName": "spawn_sub_agents",
+                "toolStatus": "IN_PROGRESS",
+                "title": title,
+                "subAgentId": child_agent_id,
+                "progress": progress
+            }
         )
     
     @workflow.signal
@@ -198,20 +245,31 @@ class AgentWorkflow:
         
         workflow.logger.info(f"✅ Child {child_agent_id[:8]} completed")
         
-        # Remove from pending
-        self.pending_children.discard(child_agent_id)
-        
-        # Get child's tool_call_id
+        # Get child's tool_call_id and post FINISHED message FIRST
+        # (before removing from pending, to avoid race condition where parent
+        # sees all children complete before all completion messages are posted)
         child_tool_id = self.child_tool_ids.get(child_agent_id)
         if child_tool_id:
             status = result.get("status", "completed")
             goal_text = result.get("goal", "")
             
-            # Post FINISHED message
+            # Post FINISHED message with metadata
             await self._post_message(
-                f"{child_tool_id}|||Sub-agent completed|||FINISHED|||Goal: {goal_text[:100]}",
-                "TOOL"
+                goal_text[:100],
+                "TOOL",
+                metadata={
+                    "toolCallId": child_tool_id,
+                    "toolName": "spawn_sub_agents",
+                    "toolStatus": "FINISHED",
+                    "title": "Sub-agent completed: " + goal_text[:30],
+                    "subAgentId": child_agent_id,
+                    "progress": 1.0
+                }
             )
+        
+        # Remove from pending AFTER posting message
+        # This ensures parent's wait_condition doesn't wake up until message is posted
+        self.pending_children.discard(child_agent_id)
         
     @workflow.run
     async def run(
@@ -295,21 +353,12 @@ class AgentWorkflow:
         # Fetch tool descriptions from backend (only on first iteration)
         # This fetches tools assigned to this agent via AgentTool junction table
         if not self.tools:
-            # First, fetch agent config to check if this is a sub-agent
-            is_sub_agent = False
-            try:
-                workflow.logger.info("🔍 Fetching agent config to check parent status", agent_id=agent_id)
-                initial_config = await workflow.execute_activity(
-                    fetch_agent_config,
-                    args=[agent_id],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=3)
-                )
-                is_sub_agent = initial_config.get('parent_agent_id') is not None
-                if is_sub_agent:
-                    workflow.logger.info("🔗 Sub-agent detected, excluding spawn_sub_agents tool", parent_id=initial_config.get('parent_agent_id'))
-            except Exception as e:
-                workflow.logger.warning(f"Failed to fetch initial config for parent check: {str(e)}")
+            # Filter system tools based on depth (sub-agents can't spawn more sub-agents)
+            # Use self.depth which is passed through the workflow args
+            is_sub_agent = self.depth >= 1
+            
+            if is_sub_agent:
+                workflow.logger.info("🔗 Sub-agent detected (depth=%d), excluding spawn_sub_agents tool", self.depth)
             
             # Filter system tools: exclude spawn_sub_agents for sub-agents
             system_tools = [
@@ -468,32 +517,59 @@ class AgentWorkflow:
                             # Default formatting for tools without custom formatter
                             pre_msg = {"title": f"Executing {tool_name}", "message": f"params: {tool_call}"}
                         
+                        # Ensure message is not empty (backend validation requires at least 1 character)
+                        message_content = pre_msg.get('message', '').strip()
+                        
                         await self._post_message(
-                            f"{tool_call_id}|||{pre_msg['title']}|||IN_PROGRESS|||{pre_msg.get('message', '')}",
-                            "TOOL"
+                            message_content,
+                            "TOOL",
+                            metadata={
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolStatus": "IN_PROGRESS",
+                                "title": pre_msg['title']
+                            }
                         )
                         
                         # Execute tool (blocking)
-                        result = await self._execute_tool(tool_call)
+                        result = await self._execute_tool(tool_call, tool_call_id)
                         
                         # Format and post post-execution message (FINISHED)
-                        if formatter.get("post"):
-                            post_msg = formatter["post"](tool_call, result)
-                        else:
-                            # Default formatting
-                            post_msg = {"title": f"Completed {tool_name}", "message": str(result)}
-                        
-                        await self._post_message(
-                            f"{tool_call_id}|||{post_msg['title']}|||FINISHED|||{post_msg.get('message', '')}",
-                            "TOOL"
-                        )
+                        # Skip for spawn_sub_agents - it posts its own summary message before waiting
+                        if tool_name != "spawn_sub_agents":
+                            if formatter.get("post"):
+                                post_msg = formatter["post"](tool_call, result)
+                            else:
+                                # Default formatting
+                                post_msg = {"title": f"Completed {tool_name}", "message": str(result)}
+                            
+                            # Ensure message is not empty (backend validation requires at least 1 character)
+                            message_content = post_msg.get('message', '').strip()
+                            
+                            await self._post_message(
+                                message_content,
+                                "TOOL",
+                                metadata={
+                                    "toolCallId": tool_call_id,
+                                    "toolName": tool_name,
+                                    "toolStatus": "FINISHED",
+                                    "title": post_msg['title']
+                                }
+                            )
                         
                     except Exception as e:
                         # Post error and add to context so agent can see what failed
                         error_msg = f"Tool {tool_name} failed: {str(e)}"
                         await self._post_message(
-                            f"{tool_call_id}|||Error|||FINISHED|||{error_msg}",
-                            "TOOL"
+                            error_msg,
+                            "TOOL",
+                            metadata={
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolStatus": "FINISHED",
+                                "title": "Error",
+                                "error": True
+                            }
                         )
                         workflow.logger.error(f"Tool execution failed: {error_msg}")
                 
@@ -512,6 +588,25 @@ class AgentWorkflow:
                     f"Verifier assessment: {progress_reasoning} (Progress: {progress_score*100:.0f}%)",
                     "ASSISTANT"
                 )
+                
+                # If this is a sub-agent, signal parent with progress update AND token usage
+                if self.parent_workflow_id:
+                    try:
+                        parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                        await parent_handle.signal("child_progress", {
+                            "child_agent_id": self.agent_id,
+                            "progress": progress_score,
+                            "tokens_in": self.tokens_in,
+                            "tokens_out": self.tokens_out,
+                            "token_count": self.token_count,
+                            "goal": self.goal
+                        })
+                        workflow.logger.info(
+                            f"📊 Sent progress update to parent: {progress_score*100:.1f}%, "
+                            f"tokens: {self.token_count}"
+                        )
+                    except Exception as signal_error:
+                        workflow.logger.warning(f"Failed to signal parent progress: {signal_error}")
                 
                 # Calculate context metrics before updating
                 context_text = "\n".join([msg.get('text', '') for msg in self.context])
@@ -606,7 +701,9 @@ class AgentWorkflow:
                         reasoning_effort=self.reasoning_effort,
                         tool_ids=self.tool_ids,
                         verifier=self.verifier,
-                        context=compressed_context
+                        context=compressed_context,
+                        parent_workflow_id=self.parent_workflow_id,  # Preserve parent relationship
+                        depth=self.depth  # Preserve depth to prevent sub-agents from spawning
                     )
                 
                 # No sleep between iterations - let the agent work as fast as possible
@@ -655,17 +752,18 @@ class AgentWorkflow:
             # Return empty list on error - will try again next iteration
             return []
     
-    async def _post_message(self, text: str, role: str = "ASSISTANT") -> None:
-        """Post a message from the agent and signal parent if this is a sub-agent."""
+    async def _post_message(self, text: str, role: str = "ASSISTANT", metadata: Optional[Dict] = None) -> None:
+        """Post a message from the agent with optional metadata."""
         try:
             workflow.logger.info("🔍 Calling post_agent_message", 
                 agent_id=self.agent_id, 
                 role=role, 
-                text_preview=text[:50] if len(text) > 50 else text
+                text_preview=text[:50] if len(text) > 50 else text,
+                has_metadata=metadata is not None
             )
             await workflow.execute_activity(
                 post_agent_message,
-                args=[self.agent_id, text, role],
+                args=[self.agent_id, text, role, metadata],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
@@ -682,49 +780,10 @@ class AgentWorkflow:
                 "timestamp": workflow.now().isoformat()
             })
             
-            # If this is a sub-agent, signal parent with FORMATTED message
-            if self.parent_workflow_id:
-                try:
-                    # Format the message for parent (extract readable content)
-                    formatted_message = self._format_message_for_parent(text, role)
-                    
-                    parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                    # Signal takes signal_name and a single argument (dict with multiple values)
-                    await parent_handle.signal("child_message", {
-                        "child_agent_id": self.agent_id,
-                        "formatted_message": formatted_message
-                    })
-                    workflow.logger.info(f"📤 Signaled parent {self.parent_workflow_id[:8]}")
-                except Exception as signal_error:
-                    workflow.logger.warning(f"Failed to signal parent: {signal_error}")
-                    # Non-fatal - continue even if signal fails
-            
         except Exception as e:
             workflow.logger.error(f"Failed to post message: {str(e)}")
             # Non-fatal - continue
     
-    def _format_message_for_parent(self, text: str, role: str) -> str:
-        """
-        Format a message to send to parent (extract readable content).
-        
-        For TOOL messages with format: tool_id|||title|||status|||message
-        Extract: "title\n\nmessage"
-        
-        For other roles, return as-is.
-        """
-        if role == "TOOL" and "|||" in text:
-            # Parse splittable format
-            parts = text.split("|||", 3)
-            if len(parts) >= 4:
-                tool_call_id, title, status, message = parts
-                # Return formatted with double line break
-                return f"{title}\n\n{message}" if message else title
-            elif len(parts) >= 2:
-                # Fallback: just title
-                return parts[1]
-        
-        # For ASSISTANT, USER, SYSTEM: return as-is
-        return text
     
     async def _query_blueprints(self) -> List[Dict]:
         """Query knowledge base for similar goals."""
@@ -737,8 +796,14 @@ class AgentWorkflow:
             # Post pre-execution message
             pre_msg = formatter["pre"]([])
             await self._post_message(
-                f"{activity_id}|||{pre_msg['title']}|||IN_PROGRESS|||{pre_msg.get('message', '')}",
-                "TOOL"
+                pre_msg.get('message', ''),
+                "TOOL",
+                metadata={
+                    "toolCallId": activity_id,
+                    "toolName": "query_blueprints",
+                    "toolStatus": "IN_PROGRESS",
+                    "title": pre_msg['title']
+                }
             )
             
             workflow.logger.info("🔍 Calling query_blueprints", 
@@ -765,8 +830,14 @@ class AgentWorkflow:
             # Post post-execution message
             post_msg = formatter["post"]([], blueprints)
             await self._post_message(
-                f"{activity_id}|||{post_msg['title']}|||FINISHED|||{post_msg.get('message', '')}",
-                "TOOL"
+                post_msg.get('message', ''),
+                "TOOL",
+                metadata={
+                    "toolCallId": activity_id,
+                    "toolName": "query_blueprints",
+                    "toolStatus": "FINISHED",
+                    "title": post_msg['title']
+                }
             )
             
             return blueprints
@@ -775,8 +846,15 @@ class AgentWorkflow:
             workflow.logger.error(f"Failed to query blueprints: {str(e)}")
             # Post error message
             await self._post_message(
-                f"{activity_id}|||Error|||FINISHED|||Failed to query blueprints: {str(e)}",
-                "TOOL"
+                f"Failed to query blueprints: {str(e)}",
+                "TOOL",
+                metadata={
+                    "toolCallId": activity_id,
+                    "toolName": "query_blueprints",
+                    "toolStatus": "FINISHED",
+                    "title": "Error",
+                    "error": True
+                }
             )
             return []
     
@@ -818,10 +896,11 @@ class AgentWorkflow:
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
     
-    async def _execute_tool(self, tool_call: Dict) -> str:
+    async def _execute_tool(self, tool_call: Dict, tool_call_id: str = None) -> str:
         """
         Execute a single tool call. Returns result string.
         Does NOT post messages - main loop handles all posting.
+        Exception: spawn_sub_agents posts its summary message before waiting.
         """
         tool = tool_call.get("tool")
         args = tool_call.get("args", [])
@@ -905,11 +984,34 @@ class AgentWorkflow:
                         self.child_tool_ids[child_agent_id] = child_tool_id
                         self.pending_children.add(child_agent_id)
                         
-                        # Post initial IN_PROGRESS message
+                        # Post initial IN_PROGRESS message with metadata
                         await self._post_message(
-                            f"{child_tool_id}|||Sub-agent starting|||IN_PROGRESS|||{child_info['goal']}",
-                            "TOOL"
+                            child_info['goal'],
+                            "TOOL",
+                            metadata={
+                                "toolCallId": child_tool_id,
+                                "toolName": "spawn_sub_agents",
+                                "toolStatus": "IN_PROGRESS",
+                                "title": "Sub-agent starting",
+                                "subAgentId": child_agent_id,
+                                "progress": 0.0
+                            }
                         )
+                
+                # Step 2.5: Post the spawn_sub_agents post message (agents spawned summary)
+                # This happens BEFORE waiting, so user sees "agents spawned" immediately
+                if tool_call_id:
+                    # Post a simple "agents spawned" message
+                    await self._post_message(
+                        "",
+                        "TOOL",
+                        metadata={
+                            "toolCallId": tool_call_id,
+                            "toolName": "spawn_sub_agents",
+                            "toolStatus": "FINISHED",  # Still in progress (waiting for children)
+                            "title": f"🎯 Spawned {len(spawned)} sub-agent{'s' if len(spawned) != 1 else ''}"
+                        }
+                    )
                 
                 # Step 3: Wait for all children to signal completion
                 # Using workflow.wait_condition (Temporal primitive - parent goes dormant)
@@ -1029,11 +1131,17 @@ class AgentWorkflow:
             # Post pre-execution message
             pre_msg = formatter["pre"]([])
             await self._post_message(
-                f"{activity_id}|||{pre_msg['title']}|||IN_PROGRESS|||{pre_msg.get('message', '')}",
-                "TOOL"
+                pre_msg.get('message', ''),
+                "TOOL",
+                metadata={
+                    "toolCallId": activity_id,
+                    "toolName": "save_blueprint",
+                    "toolStatus": "IN_PROGRESS",
+                    "title": pre_msg['title']
+                }
             )
             
-            # Save blueprint (uses LLM to extract key points)
+            # Save blueprint (uses LLM to compress message history)
             blueprint_result = await workflow.execute_activity(
                 save_blueprint,
                 args=[self.user_id, steps],
@@ -1046,7 +1154,7 @@ class AgentWorkflow:
                 )
             )
             
-            # Track tokens from blueprint extraction LLM call
+            # Track tokens from blueprint compression LLM call
             blueprint_usage = blueprint_result.get("usage", {})
             self.tokens_in += blueprint_usage.get("prompt_tokens", 0)
             self.tokens_out += blueprint_usage.get("completion_tokens", 0)
@@ -1060,8 +1168,14 @@ class AgentWorkflow:
             # Post post-execution message
             post_msg = formatter["post"]([], blueprint_result)
             await self._post_message(
-                f"{activity_id}|||{post_msg['title']}|||FINISHED|||{post_msg.get('message', '')}",
-                "TOOL"
+                post_msg.get('message', ''),
+                "TOOL",
+                metadata={
+                    "toolCallId": activity_id,
+                    "toolName": "save_blueprint",
+                    "toolStatus": "FINISHED",
+                    "title": post_msg['title']
+                }
             )
             
             # Mark as finished in the database (with updated token counts)

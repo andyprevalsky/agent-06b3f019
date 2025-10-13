@@ -84,6 +84,7 @@ model Message {
   timestamp DateTime    @default(now())
   text      String      @db.Text
   role      MessageRole
+  metadata  Json?       // Structured metadata (tool type, status, sub-agent ID, etc)
   createdAt DateTime    @default(now())
 
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)

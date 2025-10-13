@@ -40,6 +40,9 @@ echo -e "\n${YELLOW}Step 2: Starting fresh local worker...${NC}"
 cd "$AGENTS_DIR"
 source venv/bin/activate
 
+# Clear previous worker log
+> /tmp/navi-worker.log
+
 # Start worker in background
 TASK_QUEUE="navi-agent-tasks-quicktest" python worker.py > /tmp/navi-worker.log 2>&1 &
 WORKER_PID=$!

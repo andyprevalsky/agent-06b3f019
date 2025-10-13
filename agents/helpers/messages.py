@@ -75,7 +75,12 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
 
 
 @activity.defn
-async def post_agent_message(agent_id: str, text: str, role: str = "ASSISTANT") -> Dict[str, Any]:
+async def post_agent_message(
+    agent_id: str, 
+    text: str, 
+    role: str = "ASSISTANT",
+    metadata: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
     """
     Post a message from the agent back to the database.
     
@@ -83,6 +88,7 @@ async def post_agent_message(agent_id: str, text: str, role: str = "ASSISTANT") 
         agent_id: The agent ID
         text: Message text
         role: Message role (ASSISTANT, TOOL, SYSTEM)
+        metadata: Optional JSON metadata (tool type, sub-agent ID, etc)
         
     Returns:
         Created message data
@@ -95,19 +101,34 @@ async def post_agent_message(agent_id: str, text: str, role: str = "ASSISTANT") 
         
         config = load_config()
         
+        payload = {
+            "message": text,
+            "role": role
+        }
+        
+        # Add metadata if provided
+        if metadata:
+            payload["metadata"] = metadata
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                json={
-                    "message": text,
-                    "role": role
-                },
+                json=payload,
                 headers={
                     "X-API-Key": config.backend.api_key,
                     "Content-Type": "application/json"
                 },
                 timeout=30.0
             )
+            if response.status_code != 201:
+                logger.error(
+                    "Failed to post message - HTTP error",
+                    agent_id=agent_id,
+                    status_code=response.status_code,
+                    response_body=response.text,
+                    payload=payload
+                )
+            
             response.raise_for_status()
             
             message = response.json()
@@ -116,7 +137,8 @@ async def post_agent_message(agent_id: str, text: str, role: str = "ASSISTANT") 
                 "Message posted",
                 agent_id=agent_id,
                 message_id=message.get('message_id'),
-                role=role
+                role=role,
+                has_metadata=metadata is not None
             )
             
             return message

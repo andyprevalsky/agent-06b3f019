@@ -24,8 +24,9 @@ const createAgentSchema = z.object({
 });
 
 const postMessageSchema = z.object({
-  message: z.string().min(1),
+  message: z.string().min(0), // Actual message content (tool result, assistant response, etc)
   role: z.enum(['USER', 'ASSISTANT', 'TOOL', 'SYSTEM']).optional(),
+  metadata: z.record(z.any()).optional(), // JSON metadata about the tool call (toolCallId, toolName, status, etc)
 });
 
 const updateStatusSchema = z.object({
@@ -72,22 +73,6 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         messageCount: true,
         createdAt: true,
         updatedAt: true,
-        // Include children
-        children: {
-          where: {
-            deletedAt: null,
-          },
-          select: {
-            id: true,
-            goal: true,
-            progress: true,
-            status: true,
-            createdAt: true,
-          },
-          orderBy: {
-            createdAt: 'asc',
-          },
-        },
       },
       orderBy: {
         createdAt: 'desc',
@@ -111,13 +96,6 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         message_count: agent.messageCount,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
-        children: agent.children.map((child) => ({
-          agent_id: child.id,
-          goal: child.goal,
-          progress: child.progress,
-          status: child.status,
-          created_at: child.createdAt,
-        })),
       })),
     });
   } catch (error) {
@@ -301,28 +279,91 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Fetch messages with pagination (cursor-based)
-    // Strategy: Fetch newest-first, then reverse to chronological order
-    // - Initial load (no 'before'): Get 50 most recent messages
-    // - Pagination (with 'before'): Get 50 messages before cursor
-    const messages = await prisma.message.findMany({
+    // Fetch messages with pagination by ASSISTANT messages
+    // Strategy: 
+    // 1. Find last N assistant messages (these represent conversation "turns")
+    // 2. Get the oldest timestamp from those assistant messages
+    // 3. Load ALL messages from that timestamp onwards (includes tool calls, system msgs, etc.)
+    // This ensures we get complete conversation turns with all context
+    
+    // First, get the last N assistant messages to find the time range
+    const assistantMessages = await prisma.message.findMany({
       where: {
         agentId,
+        role: 'ASSISTANT',
         ...(before ? { timestamp: { lt: new Date(before) } } : {}),
       },
       orderBy: {
-        timestamp: 'desc', // Newest first (to get most recent X messages)
+        timestamp: 'desc',
       },
       take: limit,
+      select: {
+        timestamp: true,
+      },
     });
 
-    // Reverse to chronological order (oldest first) for display
-    const orderedMessages = messages.reverse();
+    let messages: any[] = [];
+    let oldestAssistantTimestamp: Date | null = null;
+
+    if (assistantMessages.length === 0 || assistantMessages.length < limit) {
+      // We have ALL assistant messages (or none) - fetch all messages from the beginning
+      // This ensures we get USER goal and TOOL blueprint messages that come before first ASSISTANT message
+      const oldestMessage = await prisma.message.findFirst({
+        where: { 
+          agentId,
+          ...(before ? { timestamp: { lt: new Date(before) } } : {}),
+        },
+        orderBy: { timestamp: 'asc' },
+        select: { timestamp: true },  // Lightweight - only get timestamp
+      });
+
+      if (oldestMessage) {
+        messages = await prisma.message.findMany({
+          where: {
+            agentId,
+            timestamp: { gte: oldestMessage.timestamp },
+            ...(before ? { timestamp: { lt: new Date(before) } } : {}),
+          },
+          orderBy: { timestamp: 'asc' },
+        });
+      }
+      
+      // For pagination response, use oldest assistant timestamp if we have any
+      oldestAssistantTimestamp = assistantMessages.length > 0 
+        ? assistantMessages[assistantMessages.length - 1].timestamp 
+        : null;
+    } else {
+      // Hit the limit - there might be more assistant messages, use pagination
+      oldestAssistantTimestamp = assistantMessages[assistantMessages.length - 1].timestamp;
+
+      // Fetch all messages from the oldest assistant timestamp onwards
+      messages = await prisma.message.findMany({
+        where: {
+          agentId,
+          timestamp: { gte: oldestAssistantTimestamp },
+          ...(before ? { timestamp: { lt: new Date(before) } } : {}),
+        },
+        orderBy: {
+          timestamp: 'asc', // Chronological order
+        },
+      });
+    }
+
+    // Fetch parent goal if this is a sub-agent
+    let parentGoal: string | null = null;
+    if (agent.parentAgentId) {
+      const parent = await prisma.agent.findUnique({
+        where: { id: agent.parentAgentId },
+        select: { goal: true },
+      });
+      parentGoal = parent?.goal || null;
+    }
 
     res.json({
       agent: {
         agent_id: agent.id,
-        parentAgentId: agent.parentAgentId,
+        parent_agent_id: agent.parentAgentId,
+        parent_goal: parentGoal,
         goal: agent.goal,
         model: agent.model,
         reasoning_effort: agent.reasoningEffort,
@@ -349,15 +390,16 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
           description: at.tool.description,
         })),
       },
-      messages: orderedMessages.map((msg) => ({
+      messages: messages.map((msg) => ({
         message_id: msg.id,
         timestamp: msg.timestamp,
         text: msg.text,
         role: msg.role,
+        metadata: msg.metadata,
       })),
       pagination: {
-        has_more: messages.length === limit,
-        oldest_timestamp: orderedMessages.length > 0 ? orderedMessages[0].timestamp.toISOString() : null,
+        has_more: assistantMessages.length === limit,
+        oldest_timestamp: oldestAssistantTimestamp ? oldestAssistantTimestamp.toISOString() : null,
       },
     });
   } catch (error) {
@@ -424,6 +466,7 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
         agentId,
         text: body.message,
         role,
+        metadata: body.metadata || undefined,
         timestamp: new Date(),
       },
     });
@@ -563,12 +606,57 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
   }
 });
 
+// Helper function to recursively pause all child agents
+async function pauseAgentRecursive(agentId: string): Promise<void> {
+  const agent = await prisma.agent.findFirst({
+    where: {
+      id: agentId,
+      deletedAt: null,
+    },
+    include: {
+      children: {
+        where: {
+          deletedAt: null,
+        },
+      },
+    },
+  });
+
+  if (!agent) {
+    return;
+  }
+
+  // Update this agent's status to PAUSED
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { status: 'PAUSED' },
+  });
+
+  // Try to send signal (best effort for instant response)
+  if (agent.temporalWorkflowId) {
+    try {
+      const { getTemporalClient } = await import('../lib/temporal');
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.signal('pause');
+    } catch (error) {
+      console.warn(`Pause signal failed for agent ${agentId}, but DB updated. Workflow will sync next iteration:`, error);
+    }
+  }
+
+  // Recursively pause all children
+  for (const child of agent.children) {
+    await pauseAgentRecursive(child.id);
+  }
+}
+
 // POST /api/agents/:id/pause - Pause workflow
 router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.id;
     const agentId = req.params.id;
 
+    // Verify agent belongs to user
     const agent = await prisma.agent.findFirst({
       where: {
         id: agentId,
@@ -582,26 +670,8 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    if (!agent.temporalWorkflowId) {
-      res.status(400).json({ error: 'No workflow running' });
-      return;
-    }
-
-    // Update DB first (source of truth)
-    await prisma.agent.update({
-      where: { id: agentId },
-      data: { status: 'PAUSED' },
-    });
-
-    // Try to send signal (best effort for instant response)
-    try {
-      const { getTemporalClient } = await import('../lib/temporal');
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.signal('pause');
-    } catch (error) {
-      console.warn('Pause signal failed, but DB updated. Workflow will sync next iteration:', error);
-    }
+    // Recursively pause this agent and all its children
+    await pauseAgentRecursive(agentId);
 
     res.json({ success: true });
   } catch (error) {
@@ -610,12 +680,57 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
   }
 });
 
+// Helper function to recursively resume all child agents
+async function resumeAgentRecursive(agentId: string): Promise<void> {
+  const agent = await prisma.agent.findFirst({
+    where: {
+      id: agentId,
+      deletedAt: null,
+    },
+    include: {
+      children: {
+        where: {
+          deletedAt: null,
+        },
+      },
+    },
+  });
+
+  if (!agent) {
+    return;
+  }
+
+  // Update this agent's status to ACTIVE
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { status: 'ACTIVE' },
+  });
+
+  // Try to send signal (best effort for instant response)
+  if (agent.temporalWorkflowId) {
+    try {
+      const { getTemporalClient } = await import('../lib/temporal');
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.signal('resume');
+    } catch (error) {
+      console.warn(`Resume signal failed for agent ${agentId}, but DB updated. Workflow will sync next iteration:`, error);
+    }
+  }
+
+  // Recursively resume all children
+  for (const child of agent.children) {
+    await resumeAgentRecursive(child.id);
+  }
+}
+
 // POST /api/agents/:id/resume - Resume workflow
 router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.id;
     const agentId = req.params.id;
 
+    // Verify agent belongs to user
     const agent = await prisma.agent.findFirst({
       where: {
         id: agentId,
@@ -629,26 +744,8 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    if (!agent.temporalWorkflowId) {
-      res.status(400).json({ error: 'No workflow running' });
-      return;
-    }
-
-    // Update DB first (source of truth)
-    await prisma.agent.update({
-      where: { id: agentId },
-      data: { status: 'ACTIVE' },
-    });
-
-    // Try to send signal (best effort for instant response)
-    try {
-      const { getTemporalClient } = await import('../lib/temporal');
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.signal('resume');
-    } catch (error) {
-      console.warn('Resume signal failed, but DB updated. Workflow will sync next iteration:', error);
-    }
+    // Recursively resume this agent and all its children
+    await resumeAgentRecursive(agentId);
 
     res.json({ success: true });
   } catch (error) {

@@ -49,21 +49,35 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  // Track the most recent message for each tool_call_id
-  const toolMessageMap = new Map<string, Message>();
+  // Track the latest message AND first timestamp for each tool_call_id
+  const toolMessageMap = new Map<string, { message: Message; firstTimestamp: string }>();
   const nonToolMessages: Message[] = [];
 
   sortedMessages.forEach((message) => {
     if (message.role === 'TOOL') {
-      // Parse tool_call_id from message text (format: tool_call_id|||title|||status|||message)
-      const parts = message.text.split('|||');
-      if (parts.length >= 3) {
-        const toolCallId = parts[0];
-        // Keep only the most recent message (last one wins, since we sorted chronologically)
-        toolMessageMap.set(toolCallId, message);
-      } else {
-        // Old format or malformed, keep as-is
+      // All tool messages must have metadata with toolCallId
+      const toolCallId = message.metadata?.toolCallId;
+      
+      if (!toolCallId) {
+        console.error('Tool message missing toolCallId in metadata:', message);
         nonToolMessages.push(message);
+        return;
+      }
+      
+      const existing = toolMessageMap.get(toolCallId);
+      
+      if (existing) {
+        // Update with latest message but keep the first timestamp
+        toolMessageMap.set(toolCallId, {
+          message: message,
+          firstTimestamp: existing.firstTimestamp
+        });
+      } else {
+        // First occurrence - store both message and timestamp
+        toolMessageMap.set(toolCallId, {
+          message: message,
+          firstTimestamp: message.timestamp
+        });
       }
     } else {
       nonToolMessages.push(message);
@@ -71,8 +85,13 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
   });
 
   // Combine non-tool messages with deduplicated tool messages
-  // Already sorted chronologically from the initial sort
-  const deduplicatedMessages = [...nonToolMessages, ...Array.from(toolMessageMap.values())];
+  // Use the latest message but with the original (first) timestamp
+  const deduplicatedToolMessages = Array.from(toolMessageMap.values()).map(({ message, firstTimestamp }) => ({
+    ...message,
+    timestamp: firstTimestamp
+  }));
+
+  const deduplicatedMessages = [...nonToolMessages, ...deduplicatedToolMessages];
   deduplicatedMessages.sort((a, b) => 
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
@@ -240,6 +259,7 @@ export default function Terminal() {
             timestamp: newMessage.timestamp,
             text: newMessage.text,
             role: newMessage.role,
+            metadata: newMessage.metadata, // Include metadata for tool messages
           };
           
           // Add to buffer queue - it will be displayed when ready
@@ -303,6 +323,7 @@ export default function Terminal() {
         reconnectTimeoutRef.current = null;
       }
       channel.unsubscribe();
+      channelRef.current = null;
     };
   }, [selectedAgentId, user, forceResubscribe]);
 
@@ -406,16 +427,16 @@ export default function Terminal() {
         shouldAnimate = true;
       }
       
-      // TOOL messages animate if they are FINISHED and have a message
+      // TOOL messages animate if they are FINISHED, have a message, AND are NOT sub-agent tools
+      // Sub-agent tools don't support animation, so they should never block the queue
       if (nextMessage.role === 'TOOL') {
-        const parts = nextMessage.text.split('|||');
-        if (parts.length >= 4) {
-          const status = parts[2];
-          const message = parts[3] || '';
-          if (status === 'FINISHED' && message.trim().length > 0) {
-            shouldAnimate = true;
-            console.log(`[${performance.now().toFixed(2)}] 🎯 SHOULD COLLAPSE: FINISHED tool with message detected`);
-          }
+        const isSubAgentTool = !!nextMessage.metadata?.subAgentId;
+        const status = nextMessage.metadata?.toolStatus;
+        const message = nextMessage.text || '';
+        
+        if (!isSubAgentTool && status === 'FINISHED' && message.trim().length > 0) {
+          shouldAnimate = true;
+          console.log(`[${performance.now().toFixed(2)}] 🎯 SHOULD COLLAPSE: FINISHED tool with message detected`);
         }
       }
       
@@ -453,8 +474,8 @@ export default function Terminal() {
 
     // Check if last message is a tool with IN_PROGRESS status
     if (lastMessage.role === 'TOOL') {
-      const parts = lastMessage.text.split('|||');
-      if (parts.length >= 3 && parts[2] === 'IN_PROGRESS') {
+      const status = lastMessage.metadata?.toolStatus;
+      if (status === 'IN_PROGRESS') {
         setShowThinkingLoader(false);
         return;
       }
@@ -720,6 +741,30 @@ export default function Terminal() {
 
         {/* Main Content */}
         <main className="flex-1 flex flex-col relative">
+          {/* Breadcrumb for sub-agents - Top Left */}
+          {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
+            <div className="absolute top-4 left-0 right-0 z-20 px-6">
+              <div className="max-w-4xl mx-auto pl-10">
+                <button
+                  onClick={() => {
+                    if (agentDetail.parent_agent_id) {
+                      handleSelectAgent(agentDetail.parent_agent_id);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-lg text-sm flex items-center gap-2 border border-gray-200/50 dark:border-gray-700/50 bg-white/80 dark:bg-gray-800/80 shadow-lg"
+                  style={{
+                    backdropFilter: 'blur(12px)',
+                    WebkitBackdropFilter: 'blur(12px)',
+                  }}
+                >
+                  <span className="truncate max-w-[200px] text-gray-600 dark:text-gray-400">{agentDetail.parent_goal}</span>
+                  <span className="text-gray-400 dark:text-gray-500">›</span>
+                  <span className="font-medium truncate max-w-[200px] text-gray-800 dark:text-gray-200">{agentDetail.goal}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Settings Button - Top Right */}
           {selectedAgentId && agentDetail && (
             <div className="absolute top-4 right-4 z-20">
@@ -750,6 +795,11 @@ export default function Terminal() {
 
           {/* Main Content Area */}
           <ScrollArea className="flex-1 px-6 py-4">
+            {/* Spacer for breadcrumb when viewing sub-agent */}
+            {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
+              <div className="h-14" />
+            )}
+            
             {(!selectedAgentId || isLoadingAgent || agentDetail?.status === 'STARTING_UP') && !(agentDetail?.status === 'PAUSED' || agentDetail?.status === 'ACTIVE' || agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED') ? (
               // Show ASCII animation when: no agent selected, loading agent, or agent starting up (but not when paused/active/completed/failed)
               <div className="flex items-center justify-center h-full">
@@ -795,6 +845,7 @@ export default function Terminal() {
                     message={message}
                     shouldType={message.message_id === currentAnimatingId}
                     onTypingComplete={handleAnimationComplete}
+                    onNavigateToAgent={handleSelectAgent}
                   />
                 ))}
                 

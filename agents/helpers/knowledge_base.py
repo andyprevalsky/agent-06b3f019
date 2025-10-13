@@ -10,55 +10,59 @@ from helpers.llm import call_llm
 
 logger = structlog.get_logger()
 
-# Prompt for extracting actionable blueprints from conversation history
-BLUEPRINT_EXTRACTION_PROMPT = """You are analyzing a conversation between a user and an AI agent that successfully achieved a specific goal.
+# Prompt for compressing conversation history into a concise blueprint
+BLUEPRINT_COMPRESSION_PROMPT = """You are compressing a conversation between a user and an AI agent that successfully achieved a specific goal.
 
-Your task is to extract a concise, actionable blueprint that captures the essential steps, decisions, and learnings from this conversation.
+Your task is to filter and compress the message history into a concise blueprint while preserving the raw data structure.
 
 ## Input
 - **Goal**: {goal_description}
 - **Outcome**: Successfully completed
-- **Full Conversation**: See below
+- **Full Conversation**: Array of message objects with role/text/timestamp fields
 
-## What to Extract
+## What to Keep
 
-### 1. Core Approach (2-3 sentences)
-Summarize the overall strategy that was used to achieve the goal.
+Keep messages that show:
+- **User requests and goals**: All USER messages
+- **Important decisions**: ASSISTANT messages explaining strategy or reasoning
+- **Tool calls and results**: TOOL messages showing what actions were taken and their outcomes
+- **Key insights**: ASSISTANT messages with valuable learnings or discoveries
+- **Critical errors or pivots**: Messages showing important course corrections
 
-### 2. Key Steps (ordered list)
-Extract the specific actions taken that directly contributed to success. Include:
-- What was done
-- Why it was necessary
-- Any important parameters or decisions
+## What to Remove
 
-### 3. Critical Decisions
-Highlight important choices made during execution, especially:
-- Trade-offs considered
-- Why one approach was chosen over alternatives
-- Pivots or course corrections that proved valuable
+Filter out:
+- Greetings, pleasantries, and closing remarks
+- Repetitive confirmations ("I'll do that now", "Working on it...")
+- Status updates that don't add information ("Processing...", "Please wait...")
+- Verbose tool outputs - compress to key data points only
+- Redundant explanations - keep the first, remove repeats
 
-### 4. Success Factors
-What made this approach work? Include:
-- Specific tools or techniques used
-- Important insights discovered
-- Context-specific considerations
+## How to Compress
 
-### 5. Pitfalls Avoided (if any)
-Briefly note any dead-ends or failed attempts that were overcome, and what was learned.
-
-## What to Exclude
-- Greeting/closing pleasantries
-- Repetitive confirmations or status updates
-- Failed attempts that didn't lead anywhere
-- Debugging steps unless they revealed critical insights
-- Tool outputs unless they contain key information
+For messages you keep:
+- **Preserve structure**: Keep the role/text format intact
+- **Compress verbose content**: Condense long tool outputs to essential data (e.g., "Found 50 results" instead of listing all 50)
+- **Keep parameters**: Preserve tool call parameters and arguments
+- **Maintain causality**: Keep enough context to understand why actions were taken
 
 ## Output Format
-Provide a structured, scannable blueprint in markdown format that another agent could reference when tackling a similar goal.
 
-Be concise but specific. Use technical terminology when appropriate. Focus on reproducibility.
+Return a valid JSON array of message objects. Each message must have:
+- `role`: "USER", "ASSISTANT", "TOOL", or "SYSTEM"
+- `text`: The message content (compressed if needed)
+- `timestamp`: ISO 8601 timestamp string (preserve from original or generate if missing)
 
-Generate ONLY the blueprint content - no preamble, no "Here's the blueprint:", just the structured markdown."""
+Example output:
+```json
+[
+  {{"role": "USER", "text": "Search for Python tutorials", "timestamp": "2025-01-15T10:00:00Z"}},
+  {{"role": "TOOL", "text": "web_search(query='Python tutorials') → Found RealPython.com (4.8★), LearnPython.org, Official Docs", "timestamp": "2025-01-15T10:00:05Z"}},
+  {{"role": "ASSISTANT", "text": "Found 3 high-quality resources. RealPython.com is best for beginners.", "timestamp": "2025-01-15T10:00:10Z"}}
+]
+```
+
+Return ONLY the JSON array - no explanations, no markdown fences, just the raw JSON."""
 
 
 def extract_goal_from_context(context: List[Dict]) -> str:
@@ -247,8 +251,8 @@ async def save_blueprint(
     """
     Activity: Save a new blueprint.
     
-    Uses LLM to extract key points from the conversation history into a concise,
-    actionable blueprint that can be used by future agents.
+    Uses LLM to compress the conversation history by filtering noise and condensing
+    verbose content while preserving the raw message structure.
     
     Args:
         user_id: User ID
@@ -258,55 +262,69 @@ async def save_blueprint(
         Dict with 'saved_blueprint' and 'usage' (token counts)
     """
     try:
-        activity.heartbeat("Extracting blueprint with LLM")
+        activity.heartbeat("Compressing blueprint with LLM")
         
         # Extract goal from first USER message to use as title
         title = extract_goal_from_context(blueprint)
         
-        # Format conversation history for the LLM
-        conversation_text = ""
-        for msg in blueprint:
-            role = msg.get('role', 'ASSISTANT')
-            text = msg.get('text', '')
-            timestamp = msg.get('timestamp', '')
-            conversation_text += f"[{role}] {text}\n\n"
+        # Format conversation history as JSON for the LLM
+        import json
+        conversation_json = json.dumps(blueprint, indent=2)
         
-        # Build the extraction prompt
-        system_prompt = BLUEPRINT_EXTRACTION_PROMPT.format(
+        # Build the compression prompt
+        system_prompt = BLUEPRINT_COMPRESSION_PROMPT.format(
             goal_description=title
         )
         
-        # Call LLM to extract actionable blueprint
-        logger.info("Calling LLM to extract blueprint", goal=title)
+        # Call LLM to compress blueprint (request JSON output)
+        logger.info("Calling LLM to compress blueprint", goal=title, original_messages=len(blueprint))
         result = await call_llm(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": conversation_text}
+                {"role": "user", "content": conversation_json}
             ],
             model="google/gemini-2.5-flash",
-            temperature=0.3,  # Lower temperature for more focused extraction
-            max_tokens=2000   # Allow enough tokens for detailed blueprint
+            temperature=0.3,  # Lower temperature for more focused compression
+            max_tokens=4000,  # Allow enough tokens for compressed messages
+            response_format={"type": "json_object"}  # Request JSON output
         )
         
-        # Extract the blueprint content from LLM response
-        extracted_blueprint = result.get("content", "")
+        # Parse the compressed blueprint from LLM response
+        compressed_blueprint_str = result.get("content", "")
         usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
         
-        if not extracted_blueprint:
+        if not compressed_blueprint_str:
             logger.warning("LLM returned empty blueprint, falling back to raw messages")
-            extracted_blueprint = conversation_text
+            compressed_blueprint = blueprint
+        else:
+            try:
+                # Parse JSON response
+                compressed_blueprint = json.loads(compressed_blueprint_str)
+                
+                # Validate it's a list
+                if not isinstance(compressed_blueprint, list):
+                    logger.warning("LLM returned non-list JSON, falling back to raw messages")
+                    compressed_blueprint = blueprint
+                else:
+                    logger.info(
+                        "Blueprint compressed",
+                        goal=title,
+                        original_messages=len(blueprint),
+                        compressed_messages=len(compressed_blueprint),
+                        compression_ratio=f"{len(compressed_blueprint)/len(blueprint)*100:.1f}%",
+                        tokens_used=usage.get("total_tokens", 0)
+                    )
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    "Failed to parse LLM JSON response, falling back to raw messages",
+                    error=str(e),
+                    response_preview=compressed_blueprint_str[:200]
+                )
+                compressed_blueprint = blueprint
         
-        logger.info(
-            "Blueprint extracted",
-            goal=title,
-            original_messages=len(blueprint),
-            extracted_length=len(extracted_blueprint),
-            tokens_used=usage.get("total_tokens", 0)
-        )
-        
-        # Save the extracted blueprint (as string, not list of messages)
+        # Save the compressed blueprint (as list of message dicts)
         manager = get_blueprint_manager()
-        saved_blueprint = await manager.save(user_id, title, extracted_blueprint)
+        saved_blueprint = await manager.save(user_id, title, compressed_blueprint)
         
         # Return both the saved blueprint and usage data
         return {
@@ -316,13 +334,12 @@ async def save_blueprint(
         
     except Exception as e:
         logger.error(
-            "Blueprint extraction failed, saving raw messages as fallback",
-            error=str(e),
-            goal=title
+            "Blueprint compression failed, saving raw messages as fallback",
+            error=str(e)
         )
-        # Fallback: save raw messages if extraction fails (no token usage)
+        # Fallback: save raw messages if compression fails (no token usage)
         manager = get_blueprint_manager()
-        saved_blueprint = await manager.save(user_id, title, blueprint)
+        saved_blueprint = await manager.save(user_id, extract_goal_from_context(blueprint), blueprint)
         return {
             "saved_blueprint": saved_blueprint,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}

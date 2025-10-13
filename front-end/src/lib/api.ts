@@ -21,14 +21,6 @@ async function getAuthHeaders() {
 }
 
 // Types
-export interface AgentChild {
-  agent_id: string;
-  goal: string;
-  progress: number;
-  status: 'STARTING_UP' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED';
-  created_at: string;
-}
-
 export interface Agent {
   agent_id: string;
   goal: string;
@@ -45,10 +37,11 @@ export interface Agent {
   message_count: number;
   created_at: string;
   updated_at: string;
-  children?: AgentChild[];
 }
 
 export interface AgentDetail extends Agent {
+  parent_agent_id?: string | null;
+  parent_goal?: string | null;
   verifier: {
     type: 'FLOAT_LLM_JUDGE';
     llm_judge_prompt: string;
@@ -67,6 +60,16 @@ export interface Message {
   timestamp: string;
   text: string;
   role: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
+  metadata?: {
+    toolCallId?: string;
+    toolName?: string;
+    toolStatus?: 'IN_PROGRESS' | 'FINISHED';
+    title?: string;
+    subAgentId?: string;
+    progress?: number;
+    error?: boolean;
+    [key: string]: any;
+  };
 }
 
 export interface CreateAgentPayload {

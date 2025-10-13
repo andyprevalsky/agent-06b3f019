@@ -100,6 +100,8 @@ async def main():
         "structlog.dev",
         "markdown_it_py",
         "pygments",
+        "httpx",
+        "sniffio",
     )
     
     # Create worker with all workflows and activities

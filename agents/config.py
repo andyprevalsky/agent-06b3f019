@@ -18,11 +18,11 @@ class TemporalConfig:
     task_queue: str
     
     # Worker concurrency settings
-    max_concurrent_activities: int = 500
-    max_concurrent_workflows: int = 200 # max concurrent agents
-    max_cached_workflows: int = 1000
-    max_concurrent_activity_task_pollers: int = 5
-    max_concurrent_workflow_task_pollers: int = 5
+    max_concurrent_activities: int = 50  # Reduced to prevent DB connection exhaustion
+    max_concurrent_workflows: int = 50   # Max concurrent agents (aligned with activities)
+    max_cached_workflows: int = 100      # Reduced to match workflow count
+    max_concurrent_activity_task_pollers: int = 2
+    max_concurrent_workflow_task_pollers: int = 2
     
     # Timeout settings (in seconds)
     activity_start_to_close_timeout: int = 300
@@ -93,11 +93,11 @@ def load_config() -> AppConfig:
         namespace=os.environ["TEMPORAL_NAMESPACE"],
         address=os.environ["TEMPORAL_ADDRESS"],
         task_queue=os.getenv("TEMPORAL_TASK_QUEUE", "navi-agent-tasks"),
-        max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "500")),
-        max_concurrent_workflows=int(os.getenv("MAX_CONCURRENT_WORKFLOWS", "200")),
-        max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "1000")),
-        max_concurrent_activity_task_pollers=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "5")),
-        max_concurrent_workflow_task_pollers=int(os.getenv("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", "5")),
+        max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "50")),
+        max_concurrent_workflows=int(os.getenv("MAX_CONCURRENT_WORKFLOWS", "50")),
+        max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "100")),
+        max_concurrent_activity_task_pollers=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "2")),
+        max_concurrent_workflow_task_pollers=int(os.getenv("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", "2")),
         activity_start_to_close_timeout=int(os.getenv("ACTIVITY_START_TO_CLOSE_TIMEOUT", "300")),
         activity_schedule_to_close_timeout=int(os.getenv("ACTIVITY_SCHEDULE_TO_CLOSE_TIMEOUT", "600")),
         activity_heartbeat_timeout=int(os.getenv("ACTIVITY_HEARTBEAT_TIMEOUT", "30")),
@@ -139,7 +139,7 @@ def load_config() -> AppConfig:
         openrouter=openrouter,
         twilio=twilio,
         search=search,
-        health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8080")),
+        health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),
     )

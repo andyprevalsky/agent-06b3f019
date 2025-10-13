@@ -1,7 +1,8 @@
 import { Message } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, memo } from 'react';
+import SubAgentToolBubble from './SubAgentToolBubble';
 
 interface AnimatedTextProps {
   text: string;
@@ -65,13 +66,15 @@ interface MessageBubbleProps {
   message: Message;
   shouldType?: boolean;
   onTypingComplete?: () => void;
+  onNavigateToAgent?: (agentId: string) => void;
 }
 
-interface ParsedToolMessage {
+interface ToolMessageData {
   toolCallId: string;
   title: string;
   status: 'IN_PROGRESS' | 'FINISHED';
   message: string;
+  error?: boolean;
 }
 
 const roleConfig = {
@@ -105,39 +108,26 @@ const roleConfig = {
   },
 };
 
-function parseToolMessage(text: string): ParsedToolMessage | null {
-  // Format: tool_call_id|||title|||status|||message
-  const parts = text.split('|||');
-  if (parts.length >= 3) {
-    return {
-      toolCallId: parts[0],
-      title: parts[1],
-      status: (parts[2] === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'FINISHED') as 'IN_PROGRESS' | 'FINISHED',
-      message: parts[3] || '',
-    };
-  }
-  return null;
-}
-
-function ToolMessage({ 
-  parsed, 
+const ToolMessage = memo(function ToolMessage({ 
+  data, 
   shouldType = false, 
   onComplete 
 }: { 
-  parsed: ParsedToolMessage; 
+  data: ToolMessageData; 
   shouldType?: boolean;
   onComplete?: () => void;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [hasAnimated, setHasAnimated] = useState(false);
-  const hasMessage = parsed.message.trim().length > 0;
-  const isFinished = parsed.status === 'FINISHED';
-
-  // Show chevron if: has message AND is finished
-  const showChevron = hasMessage && isFinished;
-
-  // If we should animate and haven't animated yet, start expanded
-  const shouldBeExpanded = (shouldType && !hasAnimated) || isExpanded;
+  
+  // Memoize computed values
+  const hasMessage = useMemo(() => data.message.trim().length > 0, [data.message]);
+  const isFinished = useMemo(() => data.status === 'FINISHED', [data.status]);
+  const showChevron = useMemo(() => hasMessage && isFinished, [hasMessage, isFinished]);
+  const shouldBeExpanded = useMemo(() => 
+    (shouldType && !hasAnimated) || isExpanded, 
+    [shouldType, hasAnimated, isExpanded]
+  );
 
   // Handle animation completion - collapse after animating
   const handleAnimationComplete = () => {
@@ -163,12 +153,16 @@ function ToolMessage({
         )}
         onClick={hasMessage && isFinished ? () => setIsExpanded(!isExpanded) : undefined}
       >
-        <span className={cn(
-          "text-sm font-medium",
-          parsed.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
-          parsed.status === 'FINISHED' && "text-foreground"
-        )}>
-          {parsed.title}
+        <span 
+          className={cn(
+            "text-sm font-medium",
+            data.error && "text-red-600 dark:text-red-400",
+            !data.error && data.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
+            !data.error && data.status === 'FINISHED' && "text-foreground"
+          )}
+          style={{ filter: 'grayscale(1) brightness(0)' }}
+        >
+          {data.title}
         </span>
         {showChevron && (
           <ChevronRight 
@@ -187,12 +181,12 @@ function ToolMessage({
             <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
               {shouldType && !hasAnimated ? (
                 <AnimatedText 
-                  text={parsed.message} 
+                  text={data.message} 
                   shouldAnimate={true}
                   onComplete={handleAnimationComplete}
                 />
               ) : (
-                parsed.message
+                data.message
               )}
             </p>
           </div>
@@ -200,9 +194,9 @@ function ToolMessage({
       )}
     </div>
   );
-}
+});
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -210,11 +204,70 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   const isAssistant = message.role === 'ASSISTANT';
   const isSystem = message.role === 'SYSTEM';
 
-  // Parse tool message if applicable
-  const parsedTool = isTool ? parseToolMessage(message.text) : null;
+  // Check if this is a sub-agent tool message (ones that link to an agent_id)
+  const isSubAgentTool = !!message.metadata?.subAgentId;
 
-  // Tool messages: plain text, no bubble, no icon
-  if (isTool && parsedTool) {
+  // Memoize tool data to prevent flickers on re-renders
+  const toolData = useMemo(() => {
+    if (!isTool || !message.metadata) return null;
+    
+    return {
+      toolCallId: message.metadata.toolCallId || '',
+      title: message.metadata.title || 'Tool',
+      status: message.metadata.toolStatus || 'FINISHED',
+      message: message.text,
+      error: message.metadata.error || false,
+    } as ToolMessageData;
+  }, [isTool, message.metadata, message.text]);
+
+  // Sub-agent tool messages: use special SubAgentToolBubble component
+  const subAgentBubble = useMemo(() => {
+    if (!isSubAgentTool || !message.metadata) return null;
+
+    return (
+      <div className="flex gap-3 animate-in fade-in duration-300">
+        {/* Empty space where icon would be to align with agent messages */}
+        <div className="flex-shrink-0 w-8" />
+        
+        <div className="flex-1">
+          <SubAgentToolBubble
+            toolCallId={message.metadata.toolCallId || ''}
+            title={message.metadata.title || 'Sub-agent'}
+            message={message.text}
+            status={message.metadata.toolStatus || 'FINISHED'}
+            progress={message.metadata.progress || 0}
+            agentId={message.metadata.subAgentId}
+            onNavigate={(agentId) => {
+              if (onNavigateToAgent) {
+                onNavigateToAgent(agentId);
+              }
+            }}
+          />
+        </div>
+      </div>
+    );
+  }, [isSubAgentTool, message.metadata, message.text, onNavigateToAgent]);
+
+  if (subAgentBubble) return subAgentBubble;
+
+  // Regular tool messages: all must have metadata
+  if (isTool) {
+    // All tool messages must have metadata
+    if (!message.metadata) {
+      console.error('Tool message missing metadata:', message);
+      // Render as plain text fallback
+      return (
+        <div className="flex gap-3 animate-in fade-in duration-300">
+          <div className="flex-shrink-0 w-8" />
+          <div className="flex-1">
+            <div className="text-sm text-muted-foreground">
+              [Invalid tool message: missing metadata]
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         {/* Empty space where icon would be to align with agent messages */}
@@ -222,7 +275,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
         
         <div className="flex-1">
           <ToolMessage 
-            parsed={parsedTool} 
+            data={toolData!} 
             shouldType={shouldType}
             onComplete={onTypingComplete}
           />

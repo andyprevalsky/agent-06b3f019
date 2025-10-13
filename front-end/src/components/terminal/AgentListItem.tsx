@@ -101,54 +101,6 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
         </div>
       </div>
 
-      {/* Sub-agents (children) */}
-      {agent.children && agent.children.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 pl-3">
-          {agent.children.map((child) => {
-            const childRadius = 6;
-            const childCircumference = 2 * Math.PI * childRadius;
-            const childProgressOffset = childCircumference - (child.progress * childCircumference);
-            
-            return (
-              <div
-                key={child.agent_id}
-                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-gray-100 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700"
-              >
-                <span className="text-xs text-gray-600 dark:text-gray-400 line-clamp-1 max-w-[120px]">
-                  {child.goal}
-                </span>
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  <span className="text-[10px] text-gray-500">
-                    {Math.round(child.progress * 100)}%
-                  </span>
-                  <svg className="transform -rotate-90" viewBox="0 0 14 14" width="14" height="14">
-                    <circle
-                      className="fill-none stroke-gray-300 dark:stroke-gray-600 opacity-70"
-                      cx="7"
-                      cy="7"
-                      r={childRadius}
-                      strokeWidth="2"
-                    />
-                    <circle
-                      className="fill-none stroke-gray-500 dark:stroke-gray-400"
-                      cx="7"
-                      cy="7"
-                      r={childRadius}
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeDasharray={childCircumference}
-                      strokeDashoffset={childProgressOffset}
-                      style={{ 
-                        transition: 'stroke-dashoffset 500ms ease',
-                      }}
-                    />
-                  </svg>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }

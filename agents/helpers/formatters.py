@@ -16,12 +16,16 @@ def format_query_blueprints_post(args, result: List[Dict]) -> Dict[str, str]:
     count = len(result) if result else 0
     if count == 0:
         title = "No similar goals found"
+        message = ""
     else:
         title = f"Found {count} similar goal{'s' if count != 1 else ''}"
+        # List each blueprint's goal on a new line
+        blueprint_goals = "\n".join([f"• {bp.get('title', 'Unknown goal')}" for bp in result])
+        message = f"Retrieved {count} blueprint{'s' if count != 1 else ''} from knowledge base:\n\n{blueprint_goals}"
     
     return {
         "title": title,
-        "message": ""
+        "message": message
     }
 
 

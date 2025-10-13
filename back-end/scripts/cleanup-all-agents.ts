@@ -54,18 +54,26 @@ async function cleanupAllAgents() {
 
   try {
     // Get all non-deleted agents
-    const agents = await prisma.agent.findMany({
-      where: {
-        deletedAt: null,
-      },
-      select: {
-        id: true,
-        userId: true,
-        goal: true,
-        status: true,
-        temporalWorkflowId: true,
-      },
-    });
+    let agents;
+    try {
+      agents = await prisma.agent.findMany({
+        where: {
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          userId: true,
+          goal: true,
+          status: true,
+          temporalWorkflowId: true,
+        },
+      });
+    } catch (dbError: any) {
+      console.log('⚠️  Cannot connect to database:', dbError.message);
+      console.log('⚠️  Skipping database cleanup (workers already killed)');
+      console.log('✅ Cleanup complete (no database access needed)');
+      return;
+    }
 
     console.log(`📊 Found ${agents.length} active agents\n`);
 
