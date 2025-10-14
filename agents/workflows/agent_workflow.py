@@ -559,11 +559,32 @@ class AgentWorkflow:
                 
                 # 3. Decide next action using LLM
                 action = await self._decide_next_action()
-                # Track tokens from LLM call (usage is always present)
+                
+                # Validate action result
+                if action is None:
+                    raise ValueError("_decide_next_action returned None")
+                
+                if not isinstance(action, dict):
+                    raise ValueError(f"_decide_next_action returned non-dict: {type(action)}")
+                
+                # Track tokens from LLM call - STRICT: usage must exist
+                if "usage" not in action:
+                    raise ValueError("Action missing required 'usage' field")
+                
                 usage = action["usage"]
-                self.tokens_in += usage.get("prompt_tokens", 0)
-                self.tokens_out += usage.get("completion_tokens", 0)
-                self.token_count += usage.get("total_tokens", 0)
+                if usage is None:
+                    raise ValueError("Action 'usage' field is None")
+                
+                if "prompt_tokens" not in usage:
+                    raise ValueError("Action usage missing 'prompt_tokens'")
+                if "completion_tokens" not in usage:
+                    raise ValueError("Action usage missing 'completion_tokens'")
+                if "total_tokens" not in usage:
+                    raise ValueError("Action usage missing 'total_tokens'")
+                    
+                self.tokens_in += usage["prompt_tokens"]
+                self.tokens_out += usage["completion_tokens"]
+                self.token_count += usage["total_tokens"]
                 
                 # 4. Post response to user (visible in UI and added to context)
                 # Reasoning is logged but not posted to chat
@@ -996,17 +1017,18 @@ class AgentWorkflow:
             return action
             
         except Exception as e:
-            workflow.logger.error(f"Failed to decide action: {str(e)}")
+            error_msg = f"Failed to decide action: {type(e).__name__}: {str(e)}"
+            workflow.logger.error(error_msg, exc_info=True)
             # Fallback: return empty reasoning and no tools, with empty usage
             return {
-                "reasoning": f"Decision failed: {str(e)}, will retry",
+                "reasoning": f"Decision failed: {error_msg}, will retry",
                 "tool_calls": [],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
     
-    async def _execute_tool(self, tool_call: Dict, tool_call_id: str = None) -> str:
+    async def _execute_tool(self, tool_call: Dict, tool_call_id: str = None) -> Any:
         """
-        Execute a single tool call. Returns result string.
+        Execute a single tool call. Returns result (dict for activities, str for system tools).
         Does NOT post messages - main loop handles all posting.
         Exception: spawn_sub_agents posts its summary message before waiting.
         """
@@ -1182,7 +1204,7 @@ class AgentWorkflow:
             )
         )
         
-        return str(result)
+        return result
     
     async def _check_progress(self) -> Dict[str, Any]:
         """

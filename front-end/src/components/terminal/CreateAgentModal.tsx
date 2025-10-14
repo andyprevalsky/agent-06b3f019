@@ -31,10 +31,10 @@ interface CreateAgentModalProps {
 export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgentModalProps) {
   // Default values for local testing (only in development)
   const defaultGoal = import.meta.env.DEV 
-    ? 'Count from 1 to 100 by spawning one sub-agent for each number. Batch them 5 at a time: spawn 5 sub-agents (for numbers 1-5), wait for all to complete, then spawn the next 5 (6-10), and so on until you reach 100. Each sub-agent should have a goal like "Output the number X" where X is the number it represents. Use spawn_sub_agents tool for each batch of 5.'
+    ? 'Count from 1 to 20 by spawning one sub-agent for each number. Spawn 5 sub_agents at a time, each sub_agent should receive a web_search tool, ask them to query for something they find interesting before outputting their count.'
     : '';
   const defaultLlmJudgePrompt = import.meta.env.DEV 
-    ? 'Evaluate how well the agent counted from 1 to 100 by spawning sub-agents in batches of 5. Return a score between 0 and 1, where 0 means the agent did not successfully spawn sub-agents for all numbers or did not batch them properly, and 1 means the agent successfully spawned 20 batches (5 sub-agents each) covering numbers 1-100. Only provide the numeric score, no explanation.'
+    ? 'Evaluate the agent\'s output based on the following goal: The agent must count from 1 to 20 by spawning one sub-agent for each number. The agent should spawn 5 sub-agents at a time. Each sub-agent must receive a web_search tool and must use it to query for something they find interesting before outputting their assigned number. \n\nScore the output as follows:\n- 1.0: The agent fully achieves the goal—exactly 20 sub-agents are spawned (one per number from 1 to 20), in batches of 5 at a time, each sub-agent receives the web_search tool, performs a web search for something interesting, and then outputs their assigned number.\n- 0.0: The agent fails to achieve the goal—does not spawn the correct number of sub-agents, does not spawn them in batches of 5, does not provide the web_search tool, sub-agents do not perform a web search, or do not output their assigned number.\n- Intermediate scores: Partial achievement, such as missing some requirements or only partially following the instructions.\n\nReturn only a single float between 0 and 1, with no explanation.'
     : '';
 
   const [goal, setGoal] = useState(defaultGoal);
@@ -55,6 +55,14 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
     if (open) {
       getTools().then((tools) => {
         setAvailableTools(tools);
+        
+        // Auto-select web_search tool in development mode
+        if (import.meta.env.DEV) {
+          const webSearchTool = tools.find(t => t.name === 'web_search');
+          if (webSearchTool) {
+            setSelectedTools([webSearchTool.id]);
+          }
+        }
       });
     }
   }, [open]);
@@ -133,7 +141,15 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
       setLlmJudgePrompt(defaultLlmJudgePrompt);
       setSelectedModel('google/gemini-2.5-flash');
       setReasoningEffort('high');
-      setSelectedTools([]);
+      
+      // Reset tools to web_search in dev mode
+      if (import.meta.env.DEV) {
+        const webSearchTool = availableTools.find(t => t.name === 'web_search');
+        setSelectedTools(webSearchTool ? [webSearchTool.id] : []);
+      } else {
+        setSelectedTools([]);
+      }
+      
       onClose();
     } catch (error) {
       toast({

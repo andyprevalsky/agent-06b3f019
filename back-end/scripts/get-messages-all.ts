@@ -153,12 +153,30 @@ async function getMessagesAll() {
             console.log(`\n${colors.dim}Details:${colors.reset}`);
             console.log(wrapText(parsed.details, 78, '  '));
           }
+          
+          // Display metadata if present
+          if (msg.metadata) {
+            console.log(`\n${colors.dim}Metadata:${colors.reset}`);
+            console.log(JSON.stringify(msg.metadata, null, 2).split('\n').map(line => '  ' + line).join('\n'));
+          }
         } else {
           console.log(wrapText(msg.text, 78));
+          
+          // Display metadata if present for unparsed tool messages
+          if (msg.metadata) {
+            console.log(`\n${colors.dim}Metadata:${colors.reset}`);
+            console.log(JSON.stringify(msg.metadata, null, 2).split('\n').map(line => '  ' + line).join('\n'));
+          }
         }
       } else {
         // Regular message
         console.log(wrapText(msg.text, 78));
+        
+        // Display metadata if present for non-tool messages
+        if (msg.metadata) {
+          console.log(`\n${colors.dim}Metadata:${colors.reset}`);
+          console.log(JSON.stringify(msg.metadata, null, 2).split('\n').map(line => '  ' + line).join('\n'));
+        }
       }
       
       console.log('');

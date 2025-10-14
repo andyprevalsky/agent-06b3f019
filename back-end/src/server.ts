@@ -25,7 +25,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Increased from 100kb default for blueprint storage
 
 // CORS configuration - allow all localhost origins for development
 const defaultOrigins = [

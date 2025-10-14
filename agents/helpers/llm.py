@@ -376,20 +376,46 @@ async def call_llm_structured(
     
     # Call with structured output - Instructor handles everything
     # Use create_with_completion to get both the structured response and raw completion
-    response, completion = await client.chat.completions.create_with_completion(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        response_model=response_model,
-        **extra_args
-    )
+    try:
+        response, completion = await client.chat.completions.create_with_completion(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_model=response_model,
+            **extra_args
+        )
+    except Exception as e:
+        logger.error(f"LLM call failed in create_with_completion: {str(e)}", model=model)
+        raise
     
-    # Extract usage data from completion
+    # Validate response
+    if response is None:
+        raise ValueError(f"LLM returned None response (model={model})")
+    
+    if completion is None:
+        raise ValueError(f"LLM returned None completion (model={model})")
+    
+    # Extract usage data from completion - STRICT: no silent failures
+    if not hasattr(completion, 'usage'):
+        raise ValueError(f"LLM completion missing 'usage' attribute (model={model}, completion_type={type(completion)})")
+    
+    if completion.usage is None:
+        raise ValueError(f"LLM completion.usage is None (model={model})")
+    
+    if not hasattr(completion.usage, 'prompt_tokens'):
+        raise ValueError(f"LLM completion.usage missing 'prompt_tokens' (model={model}, usage_type={type(completion.usage)})")
+    
+    if not hasattr(completion.usage, 'completion_tokens'):
+        raise ValueError(f"LLM completion.usage missing 'completion_tokens' (model={model}, usage_type={type(completion.usage)})")
+    
+    if not hasattr(completion.usage, 'total_tokens'):
+        raise ValueError(f"LLM completion.usage missing 'total_tokens' (model={model}, usage_type={type(completion.usage)})")
+    
     usage = {
-        "prompt_tokens": completion.usage.prompt_tokens if completion.usage else 0,
-        "completion_tokens": completion.usage.completion_tokens if completion.usage else 0,
-        "total_tokens": completion.usage.total_tokens if completion.usage else 0
+        "prompt_tokens": completion.usage.prompt_tokens,
+        "completion_tokens": completion.usage.completion_tokens,
+        "total_tokens": completion.usage.total_tokens
     }
     
     return response, usage
@@ -560,28 +586,53 @@ Be strategic, efficient, and focused on accomplishing the task."""
             reasoning_effort=effort
         )
         
+        # Validate result - STRICT: no silent failures
+        if result is None:
+            raise ValueError(f"call_llm_structured returned None result (model={model})")
+        
+        if not hasattr(result, 'reasoning'):
+            raise ValueError(f"LLM result missing 'reasoning' field (model={model}, result_type={type(result)})")
+        
+        if not hasattr(result, 'response'):
+            raise ValueError(f"LLM result missing 'response' field (model={model}, result_type={type(result)})")
+        
+        if not hasattr(result, 'tool_calls'):
+            raise ValueError(f"LLM result missing 'tool_calls' field (model={model}, result_type={type(result)})")
+        
+        if usage is None:
+            raise ValueError(f"call_llm_structured returned None usage (model={model})")
+        
         logger.info(
             "Action decided",
             reasoning=result.reasoning,
             response=result.response,
-            tool_calls_count=len(result.tool_calls),
+            tool_calls_count=len(result.tool_calls) if result.tool_calls else 0,
             tokens=usage.get("total_tokens", 0)
         )
         
         # Convert tool calls to dict format for workflow
         # Each tool model has different fields, so we serialize to dict
         tool_calls_dict = []
-        for tc in result.tool_calls:
-            # Convert Pydantic model to dict
-            tc_dict = tc.model_dump() if hasattr(tc, 'model_dump') else tc.dict()
-            tool_calls_dict.append(tc_dict)
+        if result.tool_calls:
+            for i, tc in enumerate(result.tool_calls):
+                if tc is None:
+                    logger.warning(f"Skipping None tool call at index {i}")
+                    continue
+                try:
+                    # Convert Pydantic model to dict
+                    tc_dict = tc.model_dump() if hasattr(tc, 'model_dump') else tc.dict()
+                    tool_calls_dict.append(tc_dict)
+                except Exception as e:
+                    logger.error(f"Failed to serialize tool call {i}: {str(e)}, tc_type={type(tc)}")
+                    raise ValueError(f"Failed to serialize tool call {i}: {str(e)}")
         
         # Return as dict with usage for token tracking
+        # Allow empty strings/lists, but not None values
         return {
-            "reasoning": result.reasoning,
-            "response": result.response,
+            "reasoning": result.reasoning if result.reasoning is not None else "",
+            "response": result.response if result.response is not None else "",
             "tool_calls": tool_calls_dict,
-            "usage": usage
+            "usage": usage  # Already validated to not be None above
         }
         
     except Exception as e:

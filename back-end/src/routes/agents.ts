@@ -11,7 +11,7 @@ const createAgentSchema = z.object({
   goal: z.string().min(1),
   model: z.string().optional().default('google/gemini-2.5-flash'),
   reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional().default('low'),
-  tool_ids: z.array(z.string().uuid()).optional().default([]),
+  tool_ids: z.array(z.string().uuid()).nullable().optional().default([]).transform(val => val ?? []),
   task_queue: z.string().optional(), // Optional: for test isolation
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
   parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)

@@ -33,7 +33,7 @@ def format_pre_message(tool_call: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-def format_post_message(args: List[Any], result: Any) -> Dict[str, str]:
+def format_post_message(tool_call: Dict[str, Any], result: Any) -> Dict[str, str]:
     """
     Format the post-execution summary after ALL sub-agents complete.
     Note: Individual sub-agent completion is already shown above via separate messages.

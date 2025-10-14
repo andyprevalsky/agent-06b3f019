@@ -135,7 +135,7 @@ def format_pre_message(tool_call: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-def format_post_message(args: List[Any], result: Any) -> Dict[str, str]:
+def format_post_message(tool_call: Dict[str, Any], result: Any) -> Dict[str, str]:
     """Format the post-execution message for web search."""
     
     # Handle error case
