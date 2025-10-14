@@ -17,6 +17,7 @@ const createAgentSchema = z.object({
   parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)
   parent_workflow_id: z.string().optional(), // Optional: for sub-agents to signal parent
   depth: z.number().int().min(0).max(1).optional().default(0), // Nesting depth
+  pause_state: z.boolean().optional().default(false), // Optional: inherit parent's pause state
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
     llm_judge_prompt: z.string().min(1),
@@ -139,7 +140,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
           model: body.model,
           reasoningEffort: body.reasoning_effort,
           progress: 0.0,
-          status: 'STARTING_UP',
+          status: body.pause_state ? 'PAUSED' : 'STARTING_UP',
         },
       });
 

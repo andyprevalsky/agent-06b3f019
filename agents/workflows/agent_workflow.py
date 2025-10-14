@@ -12,10 +12,12 @@ import structlog
 with workflow.unsafe.imports_passed_through():
     # User-configurable tools
     from tools import (
-        send_sms,
-        list_contacts,
         web_search,
-        accomplish_web_task,
+        web_search_pre,
+        web_search_post,
+        deep_research,
+        deep_research_pre,
+        deep_research_post,
     )
     # Sub-agent spawning
     from tools.spawn_sub_agents import spawn_sub_agents
@@ -43,6 +45,7 @@ with workflow.unsafe.imports_passed_through():
         check_progress,
         update_agent_status,
         compress_context,
+        generate_completion_summary,
         get_model_context_window,
         fetch_agent_tools,
         query_blueprints,
@@ -66,6 +69,14 @@ TOOL_FORMATTERS = {
     "spawn_sub_agents": {
         "pre": spawn_sub_agents_pre,
         "post": spawn_sub_agents_post
+    },
+    "web_search": {
+        "pre": web_search_pre,
+        "post": web_search_post
+    },
+    "deep_research": {
+        "pre": deep_research_pre,
+        "post": deep_research_post
     }
 }
 
@@ -84,10 +95,12 @@ ACTIVITY_FORMATTERS = {
 # System tools that are always available (don't need to be in DB)
 SYSTEM_TOOLS = [
     {
+        "id": "system-wait-seconds",
         "name": "wait_seconds",
         "description": "Pause execution for a specified number of seconds (1-3600). Use this when you need to wait for time-dependent results or real-world delays."
     },
     {
+        "id": "system-spawn-sub-agents",
         "name": "spawn_sub_agents",
         "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Each sub-agent runs independently with its own goal, model, tools, and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_effort (optional), tool_ids (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
     },
@@ -235,10 +248,10 @@ class AgentWorkflow:
     async def child_completed(self, data: dict):
         """
         Receive completion signal from child agent.
-        Mark child's tool as FINISHED.
+        Mark child's tool as FINISHED and add summary to context.
         
         Args:
-            data: Dict with "child_agent_id" and "result"
+            data: Dict with "child_agent_id" and "result" (includes summary)
         """
         child_agent_id = data.get("child_agent_id", "")
         result = data.get("result", {})
@@ -252,10 +265,14 @@ class AgentWorkflow:
         if child_tool_id:
             status = result.get("status", "completed")
             goal_text = result.get("goal", "")
+            summary = result.get("summary", "")
             
-            # Post FINISHED message with metadata
+            # Use summary as the message content if available, otherwise use goal
+            message_content = summary if summary else f"Completed: {goal_text}"
+            
+            # Post FINISHED message with summary
             await self._post_message(
-                goal_text[:100],
+                message_content,
                 "TOOL",
                 metadata={
                     "toolCallId": child_tool_id,
@@ -265,6 +282,12 @@ class AgentWorkflow:
                     "subAgentId": child_agent_id,
                     "progress": 1.0
                 }
+            )
+            
+            workflow.logger.info(
+                "Child result added to context",
+                child_id=child_agent_id[:8],
+                summary_length=len(summary) if summary else 0
             )
         
         # Remove from pending AFTER posting message
@@ -426,9 +449,60 @@ class AgentWorkflow:
                     if was_paused != self.is_paused:
                         workflow.logger.info(f"⏸️  Pause state changed from DB: {was_paused} -> {self.is_paused}")
                     
-                    self.model = config['model']
+                    # Update model and reasoning effort
+                    if config['model'] != self.model:
+                        workflow.logger.info(f"📝 Model changed: {self.model} → {config['model']}")
+                        self.model = config['model']
+                    
+                    if 'reasoning_effort' in config and config['reasoning_effort'] != self.reasoning_effort:
+                        workflow.logger.info(f"📝 Reasoning effort changed: {self.reasoning_effort} → {config['reasoning_effort']}")
+                        self.reasoning_effort = config['reasoning_effort']
+                    
                     if config.get('verifier_prompt'):
                         self.verifier['llmJudgePrompt'] = config['verifier_prompt']
+                    
+                    # Check if tools have changed
+                    new_tool_ids = config.get('tool_ids', [])
+                    if new_tool_ids != self.tool_ids:
+                        workflow.logger.info(
+                            f"🔄 Tool configuration changed (old: {len(self.tool_ids)}, new: {len(new_tool_ids)})"
+                        )
+                        self.tool_ids = new_tool_ids
+                        
+                        # Refetch tool descriptions from backend
+                        # Filter system tools based on depth (sub-agents can't spawn more sub-agents)
+                        is_sub_agent = self.depth >= 1
+                        system_tools = [
+                            tool for tool in SYSTEM_TOOLS 
+                            if not (is_sub_agent and tool["name"] == "spawn_sub_agents")
+                        ]
+                        
+                        try:
+                            db_tools = await workflow.execute_activity(
+                                fetch_agent_tools,
+                                args=[agent_id],
+                                start_to_close_timeout=timedelta(seconds=30),
+                                retry_policy=RetryPolicy(
+                                    maximum_attempts=3,
+                                    backoff_coefficient=2.0,
+                                    initial_interval=timedelta(seconds=1),
+                                    maximum_interval=timedelta(seconds=10)
+                                )
+                            )
+                            
+                            # Merge system tools with updated DB tools
+                            self.tools = system_tools + db_tools
+                            
+                            workflow.logger.info(
+                                "✅ Tools updated",
+                                system_tools=len(system_tools),
+                                db_tools=len(db_tools),
+                                total_tools=len(self.tools)
+                            )
+                        except Exception as e:
+                            workflow.logger.error(
+                                f"⚠️ Failed to refetch tools: {str(e)}, keeping existing tools"
+                            )
                 except Exception as e:
                     workflow.logger.warning(f"Failed to fetch config: {str(e)}")
                 
@@ -992,10 +1066,10 @@ class AgentWorkflow:
                 # Calculate child depth
                 child_depth = self.depth + 1
                 
-                # Step 1: Spawn all children via activity, passing parent agent ID, workflow ID, and depth
+                # Step 1: Spawn all children via activity, passing parent agent ID, workflow ID, depth, and pause state
                 spawned = await workflow.execute_activity(
                     spawn_sub_agents,
-                    args=[self.user_id, sub_agents, self.agent_id, parent_workflow_id, child_depth],
+                    args=[self.user_id, sub_agents, self.agent_id, parent_workflow_id, child_depth, self.is_paused],
                     start_to_close_timeout=timedelta(seconds=60),
                     retry_policy=RetryPolicy(
                         maximum_attempts=3,
@@ -1070,10 +1144,8 @@ class AgentWorkflow:
         
         # Map tool to activity (for all non-system tools)
         activity_map = {
-            "send_sms": send_sms,
-            "list_contacts": list_contacts,
             "web_search": web_search,
-            "accomplish_web_task": accomplish_web_task,
+            "deep_research": deep_research,
         }
         
         activity_fn = activity_map.get(tool)
@@ -1087,14 +1159,11 @@ class AgentWorkflow:
         
         # Extract arguments from tool_call dict based on tool type
         # Each tool has its own Pydantic model with specific fields
-        if tool == "send_sms":
-            activity_args = [tool_call.get("to"), tool_call.get("message")]
-        elif tool == "web_search":
+        if tool == "web_search":
             activity_args = [tool_call.get("query")]
-        elif tool == "accomplish_web_task":
-            activity_args = [tool_call.get("task")]
-        elif tool == "list_contacts":
-            activity_args = []
+        elif tool == "deep_research":
+            # Pass query and max_tokens (with default if not provided)
+            activity_args = [tool_call.get("query"), tool_call.get("max_tokens", 4000)]
         else:
             # Fallback to args if present (for backward compatibility)
             activity_args = args
@@ -1212,8 +1281,37 @@ class AgentWorkflow:
                 }
             )
             
-            # Mark as finished in the database (with updated token counts)
-            await workflow.execute_activity(
+            # Generate completion summary (for sub-agents to return to parent)
+            summary = ""
+            if self.parent_workflow_id:
+                workflow.logger.info("📝 Generating completion summary for parent")
+                summary_result = await workflow.execute_activity(
+                    generate_completion_summary,
+                    args=[self.context, self.goal, self.model],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3,
+                        backoff_coefficient=2.0,
+                        initial_interval=timedelta(seconds=2),
+                        maximum_interval=timedelta(seconds=16)
+                    )
+                )
+                summary = summary_result.get("summary", "")
+                
+                # Track tokens from summary generation LLM call
+                summary_usage = summary_result.get("usage", {})
+                self.tokens_in += summary_usage.get("prompt_tokens", 0)
+                self.tokens_out += summary_usage.get("completion_tokens", 0)
+                self.token_count += summary_usage.get("total_tokens", 0)
+                
+                workflow.logger.info(
+                    "Summary generated",
+                    summary_length=len(summary),
+                    tokens_used=summary_usage.get("total_tokens", 0)
+                )
+            
+            # Mark as finished in the database (with updated token counts including summary)
+            finish_result = await workflow.execute_activity(
                 mark_finished,
                 args=[
                     self.agent_id,
@@ -1222,7 +1320,8 @@ class AgentWorkflow:
                     self.context_tokens,
                     len(self.context),
                     self.tokens_in,
-                    self.tokens_out
+                    self.tokens_out,
+                    summary  # Pass summary for sub-agents
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(
@@ -1239,7 +1338,7 @@ class AgentWorkflow:
             await self._post_message(error_msg, "ASSISTANT")
             raise
 
-                # Signal parent if this is a sub-agent
+        # Signal parent if this is a sub-agent
         if self.parent_workflow_id:
             try:
                 parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
@@ -1248,10 +1347,15 @@ class AgentWorkflow:
                     "child_agent_id": self.agent_id,
                     "result": {
                         "status": "completed",
-                        "goal": self.goal
+                        "goal": self.goal,
+                        "summary": finish_result.get("summary", "")  # Include summary
                     }
                 })
-                workflow.logger.info(f"📤 Signaled parent completion: {self.parent_workflow_id[:8]}")
+                workflow.logger.info(
+                    "📤 Signaled parent completion", 
+                    parent_id=self.parent_workflow_id[:8],
+                    has_summary=bool(finish_result.get("summary"))
+                )
             except Exception as signal_error:
                 workflow.logger.warning(f"Failed to signal parent completion: {signal_error}")
         

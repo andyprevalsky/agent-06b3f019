@@ -172,27 +172,16 @@ class WaitSecondsTool(BaseModel):
 
 
 class WebSearchTool(BaseModel):
-    """Tool call for searching the web."""
+    """Tool call for searching the web with real-time information."""
     tool: Literal["web_search"]
-    query: str = Field(description="Search query")
+    query: str = Field(description="Search query or question about current/recent information")
 
 
-class WebTaskTool(BaseModel):
-    """Tool call for accomplishing a task on the web."""
-    tool: Literal["accomplish_web_task"]
-    task: str = Field(description="Description of the web task to accomplish")
-
-
-class SendSMSTool(BaseModel):
-    """Tool call for sending an SMS."""
-    tool: Literal["send_sms"]
-    to: str = Field(description="Phone number to send to (E.164 format)")
-    message: str = Field(description="Message content to send")
-
-
-class ListContactsTool(BaseModel):
-    """Tool call for listing available contacts."""
-    tool: Literal["list_contacts"]
+class DeepResearchTool(BaseModel):
+    """Tool call for comprehensive multi-step research on complex topics."""
+    tool: Literal["deep_research"]
+    query: str = Field(description="Complex research topic or question requiring in-depth analysis")
+    max_tokens: Optional[int] = Field(default=4000, description="Maximum tokens for response")
 
 
 # Map tool names to their Pydantic models
@@ -200,9 +189,7 @@ TOOL_MODELS = {
     "spawn_sub_agents": SpawnSubAgentsTool,
     "wait_seconds": WaitSecondsTool,
     "web_search": WebSearchTool,
-    "accomplish_web_task": WebTaskTool,
-    "send_sms": SendSMSTool,
-    "list_contacts": ListContactsTool,
+    "deep_research": DeepResearchTool,
 }
 
 
@@ -318,7 +305,7 @@ def create_agent_action_model(available_tool_names: List[str]) -> Type[BaseModel
     # Dynamically create the AgentAction model
     AgentAction = create_model(
         'AgentAction',
-        reasoning=(str, Field(description="Your internal thinking process (not shown to user)")),
+        reasoning=(Optional[str], Field(default=None, description="Your internal thinking process (not shown to user)")),
         response=(str, Field(description="Message to communicate to the user (REQUIRED - always explain what you're doing)")),
         tool_calls=tool_calls_field,
         __base__=BaseModel
@@ -510,9 +497,9 @@ async def decide_next_action(
     try:
         activity.heartbeat(f"Deciding next action (iteration {iteration})")
         
-        # Build tool list from DB descriptions
+        # Build tool list from DB descriptions (including IDs for spawn_sub_agents)
         tools_list = "\n".join([
-            f"- {tool['name']}: {tool['description']}"
+            f"- {tool['name']} (id: {tool['id']}): {tool['description']}"
             for tool in available_tools
         ])
         

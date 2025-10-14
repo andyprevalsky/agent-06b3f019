@@ -28,7 +28,8 @@ class SubAgentSpawner:
         sub_agents: List[Dict[str, Any]],
         parent_agent_id: str,
         parent_workflow_id: str,
-        depth: int
+        depth: int,
+        parent_is_paused: bool
     ) -> List[Dict[str, Any]]:
         """
         Spawn multiple sub-agents by calling backend API.
@@ -44,6 +45,7 @@ class SubAgentSpawner:
             parent_agent_id: Parent agent ID (for hierarchy)
             parent_workflow_id: Parent workflow ID (for signaling)
             depth: Nesting depth for children
+            parent_is_paused: Whether parent is currently paused (children inherit this state)
             
         Returns:
             List of spawned agent info with agent_id and temporal_workflow_id
@@ -63,7 +65,8 @@ class SubAgentSpawner:
                         "verifier": agent["verifier"],
                         "parent_agent_id": parent_agent_id,
                         "parent_workflow_id": parent_workflow_id,
-                        "depth": depth
+                        "depth": depth,
+                        "pause_state": parent_is_paused  # Inherit parent's pause state
                     }
                     
                     # Only include model and reasoning_effort if they're not None
@@ -162,7 +165,8 @@ async def spawn_sub_agents(
     sub_agents: List[Dict[str, Any]],
     parent_agent_id: str,
     parent_workflow_id: str,
-    depth: int
+    depth: int,
+    parent_is_paused: bool
 ) -> List[Dict[str, Any]]:
     """
     Activity: Spawn multiple sub-agents to work on parallel subtasks.
@@ -173,10 +177,11 @@ async def spawn_sub_agents(
         parent_agent_id: Parent agent ID (for hierarchy)
         parent_workflow_id: Parent workflow ID (for signaling)
         depth: Nesting depth for children
+        parent_is_paused: Whether parent is currently paused (children inherit this state)
         
     Returns:
         List of spawned agent info with workflow IDs
     """
     spawner = get_spawner()
-    return await spawner.spawn_agents(user_id, sub_agents, parent_agent_id, parent_workflow_id, depth)
+    return await spawner.spawn_agents(user_id, sub_agents, parent_agent_id, parent_workflow_id, depth, parent_is_paused)
 

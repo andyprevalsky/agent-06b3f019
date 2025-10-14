@@ -3,64 +3,7 @@ import { cn } from '@/lib/utils';
 import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
 import { useState, useEffect, useMemo, memo } from 'react';
 import SubAgentToolBubble from './SubAgentToolBubble';
-
-interface AnimatedTextProps {
-  text: string;
-  shouldAnimate: boolean;
-  onComplete?: () => void;
-}
-
-function AnimatedText({ text, shouldAnimate, onComplete }: AnimatedTextProps) {
-  if (!shouldAnimate) {
-    return <>{text}</>;
-  }
-
-  // Split into words and chunk them
-  const words = text.split(' ');
-  const chunkSize = 5;
-  const chunks: string[] = [];
-  
-  for (let i = 0; i < words.length; i += chunkSize) {
-    const chunk = words.slice(i, i + chunkSize).join(' ');
-    chunks.push(chunk);
-  }
-
-  // Handler for when the LAST chunk finishes animating
-  const handleLastChunkAnimationEnd = () => {
-    if (onComplete) {
-      onComplete();
-    }
-  };
-
-  return (
-    <>
-      {chunks.map((chunk, index) => (
-        <span
-          key={index}
-          className="opacity-0"
-          style={{
-            animation: 'fadeIn 200ms ease-out forwards',
-            animationDelay: `${index * 40}ms`,
-          }}
-          onAnimationEnd={index === chunks.length - 1 ? handleLastChunkAnimationEnd : undefined}
-        >
-          {chunk}
-          {index < chunks.length - 1 ? ' ' : ''}
-        </span>
-      ))}
-      <style>{`
-        @keyframes fadeIn {
-          from {
-            opacity: 0;
-          }
-          to {
-            opacity: 1;
-          }
-        }
-      `}</style>
-    </>
-  );
-}
+import { MarkdownText } from './MarkdownText';
 
 interface MessageBubbleProps {
   message: Message;
@@ -205,17 +148,12 @@ const ToolMessage = memo(function ToolMessage({
       {hasMessage && shouldBeExpanded && (
         <div className="overflow-hidden">
           <div className="pl-4 border-l-2 border-border">
-            <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
-              {shouldType && !hasAnimated ? (
-                <AnimatedText 
-                  text={data.message} 
-                  shouldAnimate={true}
-                  onComplete={handleAnimationComplete}
-                />
-              ) : (
-                data.message
-              )}
-            </p>
+            <MarkdownText
+              text={data.message}
+              shouldAnimate={shouldType && !hasAnimated}
+              onComplete={handleAnimationComplete}
+              className="text-sm text-muted-foreground"
+            />
           </div>
         </div>
       )}
@@ -313,7 +251,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     );
   }
 
-  // Assistant messages: plain text, no bubble, no icon
+  // Assistant messages: markdown support, no bubble, no icon
   if (isAssistant) {
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
@@ -321,17 +259,12 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
         <div className="flex-shrink-0 w-8" />
         
         <div className="flex-1">
-          <p className="text-sm whitespace-pre-wrap break-words text-foreground">
-            {shouldType ? (
-              <AnimatedText 
-                text={message.text} 
-                shouldAnimate={true}
-                onComplete={onTypingComplete}
-              />
-            ) : (
-              message.text
-            )}
-          </p>
+          <MarkdownText
+            text={message.text}
+            shouldAnimate={shouldType}
+            onComplete={onTypingComplete}
+            className="text-sm text-foreground"
+          />
         </div>
       </div>
     );

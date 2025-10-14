@@ -1,0 +1,15 @@
+---
+description: >
+  COMMON MISTAKES TO AVOID
+  
+  1. Using old JWT format for anon key: Use sb_publishable_ prefix
+  2. Missing required headers: Include Authorization, apikey, and X-Supabase-Api-Version
+  3. Wrong phone format: Use +19729777432 not "+19729777432" in JSON
+  4. Trying to use backend WebSocket: It's been removed, use Supabase Realtime
+  5. Forgetting RLS is enabled: All frontend queries are filtered by user ID
+  6. Using wrong database connection: Use Session Pooler (port 5432) not Direct (IPv6 incompatible)
+  7. Not normalizing base URLs: Always strip trailing slashes to prevent double-slash bugs
+
+apply:
+  when: always
+---

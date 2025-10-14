@@ -1,0 +1,59 @@
+---
+description: >
+  TEMPORAL AGENT RULES - /agents repo
+
+  These rules are MANDATORY for the Navi temporal worker codebase in /agents.
+
+  General Architecture:
+  - All agent workflows and activities MUST be deterministic and idempotent
+  - No workflow may directly use wall-clock time, randomness, UUIDs, or non-deterministic APIs; use Temporal workflow APIs for all such logic (e.g. workflow.now())
+  - All operations with external side effects (outbound API calls, updates, notifications) must take idempotency keys from workflow context
+  
+  Activities & Tools:
+  - Write all tools as separate files in agents/tools/. Each tool is a Temporal activity
+  - Activities MUST: Be idempotent (safe on retry; use idempotency keys/upserts for side effects), Support retries with exponential backoff as defined in config/fly.toml (never hardcoded), Heartbeat every 5–10 seconds if potentially long-running (over 30s), Never block for sleep/waiting purposes—use timers only in workflows
+  - NEVER use activity-based waits. Use workflow.sleep() exclusively when you want time delays or schedule future actions
+  
+  Workflow Patterns:
+  - Workflows MUST be deterministic: always produce same results for same inputs, even if replayed
+  - Use continue_as_new for long-running workflows (reset history every 100-1000 events, or when state exceeds 100KB)
+  - All workflow state passed to continue-as-new must be serializable and as compact as possible (summarize/compress long arrays, strip large data)
+  - NO workflow timeouts—agent workflows must be indefinite by default
+  - Errors in activities DO NOT kill workflows—catch, record to SYSTEM message, then continue
+  
+  Agent Communication:
+  - Agents poll the backend database for new messages. Do NOT use Temporal signals to deliver user input, feedback, or chat messages
+  - Message flow: User → Backend saves to DB → Worker polls DB
+  - Only use direct DB polling for agent context updates
+  
+  Testing Requirements:
+  - When adding/modifying a tool, agent workflow, or activity: You MUST test retry/idempotency by intentionally causing activity retries and verifying no duplicate side effects, Simulate worker failures and check workflows resume and replay deterministically, Test continue-as-new boundaries for state handoff
+  - Always use /agents/scripts/quick-test.sh for lifecycle and workflow validation before PR/merge
+  
+  Configuration & Limits:
+  - Concurrency, retry, and batch size settings MUST be controlled via environment or config (fly.toml)—never directly in source files
+  - Do NOT hardcode task queue names, connection strings, or API keys in code
+  
+  Code Organization:
+  - Main workflows live in agents/workflows/
+  - Agent-owned logic only: never couple backend-specific code to agent worker
+  - Tools/activities = one file per tool/function, minimal coupling, explicit state passing
+  
+  Commit & Docs Policy:
+  - Do NOT create markdown or plaintext docs anywhere in the repo; all documentation must reside as code comments or in this YAML frontmatter rule pack
+  - All significant workflow, tool, or architecture design decisions must be evident from code structure and comments—avoid non-code documentation
+  
+  Prohibited Patterns:
+  - No activity-based waits/sleeps
+  - No hardcoded queue names, timeouts, or keys
+  - No Temporal signal-based user messaging
+  - No workflow timeouts
+  - No unbounded state in continue-as-new
+  - No direct random/uuid usage in workflows
+  
+  Enforcement:
+  - Any PR that introduces or modifies agent workflows, activities, or state-handling logic MUST show compliance with these rules. For any exception, explicit written justification in PR is required
+
+apply:
+  when: always
+---

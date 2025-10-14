@@ -1,0 +1,21 @@
+---
+description: >
+  SUPABASE CONFIGURATION
+  
+  Correct API Format (IMPORTANT!):
+  Supabase URL: https://kzlurqihzaolhzsbkctf.supabase.co
+  Anon Key Format (NEW - sb_publishable_ prefix): sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp
+  NOT the old JWT format! The anon key is now prefixed with sb_publishable_ not a long JWT token.
+  
+  Authentication API Usage:
+  Send OTP: curl -X POST "https://kzlurqihzaolhzsbkctf.supabase.co/auth/v1/otp" -H "Authorization: Bearer sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp" -H "apikey: sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp" -H "Content-Type: application/json" -H "X-Supabase-Api-Version: 2024-01-01" --data-raw '{"phone":"+19729777432","create_user":true,"channel":"sms"}'
+  
+  Verify OTP: curl -X POST "https://kzlurqihzaolhzsbkctf.supabase.co/auth/v1/verify" -H "Authorization: Bearer sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp" -H "apikey: sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp" -H "Content-Type: application/json" -H "X-Supabase-Api-Version: 2024-01-01" --data-raw '{"phone":"+19729777432","token":"181818","type":"sms"}'
+  
+  Response includes: access_token (JWT token for authentication - starts with eyJ...), user.id (User UUID), expires_in (Token lifetime in seconds)
+  
+  Test Credentials: Phone: +19729777432, Test OTP: 181818
+
+apply:
+  when: always
+---

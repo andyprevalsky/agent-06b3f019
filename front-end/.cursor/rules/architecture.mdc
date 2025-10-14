@@ -1,0 +1,27 @@
+---
+description: >
+  FRONTEND ARCHITECTURE - /front-end repo
+  
+  Real-time Updates:
+  - Use Supabase Realtime (not backend WebSocket)
+  - Listen to: Agent and Message table changes
+  - RLS: Automatically enforced by database
+  
+  Example Supabase Realtime:
+  supabase.channel('agent:${agentId}').on('postgres_changes', { event: '*', schema: 'public', table: 'Agent', filter: 'id=eq.${agentId}' }, (payload) => { /* Handle agent updates */ }).subscribe();
+  
+  URL Handling (CRITICAL): Always normalize base URLs to prevent double slashes (//api/models).
+  CORRECT: const API_BASE = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, ''); const response = await fetch(`${API_BASE}/api/models`);
+  WRONG: const API_BASE = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'; const response = await fetch(`${API_BASE}/api/models`); // Creates double slash if env has trailing slash!
+  
+  Standard URL Formats:
+  Production: https://navi-j9a9.onrender.com (no trailing slash)
+  Localhost: http://localhost:3001 (no trailing slash)
+  Consistency: All base URLs follow the same pattern
+  
+  Key Files:
+  - front-end/src/lib/supabase.ts (Supabase client setup)
+
+apply:
+  when: always
+---

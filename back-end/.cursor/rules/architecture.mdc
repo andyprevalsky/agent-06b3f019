@@ -1,0 +1,95 @@
+---
+description: >
+  BACKEND ARCHITECTURE - /back-end repo
+  
+  Deployment:
+  - Production URL: https://navi-j9a9.onrender.com
+  - API Base: https://navi-j9a9.onrender.com/api
+  
+  Database:
+  - Type: Supabase PostgreSQL
+  - Connection: Session Pooler (IPv4 compatible)
+  - RLS: ENABLED on all tables
+  - ORM: Prisma
+  
+  Authentication:
+  - Method: JWKS (JSON Web Key Set)
+  - JWKS Endpoint: https://kzlurqihzaolhzsbkctf.supabase.co/auth/v1/.well-known/jwks.json
+  - Key ID: 3f646428-da10-4054-9125-309e72d9b2e4
+  - Algorithm: ES256 (Elliptic Curve)
+  - No secret keys needed: Backend fetches public keys from JWKS
+  
+  API Structure:
+  - REST API Only: No WebSocket on backend (removed)
+  - Real-time: Frontend uses Supabase Realtime directly
+  - Port: 3001 (local), configurable for production
+  
+  Endpoints:
+  PUBLIC (No Auth): GET /health (Health check), POST /api/waitlist (Join waitlist)
+  AUTHENTICATED (Requires JWT): GET /api/agents (List user's agents), POST /api/agents (Create agent), GET /api/agents/:id (Get agent + messages), POST /api/agents/:id/messages (Send message), DELETE /api/agents/:id (Soft delete agent), POST /api/format-llm-judge-prompt (Format LLM prompt), GET /api/tools (Get available tools)
+  
+  Authentication Middleware (src/middleware/auth.ts):
+  1. Extracts JWT from Authorization Bearer header
+  2. Parses token header to get kid (Key ID)
+  3. Fetches public key from JWKS endpoint (cached 10 minutes)
+  4. Verifies JWT signature using public key
+  5. Validates issuer, audience, expiration
+  6. Extracts user ID from sub claim
+  7. Attaches req.user with { id, email, phone }
+  
+  Database Schema:
+  - Schema Location: /back-end/prisma/schema.prisma (single source of truth)
+  - All database changes MUST be made through Prisma: 1. Edit schema.prisma, 2. Run npm run prisma:migrate:dev -- --name your_change, 3. Never manually edit the database
+  
+  Tables with RLS: Agent (User's AI agents - users can only see their own), Message (Chat messages - users can only see messages from their agents), Tool (Available tools - public read), AgentTool (Many-to-many junction - users can only see their agent's tools), Verifier (Agent verifiers - users can only see their agent's verifiers)
+  
+  Public Tables (No RLS): Waitlist (Public signups - accessed via backend API only)
+  
+  Agent Statuses: STARTING_UP (Agent initializing), ACTIVE (Agent running), PAUSED (Agent paused), COMPLETED (Agent finished), FAILED (Agent error)
+  
+  Message Roles: SYSTEM (System messages), AGENT (Agent responses), USER (User messages), TOOL (Tool outputs), STATUS (Status updates)
+  
+  RLS Policies: All users can only access data where userId = auth.uid()::text
+  
+  Database Migrations:
+  ALWAYS use Prisma migrations to update the database schema. Never manually run SQL.
+  Step 1: Edit /back-end/prisma/schema.prisma
+  Step 2 (Development): cd back-end && npm run prisma:migrate:dev -- --name your_migration_name (Creates migration in prisma/migrations/, applies to database, regenerates Prisma Client)
+  Step 3 (Production): cd back-end && npm run prisma:migrate (Applies pending migrations in production - used in render.yaml)
+  
+  Public Endpoints: Some tables don't need RLS because they're accessed via backend API. Example - Waitlist: No RLS policy needed, Backend API (POST /api/waitlist) is public, Backend validates and sanitizes all inputs
+  
+  When adding public endpoints: 1. Add model to Prisma schema (without RLS), 2. Create migration: npm run prisma:migrate:dev -- --name add_table_name, 3. Add route in /back-end/src/routes/, 4. Register in server.ts BEFORE authenticated routes, 5. Test endpoint with curl or seed script
+  
+  Seeding Data: Test endpoints by hitting them (recommended): cd back-end && npm run seed:waitlist (Tests API endpoint, validates business logic, ensures CORS is configured, catches errors early). Alternative - Direct Prisma seeding: cd back-end && npm run prisma:seed (Runs prisma/seed.ts)
+  
+  Migration Files: Located in /back-end/prisma/migrations/, Never edit existing migrations, Never delete migrations that have been deployed, Migration names: YYYYMMDDHHMMSS_description/migration.sql
+  
+  Prisma Studio (GUI): View/edit database directly: cd back-end && npm run prisma:studio (Opens at http://localhost:5555)
+  
+  Environment Variables:
+  DATABASE_URL=postgresql://postgres.kzlurqihzaolhzsbkctf:PASSWORD@aws-1-us-east-2.pooler.supabase.com:5432/postgres
+  SUPABASE_URL=https://kzlurqihzaolhzsbkctf.supabase.co
+  OPENAI_API_KEY=sk-proj-...
+  ALLOWED_ORIGINS=http://localhost:8080,https://hinavi.ai
+  PORT=3001
+  NODE_ENV=development
+  
+  URL Handling (CRITICAL): Always normalize base URLs. Problem: Double slashes (//api/models) break URLs. Solution: Always strip trailing slashes from base URLs before concatenating paths.
+  
+  Testing:
+  Backend Authentication Test: cd back-end && ./test-auth.sh
+  Manual Test with Token: cd back-end && ./test-auth-manual.sh ACCESS_TOKEN
+  
+  Cleanup All Agents and Workers: cd back-end && npm run cleanup:all (Kills any local Python workers, finds all non-deleted agents, terminates Temporal workflows, soft-deletes agents). Environment variable: TEST_TASK_QUEUE (defaults to navi-agent-tasks-quicktest). Use when: Starting fresh after testing, cleaning up before deployment, workers are stuck/misbehaving, orphaned agents in database
+  
+  Key Files:
+  - back-end/src/server.ts (Main Express server - REST API only)
+  - back-end/src/middleware/auth.ts (JWKS authentication)
+  - back-end/prisma/schema.prisma (Database schema)
+  - back-end/prisma/migrations/enable_rls.sql (RLS policies)
+  - back-end/test-auth.sh (Automated auth test)
+
+apply:
+  when: always
+---

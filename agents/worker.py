@@ -22,12 +22,7 @@ if not os.getenv("BACKEND_API_KEY"):
 from config import load_config
 from workflows import AgentWorkflow
 # User-configurable tools
-from tools import (
-    send_sms,
-    list_contacts,
-    web_search,
-    accomplish_web_task,
-)
+from tools import web_search, deep_research
 from tools.spawn_sub_agents import spawn_sub_agents
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
@@ -38,6 +33,7 @@ from helpers import (
     check_progress,
     update_agent_status,
     compress_context,
+    generate_completion_summary,
     get_model_context_window,
     fetch_agent_tools,
     query_blueprints,
@@ -112,10 +108,8 @@ async def main():
             AgentWorkflow
         ],
         activities=[
-            send_sms,
-            list_contacts,
             web_search,
-            accomplish_web_task,
+            deep_research,
             spawn_sub_agents,
             poll_new_messages,
             post_agent_message,
@@ -124,6 +118,7 @@ async def main():
             check_progress,
             update_agent_status,
             compress_context,
+            generate_completion_summary,
             get_model_context_window,
             fetch_agent_tools,
             query_blueprints,

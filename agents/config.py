@@ -55,19 +55,19 @@ class OpenRouterConfig:
 
 
 @dataclass
-class TwilioConfig:
-    """Twilio configuration for SMS (optional - only needed if using SMS tool)."""
+class OpenAIConfig:
+    """OpenAI configuration for web search."""
     
-    account_sid: Optional[str] = None
-    auth_token: Optional[str] = None
-    phone_number: Optional[str] = None
+    api_key: str
+    model: str = "gpt-4.1"  # GPT-4.1 with web search capability
 
 
 @dataclass
-class SearchConfig:
-    """Web search configuration."""
+class PerplexityConfig:
+    """Perplexity configuration for deep research."""
     
-    serper_api_key: str  # Required - using Serper API
+    api_key: str
+    model: str = "sonar-deep-research"
 
 
 @dataclass
@@ -77,8 +77,8 @@ class AppConfig:
     temporal: TemporalConfig
     backend: BackendConfig
     openrouter: OpenRouterConfig
-    twilio: TwilioConfig
-    search: SearchConfig
+    openai: OpenAIConfig
+    perplexity: PerplexityConfig
     
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -123,22 +123,22 @@ def load_config() -> AppConfig:
         model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4-turbo-preview"),
     )
     
-    twilio = TwilioConfig(
-        account_sid=os.getenv("TWILIO_ACCOUNT_SID"),
-        auth_token=os.getenv("TWILIO_AUTH_TOKEN"),
-        phone_number=os.getenv("TWILIO_PHONE_NUMBER"),
+    openai = OpenAIConfig(
+        api_key=os.environ["OPENAI_API_KEY"],
+        model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
     )
     
-    search = SearchConfig(
-        serper_api_key=os.environ["SERPER_API_KEY"],
+    perplexity = PerplexityConfig(
+        api_key=os.environ["PERPLEXITY_API_KEY"],
+        model=os.getenv("PERPLEXITY_MODEL", "sonar-deep-research"),
     )
     
     return AppConfig(
         temporal=temporal,
         backend=backend,
         openrouter=openrouter,
-        twilio=twilio,
-        search=search,
+        openai=openai,
+        perplexity=perplexity,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

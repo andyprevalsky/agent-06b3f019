@@ -41,9 +41,10 @@ async def fetch_agent_tools(agent_id: str) -> List[Dict[str, str]]:
             agent = data.get("agent", {})
             tools = agent.get("tools", [])
             
-            # Extract name and description
+            # Extract id, name, and description
             tool_list = [
                 {
+                    "id": tool.get("id"),
                     "name": tool.get("name"),
                     "description": tool.get("description", "No description available")
                 }

@@ -36,7 +36,8 @@ async def mark_finished(
     context_size: int = 0,
     message_count: int = 0,
     tokens_in: int = 0,
-    tokens_out: int = 0
+    tokens_out: int = 0,
+    summary: str = ""
 ) -> Dict:
     """
     Activity: Mark an agent task as finished.
@@ -51,9 +52,10 @@ async def mark_finished(
         message_count: Total messages
         tokens_in: Input tokens (prompt)
         tokens_out: Output tokens (completion)
+        summary: Summary of work completed (for sub-agents to return to parent)
         
     Returns:
-        Dict with completion details
+        Dict with completion details including summary
     """
     try:
         activity.heartbeat("Marking task as finished")
@@ -92,10 +94,11 @@ async def mark_finished(
             "agent_id": agent_id,
             "goal": goal,
             "steps_count": len(steps_taken),
-            "completed_at": datetime.utcnow().isoformat()
+            "completed_at": datetime.utcnow().isoformat(),
+            "summary": summary  # Include summary for parent signaling
         }
         
-        logger.info("Task marked as finished", **result)
+        logger.info("Task marked as finished", agent_id=agent_id, goal=goal[:50], has_summary=bool(summary))
         
         return result
         

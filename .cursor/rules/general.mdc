@@ -1,0 +1,26 @@
+---
+description: >
+  GENERAL DEVELOPMENT RULES - Navi Whisper Lux
+  
+  Documentation:
+  - NEVER create .md files unless explicitly requested - This means NO .md files, period
+  - No TEMPORAL_INTEGRATION.md, QUICK_TEST.md, SUMMARY.md, or any other .md files
+  - Code should be self-documenting - Write clear code, not docs about the code
+  - Update ONLY .cursor/rules/*.mdc files - If you need to document something, update rule files
+  - No completion reports, summaries, guides, or how-to docs - I'll ask if I want to know something
+  - Focus on shipping code - Not documentation about code
+  
+  Code Quality:
+  - Do not add unnecessary fallbacks to fix issues; fix the implementation for simpler, more elegant solutions
+  - This does not apply for retry fallbacks when sensible
+  
+  API Testing (MANDATORY):
+  - When adding ANY new backend API endpoint, you MUST add a corresponding test to /back-end/src/tests/api-test-suite.ts
+  - Tests must validate: HTTP status codes, response structure, authentication/authorization, and error handling
+  - Add tests to the appropriate group: publicTests, authTests, agentWorkflowTests, or blueprintWorkflowTests
+  - Run `npm run test:api` to verify all tests pass
+  - Pre-commit hook will automatically run all tests and block commits if any fail
+
+apply:
+  when: always
+---

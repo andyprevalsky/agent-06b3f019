@@ -1,4 +1,6 @@
 import type { Config } from "tailwindcss";
+import tailwindcssAnimate from "tailwindcss-animate";
+import tailwindcssTypography from "@tailwindcss/typography";
 
 export default {
 	darkMode: ["class"],
@@ -27,9 +29,11 @@ export default {
 				surface: 'hsl(var(--surface))',
 				'surface-elevated': 'hsl(var(--surface-elevated))',
 				'navi-black': '#272725',
+				'navi-black-alt': '#191A1A',
 				'navi-light-black': '#323230',
 				'navi-light-light-black': '#3d3d3b',
 				'navi-white': '#f5f5f5',
+				'navi-white-alt': '#E8E8E2',
 				'navi-white-dark': '#e5e5e5',
 				primary: {
 					DEFAULT: 'hsl(var(--primary))',
@@ -131,5 +135,8 @@ export default {
 			}
 		}
 	},
-	plugins: [require("tailwindcss-animate")],
+	plugins: [
+		tailwindcssAnimate,
+		tailwindcssTypography,
+	],
 } satisfies Config;
