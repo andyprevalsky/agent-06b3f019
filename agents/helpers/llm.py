@@ -221,12 +221,20 @@ class DeepResearchTool(BaseModel):
     max_tokens: Optional[int] = Field(default=4000, description="Maximum tokens for response")
 
 
+class BuyItemFromAmazonTool(BaseModel):
+    """Tool for searching and buying items from Amazon."""
+    tool: Literal["buy_item_from_amazon"]
+    item_search_query: str = Field(description="What to search for on Amazon (e.g., 'wooden shower bench', 'wireless headphones')")
+    item_qualifications: Optional[str] = Field(default=None, description="Natural language description of qualities that matter (e.g., 'under $100, highly rated, many reviews', 'best value, waterproof, has storage', 'premium quality, fast shipping'). If not provided, selects best overall product.")
+
+
 # Map tool names to their Pydantic models
 # Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
     "wait_seconds": WaitSecondsTool,
     "web_search": WebSearchTool,
     "deep_research": DeepResearchTool,
+    "buy_item_from_amazon": BuyItemFromAmazonTool,
 }
 
 

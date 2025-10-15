@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, Plus, LogOut, Filter } from 'lucide-react';
+import { Loader2, Plus, LogOut, Filter, Settings as SettingsIcon } from 'lucide-react';
 import { supabase, signOut, getCurrentUser } from '@/lib/supabase';
 import {
   getAllAgents,
@@ -23,6 +23,7 @@ import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
 import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
+import Settings from '@/pages/Settings';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
@@ -105,7 +106,10 @@ export default function Terminal() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [user, setUser] = useState<any>(null);
-  
+
+  // View state - which pane to show
+  const [currentView, setCurrentView] = useState<'agents' | 'settings'>('agents');
+
   // Agent list state
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isLoadingAgents, setIsLoadingAgents] = useState(true);
@@ -568,6 +572,7 @@ export default function Terminal() {
   };
 
   const handleSelectAgent = (agentId: string) => {
+    setCurrentView('agents');
     setSelectedAgentId(agentId);
     loadAgentDetail(agentId);
   };
@@ -575,6 +580,7 @@ export default function Terminal() {
   const handleCreateAgent = async (data: CreateAgentPayload) => {
     const newAgent = await createAgentAPI(data);
     await loadAgents();
+    setCurrentView('agents');
     setSelectedAgentId(newAgent.agent_id);
     loadAgentDetail(newAgent.agent_id);
   };
@@ -758,8 +764,19 @@ export default function Terminal() {
             </div>
           </ScrollArea>
 
-          {/* Logout Button */}
-          <div className="p-4 border-t border-border dark:border-navi-light-black">
+          {/* Settings and Logout Buttons */}
+          <div className="p-4 border-t border-border dark:border-navi-light-black space-y-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setCurrentView('settings');
+                setSelectedAgentId(null);
+              }}
+              className="w-full justify-start"
+            >
+              <SettingsIcon className="h-4 w-4 mr-2" />
+              Settings
+            </Button>
             <Button
               variant="outline"
               onClick={handleLogout}
@@ -826,13 +843,18 @@ export default function Terminal() {
           )}
 
           {/* Main Content Area */}
-          <ScrollArea className="flex-1 px-6 py-4" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-            {/* Spacer for breadcrumb when viewing sub-agent */}
-            {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
-              <div className="h-14" />
-            )}
-            
-            {(!selectedAgentId || isLoadingAgent || agentDetail?.status === 'STARTING_UP') && !(agentDetail?.status === 'PAUSED' || agentDetail?.status === 'ACTIVE' || agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED') ? (
+          {currentView === 'settings' ? (
+            // Settings View
+            <Settings />
+          ) : (
+            <>
+            <ScrollArea className="flex-1 px-6 py-4" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              {/* Spacer for breadcrumb when viewing sub-agent */}
+              {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
+                <div className="h-14" />
+              )}
+              
+              {(!selectedAgentId || isLoadingAgent || agentDetail?.status === 'STARTING_UP') && !(agentDetail?.status === 'PAUSED' || agentDetail?.status === 'ACTIVE' || agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED') ? (
               // Show ASCII animation when: no agent selected, loading agent, or agent starting up (but not when paused/active/completed/failed)
               <div className="flex items-center justify-center h-full">
                 <div className="text-center space-y-6">
@@ -928,6 +950,8 @@ export default function Terminal() {
                 restartThreshold={Math.round(getModelContextWindow(agentDetail.model, models) * 0.8)}
               />
             </div>
+          )}
+          </>
           )}
         </main>
       </div>

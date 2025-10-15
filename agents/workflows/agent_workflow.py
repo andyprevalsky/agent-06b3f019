@@ -18,6 +18,9 @@ with workflow.unsafe.imports_passed_through():
         deep_research,
         deep_research_pre,
         deep_research_post,
+        buy_item_from_amazon,
+        buy_item_from_amazon_pre,
+        buy_item_from_amazon_post,
     )
     from tools.request_user_attention import (
         request_user_attention,
@@ -82,6 +85,10 @@ TOOL_FORMATTERS = {
     "deep_research": {
         "pre": deep_research_pre,
         "post": deep_research_post
+    },
+    "buy_item_from_amazon": {
+        "pre": buy_item_from_amazon_pre,
+        "post": buy_item_from_amazon_post
     },
     "request_user_attention": {
         "pre": request_user_attention_pre,
@@ -1231,6 +1238,7 @@ class AgentWorkflow:
         activity_map = {
             "web_search": web_search,
             "deep_research": deep_research,
+            "buy_item_from_amazon": buy_item_from_amazon,
         }
         
         activity_fn = activity_map.get(tool)
@@ -1249,6 +1257,12 @@ class AgentWorkflow:
         elif tool == "deep_research":
             # Pass query and max_tokens (with default if not provided)
             activity_args = [tool_call.get("query"), tool_call.get("max_tokens", 4000)]
+        elif tool == "buy_item_from_amazon":
+            # Pass item_search_query and item_qualifications
+            activity_args = [
+                tool_call.get("item_search_query"),
+                tool_call.get("item_qualifications"),
+            ]
         else:
             # Fallback to args if present (for backward compatibility)
             activity_args = args

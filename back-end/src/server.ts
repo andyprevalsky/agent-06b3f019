@@ -9,6 +9,7 @@ import waitlistRouter from './routes/waitlist';
 import blueprintsRouter from './routes/blueprints';
 import modelsRouter from './routes/models';
 import attentionRequestsRouter from './routes/attentionRequests';
+import userSettingsRouter from './routes/userSettings';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -85,6 +86,7 @@ app.use('/api/tools', toolsRouter);  // Tools list is public read
 app.use('/api/agents', agentsRouter);
 app.use('/api/blueprints', authenticate, blueprintsRouter);
 app.use('/api/attention-requests', attentionRequestsRouter);
+app.use('/api/user-settings', userSettingsRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware

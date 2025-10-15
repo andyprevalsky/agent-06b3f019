@@ -4,6 +4,7 @@ from .web_search import web_search, format_pre_message as web_search_pre, format
 from .deep_research import deep_research, format_pre_message as deep_research_pre, format_post_message as deep_research_post
 from .wait_seconds import format_pre_message as wait_seconds_pre, format_post_message as wait_seconds_post
 from .request_user_attention import request_user_attention, format_pre_message as request_user_attention_pre, format_post_message as request_user_attention_post
+from .amazon_shopping import buy_item_from_amazon, format_pre_message as buy_item_from_amazon_pre, format_post_message as buy_item_from_amazon_post
 
 __all__ = [
     "web_search",
@@ -17,5 +18,8 @@ __all__ = [
     "request_user_attention",
     "request_user_attention_pre",
     "request_user_attention_post",
+    "buy_item_from_amazon",
+    "buy_item_from_amazon_pre",
+    "buy_item_from_amazon_post",
 ]
 

@@ -159,3 +159,24 @@ model AgentAttentionRequest {
   @@index([userId])
   @@index([workflowId])
 }
+
+model User {
+  id           String   @id @default(uuid())
+  userId       String   @unique // Supabase auth ID
+  
+  // User Info
+  name         String?  // Full name
+  
+  // Shipping Address
+  addressLine1 String?  // Street address
+  addressLine2 String?  // Apt, suite, unit, etc.
+  city         String?
+  state        String?  // State/Province
+  postalCode   String?  // ZIP/Postal code
+  country      String?  @default("United States")
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId])
+}

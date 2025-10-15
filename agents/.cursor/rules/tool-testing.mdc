@@ -1,0 +1,316 @@
+---
+description: >
+  Agent Tools Testing Requirements
+  
+  All agent tools MUST have corresponding tests. When creating or modifying agent tools, you MUST create/update tests to maintain code quality and prevent regressions.
+  
+  Test location: agents/tests/test_<tool_name>.py
+  
+  Required coverage:
+  1. Activity/function logic with mocking (REQUIRED)
+  2. format_pre_message() formatter (REQUIRED)
+  3. format_post_message() formatter - success (REQUIRED)
+  4. format_post_message() formatter - error (REQUIRED)
+  5. Error handling (REQUIRED)
+  
+  Use unittest.mock to mock external dependencies (HTTP calls, LLM calls, database, etc.)
+
+apply:
+  when: always
+---
+
+# Agent Tools Testing Requirements
+
+## Rule: All agent tools MUST have corresponding tests
+
+When creating or modifying agent tools, you MUST create/update tests to maintain code quality and prevent regressions.
+
+## Test Location
+
+All tests should be in `agents/tests/` with the naming convention `test_<tool_name>.py`
+
+```
+agents/
+  tools/
+    my_tool.py
+  tests/
+    test_my_tool.py  ← Test file here
+    run_all_tests.py
+    README.md
+```
+
+## What to Test
+
+### 1. Message Formatters (Required)
+
+Every tool MUST have tests for its formatters:
+
+```python
+def test_format_pre_message():
+    """Test pre-message formatting."""
+    tool_call = {"param1": "value1", "param2": "value2"}
+    result = format_pre_message(tool_call)
+    
+    assert "title" in result
+    assert "message" in result
+    assert "expected content" in result["title"] or result["message"]
+    
+    print("✅ test_format_pre_message passed")
+
+
+def test_format_post_message():
+    """Test post-message formatting."""
+    tool_call = {"param": "value"}
+    result_data = {"result": "success"}
+    
+    result = format_post_message(tool_call, result_data)
+    
+    assert "title" in result
+    assert "message" in result
+    
+    print("✅ test_format_post_message passed")
+```
+
+### 2. Core Functionality (Required - with mocking)
+
+Test the tool's main logic using mocks to avoid external dependencies:
+
+```python
+from unittest.mock import AsyncMock, patch, MagicMock
+
+async def test_my_activity():
+    """Test activity with mocked external calls."""
+    # Mock external dependencies
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"data": "test"}
+    
+    with patch('httpx.AsyncClient') as mock_client:
+        mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
+        
+        with patch('temporalio.activity.heartbeat'):
+            result = await my_activity("test input")
+        
+        assert "data" in result
+        assert result["data"] == "test"
+    
+    print("✅ test_my_activity passed")
+```
+
+### 3. Error Handling (Required)
+
+Test error cases and edge cases:
+
+```python
+async def test_activity_failure():
+    """Test activity error handling."""
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    
+    with patch('httpx.AsyncClient') as mock_client:
+        mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
+        
+        with patch('temporalio.activity.heartbeat'):
+            result = await my_activity("test")
+        
+        # Check graceful error handling
+        assert "error" in result or result == []
+    
+    print("✅ test_activity_failure passed")
+```
+
+## Test Template
+
+Use this template when creating new tool tests:
+
+```python
+"""Test your_tool tool."""
+
+import asyncio
+from dotenv import load_dotenv
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, patch, MagicMock
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+load_dotenv()
+
+from tools.your_tool import your_activity, format_pre_message, format_post_message
+
+
+async def test_activity_success():
+    """Test activity with mocked calls."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"result": "success"}
+    
+    with patch('httpx.AsyncClient') as mock_client:
+        mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
+        
+        with patch('temporalio.activity.heartbeat'):
+            result = await your_activity("test input")
+        
+        assert "result" in result
+        assert result["result"] == "success"
+    
+    print("✅ test_activity_success passed")
+
+
+async def test_activity_failure():
+    """Test activity error handling."""
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    
+    with patch('httpx.AsyncClient') as mock_client:
+        mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
+        
+        with patch('temporalio.activity.heartbeat'):
+            result = await your_activity("test")
+        
+        # Verify graceful error handling
+        assert result == [] or "error" in result
+    
+    print("✅ test_activity_failure passed")
+
+
+def test_format_pre_message():
+    """Test pre-message formatting."""
+    tool_call = {"param": "test"}
+    result = format_pre_message(tool_call)
+    
+    assert "title" in result
+    assert "message" in result
+    print("✅ test_format_pre_message passed")
+
+
+def test_format_post_message_success():
+    """Test post-message formatting."""
+    tool_call = {"param": "test"}
+    result_data = {"result": "success"}
+    result = format_post_message(tool_call, result_data)
+    
+    assert "title" in result
+    assert "message" in result
+    print("✅ test_format_post_message_success passed")
+
+
+def test_format_post_message_error():
+    """Test post-message formatting with error."""
+    tool_call = {"param": "test"}
+    result_data = "Error: Test error"
+    result = format_post_message(tool_call, result_data)
+    
+    assert "title" in result
+    assert "message" in result
+    print("✅ test_format_post_message_error passed")
+
+
+async def run_all_tests():
+    """Run all tests."""
+    print("\n" + "="*60)
+    print("🧪 TESTING YOUR_TOOL")
+    print("="*60 + "\n")
+    
+    try:
+        # Async tests for activities
+        await test_activity_success()
+        await test_activity_failure()
+        
+        # Sync tests for formatters
+        test_format_pre_message()
+        test_format_post_message_success()
+        test_format_post_message_error()
+        
+        print("\n✅ All your_tool tests passed!")
+        return True
+    except Exception as e:
+        print(f"\n❌ Test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+if __name__ == "__main__":
+    success = asyncio.run(run_all_tests())
+    sys.exit(0 if success else 1)
+```
+
+## Mocking Best Practices
+
+1. **Mock external HTTP calls:**
+   ```python
+   with patch('httpx.AsyncClient') as mock_client:
+       mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
+   ```
+
+2. **Mock LLM calls:**
+   ```python
+   with patch('helpers.llm.call_llm_structured', new_callable=AsyncMock) as mock_llm:
+       mock_llm.return_value = (mock_result, mock_usage)
+   ```
+
+3. **Mock Temporal activity heartbeat:**
+   ```python
+   with patch('temporalio.activity.heartbeat'):
+       result = await my_activity()
+   ```
+
+4. **Mock config:**
+   ```python
+   with patch('tools.my_tool.load_config') as mock_config:
+       config_mock = MagicMock()
+       config_mock.backend.api_key = "test-key"
+       mock_config.return_value = config_mock
+   ```
+
+## Running Tests
+
+### Run All Tests
+```bash
+cd agents/tests
+python run_all_tests.py
+```
+
+### Run Individual Test
+```bash
+cd agents/tests
+python test_your_tool.py
+```
+
+### Pre-commit Hook
+Tests automatically run before commits. Set up with:
+```bash
+cd agents/tests
+./setup-pre-commit.sh
+```
+
+## Test Coverage Requirements
+
+Minimum required coverage for each tool:
+- ✅ Activity/function logic - REQUIRED (with mocking)
+- ✅ `format_pre_message()` - REQUIRED
+- ✅ `format_post_message()` - REQUIRED (success case)
+- ✅ `format_post_message()` - REQUIRED (error case)
+- ✅ Error handling - REQUIRED
+
+## Examples
+
+See these files for reference:
+- `agents/tests/test_web_search.py` - Full coverage with real API calls
+- `agents/tests/test_amazon_shopping.py` - Activity testing with mocks
+- `agents/tests/test_knowledge_base.py` - HTTP mocking
+- `agents/tests/test_spawn_sub_agents.py` - Complex mocking
+- `agents/tests/README.md` - Complete testing documentation
+
+## Pre-commit Checks
+
+Before committing:
+1. ✅ Created test file in `agents/tests/test_<tool_name>.py`
+2. ✅ Tested activity/function logic with mocks
+3. ✅ Tested all formatters
+4. ✅ Tested error cases
+5. ✅ Added import to `run_all_tests.py`
+6. ✅ Added test execution to appropriate runner function
+7. ✅ Ran `python run_all_tests.py` and all tests passed
