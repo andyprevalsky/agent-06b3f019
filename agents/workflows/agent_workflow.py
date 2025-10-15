@@ -19,6 +19,11 @@ with workflow.unsafe.imports_passed_through():
         deep_research_pre,
         deep_research_post,
     )
+    from tools.request_user_attention import (
+        request_user_attention,
+        format_pre_message as request_user_attention_pre,
+        format_post_message as request_user_attention_post,
+    )
     # Sub-agent spawning
     from tools.spawn_sub_agents import spawn_sub_agents
     # Tool formatters
@@ -77,6 +82,10 @@ TOOL_FORMATTERS = {
     "deep_research": {
         "pre": deep_research_pre,
         "post": deep_research_post
+    },
+    "request_user_attention": {
+        "pre": request_user_attention_pre,
+        "post": request_user_attention_post
     }
 }
 
@@ -103,6 +112,11 @@ SYSTEM_TOOLS = [
         "id": "system-spawn-sub-agents",
         "name": "spawn_sub_agents",
         "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Each sub-agent runs independently with its own goal, model, tools, and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_effort (optional), tool_ids (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
+    },
+    {
+        "id": "system-request-user-attention",
+        "name": "request_user_attention",
+        "description": "Ask the User a direct question when you need clarification, preferences, decisions, or information that only they can provide. Do NOT use this for factual information that can be found via web_search or other tools - only use when the User's personal input is required."
     },
 ]
 
@@ -166,6 +180,25 @@ class AgentWorkflow:
         """Resume workflow execution (instant via signal)."""
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
+    
+    @workflow.signal
+    async def receive_user_response(self, response: str):
+        """
+        Receive user response to an attention request.
+        Posts the response as a USER message which unblocks the workflow.
+        
+        Args:
+            response: The user's response text
+        """
+        workflow.logger.info("💬 Received user response", response_length=len(response))
+        
+        # Post the user's response as a USER message
+        # _post_message will also add it to self.context with the correct format
+        await self._post_message(
+            response,
+            "USER",
+            metadata=None
+        )
     
     @workflow.signal
     async def child_progress(self, data: dict):
@@ -1170,6 +1203,30 @@ class AgentWorkflow:
             except Exception as e:
                 raise ValueError(f"spawn_sub_agents failed: {str(e)}")
         
+        # Special handling for request_user_attention: create request + wait for signal
+        if tool == "request_user_attention":
+            try:
+                # Get question and context from tool_call dict
+                question = tool_call.get("question", "")
+                context = tool_call.get("context")
+                
+                if not question:
+                    raise ValueError("request_user_attention requires a question")
+                
+                workflow.logger.info(f"🔔 Requesting user attention: {question[:100]}")
+                
+                # Call the workflow function (handles activity + wait_condition internally)
+                # This will create the attention request and wait for the signal
+                result = await request_user_attention(question, context)
+                
+                workflow.logger.info(f"✓ User response received, continuing workflow")
+                
+                # Return result for formatter (signal already posted the message)
+                return result
+                
+            except Exception as e:
+                raise ValueError(f"request_user_attention failed: {str(e)}")
+        
         # Map tool to activity (for all non-system tools)
         activity_map = {
             "web_search": web_search,
@@ -1256,6 +1313,42 @@ class AgentWorkflow:
             # Include all messages in blueprint (USER, ASSISTANT, TOOL, SYSTEM)
             steps = self.context
             
+            # Generate completion summary for ALL agents (before blueprint so it's included)
+            workflow.logger.info("📝 Generating completion summary")
+            summary_result = await workflow.execute_activity(
+                generate_completion_summary,
+                args=[self.context, self.goal, self.model],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(seconds=2),
+                    maximum_interval=timedelta(seconds=16)
+                )
+            )
+            summary = summary_result.get("summary", "")
+            
+            # Track tokens from summary generation LLM call
+            summary_usage = summary_result.get("usage", {})
+            self.tokens_in += summary_usage.get("prompt_tokens", 0)
+            self.tokens_out += summary_usage.get("completion_tokens", 0)
+            self.token_count += summary_usage.get("total_tokens", 0)
+            
+            workflow.logger.info(
+                "Summary generated",
+                summary_length=len(summary),
+                tokens_used=summary_usage.get("total_tokens", 0)
+            )
+            
+            # Post summary as ASSISTANT message to agent's own context
+            if summary:
+                await self._post_message(
+                    summary,
+                    "ASSISTANT",
+                    metadata={"isFinalSummary": True}
+                )
+                workflow.logger.info("Posted final summary to agent context")
+            
             # Get formatter
             formatter = ACTIVITY_FORMATTERS.get("save_blueprint", {})
             
@@ -1309,36 +1402,8 @@ class AgentWorkflow:
                 }
             )
             
-            # Generate completion summary (for sub-agents to return to parent)
-            summary = ""
-            if self.parent_workflow_id:
-                workflow.logger.info("📝 Generating completion summary for parent")
-                summary_result = await workflow.execute_activity(
-                    generate_completion_summary,
-                    args=[self.context, self.goal, self.model],
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3,
-                        backoff_coefficient=2.0,
-                        initial_interval=timedelta(seconds=2),
-                        maximum_interval=timedelta(seconds=16)
-                    )
-                )
-                summary = summary_result.get("summary", "")
-                
-                # Track tokens from summary generation LLM call
-                summary_usage = summary_result.get("usage", {})
-                self.tokens_in += summary_usage.get("prompt_tokens", 0)
-                self.tokens_out += summary_usage.get("completion_tokens", 0)
-                self.token_count += summary_usage.get("total_tokens", 0)
-                
-                workflow.logger.info(
-                    "Summary generated",
-                    summary_length=len(summary),
-                    tokens_used=summary_usage.get("total_tokens", 0)
-                )
-            
             # Mark as finished in the database (with updated token counts including summary)
+            # Note: summary is already generated above before blueprint saving
             finish_result = await workflow.execute_activity(
                 mark_finished,
                 args=[
@@ -1349,7 +1414,7 @@ class AgentWorkflow:
                     len(self.context),
                     self.tokens_in,
                     self.tokens_out,
-                    summary  # Pass summary for sub-agents
+                    summary if self.parent_workflow_id else ""  # Pass summary only for sub-agents
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(

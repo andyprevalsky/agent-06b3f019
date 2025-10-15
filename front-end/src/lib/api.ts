@@ -265,3 +265,58 @@ export async function updateAgent(
   return data.agent;
 }
 
+// Attention Requests
+export interface AttentionRequest {
+  id: string;
+  agent_id: string;
+  workflow_id: string;
+  question: string;
+  context?: any;
+  user_response?: string | null;
+  created_at: string;
+  updated_at: string;
+  answered: boolean;
+}
+
+// Check and respond to pending attention request for agent
+export async function checkAndRespondToAttentionRequest(
+  agentId: string,
+  response: string
+): Promise<boolean> {
+  const headers = await getAuthHeaders();
+  
+  // Get pending requests
+  const requestsResponse = await fetch(`${API_BASE_WITH_PATH}/attention-requests`, {
+    headers,
+  });
+
+  if (!requestsResponse.ok) {
+    return false;
+  }
+
+  const data = await requestsResponse.json();
+  const pendingRequest = data.requests?.find(
+    (r: AttentionRequest) => r.agent_id === agentId && !r.answered
+  );
+
+  if (!pendingRequest) {
+    return false;
+  }
+
+  // Respond to the request
+  const respondResponse = await fetch(
+    `${API_BASE_WITH_PATH}/attention-requests/${pendingRequest.id}/respond`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ response }),
+    }
+  );
+
+  if (!respondResponse.ok) {
+    throw new Error('Failed to respond to attention request');
+  }
+
+  return true;
+}
+

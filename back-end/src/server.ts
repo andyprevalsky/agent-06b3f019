@@ -8,6 +8,7 @@ import toolsRouter from './routes/tools';
 import waitlistRouter from './routes/waitlist';
 import blueprintsRouter from './routes/blueprints';
 import modelsRouter from './routes/models';
+import attentionRequestsRouter from './routes/attentionRequests';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -83,6 +84,7 @@ app.use('/api/tools', toolsRouter);  // Tools list is public read
 // Note: Each router handles its own auth per-route
 app.use('/api/agents', agentsRouter);
 app.use('/api/blueprints', authenticate, blueprintsRouter);
+app.use('/api/attention-requests', attentionRequestsRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware

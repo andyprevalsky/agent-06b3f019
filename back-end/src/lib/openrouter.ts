@@ -10,15 +10,25 @@ export const openrouter = new OpenAI({
 });
 
 export async function generateLLMJudgePrompt(goal: string): Promise<string> {
-  const systemPrompt = `You are an expert at creating LLM judge prompts. Your task is to generate a judge prompt based on an agent's goal that adheres to best practices for LLM judges that return scores from 0 to 1.
+  const systemPrompt = `You are an expert at creating LLM judge prompts for evaluating a SUPER-INTELLIGENT AUTONOMOUS SYSTEM capable of solving ANY problem with enough persistence, creativity, and effort.
 
-Best practices:
-1. The prompt should clearly instruct the judge to return a float between 0 and 1
-2. It should define what 0 means (failure/worst) and what 1 means (success/best)
-3. It should be specific about evaluation criteria based on the goal
-4. It should request ONLY the numeric score, no explanation
-5. It should be clear and unambiguous
-6. It should evaluate whether the goal was achieved
+CRITICAL CONTEXT: You are generating a judge prompt for an AI agent system that:
+- Has access to tools like web search, research, spawning sub-agents, and more
+- Can coordinate complex multi-step tasks across parallel sub-agents
+- Can ask the user for clarification when needed
+- Should NEVER be considered "done" just because it's an AI or the task seems hard
+- Can solve problems that require real-world action, creativity, and unlimited persistence
+
+Your judge prompt MUST be EXTREMELY STRICT and should:
+1. Clearly instruct the judge to return a float between 0.0 and 1.0
+2. Define what 0.0 means (no progress/not started) and what 1.0 means (goal COMPLETELY achieved, not just "attempted" or "explained")
+3. Be VERY specific about what constitutes actual completion vs. just planning or explanation
+4. REJECT partial completions, explanations, or "I would do X" responses - only ACTUAL results count
+5. Make it clear that the system is SUPER-INTELLIGENT and can solve the goal if given enough effort
+6. Emphasize that 1.0 should ONLY be given when the goal is FULLY accomplished, not when the agent has "done what an AI can do"
+7. Be unambiguous: the agent must produce REAL, CONCRETE, VERIFIABLE results
+
+IMPORTANT: Do NOT make excuses for the AI. Do NOT accept "as an AI, I cannot..." as a valid completion. This system CAN solve the goal through persistence, creativity, tool use, and coordination.
 
 Return ONLY the judge prompt text, nothing else.`;
 
@@ -28,12 +38,12 @@ Return ONLY the judge prompt text, nothing else.`;
       { role: 'system', content: systemPrompt },
       {
         role: 'user',
-        content: `Generate an LLM judge prompt for an agent with this goal:\n\n${goal}`,
+        content: `Generate a STRICT LLM judge prompt for a super-intelligent autonomous agent system with this goal:\n\n${goal}`,
       },
     ],
     temperature: 0.3,
   });
 
-  return completion.choices[0].message.content || 'Return a score from 0 to 1 indicating how well the goal was achieved.';
+  return completion.choices[0].message.content || 'Return a score from 0 to 1 indicating how well the goal was achieved. Be EXTREMELY STRICT - only give 1.0 if the goal is COMPLETELY accomplished with verifiable results. This is a super-intelligent system that can solve any problem with enough effort.';
 }
 

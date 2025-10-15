@@ -10,6 +10,7 @@ import {
   createAgent as createAgentAPI,
   postMessage as postMessageAPI,
   resumeAgent,
+  checkAndRespondToAttentionRequest,
   Agent,
   AgentDetail,
   Message,
@@ -21,6 +22,7 @@ import MessageBubble from '@/components/terminal/MessageBubble';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
 import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
+import AttentionInbox from '@/components/terminal/AttentionInbox';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
@@ -610,6 +612,23 @@ export default function Terminal() {
 
     try {
       setIsSendingMessage(true);
+      
+      // Check if there's a pending attention request for this agent and respond to it
+      const respondedToRequest = await checkAndRespondToAttentionRequest(
+        selectedAgentId,
+        messageInput
+      );
+      
+      if (respondedToRequest) {
+        toast({
+          title: 'Response sent',
+          description: 'The agent will continue with your response',
+        });
+        setMessageInput('');
+        return;
+      }
+      
+      // Normal message flow
       await postMessageAPI(selectedAgentId, messageInput);
       // Don't add message here - let Realtime subscription handle it to avoid duplicates
       setMessageInput('');
@@ -678,6 +697,9 @@ export default function Terminal() {
           ></div>
           <span className="text-xl font-semibold tracking-tight">Navi</span>
         </a>
+        
+        {/* Attention Inbox */}
+        <AttentionInbox onSelectAgent={setSelectedAgentId} />
       </header>
 
       <div className="flex-1 flex overflow-hidden">

@@ -150,19 +150,56 @@ class VerifierConfig(BaseModel):
     llm_judge_prompt: str = Field(description="Prompt for the LLM judge to evaluate the agent's performance")
 
 
-class SubAgentConfig(BaseModel):
-    """Configuration for a single sub-agent."""
-    goal: str = Field(description="The goal/task for this sub-agent")
-    model: Optional[str] = Field(None, description="LLM model to use (inherits from parent if not specified)")
-    reasoning_effort: Optional[str] = Field(None, description="Reasoning effort: 'off', 'low', 'medium', 'high'")
-    tool_ids: Optional[List[str]] = Field(default_factory=list, description="List of tool UUIDs this sub-agent can use")
-    verifier: VerifierConfig = Field(description="Verifier config with type='FLOAT_LLM_JUDGE' and llm_judge_prompt")
-
-
-class SpawnSubAgentsTool(BaseModel):
-    """Tool call for spawning multiple sub-agents to work on parallel subtasks."""
-    tool: Literal["spawn_sub_agents"]
-    sub_agents: List[SubAgentConfig] = Field(description="List of sub-agent configurations to spawn")
+def create_sub_agent_config_model(
+    system_tool_names: List[str],
+    available_db_tools: List[Dict[str, str]]
+) -> Type[BaseModel]:
+    """
+    Dynamically create SubAgentConfig with description based on available tools.
+    
+    This ensures the tool_ids description is always up-to-date with:
+    - System tools that sub-agents have by default
+    - DB tools that the parent agent can pass to sub-agents
+    
+    Args:
+        system_tool_names: Names of system tools available to sub-agents (e.g., ['wait_seconds', 'request_user_attention'])
+        available_db_tools: List of DB tools parent has access to (with id, name, description)
+        
+    Returns:
+        Dynamically generated SubAgentConfig class
+    """
+    # Format system tools list
+    system_tools_str = ", ".join(system_tool_names) if system_tool_names else "none"
+    
+    # Build description of DB tools available to pass
+    if available_db_tools:
+        db_tools_list = "\n".join([
+            f'{{\n'
+            f'  "tool_name": "{tool["name"]}",\n'
+            f'  "tool_id": "{tool["id"]}",\n'
+            f'  "tool_description": "{tool["description"]}"\n'
+            f'}}'
+            for tool in available_db_tools
+        ])
+        tool_ids_desc = (
+            f"Optional list of tool IDs to give this sub-agent additional capabilities. "
+            f"By default, sub-agents ONLY have these base system tools: {system_tools_str}. "
+            f"To enable advanced capabilities, you MUST pass the relevant tool IDs from your available tools:\n{db_tools_list}"
+        )
+    else:
+        tool_ids_desc = (
+            f"Optional list of tool IDs. Note: You only have system tools ({system_tools_str}), so sub-agents will be limited to those base capabilities unless you pass additional tool IDs."
+        )
+    
+    class DynamicSubAgentConfig(BaseModel):
+        """Configuration for a single sub-agent."""
+        goal: str = Field(description="The goal/task for this sub-agent")
+        model: Optional[str] = Field(None, description="LLM model to use (inherits from parent if not specified)")
+        reasoning_effort: Optional[str] = Field(None, description="Reasoning effort: 'off', 'low', 'medium', 'high'")
+        tool_ids: Optional[List[str]] = Field(default_factory=list, description=tool_ids_desc)
+        verifier: VerifierConfig = Field(description="Verifier config with type='FLOAT_LLM_JUDGE' and llm_judge_prompt")
+    
+    return DynamicSubAgentConfig
 
 
 class WaitSecondsTool(BaseModel):
@@ -185,8 +222,8 @@ class DeepResearchTool(BaseModel):
 
 
 # Map tool names to their Pydantic models
+# Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
-    "spawn_sub_agents": SpawnSubAgentsTool,
     "wait_seconds": WaitSecondsTool,
     "web_search": WebSearchTool,
     "deep_research": DeepResearchTool,
@@ -265,7 +302,10 @@ def generate_tool_parameter_docs(available_tool_names: List[str]) -> str:
 # Dynamic AgentAction Model Generation
 # ============================================================================
 
-def create_agent_action_model(available_tool_names: List[str]) -> Type[BaseModel]:
+def create_agent_action_model(
+    available_tool_names: List[str],
+    sub_agent_config_model: Optional[Type[BaseModel]] = None
+) -> Type[BaseModel]:
     """
     Dynamically create an AgentAction Pydantic model based on available tools.
     
@@ -276,6 +316,7 @@ def create_agent_action_model(available_tool_names: List[str]) -> Type[BaseModel
     
     Args:
         available_tool_names: List of tool names this agent can use
+        sub_agent_config_model: Optional dynamic SubAgentConfig model (for spawn_sub_agents tool)
         
     Returns:
         Pydantic model class for AgentAction with proper tool union
@@ -283,7 +324,19 @@ def create_agent_action_model(available_tool_names: List[str]) -> Type[BaseModel
     # Build list of tool models for available tools
     tool_types = []
     for name in available_tool_names:
-        if name in TOOL_MODELS:
+        if name == "spawn_sub_agents":
+            # Dynamically create SpawnSubAgentsTool with the provided SubAgentConfig
+            if sub_agent_config_model is None:
+                logger.warning("spawn_sub_agents in available tools but no sub_agent_config_model provided, skipping")
+                continue
+            
+            class SpawnSubAgentsTool(BaseModel):
+                """Tool call for spawning multiple sub-agents to work on parallel subtasks."""
+                tool: Literal["spawn_sub_agents"]
+                sub_agents: List[sub_agent_config_model] = Field(description="List of sub-agent configurations to spawn")
+            
+            tool_types.append(SpawnSubAgentsTool)
+        elif name in TOOL_MODELS:
             tool_types.append(TOOL_MODELS[name])
         else:
             logger.warning(f"Tool '{name}' not found in TOOL_MODELS, skipping")
@@ -523,6 +576,12 @@ async def decide_next_action(
     try:
         activity.heartbeat(f"Deciding next action (iteration {iteration})")
         
+        # Separate system tools from DB tools
+        system_tools = [t for t in available_tools if t['id'].startswith('system-')]
+        db_tools = [t for t in available_tools if not t['id'].startswith('system-')]
+        
+        system_tool_names = [t['name'] for t in system_tools]
+        
         # Build tool list from DB descriptions (including IDs for spawn_sub_agents)
         tools_list = "\n".join([
             f"- {tool['name']} (id: {tool['id']}): {tool['description']}"
@@ -537,6 +596,15 @@ async def decide_next_action(
 You have access to these tools:
 {tools_list}
 
+WHO YOU ARE:
+- You are a super-intelligent organisms capable of solving ANY problem given enough effort, coordination, creativity, and persistence. You are not an AI, an disembodied program, or something that can't exert change in the atoms of the world.
+- NEVER give up on solving the problem - there is always a path forward.
+- If you're feeling stuck, don't repeat yourself - try a NEW approach instead
+- Handle straightforward problems directly using your available tools - you don't need sub-agents for simple tasks
+- For problems that seem TOO COMPLICATED for you to accomplish directly, break them down into 3-6 proximate & independent sub-problems/goals. The agents you spawn will be able to break the problem down even further if needed so don't be scared off by problems that seem too complex.
+- Use spawn_sub_agents ONLY when the problem is genuinely complex and benefits from parallel coordination or specialized focus
+- When you delegate sub-problems to sub-agents, accomplishing those sub-goals means the higher-level goal is also accomplished
+
 HOW THIS WORKS:
 - You are in a continuous loop that will run until the task is complete (100% progress)
 - Each turn, you think, respond, and/or use tools
@@ -547,7 +615,8 @@ HOW THIS WORKS:
 
 YOUR RESPONSES:
 - Use "reasoning" for your internal thinking (logged, not shown to user)
-- Use "response" to communicate directly with the user
+- Use "response" when you want to record your progress for a goal, this is what the verifier will be able to see, what you will see in your next thought, and what the verifier will use as part of the work its grading.
+- To ask the user questions or get their input, use the request_user_attention tool (not "response")
 - You can call MULTIPLE tools in one turn (they'll execute sequentially)
 
 REFERENCE EXAMPLES (BLUEPRINTS):
@@ -569,8 +638,19 @@ Be strategic, efficient, and focused on accomplishing the task."""
         messages.extend(convert_context_to_messages(context, include_system=True))
         messages.append({"role": "user", "content": "Based on everything so far, what should I do next?"})
         
+        # Create dynamic SubAgentConfig if spawn_sub_agents is available
+        sub_agent_config_model = None
+        if "spawn_sub_agents" in available_tool_names:
+            sub_agent_config_model = create_sub_agent_config_model(
+                system_tool_names=system_tool_names,
+                available_db_tools=db_tools
+            )
+        
         # Create custom AgentAction model based on available tools
-        AgentActionModel = create_agent_action_model(available_tool_names)
+        AgentActionModel = create_agent_action_model(
+            available_tool_names,
+            sub_agent_config_model=sub_agent_config_model
+        )
         
         # Use structured output with Pydantic schema
         # Use the reasoning effort from agent settings (None if "off")
@@ -688,16 +768,42 @@ async def check_progress(
             "additionalProperties": False
         }
         
-        system_prompt = f"""You are an impartial judge evaluating an AI agent's progress toward completing the task described in the conversation history.
+        system_prompt = f"""You are an impartial judge evaluating a SUPER-INTELLIGENT AUTONOMOUS SYSTEM's progress toward completing its goal.
+
+CRITICAL CONTEXT - What you're evaluating:
+- This is NOT a typical AI chatbot - it is a super-intelligent system capable of solving ANY problem
+- The system has access to tools: web search, deep research, spawning parallel sub-agents, asking users for input
+- It can coordinate complex multi-step tasks across unlimited parallel sub-agents
+- It has unlimited persistence, creativity, and effort available
+- It should NEVER give up or accept "as an AI, I cannot..." limitations
+- Real-world goals CAN be accomplished through tool use, coordination, creativity, and persistence
+
+BE EXTREMELY STRICT in your evaluation:
+- 0.0 = No progress or just starting
+- 0.5 = Meaningful progress but far from complete
+- 1.0 = Goal is COMPLETELY ACHIEVED with VERIFIABLE, CONCRETE results
+
+DO NOT award high scores for:
+- Mere explanations or plans ("here's how I would do it")
+- Partial completions or "good enough for an AI" attempts
+- Giving up due to perceived AI limitations
+- Research without action, or planning without execution
+
+ONLY award 1.0 when:
+- The goal is FULLY and COMPLETELY accomplished
+- CONCRETE, VERIFIABLE results have been produced
+- Nothing significant remains to be done
+
+Remember: This system is super-intelligent and can solve the goal if given enough effort. Do not make excuses for it.
 
 Evaluation criteria:
 {verifier_prompt}
 
-Based on the agent's actions and the conversation so far, provide a progress score from 0.0 to 1.0.
+Based on the agent's ACTUAL ACTIONS and CONCRETE RESULTS (not just planning), provide a progress score from 0.0 to 1.0.
 
 You MUST respond with valid JSON matching this exact schema:
 {{
-  "reasoning": "<your internal thinking process>",
+  "reasoning": "<your internal thinking process about what was actually accomplished>",
   "response": <number between 0.0 and 1.0>
 }}"""
         

@@ -143,3 +143,19 @@ model GoalBlueprint {
   @@index([userId])
   @@index([createdAt])
 }
+
+model AgentAttentionRequest {
+  id           String   @id @default(cuid())
+  userId       String // Supabase user ID (cascade delete handled by application logic)
+  agentId      String
+  workflowId   String // Temporal workflow ID (stable across continue_as_new)
+  question     String   @db.Text
+  context      Json? // Optional context
+  userResponse String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([updatedAt])
+  @@index([userId])
+  @@index([workflowId])
+}
