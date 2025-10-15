@@ -2,19 +2,20 @@
 """
 Agent Tools Test Suite Runner
 
-Runs all agent tool tests and reports results.
+Runs all agent tool tests in parallel and reports results.
 Similar to back-end's api-test-suite.ts
 """
 
 import asyncio
 import sys
+import time
 from pathlib import Path
+from typing import Dict, Callable, Awaitable
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from test_web_search import run_all_tests as test_web_search
-from test_deep_research import run_all_tests as test_deep_research
 from test_amazon_shopping import run_all_tests as test_amazon_shopping
 from test_request_user_attention import run_all_tests as test_request_user_attention
 from test_wait_seconds import run_all_tests as test_wait_seconds
@@ -22,106 +23,110 @@ from test_spawn_sub_agents import run_all_tests as test_spawn_sub_agents
 from test_knowledge_base import run_all_tests as test_knowledge_base
 
 
-async def run_async_tests():
-    """Run tests that require async."""
-    results = {}
+async def run_test_silent(name: str, test_func: Callable[[], Awaitable[bool]]) -> tuple[str, bool, float]:
+    """Run a test silently and return results."""
+    import io
+    import contextlib
     
-    # Web search tests
-    print("\n" + "="*70)
-    print("🧪 RUNNING WEB_SEARCH TESTS")
-    print("="*70)
-    results['web_search'] = await test_web_search()
+    start = time.time()
     
-    # Deep research tests (can be slow)
-    print("\n" + "="*70)
-    print("🧪 RUNNING DEEP_RESEARCH TESTS (may take 30-120s)")
-    print("="*70)
-    results['deep_research'] = await test_deep_research()
+    # Capture stdout/stderr to suppress test output
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
     
-    # Amazon shopping tests (now async)
-    print("\n" + "="*70)
-    print("🧪 RUNNING AMAZON_SHOPPING TESTS")
-    print("="*70)
-    results['amazon_shopping'] = await test_amazon_shopping()
-    
-    # Spawn sub-agents tests (now async)
-    print("\n" + "="*70)
-    print("🧪 RUNNING SPAWN_SUB_AGENTS TESTS")
-    print("="*70)
-    results['spawn_sub_agents'] = await test_spawn_sub_agents()
-    
-    # Knowledge base tests (now async)
-    print("\n" + "="*70)
-    print("🧪 RUNNING KNOWLEDGE_BASE TESTS")
-    print("="*70)
-    results['knowledge_base'] = await test_knowledge_base()
-    
-    return results
-
-
-def run_sync_tests():
-    """Run tests that are synchronous."""
-    results = {}
-    
-    # Request user attention tests
-    print("\n" + "="*70)
-    print("🧪 RUNNING REQUEST_USER_ATTENTION TESTS")
-    print("="*70)
-    results['request_user_attention'] = test_request_user_attention()
-    
-    # Wait seconds tests
-    print("\n" + "="*70)
-    print("🧪 RUNNING WAIT_SECONDS TESTS")
-    print("="*70)
-    results['wait_seconds'] = test_wait_seconds()
-    
-    return results
+    try:
+        with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
+            result = await test_func()
+        duration = time.time() - start
+        return (name, result, duration)
+    except Exception as e:
+        duration = time.time() - start
+        # On error, show the captured output for debugging
+        captured_out = stdout_capture.getvalue()
+        captured_err = stderr_capture.getvalue()
+        if captured_out:
+            print(f"\n--- {name} stdout ---")
+            print(captured_out)
+        if captured_err:
+            print(f"\n--- {name} stderr ---")
+            print(captured_err)
+        print(f"❌ {name} failed with exception: {e}")
+        return (name, False, duration)
 
 
 async def main():
-    """Run all tests and report results."""
-    print("\n" + "="*70)
-    print("🚀 AGENT TOOLS TEST SUITE")
-    print("="*70)
-    print("\nThis test suite validates all agent tools including:")
-    print("  • User tools: web_search, deep_research, amazon_shopping")
-    print("  • System tools: wait_seconds, spawn_sub_agents, request_user_attention")
-    print("  • Activities: knowledge_base (blueprints)")
-    print("\n" + "="*70)
+    """Run all tests in parallel and report results."""
+    start_time = time.time()
     
-    # Run all tests
-    async_results = await run_async_tests()
-    sync_results = run_sync_tests()
+    print("🧪 Starting Agent Tools Test Suite...")
+    print("")
     
-    # Combine results
-    all_results = {**async_results, **sync_results}
+    # Group tests that can run in parallel
+    print("🔧 Running tool tests in parallel...")
+    
+    # Create test tasks (all async, run in parallel)
+    test_tasks = [
+        run_test_silent("Web Search", test_web_search),
+        run_test_silent("Amazon Shopping", test_amazon_shopping),
+        run_test_silent("Spawn Sub-Agents", test_spawn_sub_agents),
+        run_test_silent("Knowledge Base", test_knowledge_base),
+    ]
+    
+    # Run sync tests (these are fast, run them sequentially, silently)
+    import io
+    import contextlib
+    
+    sync_start = time.time()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        wait_seconds_result = test_wait_seconds()
+    wait_seconds_duration = (time.time() - sync_start) * 1000
+    
+    sync_start = time.time()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        request_attention_result = test_request_user_attention()
+    request_attention_duration = (time.time() - sync_start) * 1000
+    
+    # Wait for all async tests
+    async_results = await asyncio.gather(*test_tasks)
+    
+    # Collect all results
+    results = []
+    for name, passed, duration in async_results:
+        results.append((name, passed, int(duration * 1000)))  # Convert to ms
+    
+    results.append(("Wait Seconds", wait_seconds_result, int(wait_seconds_duration)))
+    results.append(("Request User Attention", request_attention_result, int(request_attention_duration)))
+    
+    # Calculate summary
+    total_duration = int((time.time() - start_time) * 1000)
+    passed_count = sum(1 for _, passed, _ in results if passed)
+    failed_count = len(results) - passed_count
     
     # Print summary
-    print("\n\n" + "="*70)
-    print("📊 TEST SUMMARY")
-    print("="*70 + "\n")
+    print("")
+    print("=" * 60)
+    print("")
+    print("📊 Test Summary:")
+    print(f"   Total: {len(results)}")
+    print(f"   ✅ Passed: {passed_count}")
+    print(f"   ❌ Failed: {failed_count}")
+    print(f"   ⏱️  Duration: {total_duration}ms")
+    print("")
     
-    passed = 0
-    failed = 0
+    # Print individual results
+    for name, passed, duration in results:
+        status = "✅" if passed else "❌"
+        print(f"{status} {name} ({duration}ms)")
     
-    for tool_name, result in all_results.items():
-        status = "✅ PASSED" if result else "❌ FAILED"
-        print(f"  {tool_name:25} {status}")
-        if result:
-            passed += 1
-        else:
-            failed += 1
+    print("")
     
-    total = passed + failed
-    print("\n" + "-"*70)
-    print(f"  Total: {total}  |  Passed: {passed}  |  Failed: {failed}")
-    print("="*70 + "\n")
-    
-    if failed == 0:
-        print("🎉 ALL TESTS PASSED!")
+    if failed_count == 0:
+        print("✅ ALL TESTS PASSED!")
+        print("")
         return 0
     else:
-        print(f"⚠️  {failed} TEST SUITE(S) FAILED")
+        print(f"❌ {failed_count} TEST(S) FAILED")
+        print("")
         return 1
 
 
