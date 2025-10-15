@@ -53,6 +53,7 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
             WebkitTextFillColor: 'transparent',
             backgroundClip: 'text',
             filter: 'drop-shadow(0 0 6px rgba(141, 141, 138, 0.4))',
+            textAlign: 'center',
           }}
         >
           {frames[frameIndex]}
@@ -66,6 +67,7 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
             WebkitTextFillColor: 'transparent',
             backgroundClip: 'text',
             filter: 'drop-shadow(0 0 6px rgba(141, 141, 138, 0.4))',
+            textAlign: 'center',
           }}
         >
           {frames[frameIndex]}
@@ -79,6 +81,7 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
             WebkitTextFillColor: 'transparent',
             backgroundClip: 'text',
             filter: 'drop-shadow(0 0 6px rgba(141, 141, 138, 0.4))',
+            textAlign: 'center',
           }}
         >
           {frames[frameIndex]}
@@ -99,6 +102,7 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
           WebkitTextFillColor: 'transparent',
           backgroundClip: 'text',
           filter: 'drop-shadow(0 0 6px rgba(141, 141, 138, 0.4))',
+          textAlign: 'center',
         }}
       >
         {frames[frameIndex]}

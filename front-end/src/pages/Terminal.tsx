@@ -266,7 +266,7 @@ export default function Terminal() {
           setMessageBuffer((prev) => [...prev, message]);
         }
       )
-      .subscribe((status) => {
+      .subscribe(async (status) => {
         console.log(`📡 Realtime subscription status for agent ${selectedAgentId}:`, status);
         
         if (status === 'SUBSCRIBED') {
@@ -274,6 +274,16 @@ export default function Terminal() {
           // Reset reconnection attempts on successful connection
           reconnectAttemptRef.current = 0;
           isReconnectingRef.current = false;
+          
+          // Refetch messages to catch any that were created before subscription was established
+          // This prevents the race condition where messages are created before realtime connects
+          try {
+            const data = await getAgent(selectedAgentId);
+            setMessages(data.messages);
+            setAgentDetail(data.agent);
+          } catch (error) {
+            console.error('Failed to refetch messages after subscription:', error);
+          }
         } else if (status === 'CHANNEL_ERROR') {
           console.error('❌ Realtime subscription error - will attempt to reconnect');
           isReconnectingRef.current = false;
