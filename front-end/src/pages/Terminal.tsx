@@ -804,7 +804,7 @@ export default function Terminal() {
           )}
 
           {/* Main Content Area */}
-          <ScrollArea className="flex-1 px-6 py-4">
+          <ScrollArea className="flex-1 px-6 py-4" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
             {/* Spacer for breadcrumb when viewing sub-agent */}
             {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
               <div className="h-14" />

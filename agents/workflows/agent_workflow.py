@@ -543,13 +543,19 @@ class AgentWorkflow:
                 if self.iteration_count == 0:
                     blueprints = await self._query_blueprints()
                     if blueprints:
-                        # Insert blueprints directly into context with clear delimiters
-                        for bp in blueprints:
+                        # Insert blueprints as reference examples from past successful agents
+                        for idx, bp in enumerate(blueprints, 1):
                             formatted_blueprint = (
-                                f"=== BLUEPRINT START ===\n"
-                                f"Goal: {bp['title']}\n\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📋 REFERENCE EXAMPLE #{idx} (from previous agent)\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"Similar Goal: {bp['title']}\n\n"
+                                f"How a past agent successfully approached this:\n"
                                 f"{bp['blueprint']}\n"
-                                f"=== BLUEPRINT END ==="
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"Note: This is a reference example, not your current progress.\n"
+                                f"Use these insights to inform your own approach.\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                             )
                             self.context.append({
                                 "role": "SYSTEM",

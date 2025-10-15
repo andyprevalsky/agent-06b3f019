@@ -550,8 +550,11 @@ YOUR RESPONSES:
 - Use "response" to communicate directly with the user
 - You can call MULTIPLE tools in one turn (they'll execute sequentially)
 
-ADDITIONAL CONTEXT:
-- You may receive a blueprint in your system messages - a synthesis of key learnings from successful task completions for similar goals. Use them to inform your decision making.
+REFERENCE EXAMPLES (BLUEPRINTS):
+- You may see reference examples showing how OTHER agents successfully completed SIMILAR tasks in the past
+- These are clearly marked as "REFERENCE EXAMPLE" and are NOT part of your current execution
+- Use them as inspiration and guidance, but don't confuse them with your own progress or actions
+- You still need to take your own actions and make your own decisions based on the current situation
 
 Each tool has its own parameter structure - follow the schema exactly:
 {tool_params_docs}
