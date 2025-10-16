@@ -17,10 +17,17 @@ async def create_attention_request_activity(
     agent_id: str,
     workflow_id: str,
     question: str,
-    context: Optional[Dict[str, Any]] = None
+    image_url: Optional[str] = None,
 ) -> str:
     """
     Activity: Create an attention request in the database.
+    
+    Args:
+        user_id: User ID
+        agent_id: Agent ID
+        workflow_id: Temporal workflow ID
+        question: Question to ask the user
+        image_url: Optional image URL (e.g. product thumbnail)
     
     Returns:
         The ID of the created request
@@ -29,18 +36,38 @@ async def create_attention_request_activity(
         config = load_config()
         backend_url = config.backend.api_url
         
+        payload = {
+            "userId": user_id,
+            "agentId": agent_id,
+            "workflowId": workflow_id,
+            "question": question,
+        }
+        
+        # Only include imageUrl if provided
+        if image_url:
+            payload["imageUrl"] = image_url
+        
+        logger.info(
+            "Creating attention request",
+            payload=payload,
+            backend_url=backend_url
+        )
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{backend_url}/api/attention-requests",
-                json={
-                    "userId": user_id,
-                    "agentId": agent_id,
-                    "workflowId": workflow_id,
-                    "question": question,
-                    "context": context
-                },
+                json=payload,
                 timeout=30.0
             )
+            
+            if response.status_code != 200:
+                logger.error(
+                    "Failed to create attention request - HTTP error",
+                    status_code=response.status_code,
+                    response_body=response.text,
+                    payload=payload
+                )
+            
             response.raise_for_status()
             data = response.json()
             
@@ -60,8 +87,9 @@ async def create_attention_request_activity(
 
 
 async def request_user_attention(
+    workflow_instance: Any,
     question: str,
-    context: Optional[Dict[str, Any]] = None
+    image_url: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     Workflow function: Request user attention and wait for response.
@@ -72,8 +100,9 @@ async def request_user_attention(
     3. Return success (the message is already in context)
     
     Args:
+        workflow_instance: The workflow instance (self) to access context
         question: The question to ask the user
-        context: Optional context about why you're asking
+        image_url: Optional image URL (e.g. product thumbnail)
         
     Returns:
         Dict with:
@@ -84,20 +113,16 @@ async def request_user_attention(
     if not workflow.in_workflow():
         raise RuntimeError("request_user_attention must be called from within a workflow")
     
-    # Get workflow info
+    # Get workflow info and IDs from workflow instance
     info = workflow.info()
     workflow_id = info.workflow_id
-    
-    # Extract user_id and agent_id from workflow memo/search attributes
-    # These should be set when the workflow is started
-    search_attrs = info.search_attributes
-    user_id = search_attrs.get("userId", ["unknown"])[0] if search_attrs else "unknown"
-    agent_id = search_attrs.get("agentId", ["unknown"])[0] if search_attrs else "unknown"
+    user_id = workflow_instance.user_id
+    agent_id = workflow_instance.agent_id
     
     # Create the attention request via activity
     request_id = await workflow.execute_activity(
         create_attention_request_activity,
-        args=[user_id, agent_id, workflow_id, question, context],
+        args=[user_id, agent_id, workflow_id, question, image_url],
         start_to_close_timeout=timedelta(seconds=30),
     )
     
@@ -112,20 +137,20 @@ async def request_user_attention(
     # We just wait until the last message is from USER
     await workflow.wait_condition(
         lambda: (
-            len(workflow.unsafe.extern().context) > 0 and
-            workflow.unsafe.extern().context[-1].get("role") == "USER"
+            len(workflow_instance.context) > 0 and
+            workflow_instance.context[-1].get("role") == "USER"
         )
     )
     
     # Get the response from all consecutive USER messages at the end
     # (in case user sends multiple messages in quick succession)
-    context = workflow.unsafe.extern().context
+    wf_context = workflow_instance.context
     user_messages = []
     
     # Walk backwards and collect all consecutive USER messages
-    for i in range(len(context) - 1, -1, -1):
-        if context[i].get("role") == "USER":
-            user_messages.insert(0, context[i].get("text", ""))
+    for i in range(len(wf_context) - 1, -1, -1):
+        if wf_context[i].get("role") == "USER":
+            user_messages.insert(0, wf_context[i].get("text", ""))
         else:
             break
     

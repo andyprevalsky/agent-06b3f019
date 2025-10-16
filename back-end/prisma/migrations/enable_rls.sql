@@ -7,6 +7,7 @@ ALTER TABLE "Tool" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "AgentTool" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "Verifier" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "Message" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "AgentAttentionRequest" ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Users can only see their own agents
 CREATE POLICY "Users can view own agents"
@@ -82,6 +83,28 @@ CREATE POLICY "Anyone can view tools"
   ON "Tool"
   FOR SELECT
   USING (true);
+
+-- Policy: Users can only see their own attention requests
+CREATE POLICY "Users can view own attention requests"
+  ON "AgentAttentionRequest"
+  FOR SELECT
+  USING (auth.uid()::text = "userId");
+
+CREATE POLICY "Users can update own attention requests"
+  ON "AgentAttentionRequest"
+  FOR UPDATE
+  USING (auth.uid()::text = "userId")
+  WITH CHECK (auth.uid()::text = "userId");
+
+CREATE POLICY "Users can insert own attention requests"
+  ON "AgentAttentionRequest"
+  FOR INSERT
+  WITH CHECK (auth.uid()::text = "userId");
+
+CREATE POLICY "Users can delete own attention requests"
+  ON "AgentAttentionRequest"
+  FOR DELETE
+  USING (auth.uid()::text = "userId");
 
 -- Note: Backend connections bypass RLS (they use service role or session pooler)
 -- This only affects direct frontend connections with anon key

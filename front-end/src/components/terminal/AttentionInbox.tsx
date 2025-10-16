@@ -1,18 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Bell } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabase';
+import { MarkdownText } from './MarkdownText';
+import type { RealtimeChannel } from '@supabase/supabase-js';
+
+// API Configuration - match pattern used in lib/api.ts
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
 interface AttentionRequest {
   id: string;
   agent_id: string;
   workflow_id: string;
   question: string;
-  context?: any;
+  image_url?: string | null;
   user_response?: string | null;
   created_at: string;
   updated_at: string;
@@ -30,6 +34,12 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   const [responses, setResponses] = useState<Record<string, string>>({});
   const { toast } = useToast();
 
+  // Realtime subscription refs
+  const channelRef = useRef<RealtimeChannel | null>(null);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const [forceResubscribe, setForceResubscribe] = useState(0);
+
   // Fetch requests
   const fetchRequests = async () => {
     try {
@@ -37,7 +47,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       if (!session.data.session) return;
 
       const response = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/attention-requests`,
+        `${API_BASE_WITH_PATH}/attention-requests`,
         {
           headers: {
             'Authorization': `Bearer ${session.data.session.access_token}`,
@@ -54,11 +64,151 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
     }
   };
 
-  // Fetch on mount and when opened
+  // Fetch immediately on mount (before websocket connects)
   useEffect(() => {
     fetchRequests();
   }, []);
 
+  // Set up real-time subscription for attention requests
+  useEffect(() => {
+    const setupRealtimeSubscription = async () => {
+      const session = await supabase.auth.getSession();
+      const userId = session.data.session?.user?.id;
+      if (!userId) return;
+
+      // Clean up existing channel
+      if (channelRef.current) {
+        console.log('🧹 Cleaning up existing attention requests channel');
+        await supabase.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
+
+      // Clear any pending reconnect timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
+      console.log('📡 Creating realtime channel for attention requests');
+
+      // Create new channel for attention requests
+      const channel = supabase
+        .channel(`attention-requests:${userId}:${Date.now()}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'AgentAttentionRequest',
+            filter: `userId=eq.${userId}`,
+          },
+          (payload) => {
+            console.log('🔔 Attention request update:', payload);
+            
+            if (payload.eventType === 'INSERT') {
+              // New request - add to list
+              const newRequest = payload.new as any;
+              const request: AttentionRequest = {
+                id: newRequest.id,
+                agent_id: newRequest.agentId,
+                workflow_id: newRequest.workflowId,
+                question: newRequest.question,
+                image_url: newRequest.imageUrl,
+                user_response: newRequest.userResponse,
+                created_at: newRequest.createdAt,
+                updated_at: newRequest.updatedAt,
+                answered: !!newRequest.userResponse,
+              };
+              setRequests((prev) => [request, ...prev]);
+            } else if (payload.eventType === 'UPDATE') {
+              // Request updated (likely answered)
+              const updated = payload.new as any;
+              setRequests((prev) =>
+                prev.map((req) =>
+                  req.id === updated.id
+                    ? {
+                        ...req,
+                        user_response: updated.userResponse,
+                        updated_at: updated.updatedAt,
+                        answered: !!updated.userResponse,
+                      }
+                    : req
+                )
+              );
+            } else if (payload.eventType === 'DELETE') {
+              // Request deleted
+              const deleted = payload.old as any;
+              setRequests((prev) => prev.filter((req) => req.id !== deleted.id));
+            }
+          }
+        )
+        .subscribe(async (status) => {
+          console.log('📡 Attention requests subscription status:', status);
+
+          if (status === 'SUBSCRIBED') {
+            console.log('✅ Successfully subscribed to attention requests');
+            // Reset reconnection attempts on successful connection
+            reconnectAttemptRef.current = 0;
+
+            // Fetch initial data to catch any requests created before subscription
+            try {
+              await fetchRequests();
+            } catch (error) {
+              console.error('Failed to fetch initial requests:', error);
+            }
+          } else if (status === 'CHANNEL_ERROR') {
+            console.error('❌ Attention requests subscription error - will retry');
+            scheduleReconnect();
+          } else if (status === 'TIMED_OUT') {
+            console.error('⏱️ Attention requests subscription timed out - will retry');
+            scheduleReconnect();
+          } else if (status === 'CLOSED') {
+            console.log('🔌 Attention requests subscription closed - will retry');
+            scheduleReconnect();
+          }
+        });
+
+      channelRef.current = channel;
+
+      // Helper function to schedule reconnection with exponential backoff
+      function scheduleReconnect() {
+        if (!userId) return;
+
+        // Clear any existing timeout
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+        const attempt = reconnectAttemptRef.current;
+        const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+
+        console.log(`🔄 Scheduling attention requests reconnection attempt ${attempt + 1} in ${delay}ms...`);
+        reconnectAttemptRef.current += 1;
+
+        reconnectTimeoutRef.current = window.setTimeout(() => {
+          console.log(`🔄 Attempting to reconnect attention requests (attempt ${attempt + 1})...`);
+          setForceResubscribe((prev) => prev + 1);
+        }, delay);
+      }
+    };
+
+    setupRealtimeSubscription();
+
+    return () => {
+      console.log('🧹 Cleaning up attention requests subscription');
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
+    };
+  }, [forceResubscribe]);
+
+  // Fetch when modal is opened (for latest state)
   useEffect(() => {
     if (isOpen) {
       fetchRequests();
@@ -86,7 +236,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       if (!session.data.session) return;
 
       const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/attention-requests/${requestId}/respond`,
+        `${API_BASE_WITH_PATH}/attention-requests/${requestId}/respond`,
         {
           method: 'POST',
           headers: {
@@ -132,7 +282,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       if (!session.data.session) return;
 
       const res = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL}/api/attention-requests/${requestId}/skip`,
+        `${API_BASE_WITH_PATH}/attention-requests/${requestId}/skip`,
         {
           method: 'POST',
           headers: {
@@ -192,12 +342,15 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       >
         <Bell className="h-5 w-5" />
         {unansweredCount > 0 && (
-          <Badge
-            variant="destructive"
-            className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center p-0 text-xs"
+          <span
+            className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center rounded-full text-xs font-semibold text-white"
+            style={{ 
+              background: '#FC585C',
+              boxShadow: '0 2px 8px rgba(252, 88, 92, 0.4)'
+            }}
           >
             {unansweredCount}
-          </Badge>
+          </span>
         )}
       </Button>
 
@@ -211,93 +364,97 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
           />
 
           {/* Modal content */}
-          <div className="absolute top-12 right-0 z-50 w-[500px] max-h-[600px] bg-card dark:bg-navi-black border border-border dark:border-navi-light-black rounded-lg shadow-lg overflow-hidden">
-            <div className="p-4 border-b border-border dark:border-navi-light-black">
-              <h2 className="text-lg font-semibold">Agent Attention Requests</h2>
-              <p className="text-sm text-muted-foreground">
-                {unansweredCount} unanswered
-              </p>
-            </div>
-
-            <ScrollArea className="h-[500px]">
-              <div className="p-4 space-y-4">
-                {requests.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-8">
-                    No attention requests
+          <div className="absolute top-12 right-0 z-50 w-[500px] bg-card dark:bg-navi-black border border-border dark:border-navi-light-black rounded-lg shadow-lg">
+            <div className="p-4 space-y-4">
+              {requests.filter(r => !r.answered).length === 0 ? (
+                <div className="text-center py-8 space-y-2">
+                  <p className="text-sm font-medium text-foreground">
+                    🎉 Congrats!
                   </p>
-                ) : (
-                  requests
-                    .filter(r => !r.answered)
-                    .map((request) => (
-                      <div
-                        key={request.id}
-                        className="p-4 border border-border dark:border-navi-light-black rounded-lg space-y-3"
-                      >
-                        {/* Question */}
-                        <div>
-                          <p className="text-sm font-medium mb-2">Question:</p>
-                          <p className="text-sm text-muted-foreground">
-                            {request.question}
-                          </p>
+                  <p className="text-sm text-muted-foreground">
+                    All your agents are unblocked and busy working on your goals.
+                  </p>
+                </div>
+              ) : (
+                requests
+                  .filter(r => !r.answered)
+                  .map((request) => (
+                    <div
+                      key={request.id}
+                      className="space-y-3"
+                    >
+                      {/* Image thumbnail if present */}
+                      {request.image_url && (
+                        <div className="flex justify-center">
+                          <img 
+                            src={request.image_url} 
+                            alt="Product thumbnail"
+                            className="max-w-[200px] max-h-[200px] rounded-md object-contain"
+                          />
                         </div>
+                      )}
 
-                        {/* Link to agent */}
-                        <Button
-                          variant="link"
-                          size="sm"
-                          className="p-0 h-auto text-xs"
-                          onClick={() => {
-                            if (onSelectAgent) {
-                              onSelectAgent(request.agent_id);
-                              setIsOpen(false);
-                            }
-                          }}
-                        >
-                          View agent →
-                        </Button>
-
-                        {/* Response textarea */}
-                        <Textarea
-                          placeholder="Type your response..."
-                          value={responses[request.id] || ''}
-                          onChange={(e) =>
-                            setResponses((prev) => ({
-                              ...prev,
-                              [request.id]: e.target.value,
-                            }))
-                          }
-                          className="min-h-[80px]"
-                        />
-
-                        {/* Actions */}
-                        <div className="flex gap-2">
-                          <Button
-                            size="sm"
-                            onClick={() => handleRespond(request.id)}
-                            disabled={loading || !responses[request.id]?.trim()}
-                          >
-                            Respond (⌘↵)
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleSkip(request.id)}
-                            disabled={loading}
-                          >
-                            Skip (⌘S)
-                          </Button>
-                        </div>
-
-                        {/* Timestamp */}
-                        <p className="text-xs text-muted-foreground">
-                          Asked{' '}
-                          {new Date(request.created_at).toLocaleString()}
-                        </p>
+                      {/* Question rendered as markdown */}
+                      <div>
+                        <MarkdownText text={request.question} />
                       </div>
-                    ))
-                )}
-              </div>
-            </ScrollArea>
+
+                      {/* Link to agent */}
+                      <Button
+                        variant="link"
+                        size="sm"
+                        className="p-0 h-auto text-xs"
+                        onClick={() => {
+                          if (onSelectAgent) {
+                            onSelectAgent(request.agent_id);
+                            setIsOpen(false);
+                          }
+                        }}
+                      >
+                        View agent →
+                      </Button>
+
+                      {/* Response textarea */}
+                      <Textarea
+                        placeholder="Type your response..."
+                        value={responses[request.id] || ''}
+                        onChange={(e) =>
+                          setResponses((prev) => ({
+                            ...prev,
+                            [request.id]: e.target.value,
+                          }))
+                        }
+                        className="min-h-[80px]"
+                      />
+
+                      {/* Actions */}
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => handleRespond(request.id)}
+                          disabled={loading || !responses[request.id]?.trim()}
+                        >
+                          Respond (⌘↵)
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleSkip(request.id)}
+                          disabled={loading}
+                        >
+                          Skip (⌘S)
+                        </Button>
+                      </div>
+
+                      {/* Timestamp */}
+                      <p className="text-xs text-muted-foreground">
+                        Asked{' '}
+                        {new Date(request.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                  ))
+              )}
+            </div>
           </div>
         </>
       )}

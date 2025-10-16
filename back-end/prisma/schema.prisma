@@ -150,7 +150,7 @@ model AgentAttentionRequest {
   agentId      String
   workflowId   String // Temporal workflow ID (stable across continue_as_new)
   question     String   @db.Text
-  context      Json? // Optional context
+  imageUrl     String? // Optional image URL (e.g. product thumbnail)
   userResponse String?  @db.Text
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt

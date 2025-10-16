@@ -24,6 +24,12 @@ from workflows import AgentWorkflow
 # User-configurable tools
 from tools import web_search, deep_research
 from tools.spawn_sub_agents import spawn_sub_agents
+from tools.amazon_shopping import (
+    search_amazon_activity,
+    fetch_user_settings_activity,
+    rank_amazon_products_activity,
+)
+from tools.request_user_attention import create_attention_request_activity
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     poll_new_messages,
@@ -111,6 +117,10 @@ async def main():
             web_search,
             deep_research,
             spawn_sub_agents,
+            search_amazon_activity,
+            fetch_user_settings_activity,
+            rank_amazon_products_activity,
+            create_attention_request_activity,
             poll_new_messages,
             post_agent_message,
             call_llm,

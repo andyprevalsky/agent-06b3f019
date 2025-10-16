@@ -228,6 +228,12 @@ class BuyItemFromAmazonTool(BaseModel):
     item_qualifications: Optional[str] = Field(default=None, description="Natural language description of qualities that matter (e.g., 'under $100, highly rated, many reviews', 'best value, waterproof, has storage', 'premium quality, fast shipping'). If not provided, selects best overall product.")
 
 
+class RequestUserAttentionTool(BaseModel):
+    """Tool for requesting user attention when clarification or input is needed."""
+    tool: Literal["request_user_attention"]
+    question: str = Field(description="The question to ask the user")
+
+
 # Map tool names to their Pydantic models
 # Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
@@ -235,6 +241,7 @@ TOOL_MODELS = {
     "web_search": WebSearchTool,
     "deep_research": DeepResearchTool,
     "buy_item_from_amazon": BuyItemFromAmazonTool,
+    "request_user_attention": RequestUserAttentionTool,
 }
 
 

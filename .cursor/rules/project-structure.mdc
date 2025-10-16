@@ -1,0 +1,292 @@
+---
+description: >
+  PROJECT STRUCTURE - Navi Whisper Lux
+  
+  This is a full-stack AI agent platform with three main parts:
+  - Front-end: React/TypeScript web app (Vite)
+  - Back-end: Express/TypeScript REST API (Prisma + Supabase)
+  - Agents: Python Temporal workers with LLM tools
+  
+  The system allows users to create AI agents that run as Temporal workflows,
+  interact with LLMs, use various tools, and communicate with users through a terminal interface.
+
+apply:
+  when: always
+---
+
+# Project Structure
+
+This document explains the overall structure of the Navi Whisper Lux project and where to find key files.
+
+## High-Level Architecture
+
+```
+navi-whisper-lux/
+├── front-end/      → React/TypeScript web app
+├── back-end/       → Express/TypeScript REST API
+├── agents/         → Python Temporal workers
+└── .cursor/        → Project-wide Cursor rules
+```
+
+## Three-Part System
+
+### 1. Front-End (`/front-end`)
+
+**Technology**: React 18 + TypeScript + Vite + TailwindCSS + shadcn/ui
+
+**Purpose**: Web interface for creating and interacting with AI agents
+
+**Key Directories**:
+- `src/components/` - React components (81 .tsx files)
+  - `src/components/terminal/` - Terminal interface, agent chat, attention inbox
+  - `src/components/ui/` - shadcn/ui components
+- `src/pages/` - Route pages (7 .tsx files)
+- `src/hooks/` - Custom React hooks
+- `src/lib/` - Utility functions
+- `api/` - API client and types
+- `public/` - Static assets (icons, videos, etc.)
+- `supabase/` - Supabase functions and migrations
+
+**Key Files**:
+- `src/App.tsx` - Main application component with routing
+- `src/main.tsx` - Entry point
+- `src/components/terminal/CreateAgentModal.tsx` - Agent creation UI
+- `src/components/terminal/AttentionInbox.tsx` - Attention request handling
+- `api/types.d.ts` - TypeScript type definitions for API
+- `vite.config.ts` - Vite bundler configuration
+- `tailwind.config.ts` - TailwindCSS configuration
+
+**Deployment**: Vercel (configured via `vercel.json`)
+
+### 2. Back-End (`/back-end`)
+
+**Technology**: Express + TypeScript + Prisma + Supabase PostgreSQL
+
+**Purpose**: REST API for managing agents, messages, and authentication
+
+**Key Directories**:
+- `src/routes/` - API endpoints (8 .ts files)
+  - `agents.ts` - Agent CRUD operations
+  - `attentionRequests.ts` - Attention request endpoints
+  - `messages.ts` - Message endpoints
+  - `tools.ts` - Tool configuration
+  - `waitlist.ts` - Waitlist signup
+- `src/middleware/` - Express middleware
+  - `auth.ts` - JWKS authentication middleware
+- `src/lib/` - Utility functions (Temporal client, Supabase client, tool helpers)
+- `prisma/` - Database schema and migrations
+  - `schema.prisma` - **Single source of truth for database**
+  - `migrations/` - Migration files (22 migrations)
+  - `migrations/enable_rls.sql` - Row Level Security policies
+- `scripts/` - Utility scripts for cleanup, testing, etc.
+- `dist/` - Compiled JavaScript output
+
+**Key Files**:
+- `src/server.ts` - **Main Express server** (entry point)
+- `src/middleware/auth.ts` - Authentication logic
+- `prisma/schema.prisma` - **Database schema definition**
+- `prisma/migrations/enable_rls.sql` - RLS policies for Supabase
+- `src/lib/temporal-client.ts` - Temporal workflow client
+- `package.json` - Dependencies and scripts
+- `tsconfig.json` - TypeScript configuration
+- `render.yaml` - Render.com deployment config
+
+**Deployment**: Render.com (https://navi-j9a9.onrender.com)
+
+**Database**: Supabase PostgreSQL with Row Level Security (RLS) enabled
+
+### 3. Agents (`/agents`)
+
+**Technology**: Python 3.10 + Temporal + OpenAI SDK
+
+**Purpose**: AI agent workers that execute as Temporal workflows
+
+**Key Directories**:
+- `workflows/` - Temporal workflow definitions
+  - `agent_workflow.py` - **Main agent workflow logic**
+- `tools/` - Agent tool implementations (9 tools)
+  - `web_search.py` - Web search tool
+  - `deep_research.py` - Deep research tool
+  - `amazon_shopping.py` - Amazon shopping assistant
+  - `spawn_sub_agents.py` - Sub-agent spawning
+  - `request_user_attention.py` - Request user interaction
+  - `knowledge_base.py` - Knowledge base access
+  - `wait_seconds.py` - Wait/sleep functionality
+- `helpers/` - Utility functions
+  - `llm.py` - LLM interaction logic (OpenAI API)
+  - `messages.py` - Message formatting
+  - `knowledge_base.py` - Knowledge base operations
+  - `update_status.py` - Status updates
+  - `summarize.py` - Conversation summarization
+  - `formatters.py` - Output formatting
+- `tests/` - Agent tool tests
+- `scripts/` - Development and testing scripts
+
+**Key Files**:
+- `worker.py` - **Temporal worker entry point**
+- `workflows/agent_workflow.py` - **Core agent logic**
+- `helpers/llm.py` - LLM communication
+- `config.py` - Configuration (task queue, Temporal settings)
+- `requirements.txt` - Python dependencies
+- `Dockerfile` - Docker container definition
+- `fly.toml` - Fly.io deployment config
+- `health_server.py` - Health check server
+
+**Deployment**: Fly.io (Python worker container)
+
+## Data Flow
+
+1. **User** → Front-End (React app on Vercel)
+2. **Front-End** → Back-End REST API (Express on Render)
+3. **Back-End** → Supabase Database (PostgreSQL)
+4. **Back-End** → Temporal (Start agent workflow)
+5. **Temporal** → Agent Worker (Python on Fly.io)
+6. **Agent** → OpenAI API (LLM calls)
+7. **Agent** → Tools (Web search, research, etc.)
+8. **Agent** → Back-End API (Save messages, request attention)
+9. **Front-End** ← Supabase Realtime (WebSocket updates)
+
+## Key Configuration Files
+
+### Root Level
+- `package.json` - Root package for scripts
+- `package-lock.json` - Dependency lock file
+
+### Environment Variables Needed
+
+**Back-End** (`.env`):
+```
+DATABASE_URL=postgresql://...
+SUPABASE_URL=https://kzlurqihzaolhzsbkctf.supabase.co
+OPENAI_API_KEY=sk-proj-...
+ALLOWED_ORIGINS=http://localhost:8080,https://hinavi.ai
+PORT=3001
+NODE_ENV=development
+```
+
+**Agents** (`.env`):
+```
+TEMPORAL_ADDRESS=localhost:7233
+TEMPORAL_NAMESPACE=default
+TASK_QUEUE=navi-agent-tasks
+OPENAI_API_KEY=sk-proj-...
+BACKEND_URL=http://localhost:3001
+SUPABASE_URL=https://kzlurqihzaolhzsbkctf.supabase.co
+SUPABASE_ANON_KEY=...
+```
+
+## Common Development Tasks
+
+### Start Development Servers
+```bash
+# Front-end (port 8080)
+cd front-end && npm run dev
+
+# Back-end (port 3001)
+cd back-end && npm run dev
+
+# Agent worker
+cd agents && ./scripts/run_local_worker.sh
+```
+
+### Database Operations
+```bash
+# Edit schema
+vim back-end/prisma/schema.prisma
+
+# Create migration
+cd back-end && npm run prisma:migrate:dev -- --name your_change
+
+# View database
+cd back-end && npm run prisma:studio
+```
+
+### Run Tests
+```bash
+# Backend API tests
+cd back-end && npm run test:api
+
+# Agent tool tests
+cd agents && python tests/run_all_tests.py
+
+# Or individual tool test
+cd agents && python tests/test_web_search.py
+```
+
+### Cleanup Development Environment
+```bash
+# Kill all agents and workers
+cd back-end && npm run cleanup:all
+
+# Fresh start agents
+cd agents && ./scripts/fresh-start.sh
+```
+
+## Testing & Quality
+
+### Pre-commit Hook
+- Located at: `agents/tests/pre-commit-hook.sh`
+- Runs all agent tool tests before allowing commits
+- Setup: `cd agents/tests && ./setup-pre-commit.sh`
+
+### Test Files
+- **Backend tests**: `back-end/src/tests/api-test-suite.ts`
+- **Agent tests**: `agents/tests/test_*.py` (7 test files)
+
+## Documentation Files
+
+### Important Docs to Read
+- `back-end/README.md` - Backend setup and architecture
+- `agents/README.md` - Agent system overview
+- `front-end/README.md` - Frontend setup
+- `agents/CREDENTIALS.md` - API credentials needed
+- `agents/tests/SETUP_COMPLETE.md` - Test setup verification
+- `QUEUE_SETUP_COMPLETE.txt` - Temporal queue configuration
+
+### Reference Files
+- `back-end/QUICK_TEST_REFERENCE.txt` - Quick testing commands
+- `back-end/TEST_SUITE_SUMMARY.txt` - Test suite overview
+- `agents/RESPONSE_FIELD_FIX.txt` - Known issue documentation
+
+## Cursor Rules Locations
+
+See `.cursor/rules/rule-locations.mdc` for details on where to place rules.
+
+**Summary**:
+- Project-wide rules → `.cursor/rules/`
+- Backend rules → `back-end/.cursor/rules/`
+- Frontend rules → `front-end/.cursor/rules/`
+- Agent rules → `agents/.cursor/rules/`
+
+## Technology Stack Summary
+
+| Layer | Technologies |
+|-------|-------------|
+| **Frontend** | React 18, TypeScript, Vite, TailwindCSS, shadcn/ui |
+| **Backend** | Express, TypeScript, Prisma, Node.js |
+| **Agents** | Python 3.10, Temporal, OpenAI SDK |
+| **Database** | Supabase PostgreSQL with RLS |
+| **Authentication** | Supabase Auth (JWKS/JWT) |
+| **Real-time** | Supabase Realtime (WebSocket) |
+| **Deployment** | Vercel (frontend), Render (backend), Fly.io (agents) |
+| **Workflow Engine** | Temporal.io |
+| **LLM** | OpenAI GPT-4 |
+
+## Quick Reference: Where to Find Things
+
+| What | Where |
+|------|-------|
+| Agent workflow logic | `agents/workflows/agent_workflow.py` |
+| LLM interaction code | `agents/helpers/llm.py` |
+| Backend REST API server | `back-end/src/server.ts` |
+| Database schema | `back-end/prisma/schema.prisma` |
+| API route handlers | `back-end/src/routes/*.ts` |
+| Auth middleware | `back-end/src/middleware/auth.ts` |
+| Frontend React app | `front-end/src/App.tsx` |
+| Terminal UI components | `front-end/src/components/terminal/` |
+| Agent tools | `agents/tools/*.py` |
+| Cursor rules | `.cursor/rules/*.mdc` and sub-directories |
+| API tests | `back-end/src/tests/api-test-suite.ts` |
+| Agent tests | `agents/tests/test_*.py` |
+| Python dependencies | `agents/requirements.txt` |
+| Node dependencies | `back-end/package.json`, `front-end/package.json` |

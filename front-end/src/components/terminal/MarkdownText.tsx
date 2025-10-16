@@ -133,11 +133,6 @@ function FadeInMarkdown({
 
     extractWords(tempRef.current);
     
-    console.log('📝 Extracted 1D word array:', wordArray);
-    console.log('📊 Total parts:', wordArray.length, '| Words only:', wordArray.filter(w => w.isWord).length);
-    console.log('🔍 Code block items:', wordArray.filter(w => w.blockType === 'pre'));
-    console.log('🔍 Items without blockType:', wordArray.filter(w => !w.blockType));
-    
     setWords(wordArray);
   }, [markdown]);
 
@@ -162,7 +157,15 @@ function FadeInMarkdown({
 
   // Step 3: Render each word with its formatting preserved
   const wordCount = words.filter(w => w.isWord).length;
-  let wordIndex = 0;
+  let wordIndex = 0; // Counter for actual words only (for delay calculation)
+  
+  // Find the last word item in the words array (for animation completion)
+  const lastWordItem = (() => {
+    for (let i = words.length - 1; i >= 0; i--) {
+      if (words[i].isWord) return words[i];
+    }
+    return null;
+  })();
   
   // Calculate dynamic delay based on word count to ensure 3s max animation
   const maxAnimationTime = 3.0; // seconds
@@ -214,18 +217,22 @@ function FadeInMarkdown({
         
         if (animate && !reduce) {
           const currentWordIndex = wordIndex;
-          wordIndex++;
+          // Only increment wordIndex for actual words (for delay calculation)
+          if (item.isWord) {
+            wordIndex++;
+          }
           const delay = baseDelay + (currentWordIndex * perWordDelay);
-          const isLastWord = currentWordIndex === wordCount - 1;
+          // Check if this is the last word item by object reference
+          const isLastWord = item === lastWordItem;
           
           content = (
             <motion.span
-              key={`word-${wordIndex}`}
+              key={`word-${idx}`}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               transition={{
                 delay,
-                duration: 0.35,
+                duration: fadeDuration,
                 ease: 'easeOut'
               }}
               onAnimationComplete={isLastWord ? handleLastWordComplete : undefined}
@@ -234,8 +241,7 @@ function FadeInMarkdown({
             </motion.span>
           );
         } else {
-          wordIndex++;
-          content = <span key={`word-${wordIndex}`}>{item.word}</span>;
+          content = <span key={`word-${idx}`}>{item.word}</span>;
         }
         
         return content;

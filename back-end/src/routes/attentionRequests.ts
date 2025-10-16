@@ -11,7 +11,7 @@ const createAttentionRequestSchema = z.object({
   agentId: z.string(),
   workflowId: z.string(),
   question: z.string().min(1),
-  context: z.record(z.any()).optional(),
+  imageUrl: z.string().url().optional(),
 });
 
 const respondSchema = z.object({
@@ -23,6 +23,7 @@ const respondSchema = z.object({
 // POST /api/attention-requests - Create an attention request (called by agent)
 router.post('/', async (req, res) => {
   try {
+    console.log('📥 Received attention request:', JSON.stringify(req.body, null, 2));
     const data = createAttentionRequestSchema.parse(req.body);
     
     const request = await prisma.agentAttentionRequest.create({
@@ -31,9 +32,11 @@ router.post('/', async (req, res) => {
         agentId: data.agentId,
         workflowId: data.workflowId,
         question: data.question,
-        context: data.context,
+        imageUrl: data.imageUrl,
       },
     });
+    
+    console.log('✅ Attention request created:', request.id);
     
     res.json({
       id: request.id,
@@ -41,6 +44,8 @@ router.post('/', async (req, res) => {
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
+      console.error('❌ Validation error:', JSON.stringify(error.errors, null, 2));
+      console.error('Request body was:', JSON.stringify(req.body, null, 2));
       return res.status(400).json({ error: 'Invalid request data', details: error.errors });
     }
     console.error('Failed to create attention request:', error);
@@ -68,7 +73,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         agent_id: r.agentId,
         workflow_id: r.workflowId,
         question: r.question,
-        context: r.context,
+        image_url: r.imageUrl,
         user_response: r.userResponse,
         created_at: r.createdAt,
         updated_at: r.updatedAt,

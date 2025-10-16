@@ -1213,9 +1213,9 @@ class AgentWorkflow:
         # Special handling for request_user_attention: create request + wait for signal
         if tool == "request_user_attention":
             try:
-                # Get question and context from tool_call dict
+                # Get question from tool_call dict
+                # Note: context is NOT provided by LLM, only by workflow functions (e.g. buy_item_from_amazon)
                 question = tool_call.get("question", "")
-                context = tool_call.get("context")
                 
                 if not question:
                     raise ValueError("request_user_attention requires a question")
@@ -1223,8 +1223,7 @@ class AgentWorkflow:
                 workflow.logger.info(f"🔔 Requesting user attention: {question[:100]}")
                 
                 # Call the workflow function (handles activity + wait_condition internally)
-                # This will create the attention request and wait for the signal
-                result = await request_user_attention(question, context)
+                result = await request_user_attention(self, question)
                 
                 workflow.logger.info(f"✓ User response received, continuing workflow")
                 
@@ -1234,11 +1233,34 @@ class AgentWorkflow:
             except Exception as e:
                 raise ValueError(f"request_user_attention failed: {str(e)}")
         
+        # Special handling for buy_item_from_amazon: it's a workflow function, not an activity
+        if tool == "buy_item_from_amazon":
+            try:
+                # Get parameters from tool_call dict
+                item_search_query = tool_call.get("item_search_query", "")
+                item_qualifications = tool_call.get("item_qualifications")
+                
+                if not item_search_query:
+                    raise ValueError("buy_item_from_amazon requires item_search_query")
+                
+                workflow.logger.info(f"🛒 Buying from Amazon: {item_search_query}")
+                
+                # Call the workflow function directly (handles activities internally)
+                # Pass self to access workflow context
+                result = await buy_item_from_amazon(self, item_search_query, item_qualifications)
+                
+                workflow.logger.info(f"✓ Amazon purchase flow completed")
+                
+                # Return result for formatter
+                return result
+                
+            except Exception as e:
+                raise ValueError(f"buy_item_from_amazon failed: {str(e)}")
+        
         # Map tool to activity (for all non-system tools)
         activity_map = {
             "web_search": web_search,
             "deep_research": deep_research,
-            "buy_item_from_amazon": buy_item_from_amazon,
         }
         
         activity_fn = activity_map.get(tool)
@@ -1257,12 +1279,6 @@ class AgentWorkflow:
         elif tool == "deep_research":
             # Pass query and max_tokens (with default if not provided)
             activity_args = [tool_call.get("query"), tool_call.get("max_tokens", 4000)]
-        elif tool == "buy_item_from_amazon":
-            # Pass item_search_query and item_qualifications
-            activity_args = [
-                tool_call.get("item_search_query"),
-                tool_call.get("item_qualifications"),
-            ]
         else:
             # Fallback to args if present (for backward compatibility)
             activity_args = args

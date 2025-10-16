@@ -11,6 +11,12 @@ description: >
   - Connection: Session Pooler (IPv4 compatible)
   - RLS: ENABLED on all tables
   - ORM: Prisma
+  - ⚠️ CRITICAL: When adding Supabase Realtime websockets to ANY new table, you MUST add Row Level Security (RLS) policies
+    * Without RLS policies, realtime subscriptions will fail silently or expose data
+    * Always add policies to /back-end/prisma/migrations/enable_rls.sql
+    * Required policies: SELECT, INSERT, UPDATE, DELETE (matching user access patterns)
+    * Ensure proper indexes exist on filter columns (e.g., userId) for performance
+    * Ensure user turns on real-time enabled on supabase dashboard
   
   Authentication:
   - Method: JWKS (JSON Web Key Set)
@@ -28,6 +34,13 @@ description: >
   PUBLIC (No Auth): GET /health (Health check), POST /api/waitlist (Join waitlist)
   AUTHENTICATED (Requires JWT): GET /api/agents (List user's agents), POST /api/agents (Create agent), GET /api/agents/:id (Get agent + messages), POST /api/agents/:id/messages (Send message), DELETE /api/agents/:id (Soft delete agent), POST /api/format-llm-judge-prompt (Format LLM prompt), GET /api/tools (Get available tools)
   
+  ⚠️ ZOD SCHEMA CHANGES REQUIRE APPROVAL:
+  - CRITICAL: Any changes to Zod schemas in route files MUST be proposed to the user first
+  - Wait for explicit user approval before implementing schema changes
+  - This includes: Adding/removing fields, Changing field types, Modifying validation rules, Updating required/optional status
+  - Reason: Schema changes affect API contracts and may require frontend updates
+  - Process: 1. Propose the schema change to user, 2. Wait for user approval, 3. Implement only after approval
+  
   Authentication Middleware (src/middleware/auth.ts):
   1. Extracts JWT from Authorization Bearer header
   2. Parses token header to get kid (Key ID)
@@ -41,7 +54,7 @@ description: >
   - Schema Location: /back-end/prisma/schema.prisma (single source of truth)
   - All database changes MUST be made through Prisma: 1. Edit schema.prisma, 2. Run npm run prisma:migrate:dev -- --name your_change, 3. Never manually edit the database
   
-  Tables with RLS: Agent (User's AI agents - users can only see their own), Message (Chat messages - users can only see messages from their agents), Tool (Available tools - public read), AgentTool (Many-to-many junction - users can only see their agent's tools), Verifier (Agent verifiers - users can only see their agent's verifiers)
+  Tables with RLS: Agent (User's AI agents - users can only see their own), Message (Chat messages - users can only see messages from their agents), AgentAttentionRequest (Attention requests - users can only see their own), Tool (Available tools - public read), AgentTool (Many-to-many junction - users can only see their agent's tools), Verifier (Agent verifiers - users can only see their agent's verifiers)
   
   Public Tables (No RLS): Waitlist (Public signups - accessed via backend API only)
   

@@ -179,6 +179,7 @@ async def rank_amazon_products_activity(prompt: str) -> Dict[str, Any]:
 
 
 async def buy_item_from_amazon(
+    workflow_instance: Any,
     item_search_query: str,
     item_qualifications: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -193,6 +194,7 @@ async def buy_item_from_amazon(
     5. Send purchase confirmation to user via request_user_attention (mock purchase)
     
     Args:
+        workflow_instance: The workflow instance (self) to pass to request_user_attention
         item_search_query: What to search for (e.g., "wooden shower bench", "wireless headphones")
         item_qualifications: Optional natural language description of what qualities matter.
             Examples:
@@ -208,6 +210,7 @@ async def buy_item_from_amazon(
         
     Example:
         result = await buy_item_from_amazon(
+            workflow_instance,
             item_search_query="wooden shower bench",
             item_qualifications="under $100, highly rated, has storage shelf, natural wood finish"
         )
@@ -324,31 +327,12 @@ Return the index of the best product and explain your reasoning."""
     reviews = best_product.get('reviews', 0)
     link = best_product.get('link', '')
     asin = best_product.get('asin', '')
+    thumbnail = best_product.get('thumbnail', '')
     
     # Calculate estimated delivery (mock - 3-5 business days)
     estimated_delivery = (datetime.now() + timedelta(days=5)).strftime("%B %d, %Y")
     
-    # Format purchase confirmation message
-    purchase_msg = f"# 🛒 Amazon Order Confirmation\n\n"
-    purchase_msg += f"## {title}\n\n"
-    
-    # LLM's reasoning for selection
-    purchase_msg += f"**Why this product:** {llm_reasoning}\n\n"
-    purchase_msg += f"---\n\n"
-    
-    # Price info
-    purchase_msg += f"**Price:** ${price:.2f}"
-    if orig_price and orig_price > price:
-        discount = (orig_price - price) / orig_price * 100
-        purchase_msg += f" ~~${orig_price:.2f}~~ (${orig_price - price:.2f} savings, {discount:.0f}% off!)"
-    purchase_msg += "\n\n"
-    
-    # Product details
-    purchase_msg += f"**Rating:** {'⭐' * int(rating)} {rating}/5 ({reviews:,} reviews)\n"
-    purchase_msg += f"**ASIN:** {asin}\n"
-    purchase_msg += f"**Estimated Delivery:** {estimated_delivery}\n\n"
-    
-    # Format shipping address from user data
+    # Format shipping address from user data (for return value, not shown in message)
     name = user_settings.get("name")
     addr_line1 = user_settings.get("addressLine1")
     addr_line2 = user_settings.get("addressLine2")
@@ -372,15 +356,12 @@ Return the index of the best product and explain your reasoning."""
             addr_parts.append(country)
         shipping_addr = "\n".join(addr_parts)
     
-    purchase_msg += f"**Shipping Address:**\n{shipping_addr}\n\n"
-    purchase_msg += f"**Payment Method:** [Default card ending in 1234]\n\n"
+    # Format simple purchase confirmation message
+    # Get agent goal from workflow instance
+    agent_goal = workflow_instance.goal
     
-    # Link
-    purchase_msg += f"---\n\n"
-    purchase_msg += f"🔗 **[View Order on Amazon]({link})**\n\n"
-    purchase_msg += f"---\n\n"
-    purchase_msg += f"**Do you want to proceed with this purchase?**\n"
-    purchase_msg += f"Reply 'confirm' to place the order, or 'cancel' to stop."
+    purchase_msg = f"Agent with the goal **{agent_goal}** would like to buy **{title}** (${price:.2f}).\n\n"
+    purchase_msg += f"Send **yes** to confirm or **no** to deny the request."
     
     logger.info(
         "Requesting purchase confirmation",
@@ -393,17 +374,9 @@ Return the index of the best product and explain your reasoning."""
     
     # Step 4: Request user confirmation (mock "purchase")
     attention_result = await request_user_attention(
+        workflow_instance,
         question=purchase_msg,
-        context={
-            "type": "amazon_purchase_confirmation",
-            "item_search_query": item_search_query,
-            "item_qualifications": item_qualifications,
-            "selected_product": title,
-            "price": price,
-            "asin": asin,
-            "link": link,
-            "llm_reasoning": llm_reasoning
-        }
+        image_url=thumbnail if thumbnail else None,
     )
     
     user_response = attention_result.get("response", "").lower()

@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 
 /**
- * Cleanup Script: Delete All Agents, Terminate Workflows, and Clear Blueprints
+ * Cleanup Script: Delete All Agents, Terminate Workflows, Clear Blueprints, and Attention Requests
  * 
  * This script will:
  * 1. Kill any local workers running on the test queue
@@ -9,6 +9,7 @@
  * 3. Terminate their Temporal workflows
  * 4. Soft-delete them from the database
  * 5. Clear all blueprints from the knowledge base
+ * 6. Clear all attention requests
  */
 
 import { prisma } from '../src/lib/prisma';
@@ -141,16 +142,22 @@ async function cleanupAllAgents() {
     const deletedBlueprints = await prisma.goalBlueprint.deleteMany({});
     console.log(`✅ Deleted ${deletedBlueprints.count} blueprint(s)`);
 
+    // Clear all attention requests
+    console.log('\n🗑️  Clearing all attention requests...');
+    const deletedAttentionRequests = await prisma.agentAttentionRequest.deleteMany({});
+    console.log(`✅ Deleted ${deletedAttentionRequests.count} attention request(s)`);
+
     console.log('\n' + '='.repeat(60));
     console.log('📈 Cleanup Summary:');
     console.log(`   Total agents: ${agents.length}`);
     console.log(`   Successfully deleted: ${successCount}`);
     console.log(`   Failed: ${failCount}`);
     console.log(`   Blueprints cleared: ${deletedBlueprints.count}`);
+    console.log(`   Attention requests cleared: ${deletedAttentionRequests.count}`);
     console.log('='.repeat(60));
 
     if (failCount === 0) {
-      console.log('\n✅ All agents and blueprints cleaned up successfully!');
+      console.log('\n✅ All agents, blueprints, and attention requests cleaned up successfully!');
     } else {
       console.log(`\n⚠️  ${failCount} agent(s) failed to delete`);
     }

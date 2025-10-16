@@ -419,12 +419,12 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
     // Determine role based on auth type
     let role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
     if (isInternal) {
-      // Internal (worker): role must be provided and must be ASSISTANT/TOOL/SYSTEM
-      if (!body.role || body.role === 'USER') {
-        res.status(400).json({ error: 'Internal messages must specify role (ASSISTANT/TOOL/SYSTEM)' });
+      // Internal (worker): role must be provided
+      if (!body.role) {
+        res.status(400).json({ error: 'Internal messages must specify role (USER/ASSISTANT/TOOL/SYSTEM)' });
         return;
       }
-      role = body.role as 'ASSISTANT' | 'TOOL' | 'SYSTEM';
+      role = body.role;
     } else {
       // User: always USER role, ignore any provided role
       role = 'USER';

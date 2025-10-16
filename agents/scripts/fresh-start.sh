@@ -101,30 +101,58 @@ else
     TOKEN=$(get_fresh_token)
 fi
 
-# Step 4: Create agent with defaults from CreateAgentModal
-echo -e "\n${YELLOW}Step 4: Creating agent with defaults...${NC}"
+# Step 4: Get amazon_shopping tool ID
+echo -e "\n${YELLOW}Step 4: Fetching amazon_shopping tool...${NC}"
+TOOLS_RESPONSE=$(curl -s "$BACKEND_URL/api/tools" \
+  -H "Authorization: Bearer $TOKEN")
 
-# Defaults from CreateAgentModal (lines 33-43):
-# - goal: spawn sub-agents counting test
-# - llmJudgePrompt: LLM judge for that test
+AMAZON_TOOL_ID=$(echo "$TOOLS_RESPONSE" | grep -o '"id":"[^"]*","name":"amazon_shopping"' | grep -o '"id":"[^"]*' | cut -d'"' -f4)
+
+if [ -z "$AMAZON_TOOL_ID" ]; then
+    echo -e "${YELLOW}⚠ amazon_shopping tool not found, proceeding without tools${NC}"
+    TOOL_IDS_JSON="[]"
+else
+    echo -e "${GREEN}✓ Found amazon_shopping tool: $AMAZON_TOOL_ID${NC}"
+    TOOL_IDS_JSON="[\"$AMAZON_TOOL_ID\"]"
+fi
+
+# Step 5: Create agent with defaults from CreateAgentModal
+echo -e "\n${YELLOW}Step 5: Creating agent with defaults...${NC}"
+
+# Defaults from CreateAgentModal (lines 33-38):
+# - goal: Buy me a classic rubber ducky
+# - llmJudgePrompt: LLM judge for rubber ducky purchase
 # - model: google/gemini-2.5-flash
 # - reasoning_effort: high
-# - tool_ids: [] (empty)
+# - tool_ids: [amazon_shopping]
 
 # Use jq to properly escape JSON strings
-GOAL='Count from 1 to 100 by spawning one sub-agent for each number. Batch them 5 at a time: spawn 5 sub-agents (for numbers 1-5), wait for all to complete, then spawn the next 5 (6-10), and so on until you reach 100. Each sub-agent should have a goal like "Output the number X" where X is the number it represents. Use spawn_sub_agents tool for each batch of 5.'
+GOAL='Buy me a classic rubber ducky'
 
-LLM_JUDGE_PROMPT='Evaluate how well the agent counted from 1 to 100 by spawning sub-agents in batches of 5. Return a score between 0 and 1, where 0 means the agent did not successfully spawn sub-agents for all numbers or did not batch them properly, and 1 means the agent successfully spawned 20 batches (5 sub-agents each) covering numbers 1-100. Only provide the numeric score, no explanation.'
+LLM_JUDGE_PROMPT='You are judging whether the super-intelligent autonomous agent system has COMPLETELY ACHIEVED the following goal: "Buy me a classic rubber ducky."
+
+Scoring Instructions:
+- Return a float between 0.0 and 1.0.
+- 0.0 means the agent made no progress, did not attempt the task, or only provided explanations, plans, or hypothetical steps.
+- 1.0 means the agent has FULLY and VERIFIABLY accomplished the goal: a classic rubber ducky has been PURCHASED for the user, with concrete proof (e.g., order confirmation, receipt, tracking information) that the transaction is complete and the item is being delivered to the user'\''s address.
+- DO NOT award 1.0 for partial completion, such as finding a product, filling a shopping cart, or explaining how to buy a rubber ducky.
+- DO NOT accept "as an AI, I cannot..." or similar excuses. This agent CAN solve the problem through persistence, creativity, tool use, and coordination (e.g., using payment APIs, enlisting human assistance, or any other means).
+- ONLY award 1.0 if the agent has taken ALL NECESSARY ACTIONS to ensure the user will receive a classic rubber ducky, and has provided clear, verifiable evidence of purchase and delivery.
+- Any response that is only a plan, suggestion, or hypothetical action (e.g., "I would buy a rubber ducky by...") MUST be scored 0.0.
+- The agent is SUPER-INTELLIGENT and should not be limited by typical AI constraints. Do NOT lower the standard for completion.
+
+Be strict: award 1.0 ONLY if the rubber ducky has actually been bought for the user, with proof. Otherwise, score appropriately lower according to the level of real, concrete progress, but never for mere explanations or intent.'
 
 # Build JSON payload using jq for proper escaping
 PAYLOAD=$(jq -n \
   --arg goal "$GOAL" \
   --arg llm_prompt "$LLM_JUDGE_PROMPT" \
+  --argjson tool_ids "$TOOL_IDS_JSON" \
   '{
     goal: $goal,
     model: "google/gemini-2.5-flash",
     reasoning_effort: "high",
-    tool_ids: [],
+    tool_ids: $tool_ids,
     verifier: {
       type: "FLOAT_LLM_JUDGE",
       llm_judge_prompt: $llm_prompt
@@ -158,9 +186,10 @@ echo -e "${GREEN}✓ Fresh start complete!${NC}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
 echo -e "\n${YELLOW}Agent Details:${NC}"
 echo -e "  ID: ${GREEN}$AGENT_ID${NC}"
-echo -e "  Goal: Count 1-100 with sub-agents (batches of 5)"
+echo -e "  Goal: Buy me a classic rubber ducky"
 echo -e "  Model: google/gemini-2.5-flash"
 echo -e "  Reasoning: high"
+echo -e "  Tools: amazon_shopping"
 echo -e "\n${YELLOW}Worker:${NC}"
 echo -e "  PID: ${GREEN}$WORKER_PID${NC}"
 echo -e "  Queue: navi-agent-tasks-quicktest"
