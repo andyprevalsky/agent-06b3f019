@@ -274,11 +274,13 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   if (isUser) {
     return (
       <div className="flex justify-end animate-in fade-in duration-300">
-        <div className={cn(
-          'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
-          config.bg,
-          config.border
-        )}>
+        <div 
+          className={cn(
+            'inline-block max-w-[80%] px-4 py-2 rounded-lg border backdrop-blur-md',
+            config.bg,
+            config.border
+          )}
+        >
           <p className="text-sm whitespace-pre-wrap break-words">{message.text}</p>
         </div>
       </div>

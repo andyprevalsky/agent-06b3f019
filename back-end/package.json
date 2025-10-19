@@ -5,6 +5,9 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "dev:server": "tsx watch src/server.ts",
+    "ngrok": "ngrok http 3001 --pooling-enabled",
+    "kill:ngrok": "./scripts/kill-ngrok.sh",
     "build": "tsc",
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
@@ -14,6 +17,7 @@
     "cleanup:all": "tsx scripts/cleanup-all-agents.ts",
     "clear:blueprints": "tsx scripts/clear-blueprints.ts",
     "getmessages:all": "tsx scripts/get-messages-all.ts",
+    "backfill:pricing": "tsx scripts/backfill-agent-pricing.ts",
     "test:api": "tsx src/tests/api-test-suite.ts",
     "workers:check": "tsx scripts/query-temporal-workers.ts",
     "postinstall": "prisma generate"

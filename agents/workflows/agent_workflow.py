@@ -60,6 +60,7 @@ with workflow.unsafe.imports_passed_through():
         save_blueprint,
         mark_finished,
         fetch_agent_config,
+        check_user_usage,
     )
 
 logger = structlog.get_logger()
@@ -545,6 +546,64 @@ class AgentWorkflow:
                             )
                 except Exception as e:
                     workflow.logger.warning(f"Failed to fetch config: {str(e)}")
+                
+                # Check user's credit usage - pause if depleted
+                try:
+                    usage_result = await workflow.execute_activity(
+                        check_user_usage,
+                        args=[self.user_id],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(
+                            maximum_attempts=2,
+                            backoff_coefficient=2.0,
+                            initial_interval=timedelta(seconds=1),
+                            maximum_interval=timedelta(seconds=5)
+                        )
+                    )
+                    
+                    # If None, activity failed - preserve cached value
+                    if usage_result is None:
+                        workflow.logger.warning(
+                            "⚠️  Failed to check usage after retries - using cached value"
+                        )
+                    else:
+                        # Update cache with new value
+                        if not usage_result.get("has_credits", True):
+                            workflow.logger.warning(
+                                f"💳 User has no credits remaining (${usage_result.get('remaining', 0):.2f}), pausing agent"
+                            )
+                            # Update agent status to PAUSED
+                            try:
+                                await workflow.execute_activity(
+                                    update_agent_status,
+                                    args=[
+                                        self.agent_id,
+                                        "PAUSED",
+                                        0.0,  # progress
+                                        "Out of credits",
+                                        self.token_count,
+                                        self.context_tokens,
+                                        len(self.context),
+                                        self.tokens_in,
+                                        self.tokens_out
+                                    ],
+                                    start_to_close_timeout=timedelta(seconds=10),
+                                    retry_policy=RetryPolicy(maximum_attempts=2)
+                                )
+                            except Exception as e:
+                                workflow.logger.error(f"Failed to update status to PAUSED: {str(e)}")
+                            
+                            # Set is_paused flag to trigger pause logic
+                            self.is_paused = True
+                        else:
+                            remaining = usage_result.get("remaining", 0)
+                            if remaining < 1.0:  # Warn when below $1
+                                workflow.logger.warning(
+                                    f"⚠️  Low credits: ${remaining:.2f} remaining"
+                                )
+                
+                except Exception as e:
+                    workflow.logger.warning(f"Failed to check usage: {str(e)} - continuing anyway")
                 
                 # Green-light check: wait if paused (with timeout to re-check DB)
                 if self.is_paused:

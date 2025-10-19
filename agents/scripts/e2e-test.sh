@@ -175,14 +175,14 @@ AGENT_RESPONSE=$(curl -s "$BACKEND_URL/api/agents" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
-    \"goal\": \"Count to 5, one message at a time. Wait 1 second between each number.\",
-    \"model\": \"qwen/qwen-2.5-7b-instruct\",
+    \"goal\": \"Post 5 messages. Each message should contain only a single number: 1, 2, 3, 4, 5. Use wait_seconds(1) between each message. Do not explain what you're doing - just post the numbers.\",
+    \"model\": \"google/gemini-2.5-flash\",
     \"reasoning_effort\": \"off\",
     \"tool_ids\": [],
     \"task_queue\": \"$TEST_TASK_QUEUE\",
     \"verifier\": {
       \"type\": \"FLOAT_LLM_JUDGE\",
-      \"llm_judge_prompt\": \"Evaluate the response for correctly generating 5 consecutive counting messages (1, 2, 3, 4, 5) with 1 second waits between each. Score: 1.0 if all 5 numbers are posted with proper waits. Partial credit based on count/5. Return only a float between 0 and 1.\"
+      \"llm_judge_prompt\": \"Count how many single-number messages the agent posted (messages that contain ONLY '1', '2', '3', '4', or '5' with no other text). Score: (count of correct number messages) / 5. Maximum score is 1.0 when all 5 numbers are posted correctly.\"
     }
   }")
 

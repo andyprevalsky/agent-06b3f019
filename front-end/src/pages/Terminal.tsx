@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, Plus, LogOut, Filter, Settings as SettingsIcon } from 'lucide-react';
+import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot } from 'lucide-react';
 import { supabase, signOut, getCurrentUser } from '@/lib/supabase';
 import {
   getAllAgents,
@@ -24,6 +24,7 @@ import QueryInput from '@/components/terminal/QueryInput';
 import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
 import Settings from '@/pages/Settings';
+import UsageDisplay from '@/components/UsageDisplay';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
@@ -109,12 +110,14 @@ export default function Terminal() {
 
   // View state - which pane to show
   const [currentView, setCurrentView] = useState<'agents' | 'settings'>('agents');
+  
+  // Sidebar state
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   // Agent list state
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isLoadingAgents, setIsLoadingAgents] = useState(true);
   const [isFirstLoad, setIsFirstLoad] = useState(true);
-  const [showCompleted, setShowCompleted] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
   
@@ -146,6 +149,74 @@ export default function Terminal() {
   const isInitialLoadRef = useRef<boolean>(false);
   const [forceResubscribe, setForceResubscribe] = useState<number>(0);
 
+  // Popular goals carousel
+  const popularGoals = [
+    "Cure cancer",
+    "Make me a master painter",
+    "Get me socks",
+    "Make sure my birthday is amazing",
+    "Get me 5 new friends",
+    "End world hunger",
+    "Make sure I accomplish my body goals",
+    "Get me into Stanford",
+    "Optimize my nutrition",
+    "Raise me 1 million dollars",
+    "Find me my first 10 customers",
+    "Make sure my startup succeeds",
+    "Make me happy",
+    "Get me a boyfriend",
+    "Get me a girlfriend",
+    "Make sure my parents are taken care of",
+    "Make sure I am a good friend"
+  ];
+  const [tickerOffset, setTickerOffset] = useState(0);
+  const tickerRef = useRef<HTMLDivElement>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const lastTimeRef = useRef<number>(Date.now());
+
+  // Rotate popular goals carousel like a stock ticker with constant motion
+  useEffect(() => {
+    if (selectedAgentId) {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      return;
+    }
+
+    const animate = () => {
+      const now = Date.now();
+      const deltaTime = now - lastTimeRef.current;
+      lastTimeRef.current = now;
+
+      setTickerOffset(prev => {
+        if (!tickerRef.current) return prev;
+        
+        // Calculate how much to move (pixels per millisecond * deltaTime)
+        const pixelsPerSecond = 30; // Adjust speed here
+        const newOffset = prev + (pixelsPerSecond * deltaTime) / 1000;
+        
+        // Get the width of one complete set of goals
+        const singleSetWidth = tickerRef.current.scrollWidth / 3;
+        
+        // Reset when we've scrolled past one full set
+        if (newOffset >= singleSetWidth) {
+          return newOffset - singleSetWidth;
+        }
+        
+        return newOffset;
+      });
+
+      animationFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    animationFrameRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [selectedAgentId]);
 
   // Check authentication
   useEffect(() => {
@@ -575,6 +646,7 @@ export default function Terminal() {
     setCurrentView('agents');
     setSelectedAgentId(agentId);
     loadAgentDetail(agentId);
+    setIsSidebarOpen(false);
   };
 
   const handleCreateAgent = async (data: CreateAgentPayload) => {
@@ -614,10 +686,32 @@ export default function Terminal() {
   };
 
   const handleSendMessage = async () => {
-    if (!messageInput.trim() || !selectedAgentId) return;
+    if (!messageInput.trim()) return;
 
     try {
       setIsSendingMessage(true);
+      
+      // If no agent selected, create a new agent
+      if (!selectedAgentId) {
+        const newAgent = await createAgentAPI({
+          goal: messageInput,
+          model: selectedModel,
+          verifier: {
+            type: 'FLOAT_LLM_JUDGE',
+            llm_judge_prompt: `You are judging whether the agent has achieved the following goal: "${messageInput}"\n\nScoring Instructions:\n- Return a float between 0.0 and 1.0.\n- 0.0 means no progress or only explanations/plans.\n- 1.0 means the goal is FULLY accomplished with verifiable proof.\n- Do not award 1.0 for partial completion.\n- The agent has access to tools and can solve problems through persistence and creativity.`,
+          },
+        });
+        await loadAgents();
+        setCurrentView('agents');
+        setSelectedAgentId(newAgent.agent_id);
+        await loadAgentDetail(newAgent.agent_id);
+        setMessageInput(''); // Clear input after agent is loaded
+        toast({
+          title: 'Agent created',
+          description: 'Your new agent has been created and is starting',
+        });
+        return;
+      }
       
       // Check if there's a pending attention request for this agent and respond to it
       const respondedToRequest = await checkAndRespondToAttentionRequest(
@@ -641,7 +735,7 @@ export default function Terminal() {
     } catch (error) {
       toast({
         title: 'Error',
-        description: 'Failed to send message',
+        description: selectedAgentId ? 'Failed to send message' : 'Failed to create agent',
         variant: 'destructive',
       });
     } finally {
@@ -663,15 +757,11 @@ export default function Terminal() {
     }
   };
 
-  const filteredAgents = agents.filter((agent) => {
-    if (showCompleted) {
-      return agent.status === 'COMPLETED';
-    }
-    return agent.status !== 'COMPLETED';
-  });
-
-  const sortedAgents = [...filteredAgents].sort((a, b) => {
-    // Paused agents go to the bottom
+  const sortedAgents = [...agents].sort((a, b) => {
+    // Completed agents go to the bottom
+    if (a.status === 'COMPLETED' && b.status !== 'COMPLETED') return 1;
+    if (a.status !== 'COMPLETED' && b.status === 'COMPLETED') return -1;
+    // Paused agents go to the bottom (but above completed)
     if (a.status === 'PAUSED' && b.status !== 'PAUSED') return 1;
     if (a.status !== 'PAUSED' && b.status === 'PAUSED') return -1;
     // Otherwise sort by progress (descending)
@@ -686,35 +776,159 @@ export default function Terminal() {
   // Get system messages
   const systemMessages = messages.filter((m) => m.role === 'SYSTEM');
 
+  // Calculate pattern offset dynamically based on viewport
+  const [patternOffset, setPatternOffset] = useState({ x: 0, y: 0 });
+  
+  useEffect(() => {
+    const updatePatternOffset = () => {
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      
+      // Large tile corners are at (50% - 214.5px, 40% - 214.5px)
+      // Pattern needs grid lines to hit exactly at those positions
+      const tileX = viewportWidth * 0.5 - 214.5;
+      const tileY = viewportHeight * 0.4 - 214.5;
+      
+      // Pattern offset: grid lines at px + k*143, we want one at tileX
+      // So px = tileX mod 143 (handling negatives correctly)
+      const x = ((tileX % 143) + 143) % 143;
+      const y = ((tileY % 143) + 143) % 143;
+      
+      setPatternOffset({ x, y });
+    };
+    
+    updatePatternOffset();
+    window.addEventListener('resize', updatePatternOffset);
+    return () => window.removeEventListener('resize', updatePatternOffset);
+  }, []);
+
   return (
-    <div className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black">
-      {/* Header */}
-      <header className="h-16 border-b border-border dark:border-navi-light-black flex items-center justify-between px-6 bg-card dark:bg-navi-black flex-shrink-0">
-        <a
-          href="/"
-          className="flex items-center space-x-3 hover:opacity-80 transition-opacity"
+    <div className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden">
+      {/* Background Pattern */}
+      <svg className="absolute inset-0 w-full h-full pointer-events-none" xmlns="http://www.w3.org/2000/svg" style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}>
+        <defs>
+          {/* Navi gradient for top corners */}
+          <linearGradient id="navi-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#FE7503" />
+            <stop offset="20%" stopColor="#FC585C" />
+            <stop offset="40%" stopColor="#FD5776" />
+            <stop offset="60%" stopColor="#E062CC" />
+            <stop offset="80%" stopColor="#A76CED" />
+            <stop offset="100%" stopColor="#7A6BEC" />
+          </linearGradient>
+          
+          <pattern id="grid-pattern" x={patternOffset.x} y={patternOffset.y} width="143" height="143" patternUnits="userSpaceOnUse">
+            {/* Small tile square outline */}
+            <rect x="0" y="0" width="143" height="143" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" />
+            
+            {/* Center dot */}
+            <circle cx="71.5" cy="71.5" r="3" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
+            
+            {/* Corner diamonds with concave (inward curved) sides */}
+            <path d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
+            <path d="M 143,-11 Q 143,0 154,0 Q 143,0 143,11 Q 143,0 132,0 Q 143,0 143,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
+            <path d="M 0,132 Q 0,143 11,143 Q 0,143 0,154 Q 0,143 -11,143 Q 0,143 0,132 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
+            <path d="M 143,132 Q 143,143 154,143 Q 143,143 143,154 Q 143,143 132,143 Q 143,143 143,132 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
+          </pattern>
+          
+          {/* Mask to hide small tiles inside large tile area */}
+          <mask id="large-tile-mask">
+            <rect x="-5000" y="-5000" width="10000" height="10000" fill="white" />
+            {/* Black out the interior of the large tile (slightly inset to preserve boundary corners) */}
+            <rect x="50%" y="40%" width="426.8" height="426.8" style={{ transform: 'translate(-213.4px, -213.4px)' }} fill="black" />
+          </mask>
+        </defs>
+        
+        {/* Small tiles pattern everywhere except inside large tile */}
+        <rect x="-5000" y="-5000" width="10000" height="10000" fill="url(#grid-pattern)" mask="url(#large-tile-mask)" />
+        
+        {/* Large tile border (3x3 size = 429x429) aligned with small tile grid */}
+        {/* Pattern offset ensures corners land exactly on grid intersections */}
+        <rect x="50%" y="40%" width="429" height="429" style={{ transform: 'translate(-214.5px, -214.5px)' }} fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" />
+        
+        {/* Large tile corner diamonds with concave sides (shared with surrounding small tiles) */}
+        {/* Top-left corner with circle and perfectly smooth geometric diamond shape */}
+        <circle cx="0" cy="0" r="25" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
+        <path d="M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z" fill="url(#navi-gradient)" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
+        
+        {/* Top-right corner with circle and perfectly smooth geometric diamond shape */}
+        <circle cx="0" cy="0" r="25" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
+        <path d="M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z" fill="url(#navi-gradient)" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
+        
+        {/* Bottom corners keep original styling */}
+        <path d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% + 214.5px))' }} />
+        <path d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% + 214.5px))' }} />
+      </svg>
+
+      {/* Floating Blur Header */}
+      <header 
+        className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between px-1 py-1 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
+        style={{
+          width: '320px',
+          backdropFilter: 'blur(12px)',
+          WebkitBackdropFilter: 'blur(12px)',
+        }}
+      >
+        <button 
+          onClick={() => {
+            setCurrentView('agents');
+            setSelectedAgentId(null);
+            setMessages([]);
+            setIsSidebarOpen(false);
+          }}
+          className="flex items-center space-x-2.5 px-1 cursor-pointer hover:opacity-80 transition-opacity"
         >
           <div
-            className="w-8 h-8 rounded-lg"
+            className="w-8 h-8 rounded-lg flex-shrink-0"
             style={{
               background:
                 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)',
             }}
           ></div>
-          <span className="text-xl font-semibold tracking-tight">Navi</span>
+          <span className="text-base font-semibold tracking-tight">Navi</span>
+        </button>
+        
+        {/* Research Button - Absolutely centered in viewport */}
+        <a
+          href="/"
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          Research
         </a>
         
         {/* Attention Inbox */}
         <AttentionInbox onSelectAgent={setSelectedAgentId} />
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar */}
-        <aside className="w-80 border-r border-border dark:border-navi-light-black bg-card dark:bg-navi-black flex flex-col">
+      <div className="h-screen flex items-center justify-center overflow-hidden">
+        {/* Overlay */}
+        {isSidebarOpen && (
+          <div 
+            className="absolute inset-0 bg-black/20 z-[55] transition-opacity duration-300"
+            onClick={() => setIsSidebarOpen(false)}
+          />
+        )}
+        
+        {/* Left Sidebar - Positioned Absolute */}
+        <aside 
+          className={cn(
+            "absolute top-0 left-0 h-full w-64 border-r border-border/50 dark:border-navi-light-black/50 flex flex-col z-[60] shadow-2xl transition-transform duration-300 ease-in-out bg-white/80 dark:bg-navi-black/80",
+            isSidebarOpen ? "translate-x-0" : "-translate-x-full"
+          )}
+          style={{
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+          }}
+        >
           {/* Create Agent Button */}
-          <div className="p-4 border-b border-border dark:border-navi-light-black">
-            <Button
-              onClick={() => setCreateModalOpen(true)}
+          <div className="p-3">
+              <Button
+              onClick={() => {
+                setCurrentView('agents');
+                setSelectedAgentId(null);
+                setMessages([]);
+                setIsSidebarOpen(false);
+              }}
               className="w-full"
               size="lg"
             >
@@ -723,31 +937,16 @@ export default function Terminal() {
             </Button>
           </div>
 
-          {/* Filter Toggle */}
-          <div className="px-4 py-3 border-b border-border dark:border-navi-light-black">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowCompleted(!showCompleted)}
-              className="w-full justify-start"
-            >
-              <Filter className="h-4 w-4 mr-2" />
-              {showCompleted ? 'Show In Progress' : 'Show Completed'}
-            </Button>
-          </div>
-
           {/* Agent List */}
           <ScrollArea className="flex-1">
-            <div className="p-4 space-y-2">
+            <div className="px-3 py-2 space-y-1">
               {isLoadingAgents && agents.length === 0 ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : sortedAgents.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground text-sm">
-                  {showCompleted
-                    ? 'No completed agents yet'
-                    : 'No agents in progress'}
+                  No agents yet
                 </div>
               ) : (
                 sortedAgents.map((agent) => (
@@ -764,36 +963,61 @@ export default function Terminal() {
             </div>
           </ScrollArea>
 
-          {/* Settings and Logout Buttons */}
-          <div className="p-4 border-t border-border dark:border-navi-light-black space-y-2">
-            <Button
-              variant="outline"
-              onClick={() => {
-                setCurrentView('settings');
-                setSelectedAgentId(null);
-              }}
-              className="w-full justify-start"
-            >
-              <SettingsIcon className="h-4 w-4 mr-2" />
-              Settings
-            </Button>
-            <Button
-              variant="outline"
-              onClick={handleLogout}
-              className="w-full justify-start"
-            >
-              <LogOut className="h-4 w-4 mr-2" />
-              Logout
-            </Button>
+          {/* Usage Visualization */}
+          <div className="px-4 py-3">
+            <UsageDisplay />
+          </div>
+
+          {/* Bottom Actions - with border top */}
+          <div className="border-t border-border dark:border-navi-light-black">
+            <div className="p-3 space-y-1">
+              {/* Settings Button */}
+              <button
+                onClick={() => {
+                  setCurrentView('settings');
+                  setSelectedAgentId(null);
+                  setIsSidebarOpen(false);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
+              >
+                <SettingsIcon className="h-4 w-4" />
+                <span>Settings</span>
+              </button>
+
+              {/* Usage Button */}
+              <button
+                onClick={() => {
+                  navigate('/usage');
+                  setIsSidebarOpen(false);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
+              >
+                <BarChart3 className="h-4 w-4" />
+                <span>Usage</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Logout - Separate border */}
+          <div className="border-t border-border dark:border-navi-light-black">
+            <div className="p-3">
+              <button
+                onClick={handleLogout}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
+              >
+                <LogOut className="h-4 w-4" />
+                <span>Logout</span>
+              </button>
+            </div>
           </div>
         </aside>
 
-        {/* Main Content */}
-        <main className="flex-1 flex flex-col relative">
-          {/* Breadcrumb for sub-agents - Top Left */}
+        {/* Main Content - Centered */}
+        <main className="flex flex-col relative max-w-5xl w-full h-screen">
+          {/* Breadcrumb for sub-agents - Below Header */}
           {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
-            <div className="absolute top-4 left-0 right-0 z-20 px-6">
-              <div className="max-w-4xl mx-auto pl-10">
+            <div className="absolute top-20 left-0 right-0 z-40 px-6">
+              <div className="max-w-4xl mx-auto">
                 <button
                   onClick={() => {
                     if (agentDetail.parent_agent_id) {
@@ -814,12 +1038,28 @@ export default function Terminal() {
             </div>
           )}
 
-          {/* Settings Button - Top Right */}
-          {selectedAgentId && agentDetail && (
-            <div className="absolute top-4 right-4 z-20">
-              <AgentSettingsDialog agent={agentDetail} onUpdate={() => loadAgentDetail(selectedAgentId)} />
-            </div>
-          )}
+          {/* Hamburger Menu Button - Top Left */}
+          <div className="absolute top-4 left-4 z-50">
+            <button
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+              className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-lg hover:bg-white/10 transition-colors"
+              style={{
+                backdropFilter: 'blur(12px)',
+                WebkitBackdropFilter: 'blur(12px)',
+              }}
+              aria-label="Toggle menu"
+            >
+              {isSidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+            </button>
+          </div>
+
+          {/* Agent Settings Button - Top Right */}
+          <div className="absolute top-4 right-4 z-20">
+            <AgentSettingsDialog 
+              agent={agentDetail} 
+              onUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)} 
+            />
+          </div>
           
           {/* System Messages - Top Right */}
           {selectedAgentId && systemMessages.length > 0 && (
@@ -848,51 +1088,83 @@ export default function Terminal() {
             <Settings />
           ) : (
             <>
-            <ScrollArea className="flex-1 px-6 py-4" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+            <ScrollArea 
+              className="flex-1 px-6 relative" 
+              style={{ 
+                display: 'flex', 
+                flexDirection: 'column', 
+                justifyContent: 'center',
+              }}
+            >
+              {/* White Background Overlay - sits behind messages but in front of ASCII loader */}
+              <div 
+                className="absolute inset-0 pointer-events-none ease-in-out"
+                style={{
+                  background: 'linear-gradient(to right, transparent 0%, #F9F9FB 10%, #F9F9FB 90%, transparent 100%)',
+                  opacity: selectedAgentId ? 1 : 0,
+                  zIndex: 15,
+                  transition: 'opacity 3s ease-in-out',
+                }}
+              />
+              
+              {/* Top padding to clear header */}
+              <div className="h-24" />
+              
               {/* Spacer for breadcrumb when viewing sub-agent */}
               {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
                 <div className="h-14" />
               )}
               
-              {(!selectedAgentId || isLoadingAgent || agentDetail?.status === 'STARTING_UP') && !(agentDetail?.status === 'PAUSED' || agentDetail?.status === 'ACTIVE' || agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED') ? (
-              // Show ASCII animation when: no agent selected, loading agent, or agent starting up (but not when paused/active/completed/failed)
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center space-y-6">
-                    <AsciiLoader showWarmingUp={false} size="large" variant="engine" />
-                  <div>
-                    {!selectedAgentId ? (
-                      // No agent selected states
-                      isLoadingAgents ? (
+              {/* ASCII Loader - Always visible, transitions to background when messages appear */}
+              <div 
+                className="absolute inset-0 flex items-center justify-center pointer-events-none transition-all duration-700 ease-in-out"
+                style={{
+                  opacity: (!selectedAgentId || displayedMessages.length === 0) ? 1 : 0.2,
+                  transform: (!selectedAgentId || displayedMessages.length === 0) ? 'translateY(0)' : 'translateY(8px)',
+                  zIndex: 18,
+                  height: '100vh',
+                }}
+              >
+                <div className="text-center space-y-6" style={{ marginBottom: '20vh' }}>
+                  <AsciiLoader showWarmingUp={false} size="large" variant="engine" />
+                  {(!selectedAgentId || displayedMessages.length === 0) && (
+                    <div className="-mt-3">
+                      {!selectedAgentId ? (
+                        // No agent selected states
+                        isLoadingAgents ? (
+                          <p className="text-muted-foreground">
+                            getting agents <span className="inline-block w-6 animate-dots" />
+                          </p>
+                        ) : agents.length === 0 ? (
+                          <p className="text-muted-foreground">what goal do you want to reach today?</p>
+                        ) : (
+                          <p className="text-muted-foreground">
+                            {sortedAgents.length} {sortedAgents.length === 1 ? 'agent' : 'agents'} in progress <span className="inline-block w-6 animate-dots" />
+                          </p>
+                        )
+                      ) : isLoadingAgent ? (
+                        // Loading agent data
                         <p className="text-muted-foreground">
-                          getting agents <span className="inline-block w-6 animate-dots" />
+                          loading agent <span className="inline-block w-6 animate-dots" />
                         </p>
-                      ) : agents.length === 0 ? (
-                        <>
-                          <p className="text-xl font-semibold mb-2">Navi Says,</p>
-                          <p className="text-muted-foreground">Make Your First Agent!</p>
-                        </>
-                      ) : (
+                      ) : agentDetail?.status === 'STARTING_UP' ? (
+                        // Agent starting up
                         <p className="text-muted-foreground">
-                          {sortedAgents.length} {sortedAgents.length === 1 ? 'agent' : 'agents'} in progress <span className="inline-block w-6 animate-dots" />
+                          agent starting up <span className="inline-block w-6 animate-dots" />
                         </p>
-                      )
-                    ) : isLoadingAgent ? (
-                      // Loading agent data
-                      <p className="text-muted-foreground">
-                        loading agent <span className="inline-block w-6 animate-dots" />
-                      </p>
-                    ) : (
-                      // Agent starting up
-                      <p className="text-muted-foreground">
-                        agent starting up <span className="inline-block w-6 animate-dots" />
-                      </p>
-                    )}
-                  </div>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
               </div>
-            ) : (
-              // Agent selected - show messages
-              <div className="max-w-4xl mx-auto space-y-4 pb-32">
+              
+              {/* Messages - Always rendered */}
+              <div 
+                className="max-w-4xl mx-auto space-y-4 pb-32 relative z-20 transition-opacity duration-700 ease-in-out"
+                style={{
+                  opacity: displayedMessages.length > 0 ? 1 : 0,
+                }}
+              >
                 {displayedMessages.map((message) => (
                   <MessageBubble 
                     key={message.message_id} 
@@ -929,28 +1201,61 @@ export default function Terminal() {
                 
                 <div ref={messagesEndRef} />
               </div>
-            )}
           </ScrollArea>
 
-          {/* Message Input - Only show for active agents */}
-          {selectedAgentId && agentDetail && !['COMPLETED', 'FAILED'].includes(agentDetail.status) && (
-            <div className="p-6">
-              <QueryInput
-                value={messageInput}
-                onChange={setMessageInput}
-                onSubmit={handleSendMessage}
-                disabled={isSendingMessage || !selectedAgentId}
-                placeholder="Type your message..."
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-                availableModels={models}
-                modelsLoading={modelsLoading}
-                contextPercentage={getContextPercentage(agentDetail, models)}
-                contextSize={agentDetail.context_size}
-                restartThreshold={Math.round(getModelContextWindow(agentDetail.model, models) * 0.8)}
-              />
-            </div>
-          )}
+          {/* Message Input - Always visible */}
+          <div 
+            className="pb-6 transition-opacity duration-300 ease-in-out"
+            style={{
+              opacity: agentDetail && ['COMPLETED', 'FAILED'].includes(agentDetail.status) ? 0.5 : 1
+            }}
+          >
+            {/* Popular Goals Carousel - Only visible when no agent selected */}
+            {!selectedAgentId && (
+              <div className="mb-4">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-muted-foreground whitespace-nowrap flex-shrink-0">Popular Goals</span>
+                  <div className="relative flex-1 overflow-hidden">
+                    <div 
+                      ref={tickerRef}
+                      className="flex gap-2"
+                      style={{
+                        transform: `translateX(-${tickerOffset}px)`
+                      }}
+                    >
+                      {/* Render goals three times for seamless loop */}
+                      {[...popularGoals, ...popularGoals, ...popularGoals].map((goal, i) => (
+                        <button
+                          key={i}
+                          onClick={() => {
+                            setMessageInput(goal);
+                          }}
+                          className="px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 rounded-full whitespace-nowrap flex-shrink-0"
+                        >
+                          {goal}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <QueryInput
+              value={messageInput}
+              onChange={setMessageInput}
+              onSubmit={handleSendMessage}
+              disabled={isSendingMessage}
+              placeholder={selectedAgentId ? "Type your message..." : "Enter any goal"}
+              selectedModel={selectedModel}
+              onModelChange={setSelectedModel}
+              availableModels={models}
+              modelsLoading={modelsLoading}
+              contextPercentage={agentDetail ? getContextPercentage(agentDetail, models) : 0}
+              contextSize={agentDetail?.context_size || 0}
+              restartThreshold={agentDetail ? Math.round(getModelContextWindow(agentDetail.model, models) * 0.8) : 100000}
+              showModelSelector={!selectedAgentId}
+            />
+          </div>
           </>
           )}
         </main>

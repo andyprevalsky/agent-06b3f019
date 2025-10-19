@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { AuthRequest, authenticate } from '../middleware/auth';
 import { startAgentWorkflow } from '../lib/temporal';
+import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
+import { chooseTools } from '../lib/chooseTools';
 
 const router = Router();
 
@@ -118,16 +120,54 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Verify all tools exist
-    const tools = await prisma.tool.findMany({
-      where: {
-        id: { in: body.tool_ids },
+    // 🤖 LLM-based tool selection
+    // Get all available tools for LLM to choose from
+    const allTools = await prisma.tool.findMany({
+      select: {
+        id: true,
+        name: true,
+        description: true,
       },
     });
 
-    if (tools.length !== body.tool_ids.length) {
+    // Use LLM to select relevant tools based on the goal
+    const { toolIds: llmSelectedToolIds, tokensIn, tokensOut } = await chooseTools(body.goal, allTools, body.model);
+    
+    // Merge LLM-selected tools with user-provided tools (no duplicates)
+    const mergedToolIds = Array.from(new Set([...body.tool_ids, ...llmSelectedToolIds]));
+    
+    console.log('🔧 Tool selection summary', {
+      userProvided: body.tool_ids.length,
+      llmSelected: llmSelectedToolIds.length,
+      merged: mergedToolIds.length,
+      llmTools: allTools.filter(t => llmSelectedToolIds.includes(t.id)).map(t => t.name),
+      tokensIn,
+      tokensOut
+    });
+
+    // Verify all merged tools exist
+    const tools = await prisma.tool.findMany({
+      where: {
+        id: { in: mergedToolIds },
+      },
+    });
+
+    if (tools.length !== mergedToolIds.length) {
       res.status(400).json({ error: 'One or more tool IDs are invalid' });
       return;
+    }
+
+    // Fetch pricing for the model
+    const pricing = await getModelPricing(body.model);
+    let tokenInPriceMicrodollars: number | null = null;
+    let tokenOutPriceMicrodollars: number | null = null;
+    
+    if (pricing) {
+      tokenInPriceMicrodollars = dollarsToMicrodollars(pricing.prompt);
+      tokenOutPriceMicrodollars = dollarsToMicrodollars(pricing.completion);
+      console.log(`💰 Fetched pricing for ${body.model}: in=${tokenInPriceMicrodollars} µ$/token, out=${tokenOutPriceMicrodollars} µ$/token`);
+    } else {
+      console.warn(`⚠️  Could not fetch pricing for ${body.model}, agent will have no pricing data`);
     }
 
     // Create agent with verifier and tool associations in a transaction
@@ -139,6 +179,10 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
           goal: body.goal,
           model: body.model,
           reasoningEffort: body.reasoning_effort,
+          tokenInPriceMicrodollars,
+          tokenOutPriceMicrodollars,
+          tokensIn, // Include tokens from tool selection
+          tokensOut, // Include tokens from tool selection
           progress: 0.0,
           status: body.pause_state ? 'PAUSED' : 'STARTING_UP',
         },
@@ -153,9 +197,9 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
         },
       });
 
-      // Associate tools
+      // Associate tools (using merged tool IDs)
       await tx.agentTool.createMany({
-        data: body.tool_ids.map((toolId) => ({
+        data: mergedToolIds.map((toolId) => ({
           agentId: newAgent.id,
           toolId,
         })),
@@ -183,7 +227,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
         goal: body.goal,
         model: body.model,
         reasoningEffort: body.reasoning_effort,
-        toolIds: body.tool_ids,
+        toolIds: mergedToolIds, // Use merged tool IDs
         verifier: {
           type: body.verifier.type,
           llmJudgePrompt: body.verifier.llm_judge_prompt,

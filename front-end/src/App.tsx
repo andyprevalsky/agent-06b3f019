@@ -11,6 +11,7 @@ import Terms from "./pages/Terms";
 import NotFound from "./pages/NotFound";
 import About from "./pages/About";
 import Terminal from "./pages/Terminal";
+import Usage from "./pages/Usage";
 
 const queryClient = new QueryClient();
 
@@ -28,6 +29,7 @@ const App = () => (
               <Route path="/terms" element={<Terms />} />
               <Route path="/about" element={<About />} />
               <Route path="/terminal" element={<Terminal />} />
+              <Route path="/usage" element={<Usage />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
               <Route path="*" element={<NotFound />} />
             </Routes>

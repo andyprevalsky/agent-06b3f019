@@ -231,7 +231,7 @@ class BuyItemFromAmazonTool(BaseModel):
 class RequestUserAttentionTool(BaseModel):
     """Tool for requesting user attention when clarification or input is needed."""
     tool: Literal["request_user_attention"]
-    question: str = Field(description="The question to ask the user")
+    question: str = Field(description="The question to ask the user. Make sure to use markdown formatting to make your response more readable.")
 
 
 # Map tool names to their Pydantic models
@@ -373,8 +373,8 @@ def create_agent_action_model(
     # Dynamically create the AgentAction model
     AgentAction = create_model(
         'AgentAction',
-        reasoning=(Optional[str], Field(default=None, description="Your internal thinking process (not shown to user)")),
-        response=(str, Field(description="Message to communicate to the user (REQUIRED - always explain what you're doing)")),
+        reasoning=(Optional[str], Field(default=None, description="Your internal thinking process. Do not use this field to communicate with the user or the verifier, or your future self, they will NOT see it: They will not see it! This field is only here to be used a throwaway scratchpad for your reasoning.")),
+        response=(str, Field(description="Message to communicate to the user & verifier (REQUIRED - always explain what you're doing). Make sure to use markdown formatting to make your response more readable.")),
         tool_calls=tool_calls_field,
         __base__=BaseModel
     )
@@ -451,6 +451,7 @@ async def call_llm_structured(
             temperature=temperature,
             max_tokens=max_tokens,
             response_model=response_model,
+            max_retries=3,
             **extra_args
         )
     except Exception as e:
@@ -724,11 +725,21 @@ Be strategic, efficient, and focused on accomplishing the task."""
                     logger.error(f"Failed to serialize tool call {i}: {str(e)}, tc_type={type(tc)}")
                     raise ValueError(f"Failed to serialize tool call {i}: {str(e)}")
         
+        # Append question to response if using request_user_attention tool
+        response_text = result.response if result.response is not None else ""
+        for tool_call in tool_calls_dict:
+            if tool_call.get("tool") == "request_user_attention":
+                question = tool_call.get("question", "")
+                if question and response_text:
+                    response_text += f"\n\n### Question\n{question}"
+                elif question:
+                    response_text = f"### Question\n{question}"
+        
         # Return as dict with usage for token tracking
         # Allow empty strings/lists, but not None values
         return {
             "reasoning": result.reasoning if result.reasoning is not None else "",
-            "response": result.response if result.response is not None else "",
+            "response": response_text,
             "tool_calls": tool_calls_dict,
             "usage": usage  # Already validated to not be None above
         }

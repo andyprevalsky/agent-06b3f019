@@ -10,6 +10,8 @@ import blueprintsRouter from './routes/blueprints';
 import modelsRouter from './routes/models';
 import attentionRequestsRouter from './routes/attentionRequests';
 import userSettingsRouter from './routes/userSettings';
+import creditsRouter from './routes/credits';
+import webhooksRouter from './routes/webhooks';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -25,6 +27,10 @@ if (!process.env.BACKEND_API_KEY) {
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Webhooks must be mounted BEFORE express.json() middleware
+// (Stripe requires raw body for signature verification)
+app.use('/webhooks', webhooksRouter);
 
 // Middleware
 app.use(express.json({ limit: '10mb' })); // Increased from 100kb default for blueprint storage
@@ -87,6 +93,7 @@ app.use('/api/agents', agentsRouter);
 app.use('/api/blueprints', authenticate, blueprintsRouter);
 app.use('/api/attention-requests', attentionRequestsRouter);
 app.use('/api/user-settings', userSettingsRouter);
+app.use('/api/credits', creditsRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware

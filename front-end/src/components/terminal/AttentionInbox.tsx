@@ -58,6 +58,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       if (!response.ok) throw new Error('Failed to fetch requests');
 
       const data = await response.json();
+      console.log('📥 Fetched attention requests:', data.requests.length, 'total,', data.requests.filter((r: any) => !r.answered).length, 'unanswered');
       setRequests(data.requests || []);
     } catch (error) {
       console.error('Failed to fetch attention requests:', error);
@@ -235,6 +236,9 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       const session = await supabase.auth.getSession();
       if (!session.data.session) return;
 
+      // Count remaining requests before responding
+      const remainingBeforeResponse = requests.filter(r => !r.answered && r.id !== requestId).length;
+
       const res = await fetch(
         `${API_BASE_WITH_PATH}/attention-requests/${requestId}/respond`,
         {
@@ -249,11 +253,6 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
 
       if (!res.ok) throw new Error('Failed to respond');
 
-      toast({
-        title: 'Response sent',
-        description: 'The agent will continue with your response',
-      });
-
       // Clear the response
       setResponses(prev => {
         const newResponses = { ...prev };
@@ -261,8 +260,26 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
         return newResponses;
       });
 
-      // Refresh requests
+      // Refetch to get updated list
+      console.log('🔄 Refetching requests after respond...');
       await fetchRequests();
+      console.log('✅ Refetch complete');
+
+      // Keep modal open
+      setIsOpen(true);
+      
+      // Show appropriate toast message
+      if (remainingBeforeResponse > 0) {
+        toast({
+          title: 'Response sent',
+          description: `${remainingBeforeResponse} more ${remainingBeforeResponse === 1 ? 'request' : 'requests'} waiting`,
+        });
+      } else {
+        toast({
+          title: 'Response sent',
+          description: 'The agent will continue with your response',
+        });
+      }
     } catch (error) {
       console.error('Failed to respond:', error);
       toast({
@@ -278,8 +295,12 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   // Handle skip
   const handleSkip = async (requestId: string) => {
     try {
+      setLoading(true);
       const session = await supabase.auth.getSession();
       if (!session.data.session) return;
+
+      // Count remaining requests before skipping
+      const remainingBeforeSkip = requests.filter(r => !r.answered && r.id !== requestId).length;
 
       const res = await fetch(
         `${API_BASE_WITH_PATH}/attention-requests/${requestId}/skip`,
@@ -293,8 +314,33 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
 
       if (!res.ok) throw new Error('Failed to skip');
 
-      // Refresh requests
+      // Clear the response if any
+      setResponses(prev => {
+        const newResponses = { ...prev };
+        delete newResponses[requestId];
+        return newResponses;
+      });
+
+      // Refetch to get updated list
+      console.log('🔄 Refetching requests after skip...');
       await fetchRequests();
+      console.log('✅ Refetch complete');
+
+      // Keep modal open
+      setIsOpen(true);
+      
+      // Show appropriate toast message
+      if (remainingBeforeSkip > 0) {
+        toast({
+          title: 'Request skipped',
+          description: `${remainingBeforeSkip} more ${remainingBeforeSkip === 1 ? 'request' : 'requests'} waiting`,
+        });
+      } else {
+        toast({
+          title: 'Request skipped',
+          description: 'No more pending requests',
+        });
+      }
     } catch (error) {
       console.error('Failed to skip:', error);
       toast({
@@ -302,6 +348,8 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
         description: 'Failed to skip request',
         variant: 'destructive',
       });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -338,12 +386,12 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
         variant="ghost"
         size="icon"
         onClick={() => setIsOpen(!isOpen)}
-        className="relative"
+        className="relative rounded-2xl"
       >
         <Bell className="h-5 w-5" />
         {unansweredCount > 0 && (
           <span
-            className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center rounded-full text-xs font-semibold text-white"
+            className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center rounded-lg text-xs font-semibold text-white"
             style={{ 
               background: '#FC585C',
               boxShadow: '0 2px 8px rgba(252, 88, 92, 0.4)'
@@ -376,18 +424,30 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                   </p>
                 </div>
               ) : (
-                requests
-                  .filter(r => !r.answered)
-                  .map((request) => (
-                    <div
-                      key={request.id}
-                      className="space-y-3"
-                    >
+                // Show only the first (oldest) unanswered request
+                (() => {
+                  const unansweredRequests = requests.filter(r => !r.answered);
+                  const currentRequest = unansweredRequests[0];
+                  const remainingCount = unansweredRequests.length - 1;
+                  
+                  console.log('🎯 Rendering current request:', currentRequest?.id, 'Remaining:', remainingCount);
+                  
+                  if (!currentRequest) return null;
+                  
+                  return (
+                    <div key={currentRequest.id} className="space-y-3">
+                      {/* Remaining requests indicator */}
+                      {remainingCount > 0 && (
+                        <div className="text-xs text-muted-foreground text-center py-1 px-2 bg-muted/50 rounded">
+                          {remainingCount} more {remainingCount === 1 ? 'request' : 'requests'} waiting
+                        </div>
+                      )}
+                      
                       {/* Image thumbnail if present */}
-                      {request.image_url && (
+                      {currentRequest.image_url && (
                         <div className="flex justify-center">
                           <img 
-                            src={request.image_url} 
+                            src={currentRequest.image_url} 
                             alt="Product thumbnail"
                             className="max-w-[200px] max-h-[200px] rounded-md object-contain"
                           />
@@ -396,7 +456,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
 
                       {/* Question rendered as markdown */}
                       <div>
-                        <MarkdownText text={request.question} />
+                        <MarkdownText text={currentRequest.question} />
                       </div>
 
                       {/* Link to agent */}
@@ -406,7 +466,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                         className="p-0 h-auto text-xs"
                         onClick={() => {
                           if (onSelectAgent) {
-                            onSelectAgent(request.agent_id);
+                            onSelectAgent(currentRequest.agent_id);
                             setIsOpen(false);
                           }
                         }}
@@ -417,11 +477,11 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                       {/* Response textarea */}
                       <Textarea
                         placeholder="Type your response..."
-                        value={responses[request.id] || ''}
+                        value={responses[currentRequest.id] || ''}
                         onChange={(e) =>
                           setResponses((prev) => ({
                             ...prev,
-                            [request.id]: e.target.value,
+                            [currentRequest.id]: e.target.value,
                           }))
                         }
                         className="min-h-[80px]"
@@ -431,15 +491,15 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                       <div className="flex gap-2">
                         <Button
                           size="sm"
-                          onClick={() => handleRespond(request.id)}
-                          disabled={loading || !responses[request.id]?.trim()}
+                          onClick={() => handleRespond(currentRequest.id)}
+                          disabled={loading || !responses[currentRequest.id]?.trim()}
                         >
                           Respond (⌘↵)
                         </Button>
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => handleSkip(request.id)}
+                          onClick={() => handleSkip(currentRequest.id)}
                           disabled={loading}
                         >
                           Skip (⌘S)
@@ -449,10 +509,11 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                       {/* Timestamp */}
                       <p className="text-xs text-muted-foreground">
                         Asked{' '}
-                        {new Date(request.created_at).toLocaleString()}
+                        {new Date(currentRequest.created_at).toLocaleString()}
                       </p>
                     </div>
-                  ))
+                  );
+                })()
               )}
             </div>
           </div>

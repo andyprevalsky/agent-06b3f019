@@ -6,7 +6,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Badge } from '@/components/ui/badge';
-import { Settings, Loader2, Play, Pause, Check, ChevronsUpDown, X } from 'lucide-react';
+import { Bot, Loader2, Play, Pause, Check, ChevronsUpDown, X } from 'lucide-react';
 import { AgentDetail, pauseAgent, resumeAgent, updateAgent } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Progress } from '@/components/ui/progress';
@@ -14,7 +14,7 @@ import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 
 interface AgentSettingsDialogProps {
-  agent: AgentDetail;
+  agent: AgentDetail | null;
   onUpdate?: () => void;
 }
 
@@ -43,10 +43,10 @@ function calculateCost(tokensIn: number, tokensOut: number, promptPrice?: string
 export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDialogProps) {
   const [open, setOpen] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
-  const [verifierPrompt, setVerifierPrompt] = useState(agent.verifier?.llm_judge_prompt || '');
-  const [selectedModel, setSelectedModel] = useState(agent.model);
-  const [reasoningEffort, setReasoningEffort] = useState<'off' | 'low' | 'medium' | 'high'>(agent.reasoning_effort || 'low');
-  const [selectedTools, setSelectedTools] = useState<string[]>(agent.tools.map(t => t.id));
+  const [verifierPrompt, setVerifierPrompt] = useState(agent?.verifier?.llm_judge_prompt || '');
+  const [selectedModel, setSelectedModel] = useState(agent?.model || '');
+  const [reasoningEffort, setReasoningEffort] = useState<'off' | 'low' | 'medium' | 'high'>(agent?.reasoning_effort || 'low');
+  const [selectedTools, setSelectedTools] = useState<string[]>(agent?.tools.map(t => t.id) || []);
   const [modelOpen, setModelOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
@@ -61,10 +61,12 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   const [toolTriggerWidth, setToolTriggerWidth] = useState<number>(0);
   
   useEffect(() => {
-    setVerifierPrompt(agent.verifier?.llm_judge_prompt || '');
-    setSelectedModel(agent.model);
-    setReasoningEffort(agent.reasoning_effort || 'low');
-    setSelectedTools(agent.tools.map(t => t.id));
+    if (agent) {
+      setVerifierPrompt(agent.verifier?.llm_judge_prompt || '');
+      setSelectedModel(agent.model);
+      setReasoningEffort(agent.reasoning_effort || 'low');
+      setSelectedTools(agent.tools.map(t => t.id));
+    }
   }, [agent]);
 
   useEffect(() => {
@@ -118,15 +120,17 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   };
 
   const handleSaveChanges = async () => {
+    if (!agent) return;
     setIsUpdating(true);
     try {
       const updates: any = {};
       if (verifierPrompt !== agent.verifier?.llm_judge_prompt) {
         updates.verifier_prompt = verifierPrompt;
       }
-      if (selectedModel !== agent.model) {
-        updates.model = selectedModel;
-      }
+      // Model changing disabled
+      // if (selectedModel !== agent.model) {
+      //   updates.model = selectedModel;
+      // }
       if (reasoningEffort !== agent.reasoning_effort) {
         updates.reasoning_effort = reasoningEffort;
       }
@@ -156,9 +160,10 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   };
   
   const hasChanges = () => {
+    if (!agent) return false;
     return (
       verifierPrompt !== agent.verifier?.llm_judge_prompt ||
-      selectedModel !== agent.model ||
+      // selectedModel !== agent.model || // Model changing disabled
       reasoningEffort !== agent.reasoning_effort ||
       JSON.stringify([...selectedTools].sort()) !== JSON.stringify(agent.tools.map(t => t.id).sort())
     );
@@ -167,29 +172,36 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   // Ensure arrays are always defined
   const modelsList = Array.isArray(models) ? models : [];
   
-  const maxWindow = getModelContextWindow(agent.model, modelsList);
+  const maxWindow = agent ? getModelContextWindow(agent.model, modelsList) : 100000;
   const restartThreshold = Math.round(maxWindow * 0.8);
-  const contextPercentage = Math.min(100, (agent.context_size / restartThreshold) * 100);
+  const contextPercentage = agent ? Math.min(100, (agent.context_size / restartThreshold) * 100) : 0;
   const toolsList = Array.isArray(tools) ? tools : [];
   const selectedModelData = modelsList.find(m => m?.id === selectedModel);
   const selectedToolsData = toolsList.filter(t => t && selectedTools.includes(t.id));
   const availableToolsFiltered = toolsList.filter(t => t && !selectedTools.includes(t.id));
   
   // Calculate cost based on current model pricing
-  const currentModelData = modelsList.find(m => m?.id === agent.model);
-  const estimatedCost = calculateCost(
+  const currentModelData = agent ? modelsList.find(m => m?.id === agent.model) : null;
+  const estimatedCost = agent ? calculateCost(
     agent.tokens_in,
     agent.tokens_out,
     currentModelData?.pricing?.prompt,
     currentModelData?.pricing?.completion
-  );
+  ) : '$0.00';
 
   return (
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
       <DialogTrigger asChild>
-        <Button ref={triggerRef} variant="outline" size="icon">
-          <Settings className="h-4 w-4" />
-        </Button>
+        <button 
+          ref={triggerRef} 
+          className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-lg hover:bg-white/10 transition-colors"
+          style={{
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+          }}
+        >
+          <Bot className="h-4 w-4" />
+        </button>
       </DialogTrigger>
       <DialogContent 
         className="p-0 border border-gray-300 dark:border-gray-700 shadow-lg [&>button]:hidden overflow-hidden"
@@ -212,6 +224,11 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
             <DialogTitle>Agent Settings</DialogTitle>
           </DialogHeader>
           
+          {!agent ? (
+            <div className="py-8 text-center">
+              <p className="text-muted-foreground">create an agent to view agent settings</p>
+            </div>
+          ) : (
           <div className="space-y-6">
             {/* Pause/Resume Control */}
             <div className="space-y-2">
@@ -316,8 +333,8 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
             </Popover>
           </div>
 
-          {/* Model Selection with Search */}
-          <div className="space-y-2 pt-2 border-t">
+          {/* Model Selection - Disabled as per requirements */}
+          {/* <div className="space-y-2 pt-2 border-t">
             <Label>Model</Label>
             <Popover open={modelOpen} onOpenChange={setModelOpen}>
               <PopoverTrigger asChild>
@@ -327,6 +344,7 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
                   role="combobox"
                   aria-expanded={modelOpen}
                   className="w-full justify-between font-normal"
+                  disabled
                 >
                   <span className="truncate">
                     {selectedModelData ? `${selectedModelData.provider}/${selectedModelData.name}` : 'Select model...'}
@@ -334,74 +352,33 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent className="p-0 z-[60] bg-[#EEEFF2]/80 dark:bg-[#1a1a1a]/80 backdrop-blur-[12px]" align="start" style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', width: modelTriggerWidth > 0 ? `${modelTriggerWidth}px` : 'auto' }}>
-                <Command className="bg-transparent w-full">
-                  <CommandInput 
-                    placeholder="Search models..." 
-                    value={modelSearch}
-                    onValueChange={setModelSearch}
-                  />
-                  <CommandList className="max-h-64 overflow-x-hidden w-full">
-                    <CommandEmpty>No model found.</CommandEmpty>
-                    <CommandGroup className="overflow-x-hidden w-full">
-                      {modelsList.map((model) => {
-                        const formatPrice = (price?: string) => {
-                          if (!price) return null;
-                          const num = parseFloat(price);
-                          if (num === 0) return 'FREE';
-                          if (num < 0.000001) return `$${(num * 1000000).toFixed(2)}/M`;
-                          return `$${(num * 1000000).toFixed(2)}/M`;
-                        };
-                        
-                        const inputPrice = formatPrice(model.pricing?.prompt);
-                        const outputPrice = formatPrice(model.pricing?.completion);
-                        const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
-                        
-                        return (
-                          <CommandItem
-                            key={model.id}
-                            value={`${model.provider}/${model.name}`}
-                            onSelect={() => {
-                              setSelectedModel(model.id);
-                              setModelOpen(false);
-                              setModelSearch('');
-                            }}
-                            className="cursor-pointer overflow-hidden w-full"
-                          >
-                            <Check
-                              className={cn(
-                                "mr-2 h-4 w-4 shrink-0",
-                                selectedModel === model.id ? "opacity-100" : "opacity-0"
-                              )}
-                            />
-                            <div className="flex flex-col flex-1 min-w-0 gap-0.5">
-                              <span className="truncate">{model.provider}/{model.name}</span>
-                              {priceText && (
-                                <span className="text-[10px] text-muted-foreground truncate">{priceText}</span>
-                              )}
-                            </div>
-                          </CommandItem>
-                        );
-                      })}
-                    </CommandGroup>
-                  </CommandList>
-                </Command>
-              </PopoverContent>
             </Popover>
-          </div>
+          </div> */}
 
           {/* Tools Selection with Chips */}
           <div className="space-y-2 pt-2 border-t">
             <Label>Tools</Label>
             
             {/* Selected Tools Chips */}
-            {selectedToolsData.length > 0 && (
-              <div className="flex flex-wrap gap-2">
+            <div 
+              className="relative overflow-hidden rounded-md transition-opacity duration-300"
+              style={{
+                opacity: selectedToolsData.length > 0 ? 1 : 0,
+                height: selectedToolsData.length > 0 ? 'auto' : 0,
+              }}
+            >
+              <div 
+                className="flex gap-2 overflow-x-auto scrollbar-hide py-2 px-3 bg-white dark:bg-white/10"
+                style={{
+                  scrollbarWidth: 'none',
+                  msOverflowStyle: 'none',
+                }}
+              >
                 {selectedToolsData.map((tool) => (
                   <Badge
                     key={tool.id}
                     variant="secondary"
-                    className="pl-2 pr-1 py-1 gap-1"
+                    className="pl-2 pr-1 py-1 gap-1 shrink-0"
                   >
                     {tool.name}
                     <button
@@ -413,7 +390,23 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
                   </Badge>
                 ))}
               </div>
-            )}
+              {/* Left fade */}
+              <div 
+                className="absolute left-0 top-0 bottom-0 w-8 pointer-events-none bg-gradient-to-r from-white to-transparent dark:from-white/10 dark:to-transparent"
+                style={{
+                  opacity: selectedToolsData.length > 0 ? 1 : 0,
+                  transition: 'opacity 300ms',
+                }}
+              />
+              {/* Right fade */}
+              <div 
+                className="absolute right-0 top-0 bottom-0 w-8 pointer-events-none bg-gradient-to-l from-white to-transparent dark:from-white/10 dark:to-transparent"
+                style={{
+                  opacity: selectedToolsData.length > 0 ? 1 : 0,
+                  transition: 'opacity 300ms',
+                }}
+              />
+            </div>
             
             {/* Tool Search/Add */}
             <Popover open={toolOpen} onOpenChange={setToolOpen}>
@@ -490,6 +483,7 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
             Save Changes
           </Button>
           </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>

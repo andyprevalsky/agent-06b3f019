@@ -6,8 +6,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL") // Session pooler (IPv4 compatible)
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")  // Pooler for queries
+  directUrl = env("DIRECT_URL")     // Direct connection for migrations
 }
 
 model Agent {
@@ -15,7 +16,7 @@ model Agent {
   userId             String // Supabase user ID
   parentAgentId      String? // Parent agent ID (for sub-agents)
   goal               String          @db.Text
-  model              String          @default("google/gemini-2.5-flash") // LLM model driving this agent
+  model              String          @default("google/gemini-2.5-flash") // LLM model driving this agent (immutable after creation)
   reasoningEffort    ReasoningEffort @default(low) // OpenRouter reasoning effort level
   progress           Float           @default(0.0) // 0.0 to 1.0
   status             AgentStatus     @default(STARTING_UP)
@@ -24,6 +25,11 @@ model Agent {
   deletedAt          DateTime? // Soft delete
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
+
+  // Pricing (saved at creation, immutable) - stored as millionths of a dollar per token
+  // Example: $0.000001/token * 1,000,000 = 1, $0.000003/token * 1,000,000 = 3
+  tokenInPriceMicrodollars  Int? // Cost per input token in microdollars (dollar * 1M)
+  tokenOutPriceMicrodollars Int? // Cost per output token in microdollars (dollar * 1M)
 
   // Metrics
   tokenCount   Int @default(0) // Cumulative tokens used (total)
@@ -160,6 +166,16 @@ model AgentAttentionRequest {
   @@index([workflowId])
 }
 
+model ModelPricingCache {
+  modelId                    String   @id // e.g., "google/gemini-2.5-flash"
+  tokenInPriceMicrodollars   Int // Cost per input token in microdollars (dollar * 1M)
+  tokenOutPriceMicrodollars  Int // Cost per output token in microdollars (dollar * 1M)
+  cachedAt                   DateTime @default(now())
+  expiresAt                  DateTime // When cache expires (24 hours from cachedAt)
+
+  @@index([expiresAt])
+}
+
 model User {
   id           String   @id @default(uuid())
   userId       String   @unique // Supabase auth ID
@@ -178,5 +194,38 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  // Relations
+  credits       Credit[]
+  subscriptions Subscription[]
+
   @@index([userId])
+}
+
+model Credit {
+  id             String    @id @default(uuid())
+  userId         String
+  amountCents    Int       // Amount in cents (e.g., 500 = $5.00, 2000 = $20.00)
+  expirationDate DateTime? // Null = never expires (free $5 credit)
+  createdAt      DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expirationDate])
+}
+
+model Subscription {
+  id                   String    @id @default(uuid())
+  userId               String    @unique // One active subscription per user
+  subscriptionTier     Int       // Dollars per month: 20, 30, 40, 50, 100, 200
+  stripeSubscriptionId String    @unique
+  stripeCustomerId     String
+  currentPeriodEnd     DateTime  // When credits expire
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([stripeSubscriptionId])
 }

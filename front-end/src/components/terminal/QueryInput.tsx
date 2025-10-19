@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Command as CommandIcon, Loader2 } from 'lucide-react';
+import { Command as CommandIcon, Loader2, ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Command,
@@ -31,6 +31,7 @@ interface QueryInputProps {
   contextPercentage?: number; // Context usage percentage (0-100)
   contextSize?: number; // Current context size
   restartThreshold?: number; // Threshold for context restart
+  showModelSelector?: boolean; // Whether to show the model selector button
 }
 
 export default function QueryInput({
@@ -46,6 +47,7 @@ export default function QueryInput({
   contextPercentage = 0,
   contextSize = 0,
   restartThreshold = 100000,
+  showModelSelector = true,
 }: QueryInputProps) {
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [showToolPicker, setShowToolPicker] = useState(false);
@@ -112,18 +114,14 @@ export default function QueryInput({
   return (
     <div className="w-full">
       <div className="max-w-4xl mx-auto">
-        {/* Query Wrap - Light glassy pane with dark tints */}
-        <div className="relative rounded-xl p-3 overflow-hidden shadow-lg">
-          {/* Light gray gradient background behind the blur */}
-          <div className="absolute inset-0 bg-gradient-to-br from-gray-400/25 via-gray-300/20 to-gray-400/25" />
-          
-          {/* Subtle animated tint orbs for depth */}
-          <div className="absolute top-0 left-1/4 w-64 h-64 bg-gradient-to-br from-gray-400/20 to-gray-500/15 rounded-full blur-3xl animate-pulse" />
-          <div className="absolute bottom-0 right-1/4 w-64 h-64 bg-gradient-to-br from-gray-500/15 to-gray-400/20 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '1s' }} />
-          
-          {/* Frosted glass layer with border */}
-          <div className="absolute inset-0 bg-white/60 backdrop-blur-xl border border-navi-light-light-black rounded-xl" />
-          
+        {/* Query Wrap - Glossy modal background */}
+        <div 
+          className="relative rounded-xl p-3 shadow-lg border border-border bg-[#EEEFF2]/80 dark:bg-[#1a1a1a]/80"
+          style={{
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+          }}
+        >
           {/* Content */}
           <div className="relative z-10">
             {/* Top Bar */}
@@ -133,7 +131,7 @@ export default function QueryInput({
               <Popover open={showToolPicker} onOpenChange={setShowToolPicker}>
                 <PopoverTrigger asChild>
                   <button
-                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gray-300 border border-gray-300 text-gray-800 text-xs hover:bg-gray-400 transition-colors shadow-sm"
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-foreground/10 border border-foreground/20 text-foreground text-xs hover:bg-foreground/20 transition-colors shadow-sm"
                     title="Add tools"
                   >
                     <span className="font-bold">@</span>
@@ -183,7 +181,7 @@ export default function QueryInput({
                     <Badge
                       key={toolId}
                       variant="secondary"
-                      className="text-xs px-2 py-0.5 bg-gray-300 border border-gray-300 text-gray-800 hover:bg-gray-400 cursor-pointer shadow-sm"
+                      className="text-xs px-2 py-0.5 bg-foreground/10 border border-foreground/20 text-foreground hover:bg-foreground/20 cursor-pointer shadow-sm"
                       onClick={() => handleToolRemove(toolId)}
                     >
                       {tool.name} ×
@@ -197,20 +195,20 @@ export default function QueryInput({
             <Tooltip>
               <TooltipTrigger asChild>
                 <div>
-                  <Badge variant="outline" className="flex items-center gap-2 text-gray-500 text-xs font-mono px-2 py-1">
+                  <Badge variant="outline" className="flex items-center gap-2 text-muted-foreground text-xs font-mono px-2 py-1">
                     <span>
                       {contextPercentage.toFixed(0)}%
                     </span>
                     <svg className="transform -rotate-90" viewBox="0 0 20 20" width="16" height="16">
                       <circle
-                        className="fill-none stroke-gray-300 opacity-70"
+                        className="fill-none stroke-muted-foreground/30 opacity-70"
                         cx="10"
                         cy="10"
                         r="8"
                         strokeWidth="3"
                       />
                       <circle
-                        className="fill-none stroke-gray-500 transition-all duration-200"
+                        className="fill-none stroke-muted-foreground transition-all duration-200"
                         cx="10"
                         cy="10"
                         r="8"
@@ -224,7 +222,7 @@ export default function QueryInput({
                   </Badge>
                 </div>
               </TooltipTrigger>
-              <TooltipContent>
+              <TooltipContent className="z-[100]">
                 <p className="text-xs font-mono">
                   {contextSize.toLocaleString()} / {restartThreshold.toLocaleString()} context used
                 </p>
@@ -242,7 +240,7 @@ export default function QueryInput({
               disabled={disabled}
               placeholder={placeholder}
               className={cn(
-                'w-full bg-transparent border-none text-gray-900 placeholder:text-gray-400',
+                'w-full bg-transparent border-none text-foreground placeholder:text-muted-foreground',
                 'resize-none outline-none min-h-[56px] py-3',
                 'font-normal text-base leading-6'
               )}
@@ -253,110 +251,131 @@ export default function QueryInput({
           {/* Bottom Bar */}
           <div className="flex items-center justify-between gap-3 px-3 pt-2">
             <div className="flex items-center gap-2">
-              {/* Model Selector */}
-              <Popover open={showModelPicker} onOpenChange={setShowModelPicker}>
+              {/* Model Selector - Always visible, clickable only when no agent */}
+              <Popover open={showModelPicker && showModelSelector} onOpenChange={(open) => showModelSelector && setShowModelPicker(open)}>
                 <PopoverTrigger asChild>
-                  <button className="flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-300 bg-gray-300 text-gray-800 text-xs hover:bg-gray-400 transition-colors shadow-sm">
-                    <span>Change Model</span>
+                  <button 
+                    className={cn(
+                      "flex items-center gap-1.5 px-2 py-1 rounded-lg text-foreground text-xs",
+                      showModelSelector 
+                        ? "border border-foreground/20 bg-foreground/10 hover:bg-foreground/20 cursor-pointer transition-colors shadow-sm" 
+                        : "cursor-default"
+                    )}
+                    onClick={(e) => {
+                      if (!showModelSelector) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }
+                    }}
+                    disabled={!showModelSelector}
+                  >
+                    <span>{selectedModelName}</span>
+                    {showModelSelector && <ChevronDown className="h-3 w-3" />}
                   </button>
                 </PopoverTrigger>
-                <PopoverContent className="w-[300px] p-0 z-50" align="start">
-                  <Command className="bg-white">
-                    <CommandInput placeholder="Search models..." />
-                    <CommandList className="max-h-[400px]">
-                      <CommandEmpty>No models available.</CommandEmpty>
-                      {/* Featured Models */}
-                      <CommandGroup heading="⭐ Featured">
-                        {featuredModels.map((model) => {
-                          const formatPrice = (price?: string) => {
-                            if (!price) return null;
-                            const num = parseFloat(price);
-                            if (num === 0) return 'FREE';
-                            return `$${(num * 1000000).toFixed(2)}/M`;
-                          };
-                          
-                          const inputPrice = formatPrice(model.pricing?.prompt);
-                          const outputPrice = formatPrice(model.pricing?.completion);
-                          const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
-                          
-                          return (
-                            <CommandItem
-                              key={model.id}
-                              onSelect={() => {
-                                onModelChange?.(model.id);
-                                setShowModelPicker(false);
-                              }}
-                            >
-                              <div className="flex items-center justify-between w-full">
-                                <div className="flex flex-col gap-0.5">
-                                  <span className="font-medium">{model.name}</span>
-                                  <span className="text-xs text-gray-500">{model.provider}</span>
-                                  {priceText && (
-                                    <span className="text-[10px] text-gray-400">{priceText}</span>
+                {showModelSelector && (
+                  <PopoverContent className="w-[300px] p-0 z-50" align="start">
+                    <Command className="bg-white">
+                      <CommandInput placeholder="Search models..." />
+                      <CommandList className="max-h-[400px]">
+                        <CommandEmpty>No models available.</CommandEmpty>
+                        {/* Featured Models */}
+                        <CommandGroup heading="⭐ Featured">
+                          {featuredModels.map((model) => {
+                            const formatPrice = (price?: string) => {
+                              if (!price) return null;
+                              const num = parseFloat(price);
+                              if (num === 0) return 'FREE';
+                              return `$${(num * 1000000).toFixed(2)}/M`;
+                            };
+                            
+                            const inputPrice = formatPrice(model.pricing?.prompt);
+                            const outputPrice = formatPrice(model.pricing?.completion);
+                            const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
+                            
+                            return (
+                              <CommandItem
+                                key={model.id}
+                                onSelect={() => {
+                                  onModelChange?.(model.id);
+                                  setShowModelPicker(false);
+                                }}
+                              >
+                                <div className="flex items-center justify-between w-full">
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="font-medium">{model.name}</span>
+                                    <span className="text-xs text-gray-500">{model.provider}</span>
+                                    {priceText && (
+                                      <span className="text-[10px] text-gray-400">{priceText}</span>
+                                    )}
+                                  </div>
+                                  {model.id === selectedModel && (
+                                    <span className="text-primary">✓</span>
                                   )}
                                 </div>
-                                {model.id === selectedModel && (
-                                  <span className="text-primary">✓</span>
-                                )}
-                              </div>
-                            </CommandItem>
-                          );
-                        })}
-                      </CommandGroup>
+                              </CommandItem>
+                            );
+                          })}
+                        </CommandGroup>
 
-                      {/* Other Models */}
-                      <CommandGroup heading="All Models">
-                        {otherModels.map((model) => {
-                          const formatPrice = (price?: string) => {
-                            if (!price) return null;
-                            const num = parseFloat(price);
-                            if (num === 0) return 'FREE';
-                            return `$${(num * 1000000).toFixed(2)}/M`;
-                          };
-                          
-                          const inputPrice = formatPrice(model.pricing?.prompt);
-                          const outputPrice = formatPrice(model.pricing?.completion);
-                          const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
-                          
-                          return (
-                            <CommandItem
-                              key={model.id}
-                              onSelect={() => {
-                                onModelChange?.(model.id);
-                                setShowModelPicker(false);
-                              }}
-                            >
-                              <div className="flex items-center justify-between w-full">
-                                <div className="flex flex-col gap-0.5">
-                                  <span className="text-sm">{model.name}</span>
-                                  <span className="text-xs text-gray-500">{model.provider}</span>
-                                  {priceText && (
-                                    <span className="text-[10px] text-gray-400">{priceText}</span>
+                        {/* Other Models */}
+                        <CommandGroup heading="All Models">
+                          {otherModels.map((model) => {
+                            const formatPrice = (price?: string) => {
+                              if (!price) return null;
+                              const num = parseFloat(price);
+                              if (num === 0) return 'FREE';
+                              return `$${(num * 1000000).toFixed(2)}/M`;
+                            };
+                            
+                            const inputPrice = formatPrice(model.pricing?.prompt);
+                            const outputPrice = formatPrice(model.pricing?.completion);
+                            const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
+                            
+                            return (
+                              <CommandItem
+                                key={model.id}
+                                onSelect={() => {
+                                  onModelChange?.(model.id);
+                                  setShowModelPicker(false);
+                                }}
+                              >
+                                <div className="flex items-center justify-between w-full">
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="text-sm">{model.name}</span>
+                                    <span className="text-xs text-gray-500">{model.provider}</span>
+                                    {priceText && (
+                                      <span className="text-[10px] text-gray-400">{priceText}</span>
+                                    )}
+                                  </div>
+                                  {model.id === selectedModel && (
+                                    <span className="text-primary">✓</span>
                                   )}
                                 </div>
-                                {model.id === selectedModel && (
-                                  <span className="text-primary">✓</span>
-                                )}
-                              </div>
-                            </CommandItem>
-                          );
-                        })}
-                      </CommandGroup>
-                    </CommandList>
-                  </Command>
-                </PopoverContent>
+                              </CommandItem>
+                            );
+                          })}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                )}
               </Popover>
-
-              {/* Model Label */}
-              <span className="text-gray-600 text-xs pl-1">{selectedModelName}</span>
             </div>
 
-            {/* CMD + Enter hint */}
-            <div className="flex items-center gap-1 text-gray-600 text-xs">
+            {/* CMD + Enter hint - clickable */}
+            <button
+              onClick={onSubmit}
+              disabled={disabled}
+              className={cn(
+                "flex items-center gap-1 px-2 py-1 rounded-lg border border-foreground/20 bg-foreground/10 text-foreground text-xs shadow-sm transition-colors",
+                disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-foreground/20 cursor-pointer"
+              )}
+            >
               <span className="font-mono text-[17px] leading-none">⌘</span>
               <span className="font-mono text-xs">+</span>
               <span className="font-mono text-xs">Enter</span>
-            </div>
+            </button>
           </div>
           </div>
         </div>
