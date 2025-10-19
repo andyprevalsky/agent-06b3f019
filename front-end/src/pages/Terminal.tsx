@@ -29,6 +29,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 import { RealtimeChannel } from '@supabase/supabase-js';
+import { colorPalette, frameSequence, getTileColorsForFrame } from '@/lib/tileAnimation';
 
 function getModelContextWindow(model: string, models: Model[]): number {
   // Look up the actual context length from the models data
@@ -174,6 +175,12 @@ export default function Terminal() {
   const animationFrameRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(Date.now());
 
+  // Tile animation state
+  const [currentFrame, setCurrentFrame] = useState(0);
+  const [animationComplete, setAnimationComplete] = useState(false);
+  const FRAME_DURATION_MS = 45; // ~45ms per frame = 1 second total for 22 frames
+  const tileAnimationRef = useRef<NodeJS.Timeout | null>(null);
+
   // Rotate popular goals carousel like a stock ticker with constant motion
   useEffect(() => {
     if (selectedAgentId) {
@@ -217,6 +224,36 @@ export default function Terminal() {
       }
     };
   }, [selectedAgentId]);
+
+  // Tile animation - pause 1 second, then play once through all frames
+  useEffect(() => {
+    if (animationComplete) return;
+
+    // Pause for 0.8 seconds before starting animation
+    const startDelay = setTimeout(() => {
+      tileAnimationRef.current = setInterval(() => {
+        setCurrentFrame((prev) => {
+          const nextFrame = prev + 1;
+          if (nextFrame >= frameSequence.length) {
+            // Animation complete - stop on last frame
+            setAnimationComplete(true);
+            if (tileAnimationRef.current) {
+              clearInterval(tileAnimationRef.current);
+            }
+            return frameSequence.length - 1;
+          }
+          return nextFrame;
+        });
+      }, FRAME_DURATION_MS);
+    }, 800);
+
+    return () => {
+      clearTimeout(startDelay);
+      if (tileAnimationRef.current) {
+        clearInterval(tileAnimationRef.current);
+      }
+    };
+  }, [FRAME_DURATION_MS, animationComplete]);
 
   // Check authentication
   useEffect(() => {
@@ -802,6 +839,29 @@ export default function Terminal() {
     return () => window.removeEventListener('resize', updatePatternOffset);
   }, []);
 
+  // Calculate tile colors based on current animation frame - simple and direct
+  const tileColors = useMemo(() => {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const frameName = frameSequence[currentFrame];
+    return getTileColorsForFrame(frameName, viewportWidth, viewportHeight, 143, 429);
+  }, [currentFrame]);
+
+  // Track which tiles have EVER been animated (accumulate over time)
+  const [animatedTiles, setAnimatedTiles] = useState<Set<string>>(new Set());
+  
+  useEffect(() => {
+    setAnimatedTiles((prev) => {
+      const updated = new Set(prev);
+      tileColors.forEach((colorId, key) => {
+        if (colorId > 0) {
+          updated.add(key);
+        }
+      });
+      return updated;
+    });
+  }, [tileColors]);
+
   return (
     <div className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden">
       {/* Background Pattern */}
@@ -818,11 +878,8 @@ export default function Terminal() {
           </linearGradient>
           
           <pattern id="grid-pattern" x={patternOffset.x} y={patternOffset.y} width="143" height="143" patternUnits="userSpaceOnUse">
-            {/* Small tile square outline */}
-            <rect x="0" y="0" width="143" height="143" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" />
-            
-            {/* Center dot */}
-            <circle cx="71.5" cy="71.5" r="3" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
+            {/* Small tile square outline - transparent background to show animated colors */}
+            <rect x="0" y="0" width="143" height="143" fill="transparent" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" />
             
             {/* Corner diamonds with concave (inward curved) sides */}
             <path d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
@@ -839,8 +896,76 @@ export default function Terminal() {
           </mask>
         </defs>
         
-        {/* Small tiles pattern everywhere except inside large tile */}
+        {/* Animated tiles overlay - render first (background layer) */}
+        {Array.from(tileColors.entries()).map(([key, colorId]) => {
+          const [row, col] = key.split(',').map(Number);
+          const color = colorPalette[colorId];
+          
+          const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0;
+          const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 0;
+          const centerX = viewportWidth / 2;
+          const centerY = viewportHeight * 0.4;
+          const tileSize = 143;
+          const largeTileSize = 429;
+          const largeTileHalf = largeTileSize / 2;
+          
+          const tilesLeft = Math.floor((centerX - largeTileHalf) / tileSize);
+          const tilesUp = Math.floor((centerY - largeTileHalf) / tileSize);
+          const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize);
+          const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize);
+          
+          const x = gridOriginX + col * tileSize;
+          const y = gridOriginY + row * tileSize;
+          
+          return (
+            <rect
+              key={key}
+              x={x}
+              y={y}
+              width={tileSize}
+              height={tileSize}
+              fill={color.hex}
+              style={{
+                transition: 'fill 0.3s ease-in-out'
+              }}
+            />
+          );
+        })}
+        
+        {/* Small tiles pattern everywhere except inside large tile - render on top of animated colors */}
         <rect x="-5000" y="-5000" width="10000" height="10000" fill="url(#grid-pattern)" mask="url(#large-tile-mask)" />
+        
+        {/* Dots for animated tiles only */}
+        {Array.from(animatedTiles).map((key) => {
+          const [row, col] = key.split(',').map(Number);
+          
+          const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0;
+          const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 0;
+          const centerX = viewportWidth / 2;
+          const centerY = viewportHeight * 0.4;
+          const tileSize = 143;
+          const largeTileSize = 429;
+          const largeTileHalf = largeTileSize / 2;
+          
+          const tilesLeft = Math.floor((centerX - largeTileHalf) / tileSize);
+          const tilesUp = Math.floor((centerY - largeTileHalf) / tileSize);
+          const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize);
+          const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize);
+          
+          const x = gridOriginX + col * tileSize + tileSize / 2;
+          const y = gridOriginY + row * tileSize + tileSize / 2;
+          
+          return (
+            <circle
+              key={`dot-${key}`}
+              cx={x}
+              cy={y}
+              r="3"
+              fill="rgb(229, 231, 235)"
+              className="dark:fill-gray-800"
+            />
+          );
+        })}
         
         {/* Large tile border (3x3 size = 429x429) aligned with small tile grid */}
         {/* Pattern offset ensures corners land exactly on grid intersections */}
@@ -1096,14 +1221,16 @@ export default function Terminal() {
                 justifyContent: 'center',
               }}
             >
-              {/* White Background Overlay - sits behind messages but in front of ASCII loader */}
+              {/* Blur Background Overlay - sits behind messages but in front of ASCII loader */}
               <div 
                 className="absolute inset-0 pointer-events-none ease-in-out"
                 style={{
-                  background: 'linear-gradient(to right, transparent 0%, #F9F9FB 10%, #F9F9FB 90%, transparent 100%)',
-                  opacity: selectedAgentId ? 1 : 0,
+                  backdropFilter: selectedAgentId ? 'blur(20px)' : 'blur(0px)',
+                  WebkitBackdropFilter: selectedAgentId ? 'blur(20px)' : 'blur(0px)',
+                  maskImage: 'linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%)',
+                  WebkitMaskImage: 'linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%)',
                   zIndex: 15,
-                  transition: 'opacity 3s ease-in-out',
+                  transition: 'backdrop-filter 1.8s ease-in-out, -webkit-backdrop-filter 1.8s ease-in-out',
                 }}
               />
               
