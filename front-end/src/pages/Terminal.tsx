@@ -30,6 +30,7 @@ import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { colorPalette, frameSequence, getTileColorsForFrame } from '@/lib/tileAnimation';
+import SmallTileAnimationCanvas from '@/components/terminal/SmallTileAnimationCanvas';
 
 function getModelContextWindow(model: string, models: Model[]): number {
   // Look up the actual context length from the models data
@@ -856,73 +857,11 @@ export default function Terminal() {
     return getTileColorsForFrame(frameName, viewportWidth, viewportHeight, 143, 429);
   }, [currentFrame]);
 
-  // Track which tiles have EVER been animated (accumulate over time)
-  const [animatedTiles, setAnimatedTiles] = useState<Set<string>>(new Set());
-  
-  useEffect(() => {
-    setAnimatedTiles((prev) => {
-      const updated = new Set(prev);
-      tileColors.forEach((colorId, key) => {
-        if (colorId > 0) {
-          updated.add(key);
-        }
-      });
-      
-      // DEBUG: Log as 2D grid
-      console.log(`\n🎨 RENDERING Frame ${frameSequence[currentFrame]} (${tileColors.size} tiles):`);
-      
-      // Build a map for quick lookup
-      const colorMap = new Map(tileColors);
-      
-      // Find bounds
-      const coords = Array.from(tileColors.keys()).map(k => k.split(',').map(Number));
-      if (coords.length > 0) {
-        const rows = coords.map(c => c[0]);
-        const cols = coords.map(c => c[1]);
-        const minRow = Math.min(...rows);
-        const maxRow = Math.max(...rows);
-        const minCol = Math.min(...cols);
-        const maxCol = Math.max(...cols);
-        
-        // Calculate where large tile is
-        const viewportWidth = window.innerWidth;
-        const viewportHeight = window.innerHeight;
-        const centerX = viewportWidth / 2;
-        const centerY = viewportHeight * 0.4;
-        const largeTileHalf = 429 / 2;
-        const largeTileRow = Math.floor((centerY - largeTileHalf) / 143);
-        const largeTileCol = Math.floor((centerX - largeTileHalf) / 143);
-        
-        // Column headers
-        const colHeader = '    ' + Array.from({length: maxCol - minCol + 1}, (_, i) => (minCol + i).toString().padStart(3)).join('');
-        console.log(colHeader);
-        
-        // Each row
-        for (let row = minRow; row <= maxRow; row++) {
-          let rowStr = row.toString().padStart(3) + ':';
-          for (let col = minCol; col <= maxCol; col++) {
-            // Check if this is inside large tile
-            if (row >= largeTileRow && row < largeTileRow + 3 && 
-                col >= largeTileCol && col < largeTileCol + 3) {
-              rowStr += '  T';
-            } else {
-              const key = `${row},${col}`;
-              const val = colorMap.get(key) ?? 0;
-              rowStr += val.toString().padStart(3);
-            }
-          }
-          console.log(rowStr);
-        }
-      }
-      
-      return updated;
-    });
-  }, [tileColors, currentFrame]);
 
   return (
     <div className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden">
-      {/* Background Pattern */}
-      <svg className="absolute inset-0 w-full h-full pointer-events-none" xmlns="http://www.w3.org/2000/svg" style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}>
+      {/* Background Pattern - z-[3] renders tile borders above animation canvases (z-[2]) */}
+      <svg className="absolute inset-0 w-full h-full pointer-events-none z-[3]" xmlns="http://www.w3.org/2000/svg" style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}>
         <defs>
           {/* Navi gradient for top corners */}
           <linearGradient id="navi-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -981,7 +920,7 @@ export default function Terminal() {
               y={y}
               width={tileSize}
               height={tileSize}
-              fill={color.hex}
+              fill={colorId === 0 ? 'transparent' : color.hex}
               style={{
                 // TEMP DEBUG: Remove transition to see instant changes
                 // transition: 'fill 0.3s ease-in-out'
@@ -992,38 +931,6 @@ export default function Terminal() {
         
         {/* Small tiles pattern everywhere except inside large tile - render on top of animated colors */}
         <rect x="-5000" y="-5000" width="10000" height="10000" fill="url(#grid-pattern)" mask="url(#large-tile-mask)" />
-        
-        {/* Dots for animated tiles only */}
-        {Array.from(animatedTiles).map((key) => {
-          const [row, col] = key.split(',').map(Number);
-          
-          const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0;
-          const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 0;
-          const centerX = viewportWidth / 2;
-          const centerY = viewportHeight * 0.4;
-          const tileSize = 143;
-          const largeTileSize = 429;
-          const largeTileHalf = largeTileSize / 2;
-          
-          const tilesLeft = Math.floor((centerX - largeTileHalf) / tileSize);
-          const tilesUp = Math.floor((centerY - largeTileHalf) / tileSize);
-          const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize);
-          const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize);
-          
-          const x = gridOriginX + col * tileSize + tileSize / 2;
-          const y = gridOriginY + row * tileSize + tileSize / 2;
-          
-          return (
-            <circle
-              key={`dot-${key}`}
-              cx={x}
-              cy={y}
-              r="3"
-              fill="rgb(229, 231, 235)"
-              className="dark:fill-gray-800"
-            />
-          );
-        })}
         
         {/* Large tile border (3x3 size = 429x429) aligned with small tile grid */}
         {/* Pattern offset ensures corners land exactly on grid intersections */}
@@ -1042,6 +949,14 @@ export default function Terminal() {
         <path d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% + 214.5px))' }} />
         <path d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% + 214.5px))' }} />
       </svg>
+
+      {/* Small Tile Animations Canvas Overlay */}
+      <SmallTileAnimationCanvas 
+        enabled={true} 
+        tileAnimationComplete={animationComplete}
+        currentFrame={currentFrame}
+        tileColors={tileColors}
+      />
 
       {/* Floating Blur Header */}
       <header 
@@ -1083,7 +998,7 @@ export default function Terminal() {
         <AttentionInbox onSelectAgent={setSelectedAgentId} />
       </header>
 
-      <div className="h-screen flex items-center justify-center overflow-hidden">
+      <div className="h-screen flex items-center justify-center overflow-hidden z-[4]">
         {/* Overlay */}
         {isSidebarOpen && (
           <div 
