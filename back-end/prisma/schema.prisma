@@ -39,11 +39,12 @@ model Agent {
   messageCount Int @default(0) // Total messages in context
 
   // Relations
-  parent   Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id], onDelete: SetNull)
-  children Agent[]     @relation("AgentHierarchy")
-  verifier Verifier?
-  tools    AgentTool[]
-  messages Message[]
+  parent     Agent?       @relation("AgentHierarchy", fields: [parentAgentId], references: [id], onDelete: SetNull)
+  children   Agent[]      @relation("AgentHierarchy")
+  verifier   Verifier?
+  tools      AgentTool[]
+  messages   Message[]
+  toolUsages ToolUsage[]
 
   @@index([userId, deletedAt])
   @@index([createdAt])
@@ -174,6 +175,21 @@ model ModelPricingCache {
   expiresAt                  DateTime // When cache expires (24 hours from cachedAt)
 
   @@index([expiresAt])
+}
+
+model ToolUsage {
+  id             String   @id @default(uuid())
+  agentId        String
+  toolName       String // Tool name (e.g., "deep_research", "web_search")
+  totalCostCents Int // Pre-calculated total cost in cents (sum of all usage items)
+  usageItems     Json // Array of UsageItem objects: [{type, cost_cents, provider, number_of_tokens?, token_price_per_million_cents?}]
+  createdAt      DateTime @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@index([createdAt])
+  @@index([toolName])
 }
 
 model User {

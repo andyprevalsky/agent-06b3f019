@@ -99,6 +99,13 @@ async function handlePaymentSuccess(invoice: Stripe.Invoice) {
 
   console.log(`✅ Found userId from client_reference_id: ${userId}`);
 
+  // Ensure User record exists (upsert creates if missing)
+  await prisma.user.upsert({
+    where: { userId },
+    create: { userId },
+    update: {}, // No updates needed if already exists
+  });
+
   // Determine tier from subscription amount
   const amountInDollars = (subscription.items.data[0]?.price.unit_amount || 0) / 100;
   const tier = Math.round(amountInDollars);

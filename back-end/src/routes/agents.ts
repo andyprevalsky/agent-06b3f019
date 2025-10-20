@@ -404,6 +404,35 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
       parentGoal = parent?.goal || null;
     }
 
+    // Fetch tool usage summary
+    const toolUsages = await prisma.toolUsage.findMany({
+      where: { agentId },
+      select: { 
+        totalCostCents: true,
+        usageItems: true 
+      }
+    });
+
+    const toolUsageTotalCostCents = toolUsages.reduce((sum: number, usage: any) => sum + usage.totalCostCents, 0);
+    
+    // Calculate tool tokens from usage items
+    let toolTokensIn = 0;
+    let toolTokensOut = 0;
+    for (const usage of toolUsages) {
+      const items = usage.usageItems as any[];
+      for (const item of items) {
+        if (item.type === 'llm' && item.number_of_tokens) {
+          // Perplexity reports all tokens - we'll bundle them all as "in" for simplicity
+          // since tools don't distinguish input/output the same way
+          if (item.provider?.includes('Output')) {
+            toolTokensOut += item.number_of_tokens;
+          } else {
+            toolTokensIn += item.number_of_tokens;
+          }
+        }
+      }
+    }
+
     res.json({
       agent: {
         agent_id: agent.id,
@@ -419,6 +448,9 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
         token_count: agent.tokenCount,
         tokens_in: agent.tokensIn,
         tokens_out: agent.tokensOut,
+        tool_tokens_in: toolTokensIn,
+        tool_tokens_out: toolTokensOut,
+        tool_cost_cents: toolUsageTotalCostCents,
         context_size: agent.contextSize,
         message_count: agent.messageCount,
         created_at: agent.createdAt,

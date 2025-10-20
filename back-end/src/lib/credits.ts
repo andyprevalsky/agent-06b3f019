@@ -60,12 +60,14 @@ export async function calculateAvailableCredits(userId: string): Promise<number>
 /**
  * Calculate total usage cost for a user based on actual model pricing
  * Counts ALL agents (including deleted ones) - usage is usage regardless of deletion
+ * Includes both primary LLM costs and tool usage costs
  */
 export async function calculateTotalUsage(userId: string): Promise<number> {
   // Get ALL agents for this user (including deleted)
   const agents = await prisma.agent.findMany({
     where: { userId },
     select: {
+      id: true,
       tokensIn: true,
       tokensOut: true,
       tokenInPriceMicrodollars: true,
@@ -86,6 +88,18 @@ export async function calculateTotalUsage(userId: string): Promise<number> {
       totalCostMicrodollars += agent.tokensOut * agent.tokenOutPriceMicrodollars;
     }
   }
+
+  // Add tool usage costs (stored in cents, need to convert to microdollars)
+  const agentIds = agents.map(a => a.id);
+  const toolUsages = await prisma.toolUsage.findMany({
+    where: { agentId: { in: agentIds } },
+    select: { totalCostCents: true }
+  });
+
+  const toolCostCents = toolUsages.reduce((sum, usage) => sum + usage.totalCostCents, 0);
+  const toolCostMicrodollars = toolCostCents * 10_000; // cents to microdollars: cents * 10,000
+
+  totalCostMicrodollars += toolCostMicrodollars;
 
   // Convert microdollars to dollars: microdollars / 1,000,000 = dollars
   return totalCostMicrodollars / 1_000_000;

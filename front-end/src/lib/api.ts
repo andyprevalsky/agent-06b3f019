@@ -33,6 +33,9 @@ export interface Agent {
   token_count: number;
   tokens_in: number;
   tokens_out: number;
+  tool_tokens_in: number;
+  tool_tokens_out: number;
+  tool_cost_cents: number;
   context_size: number;
   message_count: number;
   created_at: string;
@@ -63,7 +66,7 @@ export interface Message {
   metadata?: {
     toolCallId?: string;
     toolName?: string;
-    toolStatus?: 'IN_PROGRESS' | 'FINISHED';
+    toolStatus?: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
     title?: string;
     subAgentId?: string;
     progress?: number;

@@ -794,6 +794,15 @@ export default function Terminal() {
     }
   };
 
+  const handleCreateNewAgent = () => {
+    setCurrentView('agents');
+    setSelectedAgentId(null);
+    setAgentDetail(null); // Clear agent detail to reset completed status
+    setMessages([]);
+    setMessageInput('');
+    setIsSidebarOpen(false);
+  };
+
   const sortedAgents = [...agents].sort((a, b) => {
     // Completed agents go to the bottom
     if (a.status === 'COMPLETED' && b.status !== 'COMPLETED') return 1;
@@ -1334,7 +1343,8 @@ export default function Terminal() {
           <div 
             className="pb-6 transition-opacity duration-300 ease-in-out"
             style={{
-              opacity: agentDetail && ['COMPLETED', 'FAILED'].includes(agentDetail.status) ? 0.5 : 1
+              // Only fade for FAILED status, not COMPLETED (since we show a prominent button)
+              opacity: agentDetail && agentDetail.status === 'FAILED' ? 0.8 : 1
             }}
           >
             {/* Popular Goals Carousel - Only visible when no agent selected */}
@@ -1381,6 +1391,8 @@ export default function Terminal() {
               contextSize={agentDetail?.context_size || 0}
               restartThreshold={agentDetail ? Math.round(getModelContextWindow(agentDetail.model, models) * 0.8) : 100000}
               showModelSelector={!selectedAgentId}
+              agentCompleted={selectedAgentId !== null && agentDetail?.status === 'COMPLETED'}
+              onCreateNewAgent={handleCreateNewAgent}
             />
           </div>
           </>

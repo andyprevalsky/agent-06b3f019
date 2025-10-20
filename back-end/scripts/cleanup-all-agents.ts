@@ -5,11 +5,12 @@
  * 
  * This script will:
  * 1. Kill any local workers running on the test queue
- * 2. Find all non-deleted agents in the database
+ * 2. Find all active (non-deleted) agents in the database
  * 3. Terminate their Temporal workflows
  * 4. Soft-delete them from the database
- * 5. Clear all blueprints from the knowledge base
- * 6. Clear all attention requests
+ * 5. Find all soft-deleted agents and hard-delete them
+ * 6. Clear all blueprints from the knowledge base
+ * 7. Clear all attention requests
  */
 
 import { prisma } from '../src/lib/prisma';
@@ -56,6 +57,7 @@ async function cleanupAllAgents() {
   try {
     // Get all non-deleted agents
     let agents;
+    let softDeletedAgents;
     try {
       agents = await prisma.agent.findMany({
         where: {
@@ -69,6 +71,18 @@ async function cleanupAllAgents() {
           temporalWorkflowId: true,
         },
       });
+      
+      // Get already soft-deleted agents for hard deletion
+      softDeletedAgents = await prisma.agent.findMany({
+        where: {
+          deletedAt: { not: null },
+        },
+        select: {
+          id: true,
+          goal: true,
+          deletedAt: true,
+        },
+      });
     } catch (dbError: any) {
       console.log('⚠️  Cannot connect to database:', dbError.message);
       console.log('⚠️  Skipping database cleanup (workers already killed)');
@@ -76,9 +90,10 @@ async function cleanupAllAgents() {
       return;
     }
 
-    console.log(`📊 Found ${agents.length} active agents\n`);
+    console.log(`📊 Found ${agents.length} active agents`);
+    console.log(`📊 Found ${softDeletedAgents.length} soft-deleted agents\n`);
 
-    if (agents.length === 0) {
+    if (agents.length === 0 && softDeletedAgents.length === 0) {
       console.log('✅ No agents to clean up!');
       return;
     }
@@ -137,6 +152,24 @@ async function cleanupAllAgents() {
       }
     }
 
+    // Hard-delete soft-deleted agents
+    let hardDeletedCount = 0;
+    if (softDeletedAgents.length > 0) {
+      console.log(`\n🗑️  Hard-deleting ${softDeletedAgents.length} soft-deleted agents...`);
+      for (const agent of softDeletedAgents) {
+        try {
+          await prisma.agent.delete({
+            where: { id: agent.id }
+          });
+          console.log(`   ✅ Hard-deleted agent ${agent.id} (deleted on ${agent.deletedAt?.toISOString()})`);
+          hardDeletedCount++;
+        } catch (error: any) {
+          console.log(`   ❌ Failed to hard-delete agent ${agent.id}: ${error.message}`);
+        }
+      }
+      console.log(`✅ Hard-deleted ${hardDeletedCount} soft-deleted agent(s)`);
+    }
+
     // Also clear all blueprints
     console.log('\n🗑️  Clearing all blueprints...');
     const deletedBlueprints = await prisma.goalBlueprint.deleteMany({});
@@ -149,9 +182,10 @@ async function cleanupAllAgents() {
 
     console.log('\n' + '='.repeat(60));
     console.log('📈 Cleanup Summary:');
-    console.log(`   Total agents: ${agents.length}`);
-    console.log(`   Successfully deleted: ${successCount}`);
+    console.log(`   Active agents processed: ${agents.length}`);
+    console.log(`   Successfully soft-deleted: ${successCount}`);
     console.log(`   Failed: ${failCount}`);
+    console.log(`   Hard-deleted (previously soft-deleted): ${hardDeletedCount}`);
     console.log(`   Blueprints cleared: ${deletedBlueprints.count}`);
     console.log(`   Attention requests cleared: ${deletedAttentionRequests.count}`);
     console.log('='.repeat(60));

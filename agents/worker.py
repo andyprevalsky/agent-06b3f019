@@ -30,6 +30,8 @@ from tools.amazon_shopping import (
     rank_amazon_products_activity,
 )
 from tools.request_user_attention import create_attention_request_activity
+# New event-driven tools
+from tools.deep_research_v2 import deep_research_activity
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     poll_new_messages,
@@ -48,6 +50,7 @@ from helpers import (
     fetch_agent_config,
     check_user_usage,
 )
+from helpers.save_tool_usage import save_tool_usage
 from health_server import run_health_server, set_worker_status
 
 # Configure structured logging
@@ -122,6 +125,10 @@ async def main():
             fetch_user_settings_activity,
             rank_amazon_products_activity,
             create_attention_request_activity,
+            # New event-driven tool activities
+            deep_research_activity,
+            save_tool_usage,
+            # Helper activities
             poll_new_messages,
             post_agent_message,
             call_llm,

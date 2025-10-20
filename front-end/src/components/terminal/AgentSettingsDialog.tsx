@@ -29,15 +29,17 @@ function getModelContextWindow(model: string, models: Model[]): number {
   return 100000;
 }
 
-function calculateCost(tokensIn: number, tokensOut: number, promptPrice?: string, completionPrice?: string): string {
+function calculateCost(tokensIn: number, tokensOut: number, toolCostCents: number, promptPrice?: string, completionPrice?: string): string {
   const promptPricePerToken = promptPrice ? parseFloat(promptPrice) : 0;
   const completionPricePerToken = completionPrice ? parseFloat(completionPrice) : 0;
   
-  const cost = (tokensIn * promptPricePerToken) + (tokensOut * completionPricePerToken);
+  const llmCost = (tokensIn * promptPricePerToken) + (tokensOut * completionPricePerToken);
+  const toolCost = toolCostCents / 100; // Convert cents to dollars
+  const totalCost = llmCost + toolCost;
   
-  if (cost === 0) return '$0.00';
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(2)}`;
+  if (totalCost === 0) return '$0.00';
+  if (totalCost < 0.01) return `$${totalCost.toFixed(4)}`;
+  return `$${totalCost.toFixed(2)}`;
 }
 
 export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDialogProps) {
@@ -180,14 +182,19 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   const selectedToolsData = toolsList.filter(t => t && selectedTools.includes(t.id));
   const availableToolsFiltered = toolsList.filter(t => t && !selectedTools.includes(t.id));
   
-  // Calculate cost based on current model pricing
+  // Calculate cost based on current model pricing + tool costs
   const currentModelData = agent ? modelsList.find(m => m?.id === agent.model) : null;
   const estimatedCost = agent ? calculateCost(
     agent.tokens_in,
     agent.tokens_out,
+    agent.tool_cost_cents || 0,
     currentModelData?.pricing?.prompt,
     currentModelData?.pricing?.completion
   ) : '$0.00';
+  
+  // Calculate combined tokens (primary LLM + tools)
+  const totalTokensIn = agent ? agent.tokens_in + (agent.tool_tokens_in || 0) : 0;
+  const totalTokensOut = agent ? agent.tokens_out + (agent.tool_tokens_out || 0) : 0;
 
   return (
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
@@ -261,7 +268,7 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
               
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Tokens In/Out</span>
-                <span className="font-mono">{agent.tokens_in.toLocaleString()} / {agent.tokens_out.toLocaleString()}</span>
+                <span className="font-mono">{totalTokensIn.toLocaleString()} / {totalTokensOut.toLocaleString()}</span>
               </div>
               
               <div className="flex justify-between text-sm">

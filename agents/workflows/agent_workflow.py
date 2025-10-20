@@ -62,12 +62,22 @@ with workflow.unsafe.imports_passed_through():
         fetch_agent_config,
         check_user_usage,
     )
+    from helpers.save_tool_usage import save_tool_usage
+    # New event-driven tool system
+    from tools.base import ToolEvent, EventType, MessageStatus
+    from tools.deep_research_v2 import deep_research_v2
 
 logger = structlog.get_logger()
 
 
 # Trigger continue_as_new at 80% context usage
 CONTEXT_THRESHOLD_PERCENTAGE = 0.8
+
+# Tools migrated to new event-driven system
+# Maps tool names to their workflow helper functions
+EVENT_DRIVEN_TOOLS = {
+    "deep_research": deep_research_v2,
+}
 
 # Tool formatter registry (maps tool names to their formatters)
 TOOL_FORMATTERS = {
@@ -715,6 +725,15 @@ class AgentWorkflow:
                     tool_call_id = tool_call['tool_call_id']
                     
                     try:
+                        # NEW SYSTEM: Event-driven tools handle their own messages
+                        if tool_name in EVENT_DRIVEN_TOOLS:
+                            workflow.logger.info(f"✨ Executing event-driven tool: {tool_name}")
+                            # Execute tool (handles all events internally)
+                            await self._execute_tool(tool_call, tool_call_id)
+                            # Skip old formatter logic - events handled everything
+                            continue
+                        
+                        # OLD SYSTEM: Use formatters for legacy tools
                         # Get tool formatter (or use defaults)
                         formatter = TOOL_FORMATTERS.get(tool_name, {})
                         
@@ -1018,6 +1037,71 @@ class AgentWorkflow:
             workflow.logger.error(f"Failed to post message: {str(e)}")
             # Non-fatal - continue
     
+    async def _handle_tool_event(self, event: ToolEvent, tool_call_id: str, tool_name: str) -> None:
+        """
+        Handle a single event from a tool.
+        
+        This is the core event handler for the new event-driven tool system.
+        Called for each event yielded by tool managers.
+        """
+        if event.type == EventType.POST_MESSAGE:
+            # Post message to UI and add to context
+            metadata = {
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "title": event.title,
+            }
+            # Include status if provided (IN_PROGRESS, FINISHED, ERROR)
+            if event.status:
+                metadata["toolStatus"] = event.status.value
+            
+            await self._post_message(
+                event.message or "",
+                "TOOL",
+                metadata=metadata
+            )
+        
+        elif event.type == EventType.USAGE:
+            # Save tool usage to database
+            if event.usage_items:
+                try:
+                    usage_items_dicts = [item.to_dict() for item in event.usage_items]
+                    await workflow.execute_activity(
+                        save_tool_usage,
+                        args=[self.agent_id, self.user_id, event.tool_name or tool_name, usage_items_dicts],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(
+                            maximum_attempts=3,
+                            backoff_coefficient=2.0,
+                            initial_interval=timedelta(seconds=1),
+                            maximum_interval=timedelta(seconds=10)
+                        )
+                    )
+                except Exception as e:
+                    workflow.logger.error(f"Failed to save tool usage: {str(e)}")
+                    # Don't fail the workflow if usage tracking fails
+        
+        elif event.type == EventType.ADD_TO_CONTEXT:
+            # Add message to context (no UI posting)
+            context_entry = {
+                "role": event.role or "SYSTEM",
+                "text": event.text or "",
+                "timestamp": workflow.now().isoformat()
+            }
+            if event.metadata:
+                context_entry["metadata"] = event.metadata
+            self.context.append(context_entry)
+        
+        elif event.type == EventType.WAIT_FOR_SIGNAL:
+            # Wait for a signal (e.g., user response)
+            if event.signal_key:
+                # For now, just log - specific tools like request_user_attention
+                # will handle their own wait logic
+                workflow.logger.info(f"Tool waiting for signal: {event.signal_key}")
+        
+        else:
+            workflow.logger.warning(f"Unknown event type: {event.type}")
+    
     
     async def _query_blueprints(self) -> List[Dict]:
         """Query knowledge base for similar goals."""
@@ -1136,11 +1220,20 @@ class AgentWorkflow:
         Execute a single tool call. Returns result (dict for activities, str for system tools).
         Does NOT post messages - main loop handles all posting.
         Exception: spawn_sub_agents posts its summary message before waiting.
+        
+        NEW: If tool is in EVENT_DRIVEN_TOOLS, uses new event system (no return value).
         """
         tool = tool_call.get("tool")
         args = tool_call.get("args", [])
         
         workflow.logger.info(f"Executing tool: {tool}")
+        
+        # NEW SYSTEM: Check if tool uses event-driven architecture
+        if tool in EVENT_DRIVEN_TOOLS:
+            workflow.logger.info(f"✨ Using new event-driven system for {tool}")
+            tool_helper = EVENT_DRIVEN_TOOLS[tool]
+            await tool_helper(self, tool_call, tool_call_id)
+            return None  # Event-driven tools don't return values
         
         # Special handling for wait_seconds: it's not an activity, just workflow.sleep()
         if tool == "wait_seconds":
