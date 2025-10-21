@@ -1155,7 +1155,13 @@ export default function Terminal() {
           <div className="absolute top-4 right-4 z-20">
             <AgentSettingsDialog 
               agent={agentDetail} 
-              onUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)} 
+              onUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)}
+              onDelete={() => {
+                setCurrentView('agents');
+                setSelectedAgentId(null);
+                setMessages([]);
+                loadAgents();
+              }}
             />
           </div>
           

@@ -6,9 +6,10 @@ import { Textarea } from '@/components/ui/textarea';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Badge } from '@/components/ui/badge';
-import { Bot, Loader2, Play, Pause, Check, ChevronsUpDown, X } from 'lucide-react';
-import { AgentDetail, pauseAgent, resumeAgent, updateAgent } from '@/lib/api';
+import { Bot, Loader2, Play, Pause, Check, ChevronsUpDown, X, Trash2 } from 'lucide-react';
+import { AgentDetail, pauseAgent, resumeAgent, updateAgent, deleteAgent } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
@@ -16,6 +17,7 @@ import { cn } from '@/lib/utils';
 interface AgentSettingsDialogProps {
   agent: AgentDetail | null;
   onUpdate?: () => void;
+  onDelete?: () => void;
 }
 
 function getModelContextWindow(model: string, models: Model[]): number {
@@ -42,7 +44,7 @@ function calculateCost(tokensIn: number, tokensOut: number, toolCostCents: numbe
   return `$${totalCost.toFixed(2)}`;
 }
 
-export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDialogProps) {
+export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: AgentSettingsDialogProps) {
   const [open, setOpen] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [verifierPrompt, setVerifierPrompt] = useState(agent?.verifier?.llm_judge_prompt || '');
@@ -61,6 +63,9 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
   const toolTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [modelTriggerWidth, setModelTriggerWidth] = useState<number>(0);
   const [toolTriggerWidth, setToolTriggerWidth] = useState<number>(0);
+  const [showDeleteSection, setShowDeleteSection] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
   
   useEffect(() => {
     if (agent) {
@@ -69,7 +74,18 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
       setReasoningEffort(agent.reasoning_effort || 'low');
       setSelectedTools(agent.tools.map(t => t.id));
     }
+    // Reset delete states when agent changes
+    setShowDeleteSection(false);
+    setDeleteConfirmText('');
   }, [agent]);
+
+  // Reset delete states when dialog closes
+  useEffect(() => {
+    if (!open) {
+      setShowDeleteSection(false);
+      setDeleteConfirmText('');
+    }
+  }, [open]);
 
   useEffect(() => {
     if (open && triggerRef.current) {
@@ -158,6 +174,29 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
       });
     } finally {
       setIsUpdating(false);
+    }
+  };
+
+  const handleDeleteAgent = async () => {
+    if (!agent || deleteConfirmText !== 'I END MY GOAL') return;
+    setIsDeleting(true);
+    try {
+      await deleteAgent(agent.agent_id);
+      toast({ 
+        title: 'Agent deleted', 
+        description: 'The agent and its workflow have been terminated' 
+      });
+      setOpen(false);
+      // Call onDelete to navigate back to main view
+      onDelete?.();
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to delete agent',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDeleting(false);
     }
   };
   
@@ -489,6 +528,65 @@ export default function AgentSettingsDialog({ agent, onUpdate }: AgentSettingsDi
             ) : null}
             Save Changes
           </Button>
+
+          {/* Delete Agent Section */}
+          <div className="space-y-3 pt-4 border-t border-red-500/30">
+            {!showDeleteSection ? (
+              <Button
+                onClick={() => setShowDeleteSection(true)}
+                variant="outline"
+                className="w-full text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 border-red-500/30 hover:border-red-500/50 transition-colors"
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                Delete Agent
+              </Button>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="delete-confirm" className="text-sm text-red-600 dark:text-red-500 font-semibold">
+                    Type: I END MY GOAL
+                  </Label>
+                  <Input
+                    id="delete-confirm"
+                    value={deleteConfirmText}
+                    onChange={(e) => setDeleteConfirmText(e.target.value)}
+                    placeholder="I END MY GOAL"
+                    className="text-sm border-red-500/30 focus-visible:ring-red-500"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => {
+                      setShowDeleteSection(false);
+                      setDeleteConfirmText('');
+                    }}
+                    variant="outline"
+                    className="flex-1"
+                    disabled={isDeleting}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleDeleteAgent}
+                    disabled={isDeleting || deleteConfirmText !== 'I END MY GOAL'}
+                    className="flex-1 bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isDeleting ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Deleting...
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        Delete
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
           </div>
           )}
         </div>
