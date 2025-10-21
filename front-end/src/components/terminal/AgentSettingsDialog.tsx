@@ -232,8 +232,8 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
   ) : '$0.00';
   
   // Calculate combined tokens (primary LLM + tools)
-  const totalTokensIn = agent ? agent.tokens_in + (agent.tool_tokens_in || 0) : 0;
-  const totalTokensOut = agent ? agent.tokens_out + (agent.tool_tokens_out || 0) : 0;
+  const totalTokensIn = agent ? (agent.tokens_in || 0) + (agent.tool_tokens_in || 0) : 0;
+  const totalTokensOut = agent ? (agent.tokens_out || 0) + (agent.tool_tokens_out || 0) : 0;
 
   return (
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
@@ -322,7 +322,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
                 </div>
                 <Progress value={contextPercentage} className="h-2" />
                 <p className="text-xs text-muted-foreground">
-                  {agent.context_size.toLocaleString()} / {restartThreshold.toLocaleString()} context used
+                  {(agent.context_size || 0).toLocaleString()} / {restartThreshold.toLocaleString()} context used
                 </p>
               </div>
 

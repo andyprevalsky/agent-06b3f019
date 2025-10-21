@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot } from 'lucide-react';
-import { supabase, signOut, getCurrentUser } from '@/lib/supabase';
+import { supabase, signOut, getCurrentUser, initializeRealtime } from '@/lib/supabase';
+import { subscribeToAgent, unsubscribe } from '@/lib/realtime';
 import {
   getAllAgents,
   getAgent,
@@ -256,9 +257,20 @@ export default function Terminal() {
     };
   }, [FRAME_DURATION_MS, animationComplete]);
 
-  // Check authentication
+  // Check authentication and set up auth state listener
   useEffect(() => {
     checkAuth();
+    
+    // Listen for auth state changes and update realtime connection
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session?.access_token) {
+        await supabase.realtime.setAuth(session.access_token);
+      }
+    });
+    
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   const checkAuth = async () => {
@@ -269,6 +281,9 @@ export default function Terminal() {
         return;
       }
       setUser(currentUser);
+      
+      // Initialize realtime with auth token after authentication
+      await initializeRealtime();
     } catch (error) {
       navigate('/');
     }
@@ -319,137 +334,109 @@ export default function Terminal() {
       reconnectTimeoutRef.current = null;
     }
 
-    console.log(`📡 Creating new realtime channel for agent ${selectedAgentId}`);
-
-    // Create new channel for selected agent
-    const channel = supabase
-      .channel(`agent:${selectedAgentId}:${Date.now()}`) // Add timestamp to force new channel
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'Agent',
-          filter: `id=eq.${selectedAgentId}`,
-        },
-        (payload) => {
-          console.log('🔄 Agent update:', payload);
-          if (payload.eventType === 'UPDATE' && payload.new) {
+    // Async setup for realtime with auth
+    const setupRealtime = async () => {
+      try {
+        // Subscribe to agent channel using clean subscription pattern
+        const channel = await subscribeToAgent(selectedAgentId, {
+          onInsert: (payload) => {
+            // Handle message inserts - data is in payload.record
+            const data = payload.payload?.record;
+            if (!data) return;
+            
+            const message: Message = {
+              message_id: data.id,
+              timestamp: data.timestamp,
+              text: data.text,
+              role: data.role,
+              metadata: data.metadata,
+            };
+            
+            // Add to buffer queue - it will be displayed when ready
+            setMessageBuffer((prev) => [...prev, message]);
+          },
+          onUpdate: (payload) => {
+            // Handle agent updates - data is in payload.record
+            const updated = payload.record || payload.payload?.record;
+            if (!updated) return;
+            
             // Update agent detail in state directly (no refetch = no flicker)
-            const updated = payload.new as any;
             setAgentDetail((prev) => {
               if (!prev) return prev;
               return {
                 ...prev,
-                progress: updated.progress,
-                status: updated.status,
-                status_message: updated.statusMessage,
-                model: updated.model,
-                token_count: updated.tokenCount,
-                tokens_in: updated.tokensIn,
-                tokens_out: updated.tokensOut,
-                context_size: updated.contextSize,
-                message_count: updated.messageCount,
-                updated_at: updated.updatedAt,
+                progress: updated.progress ?? prev.progress,
+                status: updated.status ?? prev.status,
+                status_message: updated.statusMessage ?? prev.status_message,
+                model: updated.model ?? prev.model,
+                token_count: updated.tokenCount ?? prev.token_count,
+                tokens_in: updated.tokensIn ?? prev.tokens_in,
+                tokens_out: updated.tokensOut ?? prev.tokens_out,
+                context_size: updated.contextSize ?? prev.context_size,
+                message_count: updated.messageCount ?? prev.message_count,
+                updated_at: updated.updatedAt ?? prev.updated_at,
               };
             });
             // Also refresh agents list to update sidebar
             loadAgents();
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'Message',
-          filter: `agentId=eq.${selectedAgentId}`,
-        },
-        (payload) => {
-          console.log('💬 New message:', payload);
-          const newMessage = payload.new as any;
-          const message: Message = {
-            message_id: newMessage.id,
-            timestamp: newMessage.timestamp,
-            text: newMessage.text,
-            role: newMessage.role,
-            metadata: newMessage.metadata, // Include metadata for tool messages
-          };
-          
-          // Add to buffer queue - it will be displayed when ready
-          setMessageBuffer((prev) => [...prev, message]);
-        }
-      )
-      .subscribe(async (status) => {
-        console.log(`📡 Realtime subscription status for agent ${selectedAgentId}:`, status);
+          },
+        });
+
+        channelRef.current = channel;
         
-        if (status === 'SUBSCRIBED') {
-          console.log('✅ Successfully subscribed to realtime updates');
-          // Reset reconnection attempts on successful connection
-          reconnectAttemptRef.current = 0;
-          isReconnectingRef.current = false;
-          
-          // Refetch messages to catch any that were created before subscription was established
-          // This prevents the race condition where messages are created before realtime connects
-          try {
-            const data = await getAgent(selectedAgentId);
-            setMessages(data.messages);
-            setAgentDetail(data.agent);
-          } catch (error) {
-            console.error('Failed to refetch messages after subscription:', error);
-          }
-        } else if (status === 'CHANNEL_ERROR') {
-          console.error('❌ Realtime subscription error - will attempt to reconnect');
-          isReconnectingRef.current = false;
-          scheduleReconnect();
-        } else if (status === 'TIMED_OUT') {
-          console.error('⏱️ Realtime subscription timed out - will attempt to reconnect');
-          isReconnectingRef.current = false;
-          scheduleReconnect();
-        } else if (status === 'CLOSED') {
-          console.log('🔌 Realtime subscription closed - will attempt to reconnect');
-          isReconnectingRef.current = false;
-          scheduleReconnect();
+        // Reset reconnection state on successful subscription
+        reconnectAttemptRef.current = 0;
+        isReconnectingRef.current = false;
+        
+        // Refetch messages to catch any that were created before subscription
+        try {
+          const data = await getAgent(selectedAgentId);
+          setMessages(data.messages);
+          setAgentDetail(data.agent);
+        } catch (error) {
+          console.error('Failed to refetch messages after subscription:', error);
         }
-      });
-
-    channelRef.current = channel;
-
-    // Helper function to schedule reconnection with exponential backoff
-    function scheduleReconnect() {
-      // Don't reconnect if we've switched agents or logged out
-      if (!selectedAgentId || !user) return;
-
-      // Clear any existing timeout
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
+      } catch (error) {
+        console.error('Failed to subscribe to agent channel:', error);
+        isReconnectingRef.current = false;
+        scheduleReconnect();
       }
 
-      // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-      const attempt = reconnectAttemptRef.current;
-      const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
-      
-      console.log(`🔄 Scheduling reconnection attempt ${attempt + 1} in ${delay}ms...`);
-      reconnectAttemptRef.current += 1;
+      // Helper function to schedule reconnection with exponential backoff
+      function scheduleReconnect() {
+        // Don't reconnect if we've switched agents or logged out
+        if (!selectedAgentId || !user) return;
 
-      reconnectTimeoutRef.current = window.setTimeout(() => {
-        console.log(`🔄 Attempting to reconnect (attempt ${attempt + 1})...`);
-        // Trigger re-subscription by updating the force counter
-        setForceResubscribe(prev => prev + 1);
-      }, delay);
-    }
+        // Clear any existing timeout
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
 
-    return () => {
-      console.log('🧹 Cleaning up realtime subscription');
-      isReconnectingRef.current = false;
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
+        // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+        const attempt = reconnectAttemptRef.current;
+        const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+        
+        reconnectAttemptRef.current += 1;
+
+        reconnectTimeoutRef.current = window.setTimeout(() => {
+          // Trigger re-subscription by updating the force counter
+          setForceResubscribe(prev => prev + 1);
+        }, delay);
       }
-      channel.unsubscribe();
-      channelRef.current = null;
+
+      return () => {
+        isReconnectingRef.current = false;
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+        unsubscribe(channelRef.current);
+        channelRef.current = null;
+      };
     };
+
+    // Call the async setup function
+    setupRealtime();
   }, [selectedAgentId, user, forceResubscribe]);
 
   // Handle tab visibility changes - reconnect when tab becomes visible

@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabase';
+import { subscribeToAttentionRequests, unsubscribe } from '@/lib/realtime';
 import { MarkdownText } from './MarkdownText';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
@@ -90,86 +91,69 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
         reconnectTimeoutRef.current = null;
       }
 
-      console.log('📡 Creating realtime channel for attention requests');
-
-      // Create new channel for attention requests
-      const channel = supabase
-        .channel(`attention-requests:${userId}:${Date.now()}`)
-        .on(
-          'postgres_changes',
-          {
-            event: '*',
-            schema: 'public',
-            table: 'AgentAttentionRequest',
-            filter: `userId=eq.${userId}`,
-          },
-          (payload) => {
-            console.log('🔔 Attention request update:', payload);
+      // Subscribe to attention requests using clean subscription pattern
+      try {
+        const channel = await subscribeToAttentionRequests(userId, {
+          onInsert: (payload) => {
+            // Data is in payload.record
+            const data = payload.payload?.record;
+            if (!data) return;
             
-            if (payload.eventType === 'INSERT') {
-              // New request - add to list
-              const newRequest = payload.new as any;
-              const request: AttentionRequest = {
-                id: newRequest.id,
-                agent_id: newRequest.agentId,
-                workflow_id: newRequest.workflowId,
-                question: newRequest.question,
-                image_url: newRequest.imageUrl,
-                user_response: newRequest.userResponse,
-                created_at: newRequest.createdAt,
-                updated_at: newRequest.updatedAt,
-                answered: !!newRequest.userResponse,
-              };
-              setRequests((prev) => [request, ...prev]);
-            } else if (payload.eventType === 'UPDATE') {
-              // Request updated (likely answered)
-              const updated = payload.new as any;
-              setRequests((prev) =>
-                prev.map((req) =>
-                  req.id === updated.id
-                    ? {
-                        ...req,
-                        user_response: updated.userResponse,
-                        updated_at: updated.updatedAt,
-                        answered: !!updated.userResponse,
-                      }
-                    : req
-                )
-              );
-            } else if (payload.eventType === 'DELETE') {
-              // Request deleted
-              const deleted = payload.old as any;
-              setRequests((prev) => prev.filter((req) => req.id !== deleted.id));
-            }
-          }
-        )
-        .subscribe(async (status) => {
-          console.log('📡 Attention requests subscription status:', status);
-
-          if (status === 'SUBSCRIBED') {
-            console.log('✅ Successfully subscribed to attention requests');
-            // Reset reconnection attempts on successful connection
-            reconnectAttemptRef.current = 0;
-
-            // Fetch initial data to catch any requests created before subscription
-            try {
-              await fetchRequests();
-            } catch (error) {
-              console.error('Failed to fetch initial requests:', error);
-            }
-          } else if (status === 'CHANNEL_ERROR') {
-            console.error('❌ Attention requests subscription error - will retry');
-            scheduleReconnect();
-          } else if (status === 'TIMED_OUT') {
-            console.error('⏱️ Attention requests subscription timed out - will retry');
-            scheduleReconnect();
-          } else if (status === 'CLOSED') {
-            console.log('🔌 Attention requests subscription closed - will retry');
-            scheduleReconnect();
-          }
+            const request: AttentionRequest = {
+              id: data.id,
+              agent_id: data.agentId,
+              workflow_id: data.workflowId,
+              question: data.question,
+              image_url: data.imageUrl,
+              user_response: data.userResponse,
+              created_at: data.createdAt,
+              updated_at: data.updatedAt,
+              answered: !!data.userResponse,
+            };
+            setRequests((prev) => [request, ...prev]);
+          },
+          onUpdate: (payload) => {
+            // Data is in payload.record or payload.payload.record
+            const data = payload.record || payload.payload?.record;
+            if (!data) return;
+            
+            setRequests((prev) =>
+              prev.map((req) =>
+                req.id === data.id
+                  ? {
+                      ...req,
+                      user_response: data.userResponse,
+                      updated_at: data.updatedAt,
+                      answered: !!data.userResponse,
+                    }
+                  : req
+              )
+            );
+          },
+          onDelete: (payload) => {
+            // Data is in payload.record or payload.payload.record
+            const data = payload.record || payload.payload?.record;
+            if (!data) return;
+            
+            setRequests((prev) => prev.filter((req) => req.id !== data.id));
+          },
         });
 
-      channelRef.current = channel;
+        channelRef.current = channel;
+        
+        // Reset reconnection state
+        reconnectAttemptRef.current = 0;
+
+        // Fetch initial data
+        try {
+          await fetchRequests();
+        } catch (error) {
+          console.error('Failed to fetch initial requests:', error);
+        }
+      } catch (error) {
+        console.error('Failed to subscribe to attention requests:', error);
+        scheduleReconnect();
+      }
 
       // Helper function to schedule reconnection with exponential backoff
       function scheduleReconnect() {
@@ -184,11 +168,9 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
         const attempt = reconnectAttemptRef.current;
         const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
 
-        console.log(`🔄 Scheduling attention requests reconnection attempt ${attempt + 1} in ${delay}ms...`);
         reconnectAttemptRef.current += 1;
 
         reconnectTimeoutRef.current = window.setTimeout(() => {
-          console.log(`🔄 Attempting to reconnect attention requests (attempt ${attempt + 1})...`);
           setForceResubscribe((prev) => prev + 1);
         }, delay);
       }
@@ -197,15 +179,12 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
     setupRealtimeSubscription();
 
     return () => {
-      console.log('🧹 Cleaning up attention requests subscription');
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
       }
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current);
-        channelRef.current = null;
-      }
+      unsubscribe(channelRef.current);
+      channelRef.current = null;
     };
   }, [forceResubscribe]);
 

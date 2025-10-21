@@ -14,6 +14,19 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     detectSessionInUrl: false,
     storage: window.localStorage,
   },
+  realtime: {
+    params: {
+      eventsPerSecond: 10,
+    },
+  },
+  db: {
+    schema: 'public',
+  },
+  global: {
+    headers: {
+      'X-Client-Info': 'supabase-js-web',
+    },
+  },
 });
 
 // Phone Auth helpers
@@ -55,4 +68,14 @@ export const getSession = async () => {
   const { data: { session }, error } = await supabase.auth.getSession();
   if (error) throw error;
   return session;
+};
+
+// Initialize realtime with current auth token
+// Call this after authentication succeeds
+export const initializeRealtime = async () => {
+  const { data: { session } } = await supabase.auth.getSession();
+  
+  if (session?.access_token) {
+    await supabase.realtime.setAuth(session.access_token);
+  }
 };

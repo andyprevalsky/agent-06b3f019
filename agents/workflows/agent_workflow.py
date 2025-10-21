@@ -29,11 +29,7 @@ with workflow.unsafe.imports_passed_through():
     )
     # Sub-agent spawning
     from tools.spawn_sub_agents import spawn_sub_agents
-    # Tool formatters
-    from tools.wait_seconds import (
-        format_pre_message as wait_seconds_pre,
-        format_post_message as wait_seconds_post,
-    )
+    # Tool formatters (for tools not yet migrated to event-driven system)
     from tools.spawn_sub_agents_formatters import (
         format_pre_message as spawn_sub_agents_pre,
         format_post_message as spawn_sub_agents_post,
@@ -66,6 +62,7 @@ with workflow.unsafe.imports_passed_through():
     # New event-driven tool system
     from tools.base import ToolEvent, EventType, MessageStatus
     from tools.deep_research_v2 import deep_research_v2
+    from tools.wait_seconds_v2 import wait_seconds_v2
 
 logger = structlog.get_logger()
 
@@ -77,14 +74,12 @@ CONTEXT_THRESHOLD_PERCENTAGE = 0.8
 # Maps tool names to their workflow helper functions
 EVENT_DRIVEN_TOOLS = {
     "deep_research": deep_research_v2,
+    "wait_seconds": wait_seconds_v2,
 }
 
 # Tool formatter registry (maps tool names to their formatters)
+# NOTE: wait_seconds migrated to EVENT_DRIVEN_TOOLS
 TOOL_FORMATTERS = {
-    "wait_seconds": {
-        "pre": wait_seconds_pre,
-        "post": wait_seconds_post
-    },
     "spawn_sub_agents": {
         "pre": spawn_sub_agents_pre,
         "post": spawn_sub_agents_post
@@ -1234,25 +1229,6 @@ class AgentWorkflow:
             tool_helper = EVENT_DRIVEN_TOOLS[tool]
             await tool_helper(self, tool_call, tool_call_id)
             return None  # Event-driven tools don't return values
-        
-        # Special handling for wait_seconds: it's not an activity, just workflow.sleep()
-        if tool == "wait_seconds":
-            try:
-                # Get seconds from tool_call dict (new Pydantic model format)
-                seconds = tool_call.get("seconds", 1)
-                
-                # Validate range
-                if seconds < 1 or seconds > 3600:
-                    raise ValueError(f"Wait time must be between 1 and 3600 seconds, got {seconds}")
-                
-                workflow.logger.info(f"Waiting {seconds} seconds")
-                await workflow.sleep(seconds)
-                
-                # Return simple result (formatter will handle the message)
-                return f"completed"
-                
-            except (ValueError, TypeError) as e:
-                raise ValueError(f"Invalid wait time: {str(e)}")
         
         # Special handling for spawn_sub_agents: spawn + wait for signal-based completion
         if tool == "spawn_sub_agents":

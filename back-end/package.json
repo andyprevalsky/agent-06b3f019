@@ -27,6 +27,7 @@
   "license": "ISC",
   "dependencies": {
     "@prisma/client": "^5.20.0",
+    "@supabase/supabase-js": "^2.76.1",
     "@temporalio/client": "^1.13.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
