@@ -1,105 +1,149 @@
-"""Web search tool using OpenAI gpt-4.1 with real-time web search capability."""
+"""Web search tool - migrated to event-driven architecture."""
 
-from typing import Dict, Any, Optional, List
-from temporalio import activity
+from typing import Dict, Any, Optional, AsyncGenerator
+from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
+from datetime import timedelta
 import structlog
 from openai import AsyncOpenAI
 
-from config import load_config
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
+
+# Import config with safe imports to avoid sandbox restrictions
+with workflow.unsafe.imports_passed_through():
+    from config import load_config
 
 logger = structlog.get_logger()
 
 
-class WebSearcher:
-    """
-    Manager for web search operations using OpenAI's web search capability.
+class WebSearchManager(ToolManager):
+    """Manager for web search operations using OpenAI's web search capability."""
     
-    Uses the Responses API with gpt-4.1 and web_search tool enabled for real-time web access.
-    """
+    tool_name = "web_search"
     
-    def __init__(self):
-        config = load_config()
-        self.openai_client = AsyncOpenAI(api_key=config.openai.api_key)
-        self.model = config.openai.model  # gpt-4.1
-    
-    async def search(self, query: str, max_tokens: int = 1500) -> Dict[str, Any]:
+    async def execute_tool(
+        self,
+        workflow_instance,
+        tool_call: Dict[str, Any],
+        tool_call_id: str
+    ) -> AsyncGenerator[ToolEvent, None]:
         """
-        Perform web search using OpenAI gpt-4.1 with web_search tool.
+        Execute web search and yield events.
         
-        Args:
-            query: Search query - can be a question or topic
-            max_tokens: Maximum tokens for response (default: 1500)
-            
-        Returns:
-            Dict with:
-                - answer: Answer with real-time web search results
-                - sources: List of source URLs (if available)
-                - query: Original query
-                - model: Model used
+        Yields:
+            - Pre-execution status with query
+            - Post-execution status with results and sources
         """
+        query = tool_call.get("query", "")
+        max_tokens = tool_call.get("max_tokens", 1500)
+        
+        # Truncate long queries for display
+        display_query = query if len(query) <= 100 else query[:97] + "..."
+        
+        # 1. Pre-execution status
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="🔍 Searching the web",
+            message=f"Query: {display_query}",
+            status=MessageStatus.IN_PROGRESS
+        )
+        
+        # 2. Execute web search activity
         try:
-            # Heartbeat (only works in activity context)
-            try:
-                activity.heartbeat(f"Web searching: {query}")
-            except RuntimeError:
-                pass  # Not in activity context (e.g., testing)
-            
-            # Call OpenAI Responses API with web_search tool
-            # Note: Responses API doesn't support max_tokens parameter
-            response = await self.openai_client.responses.create(
-                model=self.model,
-                tools=[{"type": "web_search"}],
-                input=query
+            logger.info("Calling web_search_activity", query_type=type(query).__name__, query_len=len(query))
+            result = await workflow.execute_activity(
+                web_search_activity,
+                args=[query, max_tokens],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10)
+                )
             )
             
-            # Extract answer from response
-            answer = response.output_text
+            # 3. Format success message
+            answer = result.get("answer", "")
+            sources = result.get("sources", [])
             
-            # Extract sources if available
-            sources = []
-            if hasattr(response, 'sources'):
-                sources = response.sources
+            # Build response with sources
+            if sources:
+                source_list = "\n".join([f"- {src}" for src in sources[:5]])  # Show max 5 sources
+                if len(sources) > 5:
+                    source_list += f"\n- ...and {len(sources) - 5} more"
+                
+                message = f"{answer}\n\n**Sources:**\n{source_list}"
+            else:
+                message = answer
             
-            result = {
-                "answer": answer,
-                "sources": sources,
-                "query": query,
-                "model": self.model,
-            }
-            
-            logger.info(
-                "Web search completed",
-                query=query,
-                answer_length=len(answer),
-                model=self.model
+            # Post-execution success
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Web search completed",
+                message=message,
+                status=MessageStatus.FINISHED
             )
-            
-            return result
             
         except Exception as e:
-            logger.error("Web search failed", error=str(e), query=query)
-            raise
+            # Error status
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="❌ Web search failed",
+                message=str(e),
+                status=MessageStatus.ERROR
+            )
+            raise  # Re-raise so workflow can handle
 
 
-# Singleton instance
-_web_searcher: Optional[WebSearcher] = None
+# ========================================
+# SINGLETON
+# ========================================
+
+_manager: Optional[WebSearchManager] = None
 
 
-def get_web_searcher() -> WebSearcher:
-    """Get or create web searcher singleton."""
-    global _web_searcher
-    if _web_searcher is None:
-        _web_searcher = WebSearcher()
-    return _web_searcher
+def get_manager() -> WebSearchManager:
+    """Get or create web search manager singleton."""
+    global _manager
+    if _manager is None:
+        _manager = WebSearchManager()
+    return _manager
 
+
+# ========================================
+# WORKFLOW HELPER
+# ========================================
+
+async def web_search(
+    workflow_instance,
+    tool_call: Dict[str, Any],
+    tool_call_id: str
+):
+    """
+    Workflow helper for web search (new event-driven system).
+    
+    Args:
+        workflow_instance: The workflow instance
+        tool_call: Tool call dict with 'query' and optional 'max_tokens'
+        tool_call_id: Unique ID for this tool call
+    """
+    manager = get_manager()
+    
+    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
+        await workflow_instance._handle_tool_event(event, tool_call_id, "web_search")
+
+
+# ========================================
+# TEMPORAL ACTIVITY
+# ========================================
 
 @activity.defn
-async def web_search(query: str, max_tokens: int = 1500) -> Dict[str, Any]:
+async def web_search_activity(query: str, max_tokens: int = 1500) -> Dict[str, Any]:
     """
     Activity: Perform a web search for quick facts and current information.
     
-    Uses OpenAI's gpt-4o-search-preview model which has real-time web access
-    to answer queries with up-to-date information.
+    Uses OpenAI's gpt-4.1 model with web_search tool enabled for real-time web access.
     
     Best for: current events, factual lookups, recent news, latest information.
     
@@ -112,60 +156,48 @@ async def web_search(query: str, max_tokens: int = 1500) -> Dict[str, Any]:
             - answer: Answer with real-time web search results
             - sources: List of source URLs (if available)
             - query: Original query
-            - model: Model used (gpt-4o-search-preview)
-        
-    Example:
-        result = await web_search("What's the latest news about AI?")
-        print(result["answer"])
+            - model: Model used
     """
-    searcher = get_web_searcher()
-    return await searcher.search(query, max_tokens)
-
-
-def format_pre_message(tool_call: Dict[str, Any]) -> Dict[str, str]:
-    """Format the pre-execution message for web search."""
-    query = tool_call.get("query", "")
-    
-    # Truncate long queries for display
-    display_query = query if len(query) <= 100 else query[:97] + "..."
-    
-    return {
-        "title": "🔍 Searching the web",
-        "message": f"Query: {display_query}"
-    }
-
-
-def format_post_message(tool_call: Dict[str, Any], result: Any) -> Dict[str, str]:
-    """Format the post-execution message for web search."""
-    
-    # Handle error case
-    if isinstance(result, str):
-        return {
-            "title": "❌ Web search failed",
-            "message": result
-        }
-    
-    # Parse result dict
-    if not isinstance(result, dict):
-        return {
-            "title": "Web search completed",
-            "message": str(result)
-        }
-    
-    answer = result.get("answer", "")
-    sources = result.get("sources", [])
-    
-    # Build response with sources
-    if sources:
-        source_list = "\n".join([f"- {src}" for src in sources[:5]])  # Show max 5 sources
-        if len(sources) > 5:
-            source_list += f"\n- ...and {len(sources) - 5} more"
+    try:
+        activity.heartbeat(f"Web searching: {query}")
         
-        message = f"{answer}\n\n**Sources:**\n{source_list}"
-    else:
-        message = answer
-    
-    return {
-        "title": "Web search completed",
-        "message": message
-    }
+        config = load_config()
+        openai_client = AsyncOpenAI(api_key=config.openai.api_key)
+        model = config.openai.model  # gpt-4.1
+        
+        # Call OpenAI Responses API with web_search tool
+        # Note: Responses API doesn't support max_tokens parameter
+        response = await openai_client.responses.create(
+            model=model,
+            tools=[{"type": "web_search"}],
+            input=query
+        )
+        
+        # Extract answer from response
+        answer = response.output_text
+        
+        # Extract sources if available
+        sources = []
+        if hasattr(response, 'sources'):
+            sources = response.sources
+        
+        result = {
+            "answer": answer,
+            "sources": sources,
+            "query": query,
+            "model": model,
+        }
+        
+        logger.info(
+            "Web search completed",
+            query=query,
+            answer_length=len(answer),
+            model=model
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error("Web search failed", error=str(e), query=query)
+        raise
+

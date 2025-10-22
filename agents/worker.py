@@ -4,6 +4,7 @@ import asyncio
 import signal
 import sys
 import os
+import logging
 from dotenv import load_dotenv
 from temporalio.client import Client, TLSConfig
 from temporalio.worker import Worker
@@ -22,16 +23,13 @@ if not os.getenv("BACKEND_API_KEY"):
 from config import load_config
 from workflows import AgentWorkflow
 # User-configurable tools
-from tools import web_search, deep_research
-from tools.spawn_sub_agents import spawn_sub_agents
-from tools.amazon_shopping import (
-    search_amazon_activity,
-    fetch_user_settings_activity,
-    rank_amazon_products_activity,
-)
+from tools.spawn_sub_agents import spawn_sub_agents_activity
 from tools.request_user_attention import create_attention_request_activity
 # New event-driven tools
-from tools.deep_research_v2 import deep_research_activity
+from tools.deep_research import deep_research_activity
+from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
+from tools.web_search import web_search_activity
+from tools.amazon_shopping import search_amazon_activity, fetch_user_settings_activity, rank_amazon_products_activity
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     poll_new_messages,
@@ -44,8 +42,6 @@ from helpers import (
     generate_completion_summary,
     get_model_context_window,
     fetch_agent_tools,
-    query_blueprints,
-    save_blueprint,
     mark_finished,
     fetch_agent_config,
     check_user_usage,
@@ -54,12 +50,21 @@ from helpers.save_tool_usage import save_tool_usage
 from health_server import run_health_server, set_worker_status
 
 # Configure structured logging
+logging.basicConfig(
+    format="%(message)s",
+    stream=sys.stdout,
+    level=logging.DEBUG,
+)
+
 structlog.configure(
     processors=[
+        structlog.stdlib.filter_by_level,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.add_log_level,
         structlog.processors.JSONRenderer()
-    ]
+    ],
+    wrapper_class=structlog.stdlib.BoundLogger,
+    logger_factory=structlog.stdlib.LoggerFactory(),
 )
 
 logger = structlog.get_logger()
@@ -118,15 +123,14 @@ async def main():
             AgentWorkflow
         ],
         activities=[
-            web_search,
-            deep_research,
-            spawn_sub_agents,
+            spawn_sub_agents_activity,
             search_amazon_activity,
             fetch_user_settings_activity,
             rank_amazon_products_activity,
             create_attention_request_activity,
             # New event-driven tool activities
             deep_research_activity,
+            web_search_activity,
             save_tool_usage,
             # Helper activities
             poll_new_messages,
@@ -139,8 +143,8 @@ async def main():
             generate_completion_summary,
             get_model_context_window,
             fetch_agent_tools,
-            query_blueprints,
-            save_blueprint,
+            query_blueprints_activity,
+            save_blueprint_activity,
             mark_finished,
             fetch_agent_config,
             check_user_usage

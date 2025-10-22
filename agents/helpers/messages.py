@@ -24,9 +24,7 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
         activity.heartbeat(f"Polling messages for agent {agent_id}")
         
         logger.info(
-            "Polling for new messages",
-            agent_id=agent_id,
-            last_checked=last_checked.isoformat()
+            f"Polling for new messages: agent_id={agent_id}, last_checked={last_checked.isoformat()}"
         )
         
         import httpx
@@ -58,18 +56,14 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
             
             if new_messages:
                 logger.info(
-                    "New messages found",
-                    agent_id=agent_id,
-                    count=len(new_messages)
+                    f"New messages found: agent_id={agent_id}, count={len(new_messages)}"
                 )
             
             return new_messages
             
     except Exception as e:
         logger.error(
-            "Failed to poll messages",
-            agent_id=agent_id,
-            error=str(e)
+            f"Failed to poll messages: agent_id={agent_id}, error={str(e)}"
         )
         return []
 
@@ -122,11 +116,7 @@ async def post_agent_message(
             )
             if response.status_code != 201:
                 logger.error(
-                    "Failed to post message - HTTP error",
-                    agent_id=agent_id,
-                    status_code=response.status_code,
-                    response_body=response.text,
-                    payload=payload
+                    f"Failed to post message - HTTP error: agent_id={agent_id}, status_code={response.status_code}, response_body={response.text}, payload={payload}"
                 )
             
             response.raise_for_status()
@@ -134,20 +124,14 @@ async def post_agent_message(
             message = response.json()
             
             logger.info(
-                "Message posted",
-                agent_id=agent_id,
-                message_id=message.get('message_id'),
-                role=role,
-                has_metadata=metadata is not None
+                f"Message posted: agent_id={agent_id}, message_id={message.get('message_id')}, role={role}, has_metadata={metadata is not None}"
             )
             
             return message
             
     except Exception as e:
         logger.error(
-            "Failed to post message",
-            agent_id=agent_id,
-            error=str(e)
+            f"Failed to post message: agent_id={agent_id}, error={str(e)}"
         )
         raise
 

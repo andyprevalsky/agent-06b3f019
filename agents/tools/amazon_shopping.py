@@ -1,17 +1,327 @@
-"""Amazon shopping tool - search, filter, and buy items from Amazon."""
+"""Amazon shopping tool - migrated to event-driven architecture."""
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, AsyncGenerator
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 from datetime import timedelta, datetime
 import structlog
 import httpx
 import json
 import os
 
-from tools.request_user_attention import request_user_attention
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType
+from tools.request_user_attention import request_user_attention_direct as request_user_attention
+
+# Import helpers with safe imports to avoid sandbox restrictions
+with workflow.unsafe.imports_passed_through():
+    from helpers.llm import call_llm_structured
+    from config import load_config
+    from pydantic import BaseModel
 
 logger = structlog.get_logger()
 
+
+class AmazonShoppingManager(ToolManager):
+    """Manager for Amazon shopping operations."""
+    
+    tool_name = "buy_item_from_amazon"
+    
+    async def execute_tool(
+        self,
+        workflow_instance,
+        tool_call: Dict[str, Any],
+        tool_call_id: str
+    ) -> AsyncGenerator[ToolEvent, None]:
+        """
+        Execute Amazon shopping flow and yield events.
+        
+        Steps:
+        1. Fetch user settings (shipping/payment)
+        2. Search Amazon
+        3. Rank products with LLM
+        4. Request user confirmation
+        5. Return purchase result
+        
+        Yields:
+            - Pre-execution status
+            - Usage tracking for LLM ranking
+            - Post-execution status with result
+        """
+        item_search_query = tool_call.get("item_search_query", "")
+        item_qualifications = tool_call.get("item_qualifications", "")
+        
+        # Get user_id from workflow instance
+        user_id = workflow_instance.user_id
+        
+        criteria_str = item_qualifications if item_qualifications else "best overall match (high rating, good value)"
+        
+        # 1. Pre-execution status
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=f"🛒 Buying {item_search_query} from Amazon",
+            message=f"Using the following criteria to determine the best option: {criteria_str}",
+            status=MessageStatus.IN_PROGRESS
+        )
+        
+        try:
+            # 2. Fetch user settings
+            user_settings = await workflow.execute_activity(
+                fetch_user_settings_activity,
+                args=[user_id],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            
+            # 3. Search Amazon
+            search_result = await workflow.execute_activity(
+                search_amazon_activity,
+                args=[item_search_query, "amazon.com"],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            
+            if not isinstance(search_result, tuple) or len(search_result) != 2:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Amazon purchase failed",
+                    message="Unexpected response from Amazon search",
+                    status=MessageStatus.ERROR
+                )
+                return
+            
+            status_code, products = search_result
+            
+            if status_code != 200 or not isinstance(products, list) or not products:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Amazon purchase failed",
+                    message=f"No products found for '{item_search_query}'",
+                    status=MessageStatus.ERROR
+                )
+                return
+            
+            # 4. Rank products with LLM
+            top_products = products[:10]
+            products_summary = []
+            
+            for i, p in enumerate(top_products):
+                summary = {
+                    "index": i,
+                    "title": p.get('title', ''),
+                    "price": p.get('extracted_price'),
+                    "original_price": p.get('extracted_original_price'),
+                    "rating": p.get('rating'),
+                    "reviews": p.get('reviews'),
+                    "recent_sales": p.get('recent_sales', ''),
+                }
+                products_summary.append(summary)
+            
+            qualifications_text = item_qualifications if item_qualifications else "None specified - choose the best overall product (high rating, many reviews, good value)"
+            
+            ranking_prompt = f"""You are helping a user buy an item from Amazon. They searched for: "{item_search_query}"
+
+User's qualifications:
+{qualifications_text}
+
+Here are the top products found:
+{json.dumps(products_summary, indent=2)}
+
+Based on the user's qualifications, which product (by index) is the BEST match? Consider:
+- Budget constraints if mentioned
+- Features and priorities they care about
+- Rating and review count (quality signal)
+- Value for money (price vs. quality)
+- Recent sales (popularity signal)
+
+Return the index of the best product and explain your reasoning."""
+
+            ranking_result = await workflow.execute_activity(
+                rank_amazon_products_activity,
+                args=[ranking_prompt],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            
+            best_index = ranking_result.get("best_product_index", 0)
+            llm_reasoning = ranking_result.get("reasoning", "Selected based on overall quality")
+            token_usage = ranking_result.get("usage", {})
+            
+            # Emit usage event for LLM ranking
+            if token_usage.get("total_tokens"):
+                # Estimate cost based on OpenRouter model pricing (rough estimate: ~$5 per 1M tokens)
+                input_tokens = token_usage.get("prompt_tokens", 0)
+                output_tokens = token_usage.get("completion_tokens", 0)
+                
+                usage_items = []
+                if input_tokens:
+                    cost = (input_tokens * 500) // 1_000_000  # $5 per M tokens = 500 cents per M
+                    usage_items.append(UsageItem(
+                        type=UsageType.LLM,
+                        cost_cents=cost,
+                        provider="OpenRouter Product Ranking (Input)",
+                        number_of_tokens=input_tokens,
+                        token_price_per_million_cents=500
+                    ))
+                
+                if output_tokens:
+                    cost = (output_tokens * 500) // 1_000_000
+                    usage_items.append(UsageItem(
+                        type=UsageType.LLM,
+                        cost_cents=cost,
+                        provider="OpenRouter Product Ranking (Output)",
+                        number_of_tokens=output_tokens,
+                        token_price_per_million_cents=500
+                    ))
+                
+                if usage_items:
+                    yield ToolEvent(
+                        type=EventType.USAGE,
+                        tool_name=self.tool_name,
+                        usage_items=usage_items
+                    )
+            
+            # Validate index
+            if best_index < 0 or best_index >= len(top_products):
+                logger.warning("LLM returned invalid product index", index=best_index)
+                best_index = 0
+            
+            best_product = top_products[best_index]
+            
+            # 5. Format purchase details
+            title = best_product.get('title', item_search_query)
+            price = best_product.get('extracted_price', 0)
+            orig_price = best_product.get('extracted_original_price')
+            rating = best_product.get('rating', 0)
+            reviews = best_product.get('reviews', 0)
+            link = best_product.get('link', '')
+            asin = best_product.get('asin', '')
+            thumbnail = best_product.get('thumbnail', '')
+            
+            estimated_delivery = (datetime.now() + timedelta(days=5)).strftime("%B %d, %Y")
+            
+            # Format shipping address
+            name = user_settings.get("name")
+            addr_line1 = user_settings.get("addressLine1")
+            addr_line2 = user_settings.get("addressLine2")
+            city = user_settings.get("city")
+            state = user_settings.get("state")
+            postal_code = user_settings.get("postalCode")
+            country = user_settings.get("country", "United States")
+            
+            if not addr_line1 or not city or not state or not postal_code:
+                shipping_addr = "[No shipping address set - please update in /settings]"
+            else:
+                addr_parts = []
+                if name:
+                    addr_parts.append(name)
+                addr_parts.append(addr_line1)
+                if addr_line2:
+                    addr_parts.append(addr_line2)
+                addr_parts.append(f"{city}, {state} {postal_code}")
+                if country:
+                    addr_parts.append(country)
+                shipping_addr = "\n".join(addr_parts)
+            
+            # 6. Request user confirmation
+            agent_goal = workflow_instance.goal
+            purchase_msg = f"Agent with the goal **{agent_goal}** would like to buy **{title}** (${price:.2f}).\n\n"
+            purchase_msg += f"Send **yes** to confirm or **no** to deny the request."
+            
+            logger.info(
+                "Requesting purchase confirmation",
+                item_search_query=item_search_query,
+                selected_product=title,
+                price=price,
+                asin=asin
+            )
+            
+            attention_result = await request_user_attention(
+                workflow_instance,
+                question=purchase_msg,
+                image_url=thumbnail if thumbnail else None,
+            )
+            
+            user_response = attention_result.get("response", "").lower()
+            
+            # 7. Check if confirmed or canceled
+            if "confirm" in user_response or "yes" in user_response or "proceed" in user_response or "buy" in user_response:
+                # Purchase confirmed!
+                logger.info("Amazon purchase confirmed", product=title, price=price)
+                
+                discount = (orig_price - price) if (orig_price and orig_price > price) else 0
+                
+                msg = f"**Price:** ${price:.2f}"
+                if discount > 0:
+                    msg += f" (saved ${discount:.2f})"
+                msg += f"\n**Delivery:** {estimated_delivery}\n**Shipping:** {shipping_addr}\n**Payment:** [Default card ending in 1234]"
+                
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"✓ {title[:30]} purchased from Amazon",
+                    message=msg,
+                    status=MessageStatus.FINISHED
+                )
+            else:
+                # Purchase canceled
+                logger.info("Amazon purchase canceled", product=title, user_response=user_response)
+                
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"🚫 {title} Amazon order canceled",
+                    message=f"User declined purchase: {attention_result.get('response')}",
+                    status=MessageStatus.FINISHED
+                )
+        
+        except Exception as e:
+            # Error status
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="❌ Amazon purchase failed",
+                message=str(e),
+                status=MessageStatus.ERROR
+            )
+            raise
+
+
+# ========================================
+# SINGLETON
+# ========================================
+
+_manager: Optional[AmazonShoppingManager] = None
+
+
+def get_manager() -> AmazonShoppingManager:
+    """Get or create Amazon shopping manager singleton."""
+    global _manager
+    if _manager is None:
+        _manager = AmazonShoppingManager()
+    return _manager
+
+
+# ========================================
+# WORKFLOW HELPER
+# ========================================
+
+async def buy_item_from_amazon(
+    workflow_instance,
+    tool_call: Dict[str, Any],
+    tool_call_id: str
+):
+    """
+    Workflow helper for Amazon shopping (new event-driven system).
+    
+    Args:
+        workflow_instance: The workflow instance
+        tool_call: Tool call dict with 'item_search_query' and optional 'item_qualifications'
+        tool_call_id: Unique ID for this tool call
+    """
+    manager = get_manager()
+    
+    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
+        await workflow_instance._handle_tool_event(event, tool_call_id, "buy_item_from_amazon")
+
+
+# ========================================
+# TEMPORAL ACTIVITIES
+# (Keep existing activities from amazon_shopping.py)
+# ========================================
 
 @activity.defn
 async def search_amazon_activity(query: str, domain: str = "amazon.com") -> tuple:
@@ -68,10 +378,7 @@ async def fetch_user_settings_activity(user_id: str) -> Dict[str, Any]:
     try:
         activity.heartbeat(f"Fetching user settings for: {user_id}")
         
-        # Get backend URL from environment
         backend_url = os.getenv("BACKEND_URL", "http://localhost:3001")
-        
-        # Get API key from environment (for internal service-to-service auth)
         api_key = os.getenv("INTERNAL_API_KEY")
         
         headers = {}
@@ -83,7 +390,6 @@ async def fetch_user_settings_activity(user_id: str) -> Dict[str, Any]:
                 f"{backend_url}/api/user-settings",
                 headers={
                     **headers,
-                    # Pass user ID for auth - backend will validate
                     "x-user-id": user_id
                 }
             )
@@ -98,7 +404,6 @@ async def fetch_user_settings_activity(user_id: str) -> Dict[str, Any]:
                     user_id=user_id,
                     status=response.status_code
                 )
-                # Return defaults if user data not found
                 return {
                     "name": None,
                     "addressLine1": None,
@@ -111,7 +416,6 @@ async def fetch_user_settings_activity(user_id: str) -> Dict[str, Any]:
                 
     except Exception as e:
         logger.error("Error fetching user data", error=str(e), user_id=user_id)
-        # Return defaults on error
         return {
             "name": None,
             "addressLine1": None,
@@ -121,6 +425,13 @@ async def fetch_user_settings_activity(user_id: str) -> Dict[str, Any]:
             "postalCode": None,
             "country": "United States"
         }
+
+
+class ProductRanking(BaseModel):
+    """LLM's ranking of products based on user qualifications."""
+    best_product_index: int
+    reasoning: str
+    runner_up_index: Optional[int] = None
 
 
 @activity.defn
@@ -135,19 +446,8 @@ async def rank_amazon_products_activity(prompt: str) -> Dict[str, Any]:
         Dict with 'best_product_index', 'reasoning', and 'usage' (token tracking)
     """
     try:
-        from pydantic import BaseModel
-        from helpers.llm import call_llm_structured
-        from config import load_config
-        
         activity.heartbeat("Ranking products with LLM")
         
-        class ProductRanking(BaseModel):
-            """LLM's ranking of products based on user qualifications."""
-            best_product_index: int
-            reasoning: str
-            runner_up_index: Optional[int] = None
-        
-        # Get agent config for model
         config = load_config()
         model = config.openrouter.model
         
@@ -155,7 +455,7 @@ async def rank_amazon_products_activity(prompt: str) -> Dict[str, Any]:
         result, usage = await call_llm_structured(
             messages=[{"role": "user", "content": prompt}],
             model=model,
-            temperature=0.3,  # Lower temp for more consistent ranking
+            temperature=0.3,
             max_tokens=500,
             response_model=ProductRanking
         )
@@ -170,319 +470,10 @@ async def rank_amazon_products_activity(prompt: str) -> Dict[str, Any]:
             "best_product_index": result.best_product_index,
             "reasoning": result.reasoning,
             "runner_up_index": result.runner_up_index,
-            "usage": usage  # IMPORTANT: Return usage for token tracking
+            "usage": usage
         }
         
     except Exception as e:
         logger.error("Product ranking failed", error=str(e))
         raise
 
-
-async def buy_item_from_amazon(
-    workflow_instance: Any,
-    item_search_query: str,
-    item_qualifications: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Search for an item on Amazon, find the best match using LLM-based ranking, and "buy" it.
-    
-    This tool will:
-    1. Fetch user's shipping/payment settings from backend
-    2. Search Amazon for the item
-    3. Use LLM to rank products based on natural language qualifications
-    4. Select the best match
-    5. Send purchase confirmation to user via request_user_attention (mock purchase)
-    
-    Args:
-        workflow_instance: The workflow instance (self) to pass to request_user_attention
-        item_search_query: What to search for (e.g., "wooden shower bench", "wireless headphones")
-        item_qualifications: Optional natural language description of what qualities matter.
-            Examples:
-            - "under $100, highly rated, many reviews"
-            - "best value for money, waterproof, has storage shelf"
-            - "around $50, modern style, ergonomic design"
-            - "premium quality, fast shipping, well-reviewed"
-            - "budget-friendly, good for seniors, easy to assemble"
-            If not provided, will select best overall product (high rating, good value, popular)
-        
-    Returns:
-        Dict with purchase details or error
-        
-    Example:
-        result = await buy_item_from_amazon(
-            workflow_instance,
-            item_search_query="wooden shower bench",
-            item_qualifications="under $100, highly rated, has storage shelf, natural wood finish"
-        )
-    """
-    # Must be called from workflow
-    if not workflow.in_workflow():
-        raise RuntimeError("buy_item_from_amazon must be called from within a workflow")
-    
-    # Get user_id from workflow search attributes
-    info = workflow.info()
-    search_attrs = info.search_attributes
-    user_id = search_attrs.get("userId", ["unknown"])[0] if search_attrs else "unknown"
-    
-    logger.info(
-        "Starting Amazon purchase",
-        item_search_query=item_search_query,
-        qualifications=item_qualifications,
-        user_id=user_id
-    )
-    
-    # Step 1: Fetch user settings (shipping/payment info)
-    user_settings = await workflow.execute_activity(
-        fetch_user_settings_activity,
-        args=[user_id],
-        start_to_close_timeout=timedelta(seconds=10),
-    )
-    
-    # Step 2: Search Amazon
-    result = await workflow.execute_activity(
-        search_amazon_activity,
-        args=[item_search_query, "amazon.com"],
-        start_to_close_timeout=timedelta(seconds=30),
-    )
-    
-    if not isinstance(result, tuple) or len(result) != 2:
-        return {
-            "success": False,
-            "error": "Unexpected response from Amazon search",
-            "item_search_query": item_search_query
-        }
-    
-    status_code, products = result
-    
-    if status_code != 200 or not isinstance(products, list) or not products:
-        return {
-            "success": False,
-            "error": f"No products found for '{item_search_query}'",
-            "item_search_query": item_search_query
-        }
-    
-    # Step 2: Use LLM to rank products based on natural language qualifications
-    # Prepare products summary for LLM (first 10 to keep context manageable)
-    top_products = products[:10]
-    products_summary = []
-    
-    for i, p in enumerate(top_products):
-        summary = {
-            "index": i,
-            "title": p.get('title', ''),
-            "price": p.get('extracted_price'),
-            "original_price": p.get('extracted_original_price'),
-            "rating": p.get('rating'),
-            "reviews": p.get('reviews'),
-            "recent_sales": p.get('recent_sales', ''),
-        }
-        products_summary.append(summary)
-    
-    # Format qualifications for LLM
-    if item_qualifications:
-        qualifications_text = item_qualifications
-    else:
-        qualifications_text = "None specified - choose the best overall product (high rating, many reviews, good value)"
-    
-    ranking_prompt = f"""You are helping a user buy an item from Amazon. They searched for: "{item_search_query}"
-
-User's qualifications:
-{qualifications_text}
-
-Here are the top products found:
-{json.dumps(products_summary, indent=2)}
-
-Based on the user's qualifications, which product (by index) is the BEST match? Consider:
-- Budget constraints if mentioned
-- Features and priorities they care about
-- Rating and review count (quality signal)
-- Value for money (price vs. quality)
-- Recent sales (popularity signal)
-
-Return the index of the best product and explain your reasoning."""
-
-    ranking_result = await workflow.execute_activity(
-        rank_amazon_products_activity,
-        args=[ranking_prompt],
-        start_to_close_timeout=timedelta(seconds=30),
-    )
-    
-    best_index = ranking_result.get("best_product_index", 0)
-    llm_reasoning = ranking_result.get("reasoning", "Selected based on overall quality")
-    token_usage = ranking_result.get("usage", {})
-    
-    # Validate index
-    if best_index < 0 or best_index >= len(top_products):
-        # Fallback to first product if LLM returns invalid index
-        logger.warning("LLM returned invalid product index", index=best_index)
-        best_index = 0
-    
-    best_product = top_products[best_index]
-    
-    # Step 3: Format purchase details
-    title = best_product.get('title', item_search_query)
-    price = best_product.get('extracted_price', 0)
-    orig_price = best_product.get('extracted_original_price')
-    rating = best_product.get('rating', 0)
-    reviews = best_product.get('reviews', 0)
-    link = best_product.get('link', '')
-    asin = best_product.get('asin', '')
-    thumbnail = best_product.get('thumbnail', '')
-    
-    # Calculate estimated delivery (mock - 3-5 business days)
-    estimated_delivery = (datetime.now() + timedelta(days=5)).strftime("%B %d, %Y")
-    
-    # Format shipping address from user data (for return value, not shown in message)
-    name = user_settings.get("name")
-    addr_line1 = user_settings.get("addressLine1")
-    addr_line2 = user_settings.get("addressLine2")
-    city = user_settings.get("city")
-    state = user_settings.get("state")
-    postal_code = user_settings.get("postalCode")
-    country = user_settings.get("country", "United States")
-    
-    # Build formatted address
-    if not addr_line1 or not city or not state or not postal_code:
-        shipping_addr = "[No shipping address set - please update in /settings]"
-    else:
-        addr_parts = []
-        if name:
-            addr_parts.append(name)
-        addr_parts.append(addr_line1)
-        if addr_line2:
-            addr_parts.append(addr_line2)
-        addr_parts.append(f"{city}, {state} {postal_code}")
-        if country:
-            addr_parts.append(country)
-        shipping_addr = "\n".join(addr_parts)
-    
-    # Format simple purchase confirmation message
-    # Get agent goal from workflow instance
-    agent_goal = workflow_instance.goal
-    
-    purchase_msg = f"Agent with the goal **{agent_goal}** would like to buy **{title}** (${price:.2f}).\n\n"
-    purchase_msg += f"Send **yes** to confirm or **no** to deny the request."
-    
-    logger.info(
-        "Requesting purchase confirmation",
-        item_search_query=item_search_query,
-        selected_product=title,
-        price=price,
-        asin=asin,
-        llm_reasoning=llm_reasoning
-    )
-    
-    # Step 4: Request user confirmation (mock "purchase")
-    attention_result = await request_user_attention(
-        workflow_instance,
-        question=purchase_msg,
-        image_url=thumbnail if thumbnail else None,
-    )
-    
-    user_response = attention_result.get("response", "").lower()
-    
-    # Check if user confirmed or canceled
-    if "confirm" in user_response or "yes" in user_response or "proceed" in user_response or "buy" in user_response:
-        # Purchase confirmed!
-        logger.info(
-            "Amazon purchase confirmed by user",
-            selected_product=title,
-            price=price
-        )
-        
-        return {
-            "success": True,
-            "item_search_query": item_search_query,
-            "item_name": title,
-            "price": price,
-            "original_price": orig_price,
-            "discount_amount": (orig_price - price) if (orig_price and orig_price > price) else 0,
-            "rating": rating,
-            "reviews": reviews,
-            "asin": asin,
-            "link": link,
-            "estimated_delivery": estimated_delivery,
-            "shipping_address": shipping_addr,
-            "payment_method": "[Default card ending in 1234]",
-            "user_response": attention_result.get("response"),
-            "llm_reasoning": llm_reasoning,
-            "total_products_searched": len(products),
-            "considered_products": len(top_products),
-            "usage": token_usage  # IMPORTANT: Token usage for tracking
-        }
-    else:
-        # Purchase canceled
-        logger.info(
-            "Amazon purchase canceled by user",
-            selected_product=title,
-            user_response=user_response
-        )
-        
-        return {
-            "success": False,
-            "canceled": True,
-            "item_search_query": item_search_query,
-            "item_name": title,
-            "price": price,
-            "rejection_reason": f"User declined purchase: {attention_result.get('response')}",
-            "link": link,
-            "usage": token_usage  # IMPORTANT: Token usage for tracking
-        }
-
-
-def format_pre_message(tool_call: Dict[str, Any]) -> Dict[str, str]:
-    """Format the pre-execution message."""
-    item_search_query = tool_call.get("item_search_query", "item")
-    item_qualifications = tool_call.get("item_qualifications", "")
-    
-    criteria_str = item_qualifications if item_qualifications else "best overall match (high rating, good value)"
-    
-    return {
-        "title": f"🛒 Buying {item_search_query} from Amazon",
-        "message": f"Using the following criteria to determine the best option: {criteria_str}"
-    }
-
-
-def format_post_message(tool_call: Dict[str, Any], result: Any) -> Dict[str, str]:
-    """Format the post-execution message."""
-    
-    if not isinstance(result, dict):
-        return {
-            "title": "Amazon purchase completed",
-            "message": str(result)
-        }
-    
-    # Error case
-    if not result.get("success") and not result.get("canceled"):
-        return {
-            "title": "❌ Amazon purchase failed",
-            "message": result.get("error", "Unknown error")
-        }
-    
-    # Canceled case
-    if result.get("canceled"):
-        item_name = result.get("item_name", "item")
-        rejection_reason = result.get("rejection_reason", "User declined")
-        
-        return {
-            "title": f"🚫 {item_name} Amazon order canceled",
-            "message": rejection_reason
-        }
-    
-    # Success case
-    item_name = result.get("item_name", "item")
-    price = result.get("price", 0)
-    discount = result.get("discount_amount", 0)
-    delivery = result.get("estimated_delivery", "Unknown")
-    address = result.get("shipping_address", "[Default address]")
-    payment = result.get("payment_method", "[Default card ending in 1234]")
-    
-    msg = f"**Price:** ${price:.2f}"
-    if discount > 0:
-        msg += f" (saved ${discount:.2f})"
-    msg += f"\n**Delivery:** {delivery}\n**Shipping:** {address}\n**Payment:** {payment}"
-    
-    return {
-        "title": f"✅ {item_name} purchased from Amazon",
-        "message": msg
-    }

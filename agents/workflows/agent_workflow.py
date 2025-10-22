@@ -10,37 +10,6 @@ import asyncio
 import structlog
 
 with workflow.unsafe.imports_passed_through():
-    # User-configurable tools
-    from tools import (
-        web_search,
-        web_search_pre,
-        web_search_post,
-        deep_research,
-        deep_research_pre,
-        deep_research_post,
-        buy_item_from_amazon,
-        buy_item_from_amazon_pre,
-        buy_item_from_amazon_post,
-    )
-    from tools.request_user_attention import (
-        request_user_attention,
-        format_pre_message as request_user_attention_pre,
-        format_post_message as request_user_attention_post,
-    )
-    # Sub-agent spawning
-    from tools.spawn_sub_agents import spawn_sub_agents
-    # Tool formatters (for tools not yet migrated to event-driven system)
-    from tools.spawn_sub_agents_formatters import (
-        format_pre_message as spawn_sub_agents_pre,
-        format_post_message as spawn_sub_agents_post,
-    )
-    # Activity formatters
-    from helpers.formatters import (
-        format_query_blueprints_pre,
-        format_query_blueprints_post,
-        format_save_blueprint_pre,
-        format_save_blueprint_post,
-    )
     # Helper activities (workflow orchestration, not exposed to LLM)
     from helpers import (
         poll_new_messages,
@@ -52,8 +21,6 @@ with workflow.unsafe.imports_passed_through():
         generate_completion_summary,
         get_model_context_window,
         fetch_agent_tools,
-        query_blueprints,
-        save_blueprint,
         mark_finished,
         fetch_agent_config,
         check_user_usage,
@@ -61,8 +28,13 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     # New event-driven tool system
     from tools.base import ToolEvent, EventType, MessageStatus
-    from tools.deep_research_v2 import deep_research_v2
-    from tools.wait_seconds_v2 import wait_seconds_v2
+    from tools.deep_research import deep_research
+    from tools.wait_seconds import wait_seconds
+    from tools.request_user_attention import request_user_attention
+    from tools.knowledge_base import query_blueprints, save_blueprint
+    from tools.web_search import web_search
+    from tools.amazon_shopping import buy_item_from_amazon
+    from tools.spawn_sub_agents import spawn_sub_agents
 
 logger = structlog.get_logger()
 
@@ -73,46 +45,21 @@ CONTEXT_THRESHOLD_PERCENTAGE = 0.8
 # Tools migrated to new event-driven system
 # Maps tool names to their workflow helper functions
 EVENT_DRIVEN_TOOLS = {
-    "deep_research": deep_research_v2,
-    "wait_seconds": wait_seconds_v2,
+    "deep_research": deep_research,
+    "wait_seconds": wait_seconds,
+    "request_user_attention": request_user_attention,
+    "query_blueprints": query_blueprints,
+    "save_blueprint": save_blueprint,
+    "web_search": web_search,
+    "buy_item_from_amazon": buy_item_from_amazon,
+    "spawn_sub_agents": spawn_sub_agents,
 }
 
 # Tool formatter registry (maps tool names to their formatters)
-# NOTE: wait_seconds migrated to EVENT_DRIVEN_TOOLS
-TOOL_FORMATTERS = {
-    "spawn_sub_agents": {
-        "pre": spawn_sub_agents_pre,
-        "post": spawn_sub_agents_post
-    },
-    "web_search": {
-        "pre": web_search_pre,
-        "post": web_search_post
-    },
-    "deep_research": {
-        "pre": deep_research_pre,
-        "post": deep_research_post
-    },
-    "buy_item_from_amazon": {
-        "pre": buy_item_from_amazon_pre,
-        "post": buy_item_from_amazon_post
-    },
-    "request_user_attention": {
-        "pre": request_user_attention_pre,
-        "post": request_user_attention_post
-    }
-}
+# NOTE: All tools migrated to EVENT_DRIVEN_TOOLS (v2 architecture)
+TOOL_FORMATTERS = {}
 
-# Activity formatter registry (for workflow activities that aren't tools)
-ACTIVITY_FORMATTERS = {
-    "query_blueprints": {
-        "pre": format_query_blueprints_pre,
-        "post": format_query_blueprints_post
-    },
-    "save_blueprint": {
-        "pre": format_save_blueprint_pre,
-        "post": format_save_blueprint_post
-    }
-}
+# NOTE: query_blueprints and save_blueprint migrated to knowledge_base (event-driven)
 
 # System tools that are always available (don't need to be in DB)
 SYSTEM_TOOLS = [
@@ -203,7 +150,7 @@ class AgentWorkflow:
         Args:
             response: The user's response text
         """
-        workflow.logger.info("💬 Received user response", response_length=len(response))
+        workflow.logger.info(f"💬 Received user response (length={len(response)})")
         
         # Post the user's response as a USER message
         # _post_message will also add it to self.context with the correct format
@@ -274,7 +221,7 @@ class AgentWorkflow:
         goal_text = goal[:30] if goal else "Unknown goal"
         if goal and len(goal) > 30:
             goal_text += "..."
-        title = f"Sub-agent working: {goal_text}"
+        title = f"{goal_text}"
         
         # Post progress update with metadata
         await self._post_message(
@@ -331,9 +278,7 @@ class AgentWorkflow:
             )
             
             workflow.logger.info(
-                "Child result added to context",
-                child_id=child_agent_id[:8],
-                summary_length=len(summary) if summary else 0
+                f"Child result added to context: child_id={child_agent_id[:8]}, summary_length={len(summary) if summary else 0}"
             )
         
         # Remove from pending AFTER posting message
@@ -384,17 +329,13 @@ class AgentWorkflow:
         # (must use workflow.now() for determinism)
         
         workflow.logger.info(
-            f"Agent iteration {self.iteration_count}",
-            agent_id=agent_id,
-            goal=goal,
-            model=model,
-            tools=tool_ids
+            f"Agent iteration {self.iteration_count}: agent={agent_id}, goal='{goal}', model={model}, tools={len(tool_ids)}"
         )
         
         # Fetch model's context window and tools from backend (only on first iteration)
         if self.max_context_tokens is None:
             try:
-                workflow.logger.info("🔍 Calling get_model_context_window", model=model)
+                workflow.logger.info(f"🔍 Calling get_model_context_window for model={model}")
                 self.max_context_tokens = await workflow.execute_activity(
                     get_model_context_window,
                     args=[model],
@@ -407,16 +348,13 @@ class AgentWorkflow:
                     )
                 )
                 workflow.logger.info(
-                    "Model context window fetched",
-                    model=model,
-                    max_context_tokens=self.max_context_tokens
+                    f"Model context window fetched: model={model}, max_context_tokens={self.max_context_tokens}"
                 )
             except Exception as e:
                 # Fallback to safe default if fetch fails
                 self.max_context_tokens = 100_000
                 workflow.logger.warning(
-                    f"Failed to fetch context window, using default: {str(e)}",
-                    default=self.max_context_tokens
+                    f"Failed to fetch context window, using default {self.max_context_tokens}: {str(e)}"
                 )
         
         # Fetch tool descriptions from backend (only on first iteration)
@@ -436,7 +374,7 @@ class AgentWorkflow:
             ]
             
             try:
-                workflow.logger.info("🔍 Calling fetch_agent_tools", agent_id=agent_id)
+                workflow.logger.info(f"🔍 Calling fetch_agent_tools for agent_id={agent_id}")
                 db_tools = await workflow.execute_activity(
                     fetch_agent_tools,
                     args=[agent_id],
@@ -453,11 +391,7 @@ class AgentWorkflow:
                 self.tools = system_tools + db_tools
                 
                 workflow.logger.info(
-                    "Agent tools fetched",
-                    system_tools=len(system_tools),
-                    db_tools=len(db_tools),
-                    total_tools=len(self.tools),
-                    is_sub_agent=is_sub_agent
+                    f"Agent tools fetched: system_tools={len(system_tools)}, db_tools={len(db_tools)}, total_tools={len(self.tools)}, is_sub_agent={is_sub_agent}"
                 )
             except Exception as e:
                 workflow.logger.error(
@@ -468,7 +402,7 @@ class AgentWorkflow:
         
         # Update status to ACTIVE
         try:
-            workflow.logger.info("🔍 Calling update_agent_status (initial)", agent_id=agent_id, status="ACTIVE", progress=0.0, msg_count=len(self.context))
+            workflow.logger.info(f"🔍 Calling update_agent_status (initial): agent_id={agent_id}, status=ACTIVE, progress=0.0, msg_count={len(self.context)}")
             await workflow.execute_activity(
                 update_agent_status,
                 args=[agent_id, "ACTIVE", 0.0, "Agent started", 0, 0, len(self.context), 0, 0],
@@ -540,10 +474,7 @@ class AgentWorkflow:
                             self.tools = system_tools + db_tools
                             
                             workflow.logger.info(
-                                "✅ Tools updated",
-                                system_tools=len(system_tools),
-                                db_tools=len(db_tools),
-                                total_tools=len(self.tools)
+                                f"✅ Tools updated: system_tools={len(system_tools)}, db_tools={len(db_tools)}, total_tools={len(self.tools)}"
                             )
                         except Exception as e:
                             workflow.logger.error(
@@ -643,9 +574,9 @@ class AgentWorkflow:
                     # Sort context by timestamp to maintain chronological order
                     self.context.sort(key=lambda x: x.get("timestamp", ""))
 
-                # 2. Query blueprints on first iteration
+                # 2. Query blueprints on first iteration (using new event-driven system)
                 if self.iteration_count == 0:
-                    blueprints = await self._query_blueprints()
+                    blueprints = await query_blueprints(self, self.context, self.user_id, 3)
                     if blueprints:
                         # Insert blueprints as reference examples from past successful agents
                         for idx, bp in enumerate(blueprints, 1):
@@ -723,8 +654,9 @@ class AgentWorkflow:
                         # NEW SYSTEM: Event-driven tools handle their own messages
                         if tool_name in EVENT_DRIVEN_TOOLS:
                             workflow.logger.info(f"✨ Executing event-driven tool: {tool_name}")
-                            # Execute tool (handles all events internally)
-                            await self._execute_tool(tool_call, tool_call_id)
+                            # Get the v2 workflow helper and call it directly
+                            v2_helper = EVENT_DRIVEN_TOOLS[tool_name]
+                            await v2_helper(self, tool_call, tool_call_id)
                             # Skip old formatter logic - events handled everything
                             continue
                         
@@ -757,13 +689,11 @@ class AgentWorkflow:
                         result = await self._execute_tool(tool_call, tool_call_id)
                         
                         # Format and post post-execution message (FINISHED)
-                        # Skip for spawn_sub_agents - it posts its own summary message before waiting
-                        if tool_name != "spawn_sub_agents":
-                            if formatter.get("post"):
-                                post_msg = formatter["post"](tool_call, result)
-                            else:
-                                # Default formatting
-                                post_msg = {"title": f"Completed {tool_name}", "message": str(result)}
+                        if formatter.get("post"):
+                            post_msg = formatter["post"](tool_call, result)
+                        else:
+                            # Default formatting
+                            post_msg = {"title": f"Completed {tool_name}", "message": str(result)}
                             
                             # Ensure message is not empty (backend validation requires at least 1 character)
                             message_content = post_msg.get('message', '').strip()
@@ -903,11 +833,7 @@ class AgentWorkflow:
                 # This keeps the SAME workflow ID but resets event history to prevent unbounded growth
                 if self.context_tokens >= threshold_tokens:
                     workflow.logger.info(
-                        "Context threshold reached, compressing and continuing as new",
-                        context_tokens=self.context_tokens,
-                        max_context=self.max_context_tokens,
-                        threshold_tokens=threshold_tokens,
-                        usage_percentage=f"{(self.context_tokens / self.max_context_tokens) * 100:.1f}%"
+                        f"Context threshold reached, compressing and continuing as new: context_tokens={self.context_tokens}, max_context={self.max_context_tokens}, threshold_tokens={threshold_tokens}, usage_percentage={(self.context_tokens / self.max_context_tokens) * 100:.1f}%"
                     )
                     
                     # Use Claude 4.5 Sonnet to extract key learnings
@@ -931,10 +857,7 @@ class AgentWorkflow:
                     }]
                     
                     workflow.logger.info(
-                        "Context compressed",
-                        original_size=len(self.context),
-                        original_tokens=self.context_tokens,
-                        new_size=len(compressed_context)
+                        f"Context compressed: original_size={len(self.context)}, original_tokens={self.context_tokens}, new_size={len(compressed_context)}"
                     )
                     
                     # Continue with same workflow ID, fresh history
@@ -956,7 +879,7 @@ class AgentWorkflow:
         except Exception as e:
             # Propagate all errors to context - no critical failures
             error_msg = f"Error in iteration {self.iteration_count}: {str(e)}"
-            workflow.logger.error(f"{error_msg} (agent_id={agent_id})")
+            workflow.logger.error(f"{error_msg} for agent_id={agent_id}")
             
             self.context.append({
                 "role": "ASSISTANT",
@@ -972,10 +895,7 @@ class AgentWorkflow:
     async def _poll_messages(self) -> List[Dict]:
         """Poll for new user messages since last check."""
         try:
-            workflow.logger.info("🔍 Calling poll_new_messages", 
-                agent_id=self.agent_id, 
-                last_message_check=self.last_message_check
-            )
+            workflow.logger.info(f"🔍 Calling poll_new_messages: agent_id={self.agent_id}, last_message_check={self.last_message_check}")
             messages = await workflow.execute_activity(
                 poll_new_messages,
                 args=[self.agent_id, self.last_message_check],
@@ -1000,12 +920,7 @@ class AgentWorkflow:
     async def _post_message(self, text: str, role: str = "ASSISTANT", metadata: Optional[Dict] = None) -> None:
         """Post a message from the agent with optional metadata."""
         try:
-            workflow.logger.info("🔍 Calling post_agent_message", 
-                agent_id=self.agent_id, 
-                role=role, 
-                text_preview=text[:50] if len(text) > 50 else text,
-                has_metadata=metadata is not None
-            )
+            workflow.logger.info(f"🔍 Calling post_agent_message: agent_id={self.agent_id}, role={role}, text_preview={text[:50] if len(text) > 50 else text}, has_metadata={metadata is not None}")
             await workflow.execute_activity(
                 post_agent_message,
                 args=[self.agent_id, text, role, metadata],
@@ -1098,79 +1013,6 @@ class AgentWorkflow:
             workflow.logger.warning(f"Unknown event type: {event.type}")
     
     
-    async def _query_blueprints(self) -> List[Dict]:
-        """Query knowledge base for similar goals."""
-        activity_id = workflow.uuid4()
-        
-        try:
-            # Get formatter
-            formatter = ACTIVITY_FORMATTERS.get("query_blueprints", {})
-            
-            # Post pre-execution message
-            pre_msg = formatter["pre"]([])
-            await self._post_message(
-                pre_msg.get('message', ''),
-                "TOOL",
-                metadata={
-                    "toolCallId": activity_id,
-                    "toolName": "query_blueprints",
-                    "toolStatus": "IN_PROGRESS",
-                    "title": pre_msg['title']
-                }
-            )
-            
-            workflow.logger.info("🔍 Calling query_blueprints", 
-                context_type=type(self.context).__name__, 
-                context_len=len(self.context),
-                user_id=self.user_id,
-                limit=3
-            )
-            
-            blueprints = await workflow.execute_activity(
-                query_blueprints,
-                args=[self.context, self.user_id, 3],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=6,
-                    backoff_coefficient=4.0,
-                    initial_interval=timedelta(seconds=2),
-                    maximum_interval=timedelta(seconds=64)
-                )
-            )
-            
-            workflow.logger.info(f"Found {len(blueprints)} blueprints")
-            
-            # Post post-execution message
-            post_msg = formatter["post"]([], blueprints)
-            await self._post_message(
-                post_msg.get('message', ''),
-                "TOOL",
-                metadata={
-                    "toolCallId": activity_id,
-                    "toolName": "query_blueprints",
-                    "toolStatus": "FINISHED",
-                    "title": post_msg['title']
-                }
-            )
-            
-            return blueprints
-            
-        except Exception as e:
-            workflow.logger.error(f"Failed to query blueprints: {str(e)}")
-            # Post error message
-            await self._post_message(
-                f"Failed to query blueprints: {str(e)}",
-                "TOOL",
-                metadata={
-                    "toolCallId": activity_id,
-                    "toolName": "query_blueprints",
-                    "toolStatus": "FINISHED",
-                    "title": "Error",
-                    "error": True
-                }
-            )
-            return []
-    
     async def _decide_next_action(self) -> Dict:
         """
         Decide next action based on goal and context using LLM.
@@ -1202,7 +1044,8 @@ class AgentWorkflow:
             
         except Exception as e:
             error_msg = f"Failed to decide action: {type(e).__name__}: {str(e)}"
-            workflow.logger.error(error_msg, exc_info=True)
+            import traceback
+            workflow.logger.error(f"{error_msg}\n{traceback.format_exc()}")
             # Fallback: return empty reasoning and no tools, with empty usage
             return {
                 "reasoning": f"Decision failed: {error_msg}, will retry",
@@ -1230,170 +1073,13 @@ class AgentWorkflow:
             await tool_helper(self, tool_call, tool_call_id)
             return None  # Event-driven tools don't return values
         
-        # Special handling for spawn_sub_agents: spawn + wait for signal-based completion
-        if tool == "spawn_sub_agents":
-            try:
-                # Check depth limit (max 2 levels: 0=parent, 1=child, 2=not allowed)
-                MAX_DEPTH = 1  # Sub-agents can't create sub-agents
-                if self.depth >= MAX_DEPTH:
-                    raise ValueError(
-                        f"Cannot spawn sub-agents: maximum nesting depth ({MAX_DEPTH}) reached. "
-                        f"Sub-agents cannot create their own sub-agents."
-                    )
-                
-                # Get sub_agents from tool_call dict (new Pydantic model format)
-                sub_agents = tool_call.get("sub_agents", [])
-                
-                if not sub_agents or not isinstance(sub_agents, list):
-                    raise ValueError("spawn_sub_agents requires a list of sub-agent configs")
-                
-                # Inherit parent model if not specified for each sub-agent
-                for sub_agent in sub_agents:
-                    if "model" not in sub_agent:
-                        sub_agent["model"] = self.model
-                    if "reasoning_effort" not in sub_agent:
-                        sub_agent["reasoning_effort"] = self.reasoning_effort
-                
-                workflow.logger.info(f"🚀 Spawning {len(sub_agents)} sub-agents at depth {self.depth+1} (model: {self.model})")
-                
-                # Get parent workflow ID (this workflow)
-                parent_workflow_id = workflow.info().workflow_id
-                
-                # Calculate child depth
-                child_depth = self.depth + 1
-                
-                # Step 1: Spawn all children via activity, passing parent agent ID, workflow ID, depth, and pause state
-                spawned = await workflow.execute_activity(
-                    spawn_sub_agents,
-                    args=[self.user_id, sub_agents, self.agent_id, parent_workflow_id, child_depth, self.is_paused],
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3,
-                        backoff_coefficient=2.0,
-                        initial_interval=timedelta(seconds=1),
-                        maximum_interval=timedelta(seconds=10)
-                    )
-                )
-                
-                workflow.logger.info(f"✅ Spawned {len(spawned)} sub-agents, waiting for signals...")
-                
-                # Step 2: Track children and create tool_call_id mapping
-                for i, child_info in enumerate(spawned):
-                    if "error" not in child_info:
-                        # Generate unique tool call ID for this sub-agent
-                        child_tool_id = workflow.uuid4()
-                        child_agent_id = child_info["agent_id"]
-                        
-                        # Store mapping: agent_id -> tool_call_id
-                        self.child_tool_ids[child_agent_id] = child_tool_id
-                        self.pending_children.add(child_agent_id)
-                        
-                        # Post initial IN_PROGRESS message with metadata
-                        await self._post_message(
-                            child_info['goal'],
-                            "TOOL",
-                            metadata={
-                                "toolCallId": child_tool_id,
-                                "toolName": "spawn_sub_agents",
-                                "toolStatus": "IN_PROGRESS",
-                                "title": "Sub-agent starting",
-                                "subAgentId": child_agent_id,
-                                "progress": 0.0
-                            }
-                        )
-                
-                # Step 2.5: Post the spawn_sub_agents post message (agents spawned summary)
-                # This happens BEFORE waiting, so user sees "agents spawned" immediately
-                if tool_call_id:
-                    # Post a simple "agents spawned" message
-                    await self._post_message(
-                        "",
-                        "TOOL",
-                        metadata={
-                            "toolCallId": tool_call_id,
-                            "toolName": "spawn_sub_agents",
-                            "toolStatus": "FINISHED",  # Still in progress (waiting for children)
-                            "title": f"⭐ Spawned {len(spawned)} sub-agent{'s' if len(spawned) != 1 else ''}"
-                        }
-                    )
-                
-                # Step 3: Wait for all children to signal completion
-                # Using workflow.wait_condition (Temporal primitive - parent goes dormant)
-                workflow.logger.info(f"⏳ Waiting for {len(self.pending_children)} sub-agents to complete (via signals)...")
-                
-                await workflow.wait_condition(
-                    lambda: len(self.pending_children) == 0
-                    # No timeout - can wait indefinitely (months/years)
-                )
-                
-                workflow.logger.info(f"🎉 All {len(spawned)} sub-agents completed!")
-                
-                # Return summary (detailed results already posted via signals)
-                return {
-                    "spawned": len(spawned),
-                    "completed": len(spawned) - len(self.pending_children),
-                    "message": "All sub-agents completed. Check individual results above."
-                }
-                
-            except Exception as e:
-                raise ValueError(f"spawn_sub_agents failed: {str(e)}")
-        
-        # Special handling for request_user_attention: create request + wait for signal
-        if tool == "request_user_attention":
-            try:
-                # Get question from tool_call dict
-                # Note: context is NOT provided by LLM, only by workflow functions (e.g. buy_item_from_amazon)
-                question = tool_call.get("question", "")
-                
-                if not question:
-                    raise ValueError("request_user_attention requires a question")
-                
-                workflow.logger.info(f"🔔 Requesting user attention: {question[:100]}")
-                
-                # Call the workflow function (handles activity + wait_condition internally)
-                result = await request_user_attention(self, question)
-                
-                workflow.logger.info(f"✓ User response received, continuing workflow")
-                
-                # Return result for formatter (signal already posted the message)
-                return result
-                
-            except Exception as e:
-                raise ValueError(f"request_user_attention failed: {str(e)}")
-        
-        # Special handling for buy_item_from_amazon: it's a workflow function, not an activity
-        if tool == "buy_item_from_amazon":
-            try:
-                # Get parameters from tool_call dict
-                item_search_query = tool_call.get("item_search_query", "")
-                item_qualifications = tool_call.get("item_qualifications")
-                
-                if not item_search_query:
-                    raise ValueError("buy_item_from_amazon requires item_search_query")
-                
-                workflow.logger.info(f"🛒 Buying from Amazon: {item_search_query}")
-                
-                # Call the workflow function directly (handles activities internally)
-                # Pass self to access workflow context
-                result = await buy_item_from_amazon(self, item_search_query, item_qualifications)
-                
-                workflow.logger.info(f"✓ Amazon purchase flow completed")
-                
-                # Return result for formatter
-                return result
-                
-            except Exception as e:
-                raise ValueError(f"buy_item_from_amazon failed: {str(e)}")
-        
-        # Map tool to activity (for all non-system tools)
-        activity_map = {
-            "web_search": web_search,
-            "deep_research": deep_research,
-        }
+        # Map tool to activity (for old non-event-driven tools only)
+        # Note: All tools are now event-driven and never reach here
+        activity_map = {}
         
         activity_fn = activity_map.get(tool)
         if not activity_fn:
-            raise ValueError(f"Unknown tool: {tool}")
+            raise ValueError(f"Unknown tool: {tool} (not in activity map - may need to be migrated to event-driven)")
         
         # Check if tool is available
         available_tool_names = [t['name'] for t in self.tools]
@@ -1402,14 +1088,8 @@ class AgentWorkflow:
         
         # Extract arguments from tool_call dict based on tool type
         # Each tool has its own Pydantic model with specific fields
-        if tool == "web_search":
-            activity_args = [tool_call.get("query")]
-        elif tool == "deep_research":
-            # Pass query and max_tokens (with default if not provided)
-            activity_args = [tool_call.get("query"), tool_call.get("max_tokens", 4000)]
-        else:
-            # Fallback to args if present (for backward compatibility)
-            activity_args = args
+        # Fallback to args if present (for backward compatibility)
+        activity_args = args
         
         # Execute with extreme backoff
         result = await workflow.execute_activity(
@@ -1434,12 +1114,7 @@ class AgentWorkflow:
         Returns:
             Dict with 'score' (float 0.0-1.0) and 'reasoning' (str)
         """
-        workflow.logger.info("🔍 Calling check_progress", 
-            context_type=type(self.context).__name__,
-            context_len=len(self.context),
-            verifier_prompt=self.verifier["llmJudgePrompt"][:50],
-            model=self.model
-        )
+        workflow.logger.info(f"🔍 Calling check_progress: context_type={type(self.context).__name__}, context_len={len(self.context)}, verifier_prompt={self.verifier['llmJudgePrompt'][:50]}, model={self.model}")
         
         try:
             result = await workflow.execute_activity(
@@ -1464,7 +1139,7 @@ class AgentWorkflow:
     
     async def _mark_complete(self) -> None:
         """Mark the task as complete, save blueprint, and signal parent if sub-agent."""
-        workflow.logger.info("Marking task as complete", parent_workflow_id=self.parent_workflow_id, depth=self.depth)
+        workflow.logger.info(f"Marking task as complete: parent_workflow_id={self.parent_workflow_id}, depth={self.depth}")
         activity_id = workflow.uuid4()
 
         try:
@@ -1493,9 +1168,7 @@ class AgentWorkflow:
             self.token_count += summary_usage.get("total_tokens", 0)
             
             workflow.logger.info(
-                "Summary generated",
-                summary_length=len(summary),
-                tokens_used=summary_usage.get("total_tokens", 0)
+                f"Summary generated: summary_length={len(summary)}, tokens_used={summary_usage.get('total_tokens', 0)}"
             )
             
             # Post summary as ASSISTANT message to agent's own context
@@ -1507,34 +1180,9 @@ class AgentWorkflow:
                 )
                 workflow.logger.info("Posted final summary to agent context")
             
-            # Get formatter
-            formatter = ACTIVITY_FORMATTERS.get("save_blueprint", {})
-            
-            # Post pre-execution message
-            pre_msg = formatter["pre"]([])
-            await self._post_message(
-                pre_msg.get('message', ''),
-                "TOOL",
-                metadata={
-                    "toolCallId": activity_id,
-                    "toolName": "save_blueprint",
-                    "toolStatus": "IN_PROGRESS",
-                    "title": pre_msg['title']
-                }
-            )
-            
-            # Save blueprint (uses LLM to compress message history)
-            blueprint_result = await workflow.execute_activity(
-                save_blueprint,
-                args=[self.user_id, steps],
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=6,
-                    backoff_coefficient=4.0,
-                    initial_interval=timedelta(seconds=2),
-                    maximum_interval=timedelta(seconds=64)
-                )
-            )
+            # Save blueprint (using new event-driven system)
+            # Note: save_blueprint handles messages and returns result with usage data
+            blueprint_result = await save_blueprint(self, self.user_id, steps)
             
             # Track tokens from blueprint compression LLM call
             blueprint_usage = blueprint_result.get("usage", {})
@@ -1543,21 +1191,7 @@ class AgentWorkflow:
             self.token_count += blueprint_usage.get("total_tokens", 0)
             
             workflow.logger.info(
-                "Blueprint extracted and saved",
-                tokens_used=blueprint_usage.get("total_tokens", 0)
-            )
-            
-            # Post post-execution message
-            post_msg = formatter["post"]([], blueprint_result)
-            await self._post_message(
-                post_msg.get('message', ''),
-                "TOOL",
-                metadata={
-                    "toolCallId": activity_id,
-                    "toolName": "save_blueprint",
-                    "toolStatus": "FINISHED",
-                    "title": post_msg['title']
-                }
+                f"Blueprint extracted and saved: tokens_used={blueprint_usage.get('total_tokens', 0)}"
             )
             
             # Mark as finished in the database (with updated token counts including summary)
@@ -1603,9 +1237,7 @@ class AgentWorkflow:
                     }
                 })
                 workflow.logger.info(
-                    "📤 Signaled parent completion", 
-                    parent_id=self.parent_workflow_id[:8],
-                    has_summary=bool(finish_result.get("summary"))
+                    f"📤 Signaled parent completion: parent_id={self.parent_workflow_id[:8]}, has_summary={bool(finish_result.get('summary'))}"
                 )
             except Exception as signal_error:
                 workflow.logger.warning(f"Failed to signal parent completion: {signal_error}")

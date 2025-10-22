@@ -224,12 +224,13 @@ def get_blueprint_manager() -> BlueprintManager:
 
 
 @activity.defn
-async def query_blueprints(
+async def query_blueprints_deprecated(
     context: List[Dict],
     user_id: str,
     limit: int = 3
 ) -> List[Dict]:
     """
+    DEPRECATED: Use tools.knowledge_base.query_blueprints_activity instead.
     Activity: Query blueprints by goal similarity.
     
     Args:
@@ -248,11 +249,12 @@ async def query_blueprints(
 
 
 @activity.defn
-async def save_blueprint(
+async def save_blueprint_deprecated(
     user_id: str,
     blueprint: List[Dict]
 ) -> Dict:
     """
+    DEPRECATED: Use tools.knowledge_base.save_blueprint_activity instead.
     Activity: Save a new blueprint.
     
     Uses LLM to compress the conversation history by filtering noise and condensing

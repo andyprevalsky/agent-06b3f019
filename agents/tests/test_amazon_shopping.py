@@ -11,188 +11,269 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
-from tools.amazon_shopping import (
-    format_pre_message,
-    format_post_message,
-    search_amazon_activity,
-    rank_amazon_products_activity
-)
+from tools.amazon_shopping import AmazonShoppingManager, get_manager, buy_item_from_amazon
+from tools.base import EventType, MessageStatus
 
 
-async def test_search_amazon_activity():
-    """Test Amazon search activity with mocked HTTP calls."""
-    # Mock the HTTP response
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [
-        {
-            "title": "Test Product 1",
-            "price": "$29.99",
-            "rating": "4.5",
-            "reviews": "500",
-            "url": "https://amazon.com/test1"
-        },
-        {
-            "title": "Test Product 2",
-            "price": "$39.99",
-            "rating": "4.8",
-            "reviews": "1000",
-            "url": "https://amazon.com/test2"
+def test_manager_singleton():
+    """Test that manager is a singleton."""
+    manager1 = get_manager()
+    manager2 = get_manager()
+    assert manager1 is manager2
+    assert manager1.tool_name == "buy_item_from_amazon"
+    print("✅ test_manager_singleton passed")
+
+
+async def test_amazon_purchase_confirmed():
+    """Test successful Amazon purchase with user confirmation."""
+    manager = get_manager()
+    
+    # Mock workflow instance
+    mock_workflow = MagicMock()
+    mock_workflow.goal = "Buy a shower bench"
+    mock_workflow.user_id = "test-user-123"
+    
+    # Mock user settings
+    mock_user_settings = {
+        "name": "Test User",
+        "addressLine1": "123 Main St",
+        "city": "San Francisco",
+        "state": "CA",
+        "postalCode": "94102",
+        "country": "United States"
+    }
+    
+    # Mock Amazon search results
+    mock_products = [{
+        "title": "Premium Wooden Shower Bench",
+        "extracted_price": 79.99,
+        "extracted_original_price": 99.99,
+        "rating": 4.7,
+        "reviews": 1543,
+        "asin": "B08XYZ123",
+        "link": "https://amazon.com/product",
+        "thumbnail": "https://example.com/thumb.jpg"
+    }]
+    
+    # Mock LLM ranking
+    mock_ranking = {
+        "best_product_index": 0,
+        "reasoning": "Best rated with good price",
+        "usage": {
+            "prompt_tokens": 500,
+            "completion_tokens": 100,
+            "total_tokens": 600
         }
-    ]
-    
-    with patch('httpx.AsyncClient') as mock_client:
-        mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
-        
-        # Call the activity (outside activity context for testing)
-        with patch('temporalio.activity.heartbeat'):
-            status, products = await search_amazon_activity("wireless headphones")
-        
-        assert status == 200
-        assert len(products) == 2
-        assert products[0]["title"] == "Test Product 1"
-        assert products[1]["price"] == "$39.99"
-    
-    print("✅ test_search_amazon_activity passed")
-
-
-async def test_search_amazon_activity_failure():
-    """Test Amazon search activity with failed HTTP call."""
-    # Mock a failed HTTP response
-    mock_response = MagicMock()
-    mock_response.status_code = 500
-    
-    with patch('httpx.AsyncClient') as mock_client:
-        mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
-        
-        with patch('temporalio.activity.heartbeat'):
-            status, products = await search_amazon_activity("test query")
-        
-        assert status == 500
-        assert products == []
-    
-    print("✅ test_search_amazon_activity_failure passed")
-
-
-async def test_rank_amazon_products_activity():
-    """Test product ranking activity with mocked LLM call."""
-    # Mock the LLM structured call
-    mock_ranking = MagicMock()
-    mock_ranking.best_product_index = 1
-    mock_ranking.reasoning = "Product 1 has the best reviews and price"
-    mock_ranking.runner_up_index = 0
-    
-    mock_usage = {
-        "prompt_tokens": 500,
-        "completion_tokens": 50,
-        "total_tokens": 550
     }
     
-    with patch('helpers.llm.call_llm_structured', new_callable=AsyncMock) as mock_llm:
-        mock_llm.return_value = (mock_ranking, mock_usage)
-        
-        with patch('temporalio.activity.heartbeat'):
-            result = await rank_amazon_products_activity("Rank these products: ...")
-        
-        assert result["best_product_index"] == 1
-        assert "reasoning" in result
-        assert result["runner_up_index"] == 0
-        assert result["usage"]["total_tokens"] == 550
-        
-        # Verify LLM was called
-        mock_llm.assert_called_once()
-    
-    print("✅ test_rank_amazon_products_activity passed")
-
-
-def test_format_pre_message():
-    """Test pre-message formatting."""
-    tool_call = {
-        "query": "wireless headphones",
-        "max_results": 5
+    # Mock user confirmation
+    mock_attention_result = {
+        "response": "yes, buy it"
     }
-    result = format_pre_message(tool_call)
     
-    assert "title" in result
-    assert "message" in result
-    assert "🛒" in result["title"] or "Amazon" in result["title"]
-    
-    print("✅ test_format_pre_message passed")
-
-
-def test_format_post_message_success():
-    """Test post-message formatting with successful results."""
-    tool_call = {"query": "wireless headphones"}
-    result_data = {
-        "products": [
-            {
-                "title": "Test Headphones",
-                "price": "$99.99",
-                "rating": "4.5",
-                "reviews": "1000",
-                "url": "https://amazon.com/test"
+    with patch('tools.amazon_shopping.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
+        # Setup activity mocks - now using function references, not string names
+        async def activity_side_effect(func_ref, *args, **kwargs):
+            func_name = func_ref.__name__ if callable(func_ref) else str(func_ref)
+            if "fetch_user_settings" in func_name:
+                return mock_user_settings
+            elif "search_amazon" in func_name:
+                return (200, mock_products)
+            elif "rank_amazon" in func_name:
+                return mock_ranking
+            return None
+        
+        mock_execute.side_effect = activity_side_effect
+        
+        with patch('tools.amazon_shopping.request_user_attention', new_callable=AsyncMock) as mock_attention:
+            mock_attention.return_value = mock_attention_result
+            
+            tool_call = {
+                "item_search_query": "wooden shower bench",
+                "item_qualifications": "under $100, highly rated"
             }
-        ],
-        "query": "wireless headphones"
-    }
+            tool_call_id = "test-123"
+            
+            events = []
+            async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
+                events.append(event)
+            
+            # Verify events
+            assert len(events) >= 3  # Pre, usage, post
+            
+            # Pre-execution
+            assert events[0].type == EventType.POST_MESSAGE
+            assert events[0].title == "🛒 Buying wooden shower bench from Amazon"
+            assert events[0].status == MessageStatus.IN_PROGRESS
+            
+            # Usage tracking
+            usage_events = [e for e in events if e.type == EventType.USAGE]
+            assert len(usage_events) == 1
+            
+            # Post-execution success
+            final_event = events[-1]
+            assert final_event.type == EventType.POST_MESSAGE
+            assert "purchased from Amazon" in final_event.title
+            assert final_event.status == MessageStatus.FINISHED
+            assert "$79.99" in final_event.message
     
-    result = format_post_message(tool_call, result_data)
-    
-    assert "title" in result
-    assert "message" in result
-    
-    print("✅ test_format_post_message_success passed")
+    print("✅ test_amazon_purchase_confirmed passed")
 
 
-def test_format_post_message_no_results():
-    """Test post-message formatting with no results."""
-    tool_call = {"query": "nonexistent product xyz123"}
-    result_data = {
-        "products": [],
-        "query": "nonexistent product xyz123"
-    }
+async def test_amazon_purchase_canceled():
+    """Test Amazon purchase canceled by user."""
+    manager = get_manager()
     
-    result = format_post_message(tool_call, result_data)
+    mock_workflow = MagicMock()
+    mock_workflow.goal = "Buy headphones"
+    mock_workflow.user_id = "test-user-456"
     
-    assert "title" in result
-    assert "message" in result
+    mock_user_settings = {"name": "Test", "addressLine1": "123 St", "city": "SF", "state": "CA", "postalCode": "94102"}
+    mock_products = [{"title": "Headphones", "extracted_price": 50, "rating": 4.5, "reviews": 100, "asin": "B123", "link": "", "thumbnail": ""}]
+    mock_ranking = {"best_product_index": 0, "reasoning": "Good", "usage": {"total_tokens": 500}}
+    mock_attention_result = {"response": "no, cancel it"}
     
-    print("✅ test_format_post_message_no_results passed")
+    with patch('tools.amazon_shopping.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
+        async def activity_side_effect(func_ref, *args, **kwargs):
+            func_name = func_ref.__name__ if callable(func_ref) else str(func_ref)
+            if "fetch_user_settings" in func_name:
+                return mock_user_settings
+            elif "search_amazon" in func_name:
+                return (200, mock_products)
+            elif "rank_amazon" in func_name:
+                return mock_ranking
+            return None
+        
+        mock_execute.side_effect = activity_side_effect
+        
+        with patch('tools.amazon_shopping.request_user_attention', new_callable=AsyncMock) as mock_attention:
+            mock_attention.return_value = mock_attention_result
+            
+            tool_call = {"item_search_query": "headphones", "item_qualifications": ""}
+            tool_call_id = "test-456"
+            
+            events = []
+            async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
+                events.append(event)
+            
+            final_event = events[-1]
+            assert "canceled" in final_event.title.lower()
+            assert "declined" in final_event.message.lower()
+    
+    print("✅ test_amazon_purchase_canceled passed")
 
 
-def test_format_post_message_error():
-    """Test post-message formatting with error."""
-    tool_call = {"query": "test query"}
-    result_data = "Error: API key not configured"
+async def test_amazon_no_products_found():
+    """Test Amazon search with no results."""
+    manager = get_manager()
     
-    result = format_post_message(tool_call, result_data)
+    mock_workflow = MagicMock()
+    mock_workflow.user_id = "test-user-789"
     
-    assert "title" in result
-    assert "message" in result
+    with patch('tools.amazon_shopping.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
+        async def activity_side_effect(func_ref, *args, **kwargs):
+            func_name = func_ref.__name__ if callable(func_ref) else str(func_ref)
+            if "fetch_user_settings" in func_name:
+                return {}
+            elif "search_amazon" in func_name:
+                return (200, [])  # Empty products list
+            return None
+        
+        mock_execute.side_effect = activity_side_effect
+        
+        tool_call = {"item_search_query": "nonexistent item xyz", "item_qualifications": ""}
+        tool_call_id = "test-789"
+        
+        events = []
+        async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
+            events.append(event)
+        
+        # Should have error event
+        error_events = [e for e in events if e.status == MessageStatus.ERROR]
+        assert len(error_events) > 0
+        assert "No products found" in error_events[0].message
     
-    print("✅ test_format_post_message_error passed")
+    print("✅ test_amazon_no_products_found passed")
+
+
+async def test_amazon_search_failure():
+    """Test Amazon search API failure."""
+    manager = get_manager()
+    
+    mock_workflow = MagicMock()
+    mock_workflow.user_id = "test-user-error"
+    
+    with patch('tools.amazon_shopping.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
+        async def activity_side_effect(func_ref, *args, **kwargs):
+            func_name = func_ref.__name__ if callable(func_ref) else str(func_ref)
+            if "fetch_user_settings" in func_name:
+                return {}
+            elif "search_amazon" in func_name:
+                return (500, [])  # API error
+            return None
+        
+        mock_execute.side_effect = activity_side_effect
+        
+        tool_call = {"item_search_query": "test item", "item_qualifications": ""}
+        tool_call_id = "test-error"
+        
+        events = []
+        async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
+            events.append(event)
+        
+        # Should have error event
+        final_event = events[-1]
+        assert final_event.status == MessageStatus.ERROR
+    
+    print("✅ test_amazon_search_failure passed")
+
+
+async def test_amazon_activity_exception():
+    """Test exception handling in Amazon flow."""
+    manager = get_manager()
+    
+    mock_workflow = MagicMock()
+    mock_workflow.user_id = "test-user-exception"
+    
+    with patch('tools.amazon_shopping.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
+        mock_execute.side_effect = Exception("Network error")
+        
+        tool_call = {"item_search_query": "test", "item_qualifications": ""}
+        tool_call_id = "test-exception"
+        
+        events = []
+        try:
+            async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
+                events.append(event)
+        except Exception:
+            pass  # Expected to raise
+        
+        # Should have error event
+        assert len(events) >= 2
+        assert events[-1].status == MessageStatus.ERROR
+        assert "Network error" in events[-1].message
+    
+    print("✅ test_amazon_activity_exception passed")
 
 
 async def run_all_tests():
-    """Run all amazon_shopping tests."""
+    """Run all tests."""
     print("\n" + "="*60)
-    print("🧪 TESTING AMAZON_SHOPPING TOOL")
+    print("🧪 TESTING AMAZON_SHOPPING")
     print("="*60 + "\n")
     
     try:
-        # Async tests for activities
-        await test_search_amazon_activity()
-        await test_search_amazon_activity_failure()
-        await test_rank_amazon_products_activity()
+        # Sync test
+        test_manager_singleton()
         
-        # Sync tests for formatters
-        test_format_pre_message()
-        test_format_post_message_success()
-        test_format_post_message_no_results()
-        test_format_post_message_error()
+        # Async tests
+        await test_amazon_purchase_confirmed()
+        await test_amazon_purchase_canceled()
+        await test_amazon_no_products_found()
+        await test_amazon_search_failure()
+        await test_amazon_activity_exception()
         
         print("\n✅ All amazon_shopping tests passed!")
-        print("ℹ️  Note: buy_item_from_amazon requires workflow context")
         return True
     except Exception as e:
         print(f"\n❌ Test failed: {e}")

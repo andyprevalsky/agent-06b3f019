@@ -83,6 +83,9 @@ start_worker() {
     sleep 1
   fi
   
+  # Clear the log file
+  > /tmp/navi-worker.log
+  
   # Start new worker on test queue
   cd /Users/andyprevalsky/Desktop/projects/navi-whisper-lux/agents
   source venv/bin/activate
@@ -114,19 +117,23 @@ check_worker() {
 # Create new test agent
 create_agent() {
   check_worker
+  
+  # Clear the log file for fresh start
+  > /tmp/navi-worker.log
+  
   echo -e "${BLUE}🤖 Creating test agent...${NC}"
   
   AGENT_RESPONSE=$(curl -s "$BACKEND_URL/api/agents" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{
-      \"goal\": \"Count from 1 to 3, with 1 second waits between each number\",
+      \"goal\": \"Demonstrate all your tool capabilities by calling each tool you have access to (EXCEPT deep_research). For each tool: 1) Call wait_seconds with 2 seconds, 2) Call request_user_attention to ask me a simple yes/no question, 3) Call spawn_sub_agents to create 2 sub-agents that each wait 1 second. Complete this demonstration systematically.\",
       \"model\": \"anthropic/claude-sonnet-4.5\",
       \"tool_ids\": [],
       \"task_queue\": \"$TEST_TASK_QUEUE\",
       \"verifier\": {
         \"type\": \"FLOAT_LLM_JUDGE\",
-        \"llm_judge_prompt\": \"Return 1.0 if the agent has counted from 1 to 3 with 1-second waits, otherwise return (current count) / 3.\"
+        \"llm_judge_prompt\": \"Return 1.0 if the agent has successfully called all three tools: wait_seconds, request_user_attention, and spawn_sub_agents. Return 0.66 if 2 out of 3 were called. Return 0.33 if only 1 was called. Return 0.0 if no tools were called.\"
       }
     }")
   
@@ -201,30 +208,17 @@ resume_agent() {
   fi
 }
 
-# Check status
+# Check status (tail worker logs)
 check_status() {
-  AGENT_ID=$(load_agent)
-  if [ -z "$AGENT_ID" ]; then
-    echo -e "${RED}✗ No active test agent. Create one first!${NC}"
-    exit 1
+  echo -e "${BLUE}📊 Worker logs (last 50 lines)...${NC}"
+  echo -e "${YELLOW}💡 Press Ctrl+C when done${NC}"
+  echo ""
+  
+  if [ -f "/tmp/navi-worker.log" ]; then
+    tail -50 /tmp/navi-worker.log
+  else
+    echo -e "${RED}✗ No worker logs found at /tmp/navi-worker.log${NC}"
   fi
-  
-  echo -e "${BLUE}📊 Checking agent status...${NC}"
-  
-  RESPONSE=$(curl -s "$BACKEND_URL/api/agents/$AGENT_ID" \
-    -H "Authorization: Bearer $ACCESS_TOKEN")
-  
-  STATUS=$(echo "$RESPONSE" | jq -r '.agent.status')
-  PROGRESS=$(echo "$RESPONSE" | jq -r '.agent.progress')
-  TOKEN_COUNT=$(echo "$RESPONSE" | jq -r '.agent.token_count')
-  CONTEXT_SIZE=$(echo "$RESPONSE" | jq -r '.agent.context_size')
-  MESSAGE_COUNT=$(echo "$RESPONSE" | jq -r '.agent.message_count')
-  
-  echo -e "   Status: ${CYAN}$STATUS${NC}"
-  echo -e "   Progress: ${CYAN}$(echo "$PROGRESS * 100" | bc | cut -d'.' -f1)%${NC}"
-  echo -e "   Tokens: ${CYAN}$TOKEN_COUNT${NC}"
-  echo -e "   Context: ${CYAN}$CONTEXT_SIZE${NC}"
-  echo -e "   Messages: ${CYAN}$MESSAGE_COUNT${NC}"
 }
 
 # Watch logs

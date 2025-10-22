@@ -1,210 +1,205 @@
-"""Test knowledge_base (blueprints) tool."""
+"""Test knowledge_base tool (event-driven architecture)."""
 
 import asyncio
+from dotenv import load_dotenv
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools.knowledge_base import BlueprintManager
-from helpers.formatters import (
-    format_query_blueprints_pre,
-    format_query_blueprints_post,
-    format_save_blueprint_pre,
-    format_save_blueprint_post
-)
+load_dotenv()
+
+from tools.knowledge_base import query_blueprints, save_blueprint
+from tools.base import EventType, MessageStatus
 
 
-async def test_blueprint_query_by_similarity():
-    """Test blueprint query with mocked HTTP calls."""
-    manager = BlueprintManager()
+async def test_query_blueprints_success():
+    """Test successful blueprint query."""
+    workflow_instance = MagicMock()
+    workflow_instance._handle_tool_event = AsyncMock()
     
-    # Mock the HTTP response
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [
-        {
-            "id": "bp1",
-            "title": "Write Python script",
-            "similarity": 0.95,
-            "blueprint": [{"step": 1, "action": "test"}]
-        },
-        {
-            "id": "bp2",
-            "title": "Create automation",
-            "similarity": 0.85,
-            "blueprint": [{"step": 1, "action": "test2"}]
+    # Mock blueprints result
+    mock_blueprints = [
+        {"id": "1", "title": "Build a website"},
+        {"id": "2", "title": "Create API"},
+        {"id": "3", "title": "Setup database"}
+    ]
+    
+    with patch('tools.knowledge_base.workflow.uuid4', return_value="test-123"):
+        with patch('tools.knowledge_base.workflow.execute_activity', new_callable=AsyncMock) as mock_activity:
+            mock_activity.return_value = mock_blueprints
+            
+            context = [{"role": "USER", "text": "Build a web app"}]
+            result = await query_blueprints(workflow_instance, context, "user-123", 3)
+            
+            # Should return blueprints
+            assert result == mock_blueprints
+            
+            # Should have posted 2 events
+            assert workflow_instance._handle_tool_event.call_count == 2
+            
+            # Check pre-execution event
+            pre_call = workflow_instance._handle_tool_event.call_args_list[0]
+            pre_event = pre_call[0][0]
+            assert pre_event.type == EventType.POST_MESSAGE
+            assert "Querying Knowledge Base" in pre_event.title
+            assert pre_event.status == MessageStatus.IN_PROGRESS
+            
+            # Check post-execution event
+            post_call = workflow_instance._handle_tool_event.call_args_list[1]
+            post_event = post_call[0][0]
+            assert post_event.type == EventType.POST_MESSAGE
+            assert "Found 3 similar goals" in post_event.title
+            assert "Build a website" in post_event.message
+            assert post_event.status == MessageStatus.FINISHED
+    
+    print("✅ test_query_blueprints_success passed")
+
+
+async def test_query_blueprints_no_results():
+    """Test blueprint query with no results."""
+    workflow_instance = MagicMock()
+    workflow_instance._handle_tool_event = AsyncMock()
+    
+    with patch('tools.knowledge_base.workflow.uuid4', return_value="test-123"):
+        with patch('tools.knowledge_base.workflow.execute_activity', new_callable=AsyncMock) as mock_activity:
+            mock_activity.return_value = []
+            
+            context = [{"role": "USER", "text": "Build a web app"}]
+            result = await query_blueprints(workflow_instance, context, "user-123", 3)
+            
+            # Should return empty list
+            assert result == []
+            
+            # Check post-execution event
+            post_call = workflow_instance._handle_tool_event.call_args_list[1]
+            post_event = post_call[0][0]
+            assert "No similar goals found" in post_event.title
+            assert post_event.status == MessageStatus.FINISHED
+    
+    print("✅ test_query_blueprints_no_results passed")
+
+
+async def test_query_blueprints_failure():
+    """Test error handling when query fails."""
+    workflow_instance = MagicMock()
+    workflow_instance._handle_tool_event = AsyncMock()
+    
+    with patch('tools.knowledge_base.workflow.uuid4', return_value="test-123"):
+        with patch('tools.knowledge_base.workflow.execute_activity', new_callable=AsyncMock) as mock_activity:
+            mock_activity.side_effect = Exception("Database connection failed")
+            
+            context = [{"role": "USER", "text": "Build a web app"}]
+            result = await query_blueprints(workflow_instance, context, "user-123", 3)
+            
+            # Should return empty list on error
+            assert result == []
+            
+            # Should have posted 2 events: pre and error
+            assert workflow_instance._handle_tool_event.call_count == 2
+            
+            error_call = workflow_instance._handle_tool_event.call_args_list[1]
+            error_event = error_call[0][0]
+            assert error_event.status == MessageStatus.ERROR
+            assert "Knowledge base query failed" in error_event.title
+            assert "Database connection failed" in error_event.message
+    
+    print("✅ test_query_blueprints_failure passed")
+
+
+async def test_save_blueprint_success():
+    """Test successful blueprint save."""
+    workflow_instance = MagicMock()
+    workflow_instance._handle_tool_event = AsyncMock()
+    
+    mock_result = {
+        "saved_blueprint": {"id": "blueprint-123", "title": "Web app created"},
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150
         }
-    ]
-    mock_response.raise_for_status = MagicMock()
-    
-    with patch('httpx.AsyncClient') as mock_client:
-        mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
-        
-        with patch('temporalio.activity.heartbeat'):
-            results = await manager.query_by_similarity(
-                goal="Write a Python script",
-                user_id="test_user",
-                limit=3
-            )
-        
-        assert len(results) == 2
-        assert results[0]["id"] == "bp1"
-        assert results[0]["similarity"] == 0.95
-        assert results[1]["title"] == "Create automation"
-    
-    print("✅ test_blueprint_query_by_similarity passed")
-
-
-async def test_blueprint_query_failure():
-    """Test blueprint query with failed HTTP call."""
-    manager = BlueprintManager()
-    
-    # Mock a failed HTTP response
-    mock_response = MagicMock()
-    mock_response.raise_for_status.side_effect = Exception("API error")
-    
-    with patch('httpx.AsyncClient') as mock_client:
-        mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
-        
-        with patch('temporalio.activity.heartbeat'):
-            results = await manager.query_by_similarity(
-                goal="Test goal",
-                user_id="test_user"
-            )
-        
-        # Should return empty list on error (graceful degradation)
-        assert results == []
-    
-    print("✅ test_blueprint_query_failure passed")
-
-
-async def test_blueprint_save():
-    """Test blueprint save with mocked HTTP calls."""
-    manager = BlueprintManager()
-    
-    # Mock the HTTP response
-    mock_response = MagicMock()
-    mock_response.status_code = 201
-    mock_response.json.return_value = {
-        "id": "bp123",
-        "title": "Complete task successfully",
-        "user_id": "test_user"
-    }
-    mock_response.raise_for_status = MagicMock()
-    
-    with patch('httpx.AsyncClient') as mock_client:
-        mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
-        
-        with patch('temporalio.activity.heartbeat'):
-            result = await manager.save(
-                user_id="test_user",
-                title="Complete task successfully",
-                blueprint=[{"step": 1, "action": "test"}]
-            )
-        
-        assert result["id"] == "bp123"
-        assert result["title"] == "Complete task successfully"
-    
-    print("✅ test_blueprint_save passed")
-
-
-def test_format_query_blueprints_pre():
-    """Test query blueprints pre-message formatting."""
-    args = ["Find similar tasks for: Write a Python script"]
-    result = format_query_blueprints_pre(args)
-    
-    assert "title" in result
-    assert "message" in result
-    
-    print("✅ test_format_query_blueprints_pre passed")
-
-
-def test_format_query_blueprints_post():
-    """Test query blueprints post-message formatting."""
-    result_data = [
-        {
-            "id": "bp1",
-            "title": "Write Python script",
-            "similarity": 0.95
-        },
-        {
-            "id": "bp2",
-            "title": "Create automation script",
-            "similarity": 0.85
-        }
-    ]
-    
-    result = format_query_blueprints_post(None, result_data)
-    
-    assert "title" in result
-    assert "message" in result
-    
-    print("✅ test_format_query_blueprints_post passed")
-
-
-def test_format_query_blueprints_post_no_results():
-    """Test query blueprints post-message with no results."""
-    result_data = []
-    
-    result = format_query_blueprints_post(None, result_data)
-    
-    assert "title" in result
-    assert "message" in result
-    
-    print("✅ test_format_query_blueprints_post_no_results passed")
-
-
-def test_format_save_blueprint_pre():
-    """Test save blueprint pre-message formatting."""
-    args = [
-        "user123",
-        "Complete task successfully",
-        [{"step": 1, "action": "test"}]
-    ]
-    result = format_save_blueprint_pre(args)
-    
-    assert "title" in result
-    assert "message" in result
-    
-    print("✅ test_format_save_blueprint_pre passed")
-
-
-def test_format_save_blueprint_post():
-    """Test save blueprint post-message formatting."""
-    result_data = {
-        "id": "bp123",
-        "title": "Complete task successfully"
     }
     
-    result = format_save_blueprint_post(None, result_data)
+    with patch('tools.knowledge_base.workflow.uuid4', return_value="test-123"):
+        with patch('tools.knowledge_base.workflow.execute_activity', new_callable=AsyncMock) as mock_activity:
+            mock_activity.return_value = mock_result
+            
+            steps = [
+                {"role": "USER", "text": "Build a web app"},
+                {"role": "ASSISTANT", "text": "Created the app"}
+            ]
+            
+            result = await save_blueprint(workflow_instance, "user-123", steps)
+            
+            # Should return the result with usage data
+            assert result == mock_result
+            assert result["usage"]["total_tokens"] == 150
+            
+            # Should have posted 2 events: pre and post
+            assert workflow_instance._handle_tool_event.call_count == 2
+            
+            # Check pre-execution event
+            pre_call = workflow_instance._handle_tool_event.call_args_list[0]
+            pre_event = pre_call[0][0]
+            assert pre_event.type == EventType.POST_MESSAGE
+            assert "Saving route to goal" in pre_event.title
+            assert pre_event.status == MessageStatus.IN_PROGRESS
+            
+            # Check post-execution event
+            post_call = workflow_instance._handle_tool_event.call_args_list[1]
+            post_event = post_call[0][0]
+            assert post_event.type == EventType.POST_MESSAGE
+            assert "Route to goal saved" in post_event.title
+            assert post_event.status == MessageStatus.FINISHED
     
-    assert "title" in result
-    assert "message" in result
+    print("✅ test_save_blueprint_success passed")
+
+
+async def test_save_blueprint_failure():
+    """Test error handling when save fails."""
+    workflow_instance = MagicMock()
+    workflow_instance._handle_tool_event = AsyncMock()
     
-    print("✅ test_format_save_blueprint_post passed")
+    with patch('tools.knowledge_base.workflow.uuid4', return_value="test-123"):
+        with patch('tools.knowledge_base.workflow.execute_activity', new_callable=AsyncMock) as mock_activity:
+            mock_activity.side_effect = Exception("Failed to save to database")
+            
+            steps = [{"role": "USER", "text": "Build a web app"}]
+            
+            try:
+                await save_blueprint(workflow_instance, "user-123", steps)
+                assert False, "Should have raised exception"
+            except Exception as e:
+                assert "Failed to save to database" in str(e)
+            
+            # Should have posted 2 events: pre and error
+            assert workflow_instance._handle_tool_event.call_count == 2
+            
+            error_call = workflow_instance._handle_tool_event.call_args_list[1]
+            error_event = error_call[0][0]
+            assert error_event.type == EventType.POST_MESSAGE
+            assert error_event.status == MessageStatus.ERROR
+            assert "Failed to save route" in error_event.title
+            assert "Failed to save to database" in error_event.message
+    
+    print("✅ test_save_blueprint_failure passed")
 
 
 async def run_all_tests():
-    """Run all knowledge_base tests."""
+    """Run all tests."""
     print("\n" + "="*60)
-    print("🧪 TESTING KNOWLEDGE_BASE (BLUEPRINTS) TOOL")
+    print("🧪 TESTING KNOWLEDGE_BASE")
     print("="*60 + "\n")
     
     try:
-        # Async tests for BlueprintManager
-        await test_blueprint_query_by_similarity()
-        await test_blueprint_query_failure()
-        await test_blueprint_save()
-        
-        # Sync tests for formatters
-        test_format_query_blueprints_pre()
-        test_format_query_blueprints_post()
-        test_format_query_blueprints_post_no_results()
-        test_format_save_blueprint_pre()
-        test_format_save_blueprint_post()
+        await test_query_blueprints_success()
+        await test_query_blueprints_no_results()
+        await test_query_blueprints_failure()
+        await test_save_blueprint_success()
+        await test_save_blueprint_failure()
         
         print("\n✅ All knowledge_base tests passed!")
         return True

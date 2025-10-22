@@ -7,25 +7,9 @@ import structlog
 import httpx
 
 from config import load_config
+from helpers.utils import extract_goal_from_context
 
 logger = structlog.get_logger()
-
-
-def extract_goal_from_context(steps_taken: List[Dict]) -> str:
-    """
-    Extract the goal from the first USER message in context.
-    
-    Args:
-        steps_taken: Message history
-        
-    Returns:
-        The goal text, or a default message if not found
-    """
-    for msg in steps_taken:
-        if msg.get('role') == 'USER':
-            return msg.get('text', 'No goal specified')
-    
-    return 'No goal specified'
 
 
 @activity.defn

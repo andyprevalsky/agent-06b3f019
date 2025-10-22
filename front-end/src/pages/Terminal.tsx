@@ -789,6 +789,10 @@ export default function Terminal() {
     setMessages([]);
     setMessageInput('');
     setIsSidebarOpen(false);
+    
+    // Reset animations to play from the beginning
+    setCurrentFrame(0);
+    setAnimationComplete(false);
   };
 
   const sortedAgents = [...agents].sort((a, b) => {
@@ -955,12 +959,7 @@ export default function Terminal() {
         }}
       >
         <button 
-          onClick={() => {
-            setCurrentView('agents');
-            setSelectedAgentId(null);
-            setMessages([]);
-            setIsSidebarOpen(false);
-          }}
+          onClick={handleCreateNewAgent}
           className="flex items-center space-x-2.5 px-1 cursor-pointer hover:opacity-80 transition-opacity"
         >
           <div
@@ -1008,12 +1007,7 @@ export default function Terminal() {
           {/* Create Agent Button */}
           <div className="p-3">
               <Button
-              onClick={() => {
-                setCurrentView('agents');
-                setSelectedAgentId(null);
-                setMessages([]);
-                setIsSidebarOpen(false);
-              }}
+              onClick={handleCreateNewAgent}
               className="w-full"
               size="lg"
             >

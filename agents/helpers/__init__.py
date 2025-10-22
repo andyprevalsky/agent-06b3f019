@@ -6,7 +6,7 @@ from .llm import call_llm, decide_next_action, check_progress
 from .update_status import update_agent_status
 from .summarize import compress_context, generate_completion_summary
 from .model_info import get_model_context_window
-from .knowledge_base import query_blueprints, save_blueprint
+# query_blueprints and save_blueprint imported directly by worker from knowledge_base_v2
 from .finished import mark_finished
 from .fetch_config import fetch_agent_config
 from .check_usage import check_user_usage
@@ -22,10 +22,7 @@ __all__ = [
     "compress_context",
     "generate_completion_summary",
     "get_model_context_window",
-    "query_blueprints",
-    "save_blueprint",
     "mark_finished",
     "fetch_agent_config",
     "check_user_usage",
 ]
-
