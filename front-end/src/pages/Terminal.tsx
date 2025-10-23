@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot } from 'lucide-react';
+import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift } from 'lucide-react';
 import { supabase, signOut, getCurrentUser, initializeRealtime } from '@/lib/supabase';
 import { subscribeToAgent, unsubscribe } from '@/lib/realtime';
 import {
@@ -26,6 +26,8 @@ import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
 import Settings from '@/pages/Settings';
 import UsageDisplay from '@/components/UsageDisplay';
+import InviteCodeModal from '@/components/InviteCodeModal';
+import PhoneAuthModal from '@/components/auth/PhoneAuthModal';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
@@ -122,6 +124,8 @@ export default function Terminal() {
   const [isLoadingAgents, setIsLoadingAgents] = useState(true);
   const [isFirstLoad, setIsFirstLoad] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [inviteCodeModalOpen, setInviteCodeModalOpen] = useState(false);
+  const [loginModalOpen, setLoginModalOpen] = useState(false);
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
   
   // Selected agent state
@@ -144,6 +148,8 @@ export default function Terminal() {
   const reconnectAttemptRef = useRef<number>(0);
   const reconnectTimeoutRef = useRef<number | null>(null);
   const isReconnectingRef = useRef<boolean>(false);
+  const loginButtonRef = useRef<HTMLButtonElement>(null);
+  const queryInputRef = useRef<HTMLDivElement>(null);
   
   // Message buffer queue - messages wait here before being displayed
   const [messageBuffer, setMessageBuffer] = useState<Message[]>([]);
@@ -180,6 +186,7 @@ export default function Terminal() {
   // Tile animation state
   const [currentFrame, setCurrentFrame] = useState(0);
   const [animationComplete, setAnimationComplete] = useState(false);
+  const [animationResetKey, setAnimationResetKey] = useState(0); // Key to force reset SmallTileAnimationCanvas
   const FRAME_DURATION_MS = 45; // ~45ms per frame = 1 second total for 22 frames
   const tileAnimationRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -713,6 +720,18 @@ export default function Terminal() {
   const handleSendMessage = async () => {
     if (!messageInput.trim()) return;
 
+    // Check if user is logged in before attempting any API calls
+    console.log('user', user);
+    if (!user) {
+      console.log('User not logged in, opening login modal');
+      setLoginModalOpen(true);
+      toast({
+        title: 'Authentication required',
+        description: 'Please log in to continue',
+      });
+      return;
+    }
+
     try {
       setIsSendingMessage(true);
       
@@ -757,12 +776,21 @@ export default function Terminal() {
       await postMessageAPI(selectedAgentId, messageInput);
       // Don't add message here - let Realtime subscription handle it to avoid duplicates
       setMessageInput('');
-    } catch (error) {
-      toast({
-        title: 'Error',
-        description: selectedAgentId ? 'Failed to send message' : 'Failed to create agent',
-        variant: 'destructive',
-      });
+    } catch (error: any) {
+      // Check if it's an authentication error
+      if (error.message === 'Not authenticated' || error.message?.includes('401') || error.message?.includes('Unauthorized')) {
+        setLoginModalOpen(true);
+        toast({
+          title: 'Authentication required',
+          description: 'Please log in to continue',
+        });
+      } else {
+        toast({
+          title: 'Error',
+          description: selectedAgentId ? 'Failed to send message' : 'Failed to create agent',
+          variant: 'destructive',
+        });
+      }
     } finally {
       setIsSendingMessage(false);
     }
@@ -790,9 +818,10 @@ export default function Terminal() {
     setMessageInput('');
     setIsSidebarOpen(false);
     
-    // Reset animations to play from the beginning
+    // Reset animation state to replay like on page load
     setCurrentFrame(0);
     setAnimationComplete(false);
+    setAnimationResetKey(prev => prev + 1); // Force SmallTileAnimationCanvas to remount and clear everColoredTiles
   };
 
   const sortedAgents = [...agents].sort((a, b) => {
@@ -943,10 +972,12 @@ export default function Terminal() {
 
       {/* Small Tile Animations Canvas Overlay */}
       <SmallTileAnimationCanvas 
+        key={animationResetKey}
         enabled={true} 
         tileAnimationComplete={animationComplete}
         currentFrame={currentFrame}
         tileColors={tileColors}
+        selectedAgentId={selectedAgentId}
       />
 
       {/* Floating Blur Header */}
@@ -958,19 +989,32 @@ export default function Terminal() {
           WebkitBackdropFilter: 'blur(12px)',
         }}
       >
-        <button 
-          onClick={handleCreateNewAgent}
-          className="flex items-center space-x-2.5 px-1 cursor-pointer hover:opacity-80 transition-opacity"
-        >
-          <div
-            className="w-8 h-8 rounded-lg flex-shrink-0"
-            style={{
-              background:
-                'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)',
-            }}
-          ></div>
-          <span className="text-base font-semibold tracking-tight">Navi</span>
-        </button>
+        <div className="flex items-center space-x-1">
+          {/* Gift Button - Show when user is logged in */}
+          {user && (
+            <button
+              onClick={() => setInviteCodeModalOpen(true)}
+              className="p-2 rounded-lg hover:bg-white/5 transition-colors"
+              aria-label="Invite Code"
+            >
+              <Gift className="w-5 h-5" />
+            </button>
+          )}
+          
+          <button 
+            onClick={handleCreateNewAgent}
+            className="flex items-center space-x-2.5 px-1 cursor-pointer hover:opacity-80 transition-opacity"
+          >
+            <div
+              className="w-8 h-8 rounded-lg flex-shrink-0"
+              style={{
+                background:
+                  'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)',
+              }}
+            ></div>
+            <span className="text-base font-semibold tracking-tight">Navi</span>
+          </button>
+        </div>
         
         {/* Research Button - Absolutely centered in viewport */}
         <a
@@ -1292,6 +1336,7 @@ export default function Terminal() {
 
           {/* Message Input - Always visible */}
           <div 
+            ref={queryInputRef}
             className="pb-6 transition-opacity duration-300 ease-in-out"
             style={{
               // Only fade for FAILED status, not COMPLETED (since we show a prominent button)
@@ -1356,6 +1401,19 @@ export default function Terminal() {
         open={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         onSubmit={handleCreateAgent}
+      />
+
+      {/* Invite Code Modal */}
+      <InviteCodeModal
+        open={inviteCodeModalOpen}
+        onOpenChange={setInviteCodeModalOpen}
+      />
+
+      {/* Login Modal */}
+      <PhoneAuthModal
+        open={loginModalOpen}
+        onOpenChange={setLoginModalOpen}
+        triggerRef={queryInputRef}
       />
     </div>
   );

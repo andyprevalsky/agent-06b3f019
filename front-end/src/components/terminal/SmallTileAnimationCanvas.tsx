@@ -25,6 +25,7 @@ interface SmallTileAnimationCanvasProps {
   tileAnimationComplete: boolean; // Only start after initial color animation
   currentFrame: number; // Current frame of the color animation
   tileColors: Map<string, number>; // Tile colors from the animation
+  selectedAgentId: string | null; // Whether an agent is selected (affects refill behavior)
 }
 
 export default function SmallTileAnimationCanvas({
@@ -32,6 +33,7 @@ export default function SmallTileAnimationCanvas({
   tileAnimationComplete,
   currentFrame,
   tileColors,
+  selectedAgentId,
 }: SmallTileAnimationCanvasProps) {
   const dotsCanvasRef = useRef<HTMLCanvasElement>(null);
   const animationsCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -68,6 +70,7 @@ export default function SmallTileAnimationCanvas({
     largeTileSize,
     everColoredTiles: everColoredTiles.current,
     animationInterval: 800, // Trigger new animation every 0.8 seconds
+    selectedAgentId, // Don't refill if agent is selected
   });
 
   // Set canvas sizes to match viewport and update viewport dimensions

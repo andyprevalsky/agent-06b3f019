@@ -207,6 +207,11 @@ model User {
   postalCode   String?  // ZIP/Postal code
   country      String?  @default("United States")
   
+  // Invite Code System
+  inviteCode       Int?     @unique // This user's unique invite code (6-digit number)
+  usedInviteCode   Int?     // The code this user used to sign up
+  inviteCodeUses   Int      @default(0) // Number of times this user's code has been used
+  
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -215,6 +220,8 @@ model User {
   subscriptions Subscription[]
 
   @@index([userId])
+  @@index([inviteCode])
+  @@index([usedInviteCode])
 }
 
 model Credit {

@@ -13,6 +13,7 @@ import userSettingsRouter from './routes/userSettings';
 import creditsRouter from './routes/credits';
 import webhooksRouter from './routes/webhooks';
 import toolUsageRouter from './routes/toolUsage';
+import inviteCodesRouter from './routes/inviteCodes';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -96,6 +97,7 @@ app.use('/api/attention-requests', attentionRequestsRouter);
 app.use('/api/user-settings', userSettingsRouter);
 app.use('/api/credits', creditsRouter);
 app.use('/api/tool-usage', toolUsageRouter);
+app.use('/api/invite-codes', inviteCodesRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware

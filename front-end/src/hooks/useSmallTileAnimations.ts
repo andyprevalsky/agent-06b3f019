@@ -21,6 +21,7 @@ interface UseSmallTileAnimationsOptions {
   largeTileSize: number;
   everColoredTiles: Set<string>; // Tiles that have EVER had colors > 0
   animationInterval?: number; // Time between triggering new animations (ms)
+  selectedAgentId?: string | null; // If an agent is selected, don't refill animations
 }
 
 export function useSmallTileAnimations({
@@ -31,6 +32,7 @@ export function useSmallTileAnimations({
   largeTileSize,
   everColoredTiles,
   animationInterval = 800, // Default: 0.8 seconds
+  selectedAgentId = null,
 }: UseSmallTileAnimationsOptions) {
   const [animatingTiles, setAnimatingTiles] = useState<AnimatingTile[]>([]);
   const [delayPassed, setDelayPassed] = useState<boolean>(false);
@@ -208,16 +210,23 @@ export function useSmallTileAnimations({
       }
       
       // Start refilling if pool drops to 1 (after having reached max)
-      if (hasReachedMaxRef.current && poolSize <= 1) {
+      // BUT NOT if an agent is selected (let animations go to 0)
+      if (hasReachedMaxRef.current && poolSize <= 1 && !selectedAgentId) {
         isRefillingRef.current = true;
+      }
+      
+      // If an agent is selected, stop refilling immediately
+      if (selectedAgentId && isRefillingRef.current) {
+        isRefillingRef.current = false;
       }
       
       // Determine if we should add more animations:
       // - During initial ramp-up: add until we reach 4
       // - During refill: continue adding until we reach 4 (even if pool size fluctuates)
+      // - BUT NOT if an agent is selected
       const isInitialRampUp = !hasReachedMaxRef.current;
       const isRefilling = isRefillingRef.current;
-      const shouldAdd = isInitialRampUp || isRefilling;
+      const shouldAdd = (isInitialRampUp || isRefilling) && !selectedAgentId;
       const isBelowMax = poolSize < MAX_CONCURRENT_ANIMATIONS;
       
       if (
