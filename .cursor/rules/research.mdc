@@ -1,0 +1,134 @@
+---
+description: >
+  Research Rule - Guidelines for conducting thorough research within the codebase before making changes.
+  This rule ensures proper understanding of the system before planning or implementing changes.
+alwaysApply: true
+---
+
+# Research Rule
+
+When conducting research within the codebase, follow these steps in order:
+
+## 1. Read Directly Mentioned Files First
+
+- If the user mentions or links to a specific file, read it entirely before doing anything else
+- Summarize its structure, purpose, and relationships to other parts of the codebase
+- This is the HIGHEST priority step - never skip it
+
+## 2. Analyze and Decompose the Research Question
+
+- Break the user's query into concrete sub-questions that can each be answered by inspecting code or documentation
+- Prioritize correctness and traceability
+- Identify what information is needed to fully understand the problem or feature
+
+## 3. Spawn Sub-Tasks for Exploration
+
+For each sub-question, create sub-agents that:
+- Identify relevant files and directories
+- Gather key functions, classes, and constants
+- Record relationships or data flows between components
+- **Always include exact line numbers** (e.g., `src/agent/utils.py:134-150`)
+
+## 4. Gather Metadata
+
+Before generating the research document, collect:
+- Git branch name
+- Repository name
+- Latest commit hash
+- Researcher name (from `thoughts/status.yaml` if available)
+- Current date and time (ISO 8601 with timezone)
+
+## 5. Compile Progress Notes
+
+- Aggregate summaries from all sub-agents into `research_progress.md` for review
+- Ensure all findings are documented with file paths and line numbers
+- Wait for ALL sub-agents to finish before proceeding to synthesis
+
+## 6. Generate Research Document
+
+Use metadata from step 4 and structure the document with YAML front-matter:
+
+```yaml
+---
+date: [Current date and time with timezone in ISO format]
+researchers: [Researcher name from thoughts status]
+git_commit: [Current commit hash from step 4]
+branch: [Current branch name]
+repository: [Repository name]
+topic: [User's Question/Topic]
+tags: [research, codebase, relevant-component-names]
+status: complete
+last_updated: [Current date YYYY-MM-DD]
+last_updated_by: [Researcher name]
+---
+```
+
+### Document Structure
+
+```markdown
+## Research: [User's Question/Topic]
+
+### Research Question
+[Original user query]
+
+### Summary
+[High-level findings answering the user's question]
+
+### Detailed Findings
+
+#### [Component/Area 1]
+- Finding with reference [[file.ext:line]](link)
+  - Connection to other components
+  - Implementation details
+
+#### [Component/Area 2]
+...
+
+### Code References
+- `path/to/file.py:123` — Description of what's there
+- `another/file.ts:45-87` — Description of the code block
+
+### Architecture Insights
+(Design decisions, conventions discovered)
+
+### Historical Context (from thoughts/)
+- 'thoughts/shared/something.md' — Relevant decision about X
+- 'thoughts/local/notes.md' — Past exploration of Y
+  Note: Paths exclude "searchable/" even if found there
+
+### Related Research
+(Links to other research docs in thoughts/shared/research/)
+
+### Open Questions
+(List of areas needing further study)
+```
+
+## Critical Ordering Rules
+
+- **ALWAYS** read mentioned files first before spawning sub-tasks (step 1 before step 3)
+- **ALWAYS** wait for all sub-agents to finish before synthesizing (step 3 complete before step 5)
+- **ALWAYS** gather metadata before writing (step 4 before step 6)
+- **NEVER** write the research doc with placeholders - wait for all information
+
+## Path Handling
+
+- The `thoughts/searchable/` directory contains hard links for searching
+- When documenting, strip only `searchable/` from paths
+
+Examples:
+- `thoughts/searchable/allison/old_stuff/notes.md` → `thoughts/allison/old_stuff/notes.md`
+- `thoughts/searchable/shared/prs/123.md` → `thoughts/shared/prs/123.md`
+
+## Front-Matter Consistency
+
+- Include front-matter at the top of every research document
+- Keep keys consistent across all docs
+- Update metadata on follow-ups
+- Use snake_case for multi-word keys
+
+## Context Management
+
+- Keep context utilization under 40% during research phase
+- Use sub-agents to compartmentalize exploration and reduce parent context burden
+- Return concise, structured information from sub-agents to parent
+- Include only essential code snippets with exact line numbers in research output

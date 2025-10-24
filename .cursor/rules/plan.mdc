@@ -1,0 +1,204 @@
+---
+description: >
+  Plan Rule - Guidelines for creating detailed implementation plans before writing code.
+  A bad line in a plan can lead to hundreds of bad lines of code, so planning is critical.
+alwaysApply: true
+---
+
+# Plan Rule
+
+After completing research, create a detailed implementation plan that specifies every change before writing any code.
+
+## Why Planning Matters
+
+- A bad line of code is a bad line of code
+- A bad line in a plan can be **hundreds of bad lines of code**
+- A bad line of research can be **thousands of bad lines of code**
+- Plans are much shorter than code and easier to review
+- Catching problems in the plan prevents wasted implementation effort
+
+## Planning Process
+
+### 1. Define the Scope
+
+- Clearly outline the features or fixes to be addressed
+- List all components and modules that will be affected
+- Reference specific files and functions from the research document
+- Identify dependencies between changes
+
+### 2. Specify Every Change
+
+For each change, include:
+- **Exact file path** and affected functions/classes
+- **Code snippets** showing what will be changed (before/after context)
+- **Why** the change is needed (reference research findings)
+- **How** it connects to other changes in the plan
+
+Example format:
+```markdown
+#### Change: Add validation to user input handler
+
+**File**: `back-end/src/routes/agents.ts:145-167`
+
+**Current behavior**: No validation on agent name field
+
+**Proposed change**: Add Zod schema validation before database insert
+
+**Code location**:
+- Current: `agents.ts:156` - Direct database insert
+- Will add: Validation middleware at line 145
+
+**Dependencies**: None
+
+**Testing approach**: Unit test with invalid inputs
+```
+
+### 3. Break Down Into Phases
+
+- Divide complex implementations into sequential phases
+- Each phase should be independently verifiable
+- Keep context utilization under 40% per phase
+- Plan for intentional compaction between phases
+
+### 4. Specify Testing Strategy
+
+For each change, explicitly state:
+- **Unit tests** needed (what functions/cases)
+- **Integration tests** needed (what workflows)
+- **Manual verification** steps
+- **Acceptance criteria** (how to know it works)
+
+### 5. Identify Risks and Edge Cases
+
+- List potential problems or edge cases
+- Note areas where the research was unclear
+- Highlight assumptions that need validation
+- Flag any areas that might need refactoring
+
+### 6. Review Checkpoints
+
+Plan for human review at these points:
+- After completing research (before starting plan)
+- **After completing plan** (before implementation)
+- After each major phase of implementation
+- Before final merge
+
+## Plan Document Structure
+
+```markdown
+---
+date: [ISO 8601 timestamp]
+project: [Repository name]
+branch: [Current branch]
+based_on_research: [Link to research document]
+status: ready_for_review
+---
+
+## Implementation Plan: [Feature/Fix Description]
+
+### Objective
+[Clear statement of what this plan accomplishes]
+
+### Research Summary
+[2-3 sentence summary linking to full research doc]
+
+### Scope
+- **Files to modify**: [List all files]
+- **New files to create**: [List if any]
+- **Components affected**: [List affected areas]
+
+### Changes
+
+#### Phase 1: [Phase name]
+
+##### Change 1.1: [Specific change]
+- **File**: `path/to/file.ts:123-145`
+- **Description**: [What and why]
+- **Implementation**: [How]
+- **Testing**: [Verification approach]
+
+##### Change 1.2: [Specific change]
+...
+
+#### Phase 2: [Phase name]
+...
+
+### Testing Plan
+
+#### Unit Tests
+- Test case 1
+- Test case 2
+
+#### Integration Tests
+- Scenario 1
+- Scenario 2
+
+#### Manual Verification
+- [ ] Step 1
+- [ ] Step 2
+
+### Dependencies & Order
+1. Phase 1 must complete before Phase 2 because...
+2. Change 2.3 depends on Change 1.1 because...
+
+### Risks & Mitigations
+- **Risk**: [Description]
+  - **Mitigation**: [Approach]
+
+### Open Questions
+- [ ] Question 1 needing clarification
+- [ ] Question 2 to verify
+
+### Estimated Scope
+- Lines of code: ~XXX
+- Files modified: X
+- Time estimate: [Based on complexity]
+```
+
+## Plan Review Process
+
+Before moving to implementation:
+
+1. **Self-review the plan**:
+   - Does every change have a file path and line numbers?
+   - Is the testing approach explicit?
+   - Are dependencies clearly stated?
+   - Can someone else understand this plan?
+
+2. **Present plan for human review**:
+   - Plans are MUCH easier to review than code
+   - Reviewers can catch problems early
+   - Maintains team mental alignment
+   - Allows feedback before effort is spent
+
+3. **Revise based on feedback**:
+   - Update the plan document
+   - Re-review if significant changes made
+   - Don't proceed until plan is approved
+
+## Context Management During Planning
+
+- Keep context under 40% utilization
+- Reference research document rather than re-reading all files
+- Use sub-agents to investigate specific unclear areas if needed
+- Update progress notes as planning proceeds
+
+## Critical Rules
+
+- **NEVER** start implementing without a reviewed plan
+- **NEVER** write vague plans like "refactor the handler" - be specific
+- **ALWAYS** include file paths and line numbers
+- **ALWAYS** specify testing approach
+- **ALWAYS** get human review before proceeding to implementation
+- If the plan is getting too long, break into smaller, focused plans
+
+## When Implementation Deviates from Plan
+
+If during implementation you discover the plan was wrong:
+1. **STOP** implementing
+2. Document what was discovered
+3. Update the plan
+4. Get plan re-reviewed
+5. Resume implementation
+
+Don't just keep going with a bad plan - fix the plan first.

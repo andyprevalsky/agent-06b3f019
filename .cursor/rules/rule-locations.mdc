@@ -7,133 +7,17 @@ description: >
   Agent-specific rules → agents/.cursor/rules/ (Python, Temporal workflows, tools)
   Backend-specific rules → back-end/.cursor/rules/ (TypeScript, Express, Prisma)
   Frontend-specific rules → front-end/.cursor/rules/ (React, TypeScript, UI components)
-  Project-wide rules → .cursor/rules/ (git, general practices)
+  Project-wide rules → .cursor/rules/ (git, general practices, workflow rules)
   
   NEVER use .cursorrules/ - it is not read by Cursor!
   
   All rule files must have .mdc extension and include frontmatter with description.
-
+  
+  Project-wide workflow rules (always applied):
+  - process.mdc - Orchestrates when to use Research → Plan → Implement workflow
+  - research.mdc - Guidelines for researching the codebase before changes
+  - plan.mdc - Guidelines for creating detailed implementation plans
+  - implement.mdc - Guidelines for implementing changes following approved plans
 apply:
   when: always
 ---
-
-# Rule: Correct Locations for Cursor Rules
-
-When creating or modifying Cursor rules, you MUST put them in the correct location based on their scope.
-
-## Rule Locations
-
-### Agent-specific rules → `agents/.cursor/rules/`
-
-Rules that apply to the agents system (Python, Temporal workflows, tools, etc.)
-
-Examples:
-- `agents/.cursor/rules/testing.mdc` - Testing requirements for agent tools
-- `agents/.cursor/rules/temporal-workflows.mdc` - Temporal workflow patterns
-- `agents/.cursor/rules/tool-creation.mdc` - Guidelines for creating new tools
-
-### Backend-specific rules → `back-end/.cursor/rules/`
-
-Rules that apply to the backend API (TypeScript, Express, Prisma, etc.)
-
-Examples:
-- `back-end/.cursor/rules/architecture.mdc` - Backend architecture patterns
-- `back-end/.cursor/rules/api-design.mdc` - API endpoint design
-- `back-end/.cursor/rules/testing.mdc` - Backend testing requirements
-
-### Frontend-specific rules → `front-end/.cursor/rules/`
-
-Rules that apply to the frontend (React, TypeScript, UI components, etc.)
-
-Examples:
-- `front-end/.cursor/rules/architecture.mdc` - Frontend architecture patterns
-- `front-end/.cursor/rules/components.mdc` - Component design guidelines
-- `front-end/.cursor/rules/styling.mdc` - Styling conventions
-
-### Project-wide rules → `.cursor/rules/`
-
-Rules that apply across the entire project (git, general practices, etc.)
-
-Examples:
-- `.cursor/rules/rule-locations.mdc` - This file!
-- `.cursor/rules/git-workflow.mdc` - Git commit and PR guidelines
-- `.cursor/rules/general-practices.mdc` - Cross-cutting concerns
-
-## ❌ NEVER Use `.cursorrules/`
-
-The `.cursorrules/` directory is NOT used by Cursor and any rules placed there will be ignored.
-
-## File Format
-
-All rule files MUST:
-1. Have `.mdc` extension
-2. Include frontmatter with `description` and `apply` fields
-3. Use markdown formatting
-
-Example structure:
-```
----
-description: >
-  Brief description of the rule
-  Can span multiple lines
-
-apply:
-  when: always
----
-
-# Rule Title
-
-Rule content in markdown...
-```
-
-## File Naming
-
-- Use lowercase with hyphens: `my-rule-name.mdc`
-- Always include `.mdc` extension
-- Be descriptive: `testing.mdc` not `test.mdc`, `api-design.mdc` not `api.mdc`
-
-## Adding New Rules
-
-1. Identify the scope (agents, back-end, front-end, or project-wide)
-2. Create the rule file in the appropriate `.cursor/rules/` directory
-3. Include proper frontmatter with description
-4. Use clear markdown formatting with examples
-5. Reference from other rules if needed
-
-## Examples
-
-### ✅ Correct
-
-```bash
-# Agent testing rule
-agents/.cursor/rules/testing.mdc
-
-# Backend architecture rule
-back-end/.cursor/rules/architecture.mdc
-
-# Project-wide git workflow
-.cursor/rules/git-workflow.mdc
-```
-
-### ❌ Incorrect
-
-```bash
-# Wrong - .cursorrules is not used
-.cursorrules/agents/testing.mdc
-
-# Wrong - no .cursor directory
-agents/rules/testing.mdc
-
-# Wrong - no .mdc extension
-agents/.cursor/rules/testing
-
-# Wrong - wrong scope
-.cursor/rules/agents-testing.mdc  # Should be in agents/.cursor/rules/
-```
-
-## When in Doubt
-
-- **Agent code?** → `agents/.cursor/rules/`
-- **Backend code?** → `back-end/.cursor/rules/`
-- **Frontend code?** → `front-end/.cursor/rules/`
-- **Everything else?** → `.cursor/rules/`

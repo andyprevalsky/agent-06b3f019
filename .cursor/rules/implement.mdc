@@ -1,0 +1,250 @@
+---
+description: >
+  Implement Rule - Guidelines for implementing code changes following an approved plan.
+  If the plan is good, implementation should be straightforward with minimal back-and-forth.
+alwaysApply: true
+---
+
+# Implement Rule
+
+After an approved plan, implement the changes while maintaining strict context management and quality standards.
+
+## Core Principle
+
+**If you're struggling during implementation, the plan is probably wrong.**
+
+- Good plans lead to smooth implementation
+- If you're "shouting" at the AI or stuck in loops, stop and fix the plan
+- Don't try to force through a bad plan - it will create slop
+
+## Implementation Process
+
+### 1. Follow the Approved Plan
+
+- Adhere strictly to the tasks and priorities outlined in the plan
+- Reference the plan document constantly
+- Implement changes in the order specified
+- Don't skip steps or take shortcuts
+
+### 2. Context Management (Critical)
+
+- **Keep context utilization under 40% at all times**
+- When approaching 40%, do intentional compaction:
+  - Update the plan with completed items
+  - Save progress to a file
+  - Start fresh context with updated plan
+- Never let context drift above 40% - this leads to errors
+
+### 3. Incremental Progress Updates
+
+As you complete each change:
+- Mark it complete in the plan document
+- Update progress notes
+- Verify the change works before moving on
+- Compact context if needed
+
+### 4. Write Production-Quality Code
+
+- Follow coding standards and best practices for the project
+- Write clean, maintainable code
+- Include necessary comments for complex logic
+- No slop, no placeholders, no TODOs
+- If you can't write it correctly, revisit the plan
+
+### 5. Implement Tests as You Go
+
+- Write tests immediately after implementing each change
+- Follow the testing strategy from the plan
+- Ensure tests pass before marking change complete
+- Don't defer testing to the end
+
+### 6. Verify Each Phase
+
+After completing a phase:
+- Run all relevant tests
+- Perform manual verification steps from plan
+- Check for linter errors and fix them
+- Update the plan document with results
+- Do intentional compaction before next phase
+
+## Progress Tracking Format
+
+Keep a `progress.md` file that tracks:
+
+```markdown
+---
+implementation_plan: [link to plan]
+started: [timestamp]
+last_updated: [timestamp]
+status: in_progress
+---
+
+## Implementation Progress: [Feature Name]
+
+### Completed
+- [x] Phase 1.1: Added validation to user input (✓ tests pass)
+- [x] Phase 1.2: Updated error handling (✓ tests pass)
+
+### Current
+- [ ] Phase 2.1: Refactor database queries (IN PROGRESS)
+  - Completed: Query optimization
+  - Next: Add connection pooling
+  - Context: 35%
+
+### Pending
+- [ ] Phase 2.2: Update API endpoints
+- [ ] Phase 3.1: Integration tests
+
+### Issues Found
+- Issue: Found additional edge case in validation
+  - Impact: Requires small plan update
+  - Action: Documented in plan, proceeding with fix
+
+### Context Compactions
+1. [timestamp] - After Phase 1 completion (38% → 15%)
+2. [timestamp] - During Phase 2.1 (39% → 12%)
+```
+
+## Intentional Compaction Strategy
+
+When context reaches 35-40%:
+
+1. **Save current state**:
+   - Update progress.md with exact status
+   - Note what you were working on
+   - Document any discoveries or issues
+
+2. **Start fresh context**:
+   - Load the implementation plan
+   - Load the progress.md file
+   - Resume from exactly where you left off
+
+3. **What to exclude from new context**:
+   - File search results from earlier
+   - Old iterations of code
+   - Debugging attempts that didn't work
+   - Research details (keep only plan)
+
+4. **What to include in new context**:
+   - Current implementation plan
+   - Progress.md with status
+   - Current code being worked on
+   - Relevant test files
+
+## Quality Standards
+
+### Code Quality
+- Follows project conventions
+- Properly typed (TypeScript/Python typing)
+- Error handling included
+- No copy-paste duplication
+- Comments explain "why" not "what"
+
+### No Slop Policy
+- No placeholder functions
+- No `// TODO: implement this`
+- No commented-out code blocks
+- No unused imports or variables
+- No skipped error handling
+
+### Testing Requirements
+- Unit tests for new functions
+- Integration tests for workflows
+- Edge cases covered
+- Tests actually run and pass
+- Test names clearly describe what they verify
+
+## When Things Go Wrong
+
+### If implementation is harder than expected:
+1. **STOP** - Don't force it
+2. Review the plan - is it detailed enough?
+3. Check research - did we understand the system?
+4. Update plan with new findings
+5. Get plan re-reviewed
+6. Resume implementation
+
+### If you discover the plan was wrong:
+1. Document what was discovered
+2. Update the plan document
+3. Note impact on remaining work
+4. Get updated plan reviewed
+5. Continue with corrected plan
+
+### If context is getting messy:
+1. Do immediate compaction (even if under 40%)
+2. Clean up progress.md
+3. Start fresh with minimal context
+4. Resume with clear state
+
+## Code Review Preparation
+
+Before submitting for review:
+
+1. **Self-review**:
+   - Read through all changes
+   - Verify against plan (did we do everything?)
+   - Run all tests
+   - Check for linter errors
+   - Remove debug code
+
+2. **Documentation**:
+   - Update relevant docs
+   - Add/update code comments
+   - Document any deviations from plan
+
+3. **Testing**:
+   - All tests pass
+   - Manual verification complete
+   - Edge cases tested
+   - No warnings or errors
+
+4. **Prepare PR description**:
+   - Link to plan document
+   - Link to research document
+   - Summarize what was implemented
+   - Note any deviations or discoveries
+   - List testing performed
+
+## Deployment Readiness
+
+Before considering implementation complete:
+
+- [ ] All planned changes implemented
+- [ ] All tests written and passing
+- [ ] Linter errors resolved
+- [ ] Manual verification completed
+- [ ] Documentation updated
+- [ ] Code reviewed and approved
+- [ ] Plan marked as complete
+- [ ] Progress notes finalized
+
+## Mental Alignment Principle
+
+Implementation should maintain team understanding:
+- PRs should be reviewable (not 2000 lines of mystery)
+- Changes should match the approved plan
+- Deviations should be documented and justified
+- Team members can read the plan and understand what changed
+
+## Critical Rules
+
+- **KEEP CONTEXT UNDER 40%** - This is non-negotiable
+- **FOLLOW THE PLAN** - Don't improvise major changes
+- **NO SLOP** - Production quality only
+- **TEST AS YOU GO** - Don't defer testing
+- **STOP IF STUCK** - Fix the plan, don't force implementation
+- **UPDATE PROGRESS** - Keep progress.md current
+- **COMPACT FREQUENTLY** - Don't let context bloat
+
+## Success Metrics
+
+You'll know implementation is going well when:
+- Following the plan feels natural
+- Context stays under 40%
+- Tests pass on first try (or second)
+- No "back and forth" with the AI
+- Code is clean and maintainable
+- Changes match exactly what plan described
+
+If these aren't true, stop and fix the plan or research.

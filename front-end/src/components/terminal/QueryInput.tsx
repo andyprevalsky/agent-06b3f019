@@ -120,10 +120,11 @@ export default function QueryInput({
       <div className="max-w-4xl mx-auto">
         {/* Query Wrap - Glossy modal background */}
         <div 
-          className="relative rounded-xl p-3 shadow-lg border border-border bg-[#EEEFF2]/80 dark:bg-[#1a1a1a]/80"
+          className="relative rounded-xl p-3 shadow-lg border border-border"
           style={{
             backdropFilter: 'blur(12px)',
             WebkitBackdropFilter: 'blur(12px)',
+            backgroundColor: 'transparent',
           }}
         >
           {/* Content */}

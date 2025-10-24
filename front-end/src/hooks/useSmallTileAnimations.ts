@@ -10,6 +10,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   TilePosition,
+  TileGridPosition,
   AnimatingTile,
 } from '@/lib/smallTileAnimations';
 
@@ -22,6 +23,7 @@ interface UseSmallTileAnimationsOptions {
   everColoredTiles: Set<string>; // Tiles that have EVER had colors > 0
   animationInterval?: number; // Time between triggering new animations (ms)
   selectedAgentId?: string | null; // If an agent is selected, don't refill animations
+  scrollOffset: { x: number; y: number }; // Current scroll position
 }
 
 export function useSmallTileAnimations({
@@ -33,6 +35,7 @@ export function useSmallTileAnimations({
   everColoredTiles,
   animationInterval = 800, // Default: 0.8 seconds
   selectedAgentId = null,
+  scrollOffset,
 }: UseSmallTileAnimationsOptions) {
   const [animatingTiles, setAnimatingTiles] = useState<AnimatingTile[]>([]);
   const [delayPassed, setDelayPassed] = useState<boolean>(false);
@@ -85,14 +88,14 @@ export function useSmallTileAnimations({
     // Get tiles that have EVER had colors > 0 (animation-ready tiles)
     const animationReadyTiles: TilePosition[] = [];
     
-    // Calculate grid origin
+    // Calculate grid origin (accounting for scroll)
     const centerX = viewportWidth / 2;
     const centerY = viewportHeight * 0.4;
     const largeTileHalf = largeTileSize / 2;
     const tilesLeft = Math.floor((centerX - largeTileHalf) / tileSize);
     const tilesUp = Math.floor((centerY - largeTileHalf) / tileSize);
-    const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize);
-    const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize);
+    const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize) + scrollOffset.x;
+    const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize) + scrollOffset.y;
     
     everColoredTiles.forEach((key) => {
       const [row, col] = key.split(',').map(Number);
@@ -133,16 +136,19 @@ export function useSmallTileAnimations({
     currentAnimationIndexRef.current =
       (currentAnimationIndexRef.current + 1) % availableAnimations.length;
 
-    // Add to animating tiles
+    // Add to animating tiles - only store row/col, NOT x/y (those are calculated dynamically)
     const newAnimatingTile: AnimatingTile = {
-      position: randomTile,
+      position: {
+        row: randomTile.row,
+        col: randomTile.col,
+      },
       animationId,
       startTime: performance.now(),
       currentFrame: 0,
     };
 
     setAnimatingTiles((prev) => [...prev, newAnimatingTile]);
-  }, [everColoredTiles, animatingTiles, availableAnimations, viewportWidth, viewportHeight, tileSize, largeTileSize, getGroupId]);
+  }, [everColoredTiles, animatingTiles, availableAnimations, viewportWidth, viewportHeight, tileSize, largeTileSize, getGroupId, scrollOffset]);
 
   // Function to remove a completed animation
   const removeAnimatingTile = useCallback((tile: AnimatingTile) => {

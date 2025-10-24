@@ -12,8 +12,13 @@ export interface TilePosition {
   y: number;
 }
 
+export interface TileGridPosition {
+  row: number;
+  col: number;
+}
+
 export interface AnimatingTile {
-  position: TilePosition;
+  position: TileGridPosition; // Only store row/col, not x/y (x/y calculated dynamically)
   animationId: string;
   startTime: number;
   currentFrame: number;

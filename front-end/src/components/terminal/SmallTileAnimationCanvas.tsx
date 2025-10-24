@@ -17,7 +17,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useSmallTileAnimations } from '@/hooks/useSmallTileAnimations';
-import { drawDotMarker, AnimatingTile } from '@/lib/smallTileAnimations';
+import { drawDotMarker, AnimatingTile, TileGridPosition } from '@/lib/smallTileAnimations';
 import { renderProceduralAnimationSync } from '@/lib/proceduralTileAnimation';
 
 interface SmallTileAnimationCanvasProps {
@@ -47,6 +47,7 @@ export default function SmallTileAnimationCanvas({
   const [viewportHeight, setViewportHeight] = useState(
     typeof window !== 'undefined' ? window.innerHeight : 0
   );
+  const [scrollOffset, setScrollOffset] = useState({ x: 0, y: 0 });
   const tileSize = 143;
   const largeTileSize = 429;
 
@@ -71,6 +72,7 @@ export default function SmallTileAnimationCanvas({
     everColoredTiles: everColoredTiles.current,
     animationInterval: 800, // Trigger new animation every 0.8 seconds
     selectedAgentId, // Don't refill if agent is selected
+    scrollOffset, // Pass scroll offset for position calculations
   });
 
   // Set canvas sizes to match viewport and update viewport dimensions
@@ -121,6 +123,23 @@ export default function SmallTileAnimationCanvas({
     };
   }, []);
 
+  // Track scroll position
+  useEffect(() => {
+    const handleScroll = () => {
+      setScrollOffset({
+        x: window.scrollX,
+        y: window.scrollY,
+      });
+    };
+
+    handleScroll(); // Initial value
+    window.addEventListener('scroll', handleScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener('scroll', handleScroll);
+    };
+  }, []);
+
   // Render loop
   useEffect(() => {
     const dotsCanvas = dotsCanvasRef.current;
@@ -156,14 +175,14 @@ export default function SmallTileAnimationCanvas({
         animatingTiles.map((tile) => `${tile.position.row},${tile.position.col}`)
       );
 
-      // Calculate grid origin
+      // Calculate grid origin (accounting for scroll)
       const centerX = viewportWidth / 2;
       const centerY = viewportHeight * 0.4;
       const largeTileHalf = largeTileSize / 2;
       const tilesLeft = Math.floor((centerX - largeTileHalf) / tileSize);
       const tilesUp = Math.floor((centerY - largeTileHalf) / tileSize);
-      const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize);
-      const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize);
+      const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize) + scrollOffset.x;
+      const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize) + scrollOffset.y;
 
       // Draw dots on DOTS canvas for tiles that have EVER had colors > 0
       // Use theme-appropriate color to match tile borders
@@ -185,10 +204,16 @@ export default function SmallTileAnimationCanvas({
       
       animatingTiles.forEach((tile) => {
         const elapsedMs = now - tile.startTime;
+        
+        // Recalculate screen position from row/col using current grid origin
+        // This ensures animations move smoothly with the grid when viewport resizes
+        const screenX = gridOriginX + tile.position.col * tileSize;
+        const screenY = gridOriginY + tile.position.row * tileSize;
+        
         const isStillPlaying = renderProceduralAnimationSync(
           animationsCtx,
-          tile.position.x,
-          tile.position.y,
+          screenX,
+          screenY,
           tileSize,
           elapsedMs,
           tile.animationId // Pass the animation ID to render the correct animation
@@ -225,6 +250,7 @@ export default function SmallTileAnimationCanvas({
     viewportWidth,
     viewportHeight,
     largeTileSize,
+    scrollOffset,
   ]);
 
   return (

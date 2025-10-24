@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift } from 'lucide-react';
+import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift, Copy, Check } from 'lucide-react';
 import { supabase, signOut, getCurrentUser, initializeRealtime } from '@/lib/supabase';
 import { subscribeToAgent, unsubscribe } from '@/lib/realtime';
 import {
@@ -12,6 +12,8 @@ import {
   postMessage as postMessageAPI,
   resumeAgent,
   checkAndRespondToAttentionRequest,
+  getMyInviteCode,
+  InviteCodeInfo,
   Agent,
   AgentDetail,
   Message,
@@ -26,7 +28,6 @@ import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
 import Settings from '@/pages/Settings';
 import UsageDisplay from '@/components/UsageDisplay';
-import InviteCodeModal from '@/components/InviteCodeModal';
 import PhoneAuthModal from '@/components/auth/PhoneAuthModal';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData, Model } from '@/hooks/useAppData';
@@ -108,6 +109,112 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
   return deduplicatedMessages;
 }
 
+// Component for displaying invite code content inside popover
+function InviteCodeContent() {
+  const { toast } = useToast();
+  const [inviteInfo, setInviteInfo] = useState<InviteCodeInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    loadInviteCode();
+  }, []);
+
+  const loadInviteCode = async () => {
+    try {
+      setLoading(true);
+      const info = await getMyInviteCode();
+      setInviteInfo(info);
+    } catch (error: any) {
+      console.error('Error loading invite code:', error);
+      toast({
+        title: "Error",
+        description: error.message || "Failed to load invite code",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    if (!inviteInfo) return;
+
+    try {
+      await navigator.clipboard.writeText(inviteInfo.inviteCode.toString());
+      setCopied(true);
+      toast({
+        title: "Copied!",
+        description: "Invite code copied to clipboard",
+      });
+      
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to copy to clipboard",
+        variant: "destructive",
+      });
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-4">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-400"></div>
+      </div>
+    );
+  }
+
+  if (!inviteInfo) {
+    return (
+      <div className="text-center text-navi-black/70 text-sm">
+        Failed to load invite code
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="relative">
+        <div 
+          className="w-full px-4 py-3 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-center text-2xl font-mono tracking-widest cursor-pointer hover:bg-[#e8e9ec] transition-colors"
+          onClick={handleCopy}
+        >
+          {inviteInfo.inviteCode.toString().padStart(6, '0')}
+        </div>
+        <button
+          onClick={handleCopy}
+          className="absolute top-2 right-2 p-1.5 rounded-md hover:bg-gray-300/50 transition-colors"
+          aria-label="Copy invite code"
+        >
+          {copied ? (
+            <Check className="w-4 h-4 text-green-600" />
+          ) : (
+            <Copy className="w-4 h-4 text-gray-500" />
+          )}
+        </button>
+      </div>
+
+      <div className="text-center">
+        <p className="text-lg font-semibold text-navi-black">
+          {inviteInfo.usesRemaining} Use{inviteInfo.usesRemaining !== 1 ? 's' : ''} Left
+        </p>
+      </div>
+    </>
+  );
+}
+
+// Opening messages for reveal animation [message, pauseDurationMs]
+const OPENING_MESSAGES: [string, number][] = [
+  ["Hello!", 1800],
+  ["We're Navi.", 1800],
+  ["A massive network of over 10,000 AIs.", 3800],
+  ["We work together to form a super intelligent system.", 2500],
+  ["Our purpose is to make your dreams come true.", 2500],
+  ["What is the first goal you have?", 0] // Last message stays visible
+];
+
 export default function Terminal() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -127,6 +234,7 @@ export default function Terminal() {
   const [inviteCodeModalOpen, setInviteCodeModalOpen] = useState(false);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
+  const [inviteModalPosition, setInviteModalPosition] = useState({ top: 0, right: 0 });
   
   // Selected agent state
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -150,6 +258,7 @@ export default function Terminal() {
   const isReconnectingRef = useRef<boolean>(false);
   const loginButtonRef = useRef<HTMLButtonElement>(null);
   const queryInputRef = useRef<HTMLDivElement>(null);
+  const giftButtonRef = useRef<HTMLButtonElement>(null);
   
   // Message buffer queue - messages wait here before being displayed
   const [messageBuffer, setMessageBuffer] = useState<Message[]>([]);
@@ -158,6 +267,16 @@ export default function Terminal() {
   const isInitialLoadRef = useRef<boolean>(false);
   const [forceResubscribe, setForceResubscribe] = useState<number>(0);
 
+  // Opening messages reveal animation
+  const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
+  const [animationPhase, setAnimationPhase] = useState<'revealing' | 'paused' | 'fading'>('revealing');
+  const [revealProgress, setRevealProgress] = useState(0);
+  const [isTypingComplete, setIsTypingComplete] = useState(false);
+  
+  // Dot animation for "Loading AI Network"
+  const [loadingDots, setLoadingDots] = useState('.');
+  const [isLoadingNetwork, setIsLoadingNetwork] = useState(false);
+  
   // Popular goals carousel
   const popularGoals = [
     "Cure cancer",
@@ -190,6 +309,80 @@ export default function Terminal() {
   const FRAME_DURATION_MS = 45; // ~45ms per frame = 1 second total for 22 frames
   const tileAnimationRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Reveal animation for opening messages on page load
+  useEffect(() => {
+    // Only run on initial page load when no agents selected and not loading network
+    if (selectedAgentId || isLoadingNetwork || isTypingComplete) return;
+    
+    // If all messages shown, mark as complete
+    if (currentMessageIndex >= OPENING_MESSAGES.length) {
+      setIsTypingComplete(true);
+      return;
+    }
+    
+    const [currentMessage, pauseDuration] = OPENING_MESSAGES[currentMessageIndex];
+    
+    // Handle revealing phase - animate from 0 to 100
+    if (animationPhase === 'revealing') {
+      if (revealProgress < 100) {
+        const timer = setTimeout(() => {
+          setRevealProgress(prev => Math.min(100, prev + 2)); // Increment by 2% each frame
+        }, 20); // 50fps animation
+        return () => clearTimeout(timer);
+      } else {
+        // Done revealing, pause before fading
+        // If this is the last message, keep it displayed and mark as complete
+        if (currentMessageIndex === OPENING_MESSAGES.length - 1) {
+          setIsTypingComplete(true);
+          return;
+        }
+        setAnimationPhase('paused');
+      }
+    }
+    
+    // Handle pause phase - use the specific pause duration for this message
+    if (animationPhase === 'paused') {
+      const timer = setTimeout(() => {
+        setAnimationPhase('fading');
+      }, pauseDuration);
+      return () => clearTimeout(timer);
+    }
+    
+    // Handle fading phase
+    if (animationPhase === 'fading') {
+      const timer = setTimeout(() => {
+        // Move to next message and reset
+        setCurrentMessageIndex(prev => prev + 1);
+        setAnimationPhase('revealing');
+        setRevealProgress(0);
+      }, 300); // Fade duration
+      return () => clearTimeout(timer);
+    }
+    
+  }, [currentMessageIndex, animationPhase, revealProgress, selectedAgentId, isLoadingNetwork, isTypingComplete]);
+  
+  // Dot animation for "Loading AI Network"
+  useEffect(() => {
+    if (!isLoadingNetwork) return;
+    
+    const dotSequence = ['.', '..', '...'];
+    let currentIndex = 0;
+    
+    const interval = setInterval(() => {
+      currentIndex = (currentIndex + 1) % dotSequence.length;
+      setLoadingDots(dotSequence[currentIndex]);
+    }, 500); // Change dots every 500ms
+    
+    return () => clearInterval(interval);
+  }, [isLoadingNetwork]);
+  
+  // Reset loading network state when agent is fully loaded with messages
+  useEffect(() => {
+    if (selectedAgentId && !isLoadingAgent && agentDetail?.status !== 'STARTING_UP') {
+      setIsLoadingNetwork(false);
+    }
+  }, [selectedAgentId, isLoadingAgent, agentDetail?.status]);
+  
   // Rotate popular goals carousel like a stock ticker with constant motion
   useEffect(() => {
     if (selectedAgentId) {
@@ -268,10 +461,13 @@ export default function Terminal() {
   useEffect(() => {
     checkAuth();
     
-    // Listen for auth state changes and update realtime connection
+    // Listen for auth state changes and update realtime connection and user state
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_IN' && session?.access_token) {
+      if (event === 'SIGNED_IN' && session?.user) {
         await supabase.realtime.setAuth(session.access_token);
+        setUser(session.user);
+      } else if (event === 'SIGNED_OUT') {
+        setUser(null);
       }
     });
     
@@ -737,6 +933,9 @@ export default function Terminal() {
       
       // If no agent selected, create a new agent
       if (!selectedAgentId) {
+        // Trigger loading network animation
+        setIsLoadingNetwork(true);
+        
         const newAgent = await createAgentAPI({
           goal: messageInput,
           model: selectedModel,
@@ -822,6 +1021,13 @@ export default function Terminal() {
     setCurrentFrame(0);
     setAnimationComplete(false);
     setAnimationResetKey(prev => prev + 1); // Force SmallTileAnimationCanvas to remount and clear everColoredTiles
+    
+    // Reset opening messages animation
+    setCurrentMessageIndex(0);
+    setAnimationPhase('revealing');
+    setRevealProgress(0);
+    setIsTypingComplete(false);
+    setIsLoadingNetwork(false);
   };
 
   const sortedAgents = [...agents].sort((a, b) => {
@@ -990,17 +1196,6 @@ export default function Terminal() {
         }}
       >
         <div className="flex items-center space-x-1">
-          {/* Gift Button - Show when user is logged in */}
-          {user && (
-            <button
-              onClick={() => setInviteCodeModalOpen(true)}
-              className="p-2 rounded-lg hover:bg-white/5 transition-colors"
-              aria-label="Invite Code"
-            >
-              <Gift className="w-5 h-5" />
-            </button>
-          )}
-          
           <button 
             onClick={handleCreateNewAgent}
             className="flex items-center space-x-2.5 px-1 cursor-pointer hover:opacity-80 transition-opacity"
@@ -1027,6 +1222,115 @@ export default function Terminal() {
         {/* Attention Inbox */}
         <AttentionInbox onSelectAgent={setSelectedAgentId} />
       </header>
+
+      {/* Hamburger Menu Button - Top Left - Sibling to Header */}
+      <div 
+        className="absolute top-4 z-50"
+        style={{
+          left: 'calc(50% - 448px - 38px - 16px)', // QueryBox is 896px wide (448px from center), button is 38px, gap is 16px
+        }}
+      >
+        <button
+          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+          className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-lg hover:bg-white/10 transition-colors"
+          style={{
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+          }}
+          aria-label="Toggle menu"
+        >
+          {isSidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+        </button>
+      </div>
+
+      {/* Gift Button - To the left of Agent Settings - Sibling to Header */}
+      <div 
+        className="absolute top-4 z-50"
+        style={{
+          left: 'calc(50% + 448px + 16px)', // QueryBox right edge + gap
+        }}
+      >
+        <button
+          ref={giftButtonRef}
+          onClick={() => {
+            if (user) {
+              if (!inviteCodeModalOpen && giftButtonRef.current) {
+                const rect = giftButtonRef.current.getBoundingClientRect();
+                setInviteModalPosition({
+                  top: rect.bottom + 8,
+                  right: window.innerWidth - rect.right,
+                });
+              }
+              setInviteCodeModalOpen(!inviteCodeModalOpen);
+            }
+          }}
+          disabled={!user}
+          className={cn(
+            "w-[38px] h-[38px] flex items-center justify-center rounded-lg bg-navi-black border border-navi-light-black shadow-lg transition-all duration-200",
+            user 
+              ? "hover:bg-navi-light-black cursor-pointer opacity-100" 
+              : "cursor-not-allowed opacity-50"
+          )}
+          aria-label="Invite Code"
+        >
+          <Gift className="w-5 h-5 text-white" />
+        </button>
+      </div>
+
+      {/* Invite Code Modal - Fixed positioning - Sibling to Header */}
+      {inviteCodeModalOpen && user && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-[55]"
+            onClick={() => setInviteCodeModalOpen(false)}
+          />
+
+          {/* Popover content */}
+          <div 
+            className="fixed z-[60] w-[320px] border border-gray-300 rounded-lg shadow-lg overflow-hidden"
+            style={{ 
+              top: `${inviteModalPosition.top}px`,
+              right: `${inviteModalPosition.right}px`,
+              backgroundColor: 'transparent',
+              backdropFilter: 'blur(24px)',
+              WebkitBackdropFilter: 'blur(12px)',
+            }}
+          >
+            <div className="p-5 space-y-4">
+              <div className="text-center mb-2">
+                <p className="text-sm font-medium text-navi-black">
+                  Your Invite Code
+                </p>
+                <p className="text-xs text-navi-black/70 mt-1">
+                  Share this code with friends to invite them to Navi
+                </p>
+              </div>
+
+              <InviteCodeContent />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Agent Settings Button - Top Right - Sibling to Header */}
+      <div 
+        className="absolute top-4 z-50"
+        style={{
+          left: 'calc(50% + 448px + 16px + 38px + 12px)', // QueryBox right edge + gap + gift button + gap
+        }}
+      >
+        <AgentSettingsDialog 
+          agent={agentDetail} 
+          onUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)}
+          onDelete={() => {
+            setCurrentView('agents');
+            setSelectedAgentId(null);
+            setMessages([]);
+            loadAgents();
+          }}
+        />
+      </div>
 
       <div className="h-screen flex items-center justify-center overflow-hidden z-[4]">
         {/* Overlay */}
@@ -1161,38 +1465,9 @@ export default function Terminal() {
             </div>
           )}
 
-          {/* Hamburger Menu Button - Top Left */}
-          <div className="absolute top-4 left-4 z-50">
-            <button
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-lg hover:bg-white/10 transition-colors"
-              style={{
-                backdropFilter: 'blur(12px)',
-                WebkitBackdropFilter: 'blur(12px)',
-              }}
-              aria-label="Toggle menu"
-            >
-              {isSidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-            </button>
-          </div>
-
-          {/* Agent Settings Button - Top Right */}
-          <div className="absolute top-4 right-4 z-20">
-            <AgentSettingsDialog 
-              agent={agentDetail} 
-              onUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)}
-              onDelete={() => {
-                setCurrentView('agents');
-                setSelectedAgentId(null);
-                setMessages([]);
-                loadAgents();
-              }}
-            />
-          </div>
-          
           {/* System Messages - Top Right */}
           {selectedAgentId && systemMessages.length > 0 && (
-            <div className="absolute top-4 right-16 max-w-md z-10">
+            <div className="absolute top-4 right-28 max-w-md z-10">
               <div className="bg-card dark:bg-navi-light-black border border-border dark:border-navi-light-light-black rounded-lg p-4 shadow-lg">
                 <h3 className="text-sm font-semibold mb-2">System Messages</h3>
                 <ScrollArea className="max-h-48">
@@ -1260,29 +1535,48 @@ export default function Terminal() {
                   <AsciiLoader showWarmingUp={false} size="large" variant="engine" />
                   {(!selectedAgentId || displayedMessages.length === 0) && (
                     <div className="-mt-3">
-                      {!selectedAgentId ? (
-                        // No agent selected states
-                        isLoadingAgents ? (
+                      {!selectedAgentId || isLoadingAgent || (selectedAgentId && agentDetail?.status === 'STARTING_UP') ? (
+                        // No agent selected states OR loading agent OR agent starting up
+                        isLoadingNetwork || isLoadingAgent || (selectedAgentId && agentDetail?.status === 'STARTING_UP') ? (
+                          // Loading AI Network with animated dots
                           <p className="text-muted-foreground">
-                            getting agents <span className="inline-block w-6 animate-dots" />
+                            Loading AI Network{loadingDots}
                           </p>
-                        ) : agents.length === 0 ? (
-                          <p className="text-muted-foreground">what goal do you want to reach today?</p>
                         ) : (
-                          <p className="text-muted-foreground">
-                            {sortedAgents.length} {sortedAgents.length === 1 ? 'agent' : 'agents'} in progress <span className="inline-block w-6 animate-dots" />
-                          </p>
+                          // Opening messages reveal animation - gradient sweep
+                          <div className="relative min-w-[600px] h-8 flex items-center justify-center">
+                            <p 
+                              className="text-muted-foreground absolute inset-0 flex items-center justify-center"
+                              style={{
+                                WebkitMaskImage: animationPhase === 'revealing'
+                                  ? `linear-gradient(90deg, 
+                                      rgba(0,0,0,1) 0%, 
+                                      rgba(0,0,0,1) ${Math.max(0, revealProgress - 20)}%, 
+                                      rgba(0,0,0,0.5) ${revealProgress}%, 
+                                      rgba(0,0,0,0) ${Math.min(100, revealProgress + 10)}%)`
+                                  : animationPhase === 'fading'
+                                  ? 'linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 100%)'
+                                  : 'linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 100%)',
+                                maskImage: animationPhase === 'revealing'
+                                  ? `linear-gradient(90deg, 
+                                      rgba(0,0,0,1) 0%, 
+                                      rgba(0,0,0,1) ${Math.max(0, revealProgress - 20)}%, 
+                                      rgba(0,0,0,0.5) ${revealProgress}%, 
+                                      rgba(0,0,0,0) ${Math.min(100, revealProgress + 10)}%)`
+                                  : animationPhase === 'fading'
+                                  ? 'linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 100%)'
+                                  : 'linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 100%)',
+                                filter: animationPhase === 'revealing'
+                                  ? `brightness(${0.3 + (revealProgress / 100) * 0.7})`
+                                  : 'brightness(1)',
+                                opacity: animationPhase === 'fading' ? 0 : 1,
+                                transition: animationPhase === 'fading' ? 'opacity 0.3s ease-out' : 'none',
+                              }}
+                            >
+                              {OPENING_MESSAGES[currentMessageIndex][0]}
+                            </p>
+                          </div>
                         )
-                      ) : isLoadingAgent ? (
-                        // Loading agent data
-                        <p className="text-muted-foreground">
-                          loading agent <span className="inline-block w-6 animate-dots" />
-                        </p>
-                      ) : agentDetail?.status === 'STARTING_UP' ? (
-                        // Agent starting up
-                        <p className="text-muted-foreground">
-                          agent starting up <span className="inline-block w-6 animate-dots" />
-                        </p>
                       ) : null}
                     </div>
                   )}
@@ -1401,12 +1695,6 @@ export default function Terminal() {
         open={createModalOpen}
         onClose={() => setCreateModalOpen(false)}
         onSubmit={handleCreateAgent}
-      />
-
-      {/* Invite Code Modal */}
-      <InviteCodeModal
-        open={inviteCodeModalOpen}
-        onOpenChange={setInviteCodeModalOpen}
       />
 
       {/* Login Modal */}

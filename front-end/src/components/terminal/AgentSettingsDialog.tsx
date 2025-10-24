@@ -265,7 +265,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
           WebkitBackdropFilter: 'blur(12px)',
         }}
       >
-        <div className="bg-[#EEEFF2]/80 dark:bg-[#1a1a1a]/80 p-6 max-h-[85vh] overflow-y-auto">
+        <div className="p-6 max-h-[85vh] overflow-y-auto" style={{ backgroundColor: 'transparent' }}>
           <DialogHeader className="mb-4">
             <DialogTitle>Agent Settings</DialogTitle>
           </DialogHeader>
