@@ -1,0 +1,162 @@
+# Agent Tools Development
+
+## Creating New Agent Tools
+
+When adding a new tool to the agent system, follow these steps:
+
+### 1. Implement the Tool
+
+Create the tool file in `agents/tools/` following the event-driven architecture:
+
+```python
+from typing import Dict, Any, Optional, AsyncGenerator
+from temporalio import activity, workflow
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
+
+class YourToolManager(ToolManager):
+    """Manager for your tool."""
+    
+    tool_name = "your_tool"
+    
+    async def execute_tool(
+        self,
+        workflow_instance,
+        tool_call: Dict[str, Any],
+        tool_call_id: str
+    ) -> AsyncGenerator[ToolEvent, None]:
+        # Pre-execution status
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="🔧 Starting task",
+            message="Working on it...",
+            status=MessageStatus.IN_PROGRESS
+        )
+        
+        # Execute activity
+        result = await workflow.execute_activity(...)
+        
+        # Post-execution success
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Task complete",
+            message="Done!",
+            status=MessageStatus.FINISHED
+        )
+```
+
+### 2. Add Pydantic Model
+
+Add the tool schema in `agents/helpers/llm.py`:
+
+```python
+class YourTool(BaseModel):
+    """Tool call for doing something."""
+    tool: Literal["your_tool"]
+    parameter: str = Field(description="What this parameter does")
+
+# Add to TOOL_MODELS
+TOOL_MODELS = {
+    "your_tool": YourTool,
+    # ... existing tools
+}
+```
+
+### 3. Register in Workflow
+
+Import and register in `agents/workflows/agent_workflow.py`:
+
+```python
+from tools.your_tool import your_tool
+
+EVENT_DRIVEN_TOOLS = {
+    "your_tool": your_tool,
+    # ... existing tools
+}
+```
+
+### 4. Add Configuration (if needed)
+
+**For agent-side tools** (like web_search): If the tool needs API keys, add to `agents/config.py`:
+
+```python
+@dataclass
+class YourServiceConfig:
+    """Your service configuration."""
+    api_key: str
+    base_url: str = "https://api.example.com"
+
+# Add to AppConfig
+@dataclass
+class AppConfig:
+    your_service: YourServiceConfig
+    # ... existing config
+```
+
+**For DB tools** (like send_sms, amazon_shopping): The **backend** handles external API calls, not the agent:
+- Add API keys to backend `.env` (not agent)
+- Agent calls backend endpoint, backend calls external service
+- This keeps credentials secure and centralized
+
+### 5. Write Tests
+
+Create tests in `agents/tests/test_your_tool.py` with:
+- Activity success test (with mocking)
+- Error handling tests
+- Edge case tests
+
+See existing test files for examples.
+
+### 6. Add Tool to Database
+
+**Use Prisma to add the tool directly to the database:**
+
+1. Create a script in `back-end/scripts/add-<tool_name>-tool.ts`:
+
+```typescript
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+async function main() {
+  try {
+    const tool = await prisma.tool.upsert({
+      where: { name: 'your_tool' },
+      update: {},
+      create: {
+        name: 'your_tool',
+        description: 'Clear description of what the tool does and when to use it. Include any parameter requirements.',
+      },
+    });
+
+    console.log('✅ your_tool tool added to database:', tool);
+  } catch (error) {
+    console.error('❌ Failed to add your_tool tool:', error);
+    process.exit(1);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+main();
+```
+
+2. Run the script:
+```bash
+cd back-end
+npx ts-node scripts/add-<tool_name>-tool.ts
+```
+
+3. Verify the tool appears in your database
+
+**Important:** Use `upsert` to avoid errors if the tool already exists. Never create manual SQL scripts - always use Prisma.
+
+## Tool Checklist
+
+Before considering a tool complete:
+- [ ] Implemented in `agents/tools/`
+- [ ] Pydantic model added to `agents/helpers/llm.py`
+- [ ] Registered in `agents/workflows/agent_workflow.py`
+- [ ] Configuration added (if needed)
+- [ ] Tests created and passing
+- [ ] Added to database via Prisma script
+- [ ] Tested end-to-end with an agent

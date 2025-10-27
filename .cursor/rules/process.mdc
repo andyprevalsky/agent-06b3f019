@@ -1,7 +1,7 @@
 ---
 description: >
   Process Rule - Defines when and how to use the Research → Plan → Implement workflow.
-  For non-trivial code changes, always follow these three steps in order.
+  For non-trivial code changes, always follow these three steps in order, confirming user approval after each phase.
 alwaysApply: true
 ---
 
@@ -36,24 +36,34 @@ Use the full three-step workflow for **non-trivial code changes**, including:
 - Changes that could break **existing functionality**
 - Changes you're **uncertain** about how to implement
 
-## The Three-Step Workflow
+## The Three-Step Workflow (With User Confirmation After Each Phase)
 
-When you identify a non-trivial change, follow these steps **in order**:
+Lean on the side of following the process, considering a change to be non-trivial. Examples of trivial changes are things like, copy changes, color changes, minor styling fixes, etc.
+
+Examples of things that are non-trivial are: new tool edits, and anything that creates a change in the database schema.
+
+When you identify a non-trivial change, follow these steps **in order**, and **pause for user review and confirmation after each step before proceeding to the next**:
 
 ### Step 1: Research
 Follow the guidelines in `research.mdc` to understand the current implementation.
 
 **Output**: Research document or findings summary
 
+**After generating the research document, present it to the user and wait for them to respond with "C" before beginning the planning phase.**
+
 ### Step 2: Plan
 Follow the guidelines in `plan.mdc` to create a detailed implementation plan.
 
 **Output**: Implementation plan document for review
 
+**After drafting the plan, pause and wait for the user to respond with "C" before starting implementation.**
+
 ### Step 3: Implement
 Follow the guidelines in `implement.mdc` to execute the approved plan.
 
 **Output**: Completed implementation with tests and documentation
+
+**Optionally, for multi-phase implementations, pause after major milestones or at user request to confirm alignment.**
 
 ## When to Skip the Workflow
 
@@ -83,24 +93,33 @@ Then it's probably trivial. Otherwise, use the workflow.
 When starting a non-trivial change, tell the user:
 
 ```
-This is a non-trivial change that affects [X, Y, Z]. I'll follow the Research → Plan → Implement workflow:
+This is a non-trivial change that affects [X, Y, Z]. I'll follow the Research → Plan → Implement workflow, stopping after each step for your review and confirmation.
 
-1. **Research**: Understanding [current implementation]
-2. **Plan**: Defining [specific changes needed]  
-3. **Implement**: [Building and testing]
-
-Starting with research phase...
+1. **Research**: Understanding [current implementation] (will pause for your confirmation)
+2. **Plan**: Defining [specific changes needed] (will pause for your confirmation)  
+3. **Implement**: [Building and testing] (will update after major milestones)
 ```
 
-When completing each phase:
+When completing each phase, always notify the user and wait for them to respond with "C" before proceeding:
 
 ```
 ✅ Research Complete
 - Found [key findings]
 - Documented in [research doc or summary]
 
-Moving to planning phase...
+Reply with "C" to continue to planning.
 ```
+
+and
+
+```
+✅ Planning Complete
+- [Key plan points/summary]
+
+Reply with "C" to continue to implementation.
+```
+
+Continue only after the user responds with "C".
 
 ## Critical Rules
 
@@ -110,6 +129,7 @@ Moving to planning phase...
 - **ALWAYS** stop and fix upstream if a phase is struggling
 - **ALWAYS** keep context under 40% throughout all phases
 - **WHEN IN DOUBT**, use the full workflow - it's better to be thorough
+- **ALWAYS** wait for user to respond with "C" before moving between phases
 
 ## Context Management Across Phases
 
@@ -118,13 +138,15 @@ Each phase should:
 2. Complete its work
 3. Generate artifacts (research doc, plan doc, progress.md)
 4. **Compact before next phase** if context > 35%
+5. **Pause for user to respond with "C"** between phases
 
-This keeps the AI effective and prevents context pollution.
+This keeps the AI effective, prevents context pollution, and ensures user alignment.
 
 ## Success Patterns
 
 You'll know you're following the process well when:
 - User understands what you're doing and why
+- User is asked for confirmation after each major step
 - Each phase completes smoothly
 - No surprises or "gotchas" during implementation  
 - Context stays managed throughout
@@ -140,6 +162,7 @@ Warning signs you're not following the process:
 - Forcing through implementation that feels wrong
 - Context bloating above 40%
 - Back-and-forth "fixing" with no clear plan
+- Proceeding between phases without user responding with "C"
 
 If you see these patterns, **STOP** and return to the appropriate phase.
 
@@ -150,4 +173,6 @@ Think of it like construction:
 - **Plan** = Creating detailed architectural plans and schedules
 - **Implement** = Actually building according to the plans
 
-You wouldn't start building without surveying and planning. Don't start coding without research and planning.
+You wouldn't start building without surveying and planning.
+You also wouldn't keep building without the project owner's sign-off at each stage.
+Don't proceed through workflow phases without the user responding with "C".

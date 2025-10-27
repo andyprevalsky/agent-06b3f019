@@ -16,6 +16,7 @@ const createAgentSchema = z.object({
   tool_ids: z.array(z.string().uuid()).nullable().optional().default([]).transform(val => val ?? []),
   task_queue: z.string().optional(), // Optional: for test isolation
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
+  user_phone: z.string().optional(), // Optional: for internal auth (sub-agent creation)
   parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)
   parent_workflow_id: z.string().optional(), // Optional: for sub-agents to signal parent
   depth: z.number().int().min(0).max(1).optional().default(0), // Nesting depth
@@ -221,6 +222,16 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
     // Start Temporal workflow with initial context containing goal message
     let workflowId: string | null = null;
     try {
+      // Get user's phone number from JWT (user auth) or request body (internal API key auth)
+      const userPhone = req.isInternal ? body.user_phone : req.user?.phone;
+      if (!userPhone) {
+        return res.status(400).json({
+          error: req.isInternal 
+            ? 'user_phone is required in request body for internal API calls'
+            : 'User phone number not found in authentication token',
+        });
+      }
+      
       workflowId = await startAgentWorkflow({
         agentId: agent.agent.id,
         userId,
@@ -232,6 +243,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
           type: body.verifier.type,
           llmJudgePrompt: body.verifier.llm_judge_prompt,
         },
+        userPhone, // Always required
         ...(body.task_queue ? { taskQueue: body.task_queue } : {}),
         ...(body.parent_workflow_id ? { parentWorkflowId: body.parent_workflow_id } : {}),
         ...(body.depth !== undefined ? { depth: body.depth } : {}),

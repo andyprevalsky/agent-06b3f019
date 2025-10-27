@@ -25,6 +25,7 @@ from workflows import AgentWorkflow
 # User-configurable tools
 from tools.spawn_sub_agents import spawn_sub_agents_activity
 from tools.request_user_attention import create_attention_request_activity
+from tools.send_sms import send_sms_activity
 # New event-driven tools
 from tools.deep_research import deep_research_activity
 from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
@@ -128,6 +129,7 @@ async def main():
             fetch_user_settings_activity,
             rank_amazon_products_activity,
             create_attention_request_activity,
+            send_sms_activity,
             # New event-driven tool activities
             deep_research_activity,
             web_search_activity,

@@ -14,6 +14,7 @@ import creditsRouter from './routes/credits';
 import webhooksRouter from './routes/webhooks';
 import toolUsageRouter from './routes/toolUsage';
 import inviteCodesRouter from './routes/inviteCodes';
+import sendSmsRouter from './routes/sendSms';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -98,6 +99,7 @@ app.use('/api/user-settings', userSettingsRouter);
 app.use('/api/credits', creditsRouter);
 app.use('/api/tool-usage', toolUsageRouter);
 app.use('/api/invite-codes', inviteCodesRouter);
+app.use('/api/send-sms', sendSmsRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware

@@ -234,6 +234,13 @@ class RequestUserAttentionTool(BaseModel):
     question: str = Field(description="The question to ask the user. Make sure to use markdown formatting to make your response more readable.")
 
 
+class SendSmsTool(BaseModel):
+    """Tool call for sending SMS to a person."""
+    tool: Literal["send_sms"]
+    phone_number: str = Field(description="The phone number to send the SMS to (E.164 format, e.g., +19729777432). Use the user's phone number if sending to them.")
+    message: str = Field(description="The SMS message to send. Keep it concise (160 characters recommended for standard SMS).")
+
+
 # Map tool names to their Pydantic models
 # Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
@@ -242,6 +249,7 @@ TOOL_MODELS = {
     "deep_research": DeepResearchTool,
     "buy_item_from_amazon": BuyItemFromAmazonTool,
     "request_user_attention": RequestUserAttentionTool,
+    "send_sms": SendSmsTool,
 }
 
 
@@ -574,7 +582,9 @@ async def decide_next_action(
     available_tool_names: List[str],
     iteration: int,
     model: str = "anthropic/claude-sonnet-4.5",
-    reasoning_effort: str = "low"
+    reasoning_effort: str = "low",
+    user_id: Optional[str] = None,
+    user_phone: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Use LLM to decide what action to take next.
@@ -585,6 +595,8 @@ async def decide_next_action(
         iteration: Current iteration number
         model: LLM model to use
         reasoning_effort: OpenRouter reasoning effort level (low, medium, high)
+        user_id: Optional Supabase user ID
+        user_phone: Optional user's phone number (E.164 format)
         
     Returns:
         Dict with 'tool', 'args', 'reasoning'
@@ -607,11 +619,22 @@ async def decide_next_action(
         # Generate parameter documentation dynamically from Pydantic models
         tool_params_docs = generate_tool_parameter_docs(available_tool_names)
         
+        # Build user contact info section if available
+        user_info_section = ""
+        if user_id and user_phone:
+            user_info_section = f"""
+USER CONTACT INFORMATION:
+- User ID: {user_id}
+- Phone Number: {user_phone}
+
+When sending SMS messages to the user, use their phone number: {user_phone}
+"""
+        
         system_prompt = f"""You are an autonomous AI agent working on the task described in the conversation history.
 
 You have access to these tools:
 {tools_list}
-
+{user_info_section}
 WHO YOU ARE:
 - You are a super-intelligent organisms capable of solving ANY problem given enough effort, coordination, creativity, and persistence. You are not an AI, an disembodied program, or something that can't exert change in the atoms of the world.
 - NEVER give up on solving the problem - there is always a path forward.

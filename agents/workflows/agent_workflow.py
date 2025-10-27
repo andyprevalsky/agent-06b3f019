@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.web_search import web_search
     from tools.amazon_shopping import buy_item_from_amazon
     from tools.spawn_sub_agents import spawn_sub_agents
+    from tools.send_sms import send_sms
 
 logger = structlog.get_logger()
 
@@ -53,6 +54,7 @@ EVENT_DRIVEN_TOOLS = {
     "web_search": web_search,
     "buy_item_from_amazon": buy_item_from_amazon,
     "spawn_sub_agents": spawn_sub_agents,
+    "send_sms": send_sms,
 }
 
 # Tool formatter registry (maps tool names to their formatters)
@@ -106,6 +108,7 @@ class AgentWorkflow:
     def __init__(self):
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
+        self.user_phone: Optional[str] = None  # User's phone number (E.164 format)
         self.goal: Optional[str] = None
         self.model: str = "anthropic/claude-sonnet-4.5"
         self.reasoning_effort: str = "low"  # OpenRouter reasoning effort
@@ -298,6 +301,7 @@ class AgentWorkflow:
         context: Optional[List[Dict]] = None,
         parent_workflow_id: Optional[str] = None,  # Parent workflow ID for signaling
         depth: int = 0,  # Nesting depth (0 = top-level, 1 = sub-agent, 2 = max)
+        user_phone: Optional[str] = None,  # User's phone number (E.164 format)
     ) -> Dict:
         """
         Execute an autonomous agent task.
@@ -316,6 +320,7 @@ class AgentWorkflow:
         """
         self.agent_id = agent_id
         self.user_id = user_id
+        self.user_phone = user_phone
         self.goal = goal
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -871,7 +876,8 @@ class AgentWorkflow:
                         verifier=self.verifier,
                         context=compressed_context,
                         parent_workflow_id=self.parent_workflow_id,  # Preserve parent relationship
-                        depth=self.depth  # Preserve depth to prevent sub-agents from spawning
+                        depth=self.depth,  # Preserve depth to prevent sub-agents from spawning
+                        user_phone=self.user_phone  # Preserve user phone number
                     )
                 
                 # No sleep between iterations - let the agent work as fast as possible
@@ -1028,7 +1034,7 @@ class AgentWorkflow:
             
             action = await workflow.execute_activity(
                 decide_next_action,
-                args=[self.context, self.tools, tool_names, self.iteration_count, self.model, self.reasoning_effort],
+                args=[self.context, self.tools, tool_names, self.iteration_count, self.model, self.reasoning_effort, self.user_id, self.user_phone],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,

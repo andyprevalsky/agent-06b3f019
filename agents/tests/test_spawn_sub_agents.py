@@ -35,6 +35,7 @@ async def test_spawn_sub_agents_success():
     # Mock workflow instance with child tracking
     mock_workflow = MagicMock()
     mock_workflow.user_id = "test-user-123"
+    mock_workflow.user_phone = "+19729777432"
     mock_workflow.agent_id = "parent-agent-456"
     mock_workflow.depth = 0
     mock_workflow.is_paused = False
@@ -141,6 +142,7 @@ async def test_spawn_sub_agents_partial_failure():
     
     mock_workflow = MagicMock()
     mock_workflow.user_id = "test-user-123"
+    mock_workflow.user_phone = "+19729777432"
     mock_workflow.agent_id = "parent-agent-456"
     mock_workflow.depth = 0
     mock_workflow.is_paused = False
@@ -234,6 +236,7 @@ async def test_spawn_sub_agents_activity_exception():
     
     mock_workflow = MagicMock()
     mock_workflow.user_id = "test-user-123"
+    mock_workflow.user_phone = "+19729777432"
     mock_workflow.agent_id = "parent-agent-456"
     mock_workflow.depth = 0
     mock_workflow.is_paused = False
@@ -301,6 +304,7 @@ async def test_spawn_agents_activity_http_success():
         with patch('tools.spawn_sub_agents.activity.heartbeat'):
             result = await spawn_sub_agents_activity(
                 user_id="test-user",
+                user_phone="+19729777432",
                 sub_agents=[
                     {"goal": "Research AI", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}},
                     {"goal": "Research ML", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}}
@@ -358,6 +362,7 @@ async def test_spawn_agents_activity_http_partial_failure():
             with patch('tools.spawn_sub_agents.activity.heartbeat'):
                 result = await spawn_sub_agents_activity(
                     user_id="test-user",
+                    user_phone="+19729777432",
                     sub_agents=[
                         {"goal": "Task 1", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}},
                         {"goal": "Task 2", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}}

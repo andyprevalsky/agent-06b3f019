@@ -127,13 +127,13 @@ create_agent() {
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{
-      \"goal\": \"Demonstrate all your tool capabilities by calling each tool you have access to (EXCEPT deep_research). For each tool: 1) Call wait_seconds with 2 seconds, 2) Call request_user_attention to ask me a simple yes/no question, 3) Call spawn_sub_agents to create 2 sub-agents that each wait 1 second. Complete this demonstration systematically.\",
-      \"model\": \"anthropic/claude-sonnet-4.5\",
-      \"tool_ids\": [],
+      \"goal\": \"Text aadi, +1 (614) 747-3277, and tell him u love him\",
+      \"model\": \"google/gemini-2.5-flash\",
+      \"tool_ids\": [\"242a9120-0107-4786-8076-afddb5919d88\"],
       \"task_queue\": \"$TEST_TASK_QUEUE\",
       \"verifier\": {
         \"type\": \"FLOAT_LLM_JUDGE\",
-        \"llm_judge_prompt\": \"Return 1.0 if the agent has successfully called all three tools: wait_seconds, request_user_attention, and spawn_sub_agents. Return 0.66 if 2 out of 3 were called. Return 0.33 if only 1 was called. Return 0.0 if no tools were called.\"
+        \"llm_judge_prompt\": \"Return 1.0 if an SMS was successfully sent to +16147473277 with the message 'u love him'. Return 0.0 if no SMS was sent or it failed.\"
       }
     }")
   

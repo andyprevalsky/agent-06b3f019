@@ -21,6 +21,7 @@ from test_request_user_attention import run_all_tests as test_request_user_atten
 from test_wait_seconds import run_all_tests as test_wait_seconds
 from test_spawn_sub_agents import run_all_tests as test_spawn_sub_agents
 from test_knowledge_base import run_all_tests as test_knowledge_base
+from test_send_sms import run_all_tests as test_send_sms
 
 
 async def run_test_silent(name: str, test_func: Callable[[], Awaitable[bool]]) -> tuple[str, bool, float]:
@@ -70,6 +71,7 @@ async def main():
         run_test_silent("Amazon Shopping", test_amazon_shopping),
         run_test_silent("Spawn Sub-Agents", test_spawn_sub_agents),
         run_test_silent("Knowledge Base", test_knowledge_base),
+        run_test_silent("Send SMS", test_send_sms),
     ]
     
     # Run sync tests (these are fast, run them sequentially, silently)
