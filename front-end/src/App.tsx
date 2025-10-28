@@ -24,11 +24,11 @@ const App = () => (
           <Analytics />
           <BrowserRouter>
             <Routes>
-              <Route path="/" element={<Index />} />
+              <Route path="/" element={<Terminal />} />
               <Route path="/privacy" element={<Privacy />} />
               <Route path="/terms" element={<Terms />} />
               <Route path="/about" element={<About />} />
-              <Route path="/terminal" element={<Terminal />} />
+              <Route path="/terminal" element={<Index />} />
               <Route path="/usage" element={<Usage />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
               <Route path="*" element={<NotFound />} />
