@@ -7,6 +7,8 @@ alwaysApply: true
 
 # Process Rule
 
+NEVER GIVE TIME ESTIMATES OR EFFORT ESTIMATES FOR HOW LONG A FEATURE WILL TAKE
+
 When a user asks you to make a code change, determine if it requires the full workflow or can be done directly because it is trivial.
 
 ## When to Use Research → Plan → Implement
