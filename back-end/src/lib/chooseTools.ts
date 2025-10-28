@@ -66,6 +66,9 @@ Return your analysis and the list of selected tool IDs.`;
       baseURL: 'https://openrouter.ai/api/v1',
     });
 
+    // @ts-expect-error - OpenAI SDK's zodResponseFormat has deep type inference issues
+    const responseFormat = zodResponseFormat(ToolSelectionSchema, 'tool_selection');
+
     const response = await client.beta.chat.completions.parse({
       model,
       messages: [
@@ -74,7 +77,7 @@ Return your analysis and the list of selected tool IDs.`;
       ],
       temperature: 0.3, // Lower temperature for more consistent selection
       max_tokens: 2000,
-      response_format: zodResponseFormat(ToolSelectionSchema, 'tool_selection'),
+      response_format: responseFormat,
     });
 
     const result = response.choices[0].message.parsed as ToolSelection;
