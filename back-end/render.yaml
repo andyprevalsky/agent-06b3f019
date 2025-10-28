@@ -13,6 +13,8 @@ services:
         value: production
       - key: DATABASE_URL
         sync: false  # Set manually - Supabase Session Pooler connection string
+      - key: DIRECT_URL
+        sync: false  # Set manually - Supabase Direct connection string (required for migrations)
       - key: SUPABASE_URL
         sync: false  # Set to: https://kzlurqihzaolhzsbkctf.supabase.co
       - key: OPENROUTER_API_KEY
