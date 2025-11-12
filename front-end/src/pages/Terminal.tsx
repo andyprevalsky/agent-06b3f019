@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift, Copy, Check } from 'lucide-react';
+import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift, Copy, Check, Plug, Network } from 'lucide-react';
 import { supabase, signOut, getCurrentUser, initializeRealtime } from '@/lib/supabase';
 import { subscribeToAgent, unsubscribe } from '@/lib/realtime';
 import {
@@ -28,6 +28,8 @@ import QueryInput from '@/components/terminal/QueryInput';
 import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
 import Settings from '@/pages/Settings';
+import Integrations from '@/pages/Integrations';
+import Usage from '@/pages/Usage';
 import UsageDisplay from '@/components/UsageDisplay';
 import PhoneAuthModal from '@/components/auth/PhoneAuthModal';
 import { useToast } from '@/hooks/use-toast';
@@ -316,7 +318,7 @@ export default function Terminal() {
   const [user, setUser] = useState<any>(null);
 
   // View state - which pane to show
-  const [currentView, setCurrentView] = useState<'agents' | 'settings'>('agents');
+  const [currentView, setCurrentView] = useState<'agents' | 'integrations' | 'settings' | 'usage'>('agents');
   
   // Sidebar state
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -1537,6 +1539,19 @@ export default function Terminal() {
           {/* Bottom Actions - with border top */}
           <div className="border-t border-border dark:border-navi-light-black">
             <div className="p-3 space-y-1">
+              {/* Integrations Button */}
+              <button
+                onClick={() => {
+                  setCurrentView('integrations');
+                  setSelectedAgentId(null);
+                  setIsSidebarOpen(false);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
+              >
+                <Plug className="h-4 w-4" />
+                <span>Integrations</span>
+              </button>
+
               {/* Settings Button */}
               <button
                 onClick={() => {
@@ -1553,7 +1568,8 @@ export default function Terminal() {
               {/* Usage Button */}
               <button
                 onClick={() => {
-                  navigate('/usage');
+                  setCurrentView('usage');
+                  setSelectedAgentId(null);
                   setIsSidebarOpen(false);
                 }}
                 className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
@@ -1627,8 +1643,11 @@ export default function Terminal() {
 
           {/* Main Content Area */}
           {currentView === 'settings' ? (
-            // Settings View
             <Settings />
+          ) : currentView === 'integrations' ? (
+            <Integrations />
+          ) : currentView === 'usage' ? (
+            <Usage />
           ) : (
             <>
             <ScrollArea 
