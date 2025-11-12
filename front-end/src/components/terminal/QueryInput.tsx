@@ -227,7 +227,7 @@ export default function QueryInput({
                   </Badge>
                 </div>
               </TooltipTrigger>
-              <TooltipContent className="z-[100]">
+              <TooltipContent>
                 <p className="text-xs font-mono">
                   {contextSize.toLocaleString()} / {restartThreshold.toLocaleString()} context used
                 </p>

@@ -36,6 +36,8 @@ with workflow.unsafe.imports_passed_through():
     from tools.amazon_shopping import buy_item_from_amazon
     from tools.spawn_sub_agents import spawn_sub_agents
     from tools.send_sms import send_sms
+    from tools.spawn_browser_agent import spawn_browser_agent
+    from tools.search_user_network import search_user_network_for_people
 
 logger = structlog.get_logger()
 
@@ -46,6 +48,7 @@ CONTEXT_THRESHOLD_PERCENTAGE = 0.8
 # Tools migrated to new event-driven system
 # Maps tool names to their workflow helper functions
 EVENT_DRIVEN_TOOLS = {
+    "spawn_browser_agent": spawn_browser_agent,
     "deep_research": deep_research,
     "wait_seconds": wait_seconds,
     "request_user_attention": request_user_attention,
@@ -55,6 +58,7 @@ EVENT_DRIVEN_TOOLS = {
     "buy_item_from_amazon": buy_item_from_amazon,
     "spawn_sub_agents": spawn_sub_agents,
     "send_sms": send_sms,
+    "search_user_network_for_people": search_user_network_for_people,
 }
 
 # Tool formatter registry (maps tool names to their formatters)
@@ -971,6 +975,10 @@ class AgentWorkflow:
             if event.status:
                 metadata["toolStatus"] = event.status.value
             
+            # Merge in any additional metadata from the event
+            if event.metadata:
+                metadata.update(event.metadata)
+            
             await self._post_message(
                 event.message or "",
                 "TOOL",
@@ -1032,9 +1040,16 @@ class AgentWorkflow:
             # Extract tool names from tools list
             tool_names = [tool["name"] for tool in self.tools]
             
+            # Filter browser sub-actions from LLM context
+            # Browser sub-actions have browser_url metadata and should not be seen by LLM
+            filtered_context = [
+                msg for msg in self.context
+                if not (msg.get("metadata") and msg["metadata"].get("browser_url"))
+            ]
+            
             action = await workflow.execute_activity(
                 decide_next_action,
-                args=[self.context, self.tools, tool_names, self.iteration_count, self.model, self.reasoning_effort, self.user_id, self.user_phone],
+                args=[filtered_context, self.tools, tool_names, self.iteration_count, self.model, self.reasoning_effort, self.user_id, self.user_phone],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
@@ -1123,9 +1138,15 @@ class AgentWorkflow:
         workflow.logger.info(f"🔍 Calling check_progress: context_type={type(self.context).__name__}, context_len={len(self.context)}, verifier_prompt={self.verifier['llmJudgePrompt'][:50]}, model={self.model}")
         
         try:
+            # Filter browser sub-actions from context (same as decide_next_action)
+            filtered_context = [
+                msg for msg in self.context
+                if not (msg.get("metadata") and msg["metadata"].get("browser_url"))
+            ]
+            
             result = await workflow.execute_activity(
                 check_progress,
-                args=[self.context, self.verifier["llmJudgePrompt"], self.model],
+                args=[filtered_context, self.verifier["llmJudgePrompt"], self.model],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,

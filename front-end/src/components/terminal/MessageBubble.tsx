@@ -4,6 +4,7 @@ import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
 import { useState, useEffect, useMemo, memo } from 'react';
 import SubAgentToolBubble from './SubAgentToolBubble';
 import { MarkdownText } from './MarkdownText';
+import { getToolIcon } from '@/lib/toolIcons';
 
 interface MessageBubbleProps {
   message: Message;
@@ -14,6 +15,7 @@ interface MessageBubbleProps {
 
 interface ToolMessageData {
   toolCallId: string;
+  toolName?: string;
   title: string;
   status: 'IN_PROGRESS' | 'FINISHED';
   message: string;
@@ -78,7 +80,10 @@ const ToolMessage = memo(function ToolMessage({
   const [isExpanded, setIsExpanded] = useState(false);
   const [hasAnimated, setHasAnimated] = useState(false);
   
-  // Extract emoji from title (memoized)
+  // Get tool icon based on toolName
+  const ToolIcon = data.toolName ? getToolIcon(data.toolName) : Wrench;
+  
+  // Extract emoji from title (memoized) - keeping for backward compatibility
   const { emoji, text: titleText } = useMemo(() => extractEmoji(data.title), [data.title]);
   
   // Memoize computed values
@@ -114,15 +119,14 @@ const ToolMessage = memo(function ToolMessage({
         )}
         onClick={hasMessage && isFinished ? () => setIsExpanded(!isExpanded) : undefined}
       >
-        {/* Emoji with grayscale filter - separate from text to avoid bg-clip-text interference */}
-        {emoji && (
-          <span 
-            className="text-sm font-medium"
-            style={{ filter: 'grayscale(1) brightness(0)' }}
-          >
-            {emoji}
-          </span>
-        )}
+        {/* Tool Icon */}
+        <ToolIcon className={cn(
+          "h-4 w-4 flex-shrink-0",
+          data.error && "text-red-600 dark:text-red-400",
+          !data.error && data.status === 'IN_PROGRESS' && "text-muted-foreground",
+          !data.error && data.status === 'FINISHED' && "text-muted-foreground"
+        )} />
+        
         {/* Text with shimmer animation */}
         <span 
           className={cn(
@@ -178,6 +182,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     
     return {
       toolCallId: message.metadata.toolCallId || '',
+      toolName: message.metadata.toolName || '',
       title: message.metadata.title || 'Tool',
       status: message.metadata.toolStatus || 'FINISHED',
       message: message.text,

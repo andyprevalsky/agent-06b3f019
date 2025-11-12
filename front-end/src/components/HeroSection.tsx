@@ -17,7 +17,7 @@ const HeroSection = () => {
   const arrowBtnRef = useRef<HTMLButtonElement>(null);
   const [typedTopSpacing, setTypedTopSpacing] = useState<number>(24);
 
-  const baseText = "Hi! I'm Navi, your voice AI ";
+  const baseText = "Hi! I'm Rose, your voice AI ";
   const words = ["companion.", "assistant.", "daemon.", "computer."];
   
   // Prioritize image loading, then allow video loading
@@ -279,7 +279,7 @@ const HeroSection = () => {
                     lowSrc="/navi-hero-image-low.png"
                     medSrc="/navi-hero-image-med.png"
                     highSrc="/navi-hero-image.png"
-                    alt="Navi"
+                    alt="Rose"
                     className="absolute inset-0 w-full h-full object-cover transform-gpu scale-[1.12] transition-opacity duration-150"
                     style={{ objectPosition: 'center center', opacity: hasPaintedFirstFrame ? 0 : 1 }}
                     fetchPriority="high"

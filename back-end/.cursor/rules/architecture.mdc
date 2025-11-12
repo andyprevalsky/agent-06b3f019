@@ -17,6 +17,7 @@ description: >
     * Required policies: SELECT, INSERT, UPDATE, DELETE (matching user access patterns)
     * Ensure proper indexes exist on filter columns (e.g., userId) for performance
     * Ensure user turns on real-time enabled on supabase dashboard
+    * MAKE SURE to use DB push when syncing the db, never use prisma migrate dev because that will DELETE all tables
   
   Authentication:
   - Method: JWKS (JSON Web Key Set)

@@ -15,6 +15,9 @@ import webhooksRouter from './routes/webhooks';
 import toolUsageRouter from './routes/toolUsage';
 import inviteCodesRouter from './routes/inviteCodes';
 import sendSmsRouter from './routes/sendSms';
+import browserSessionRouter from './routes/browserSession';
+import peopleRouter from './routes/people';
+import integrationsRouter from './routes/integrations';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -44,6 +47,7 @@ const defaultOrigins = [
   'http://127.0.0.1:8080',
   'http://localhost:5173',
   'http://localhost:8081',
+  'https://unadmirably-unelicitable-myung.ngrok-free.dev',
 ];
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
@@ -100,6 +104,9 @@ app.use('/api/credits', creditsRouter);
 app.use('/api/tool-usage', toolUsageRouter);
 app.use('/api/invite-codes', inviteCodesRouter);
 app.use('/api/send-sms', sendSmsRouter);
+app.use('/api/browser-session', browserSessionRouter);
+app.use('/api/people', peopleRouter);
+app.use('/api/integrations', integrationsRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware

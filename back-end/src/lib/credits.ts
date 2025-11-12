@@ -90,9 +90,9 @@ export async function calculateTotalUsage(userId: string): Promise<number> {
   }
 
   // Add tool usage costs (stored in cents, need to convert to microdollars)
-  const agentIds = agents.map(a => a.id);
+  // Query directly by userId (no join needed - more efficient!)
   const toolUsages = await prisma.toolUsage.findMany({
-    where: { agentId: { in: agentIds } },
+    where: { userId },
     select: { totalCostCents: true }
   });
 

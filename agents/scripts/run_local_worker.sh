@@ -29,10 +29,16 @@ fi
 
 echo "✅ Environment ready"
 echo ""
-echo "📋 Logs will appear below (Ctrl+C to stop):"
+
+# Clear the log file before starting
+echo "🗑️  Clearing log file..."
+> navi-worker-log.txt
+echo ""
+
+echo "📋 Logs will appear below and be saved to navi-worker-log.txt (Ctrl+C to stop):"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# Run the worker
-python worker.py
+# Run the worker and pipe logs to file while showing in terminal
+python worker.py 2>&1 | tee navi-worker-log.txt
 

@@ -1,7 +1,7 @@
 ---
 description: >
   Process Rule - Defines when and how to use the Research → Plan → Implement workflow.
-  For non-trivial code changes, always follow these three steps in order, confirming user approval after each phase.
+  For non-trivial code changes, always follow these three steps in order, confirming explicit user approval (with "C") after each phase. *Do not progress unless "C" is explicitly received.*
 alwaysApply: true
 ---
 
@@ -38,34 +38,34 @@ Use the full three-step workflow for **non-trivial code changes**, including:
 - Changes that could break **existing functionality**
 - Changes you're **uncertain** about how to implement
 
-## The Three-Step Workflow (With User Confirmation After Each Phase)
+## The Three-Step Workflow (With Mandatory User Confirmation 'C' After Each Phase)
 
 Lean on the side of following the process, considering a change to be non-trivial. Examples of trivial changes are things like, copy changes, color changes, minor styling fixes, etc.
 
 Examples of things that are non-trivial are: new tool edits, and anything that creates a change in the database schema.
 
-When you identify a non-trivial change, follow these steps **in order**, and **pause for user review and confirmation after each step before proceeding to the next**:
+When you identify a non-trivial change, follow these steps **in order**, and **pause for user review and explicit confirmation after each step before proceeding to the next**. **Absolutely do not advance unless the user types "C". If "C" is not provided, you MUST NOT continue.**
 
 ### Step 1: Research
 Follow the guidelines in `research.mdc` to understand the current implementation.
 
 **Output**: Research document or findings summary
 
-**After generating the research document, present it to the user and wait for them to respond with "C" before beginning the planning phase.**
+**After generating the research document, present it to the user and wait for them to respond by typing "C" before you begin the planning phase. If the user does not respond with an exact "C", DO NOT PROGRESS.**
 
 ### Step 2: Plan
 Follow the guidelines in `plan.mdc` to create a detailed implementation plan.
 
 **Output**: Implementation plan document for review
 
-**After drafting the plan, pause and wait for the user to respond with "C" before starting implementation.**
+**After drafting the plan, you must pause and wait for the user to explicitly reply with "C" before you start implementation. If you do not see "C", DO NOT PROCEED.**
 
 ### Step 3: Implement
 Follow the guidelines in `implement.mdc` to execute the approved plan.
 
 **Output**: Completed implementation with tests and documentation
 
-**Optionally, for multi-phase implementations, pause after major milestones or at user request to confirm alignment.**
+**Optionally, for multi-phase implementations, pause after major milestones or at user request to confirm alignment. Do not continue until the user types "C" if confirmation is requested.**
 
 ## When to Skip the Workflow
 
@@ -97,12 +97,12 @@ When starting a non-trivial change, tell the user:
 ```
 This is a non-trivial change that affects [X, Y, Z]. I'll follow the Research → Plan → Implement workflow, stopping after each step for your review and confirmation.
 
-1. **Research**: Understanding [current implementation] (will pause for your confirmation)
-2. **Plan**: Defining [specific changes needed] (will pause for your confirmation)  
+1. **Research**: Understanding [current implementation] (I will pause and wait for you to type "C" before continuing)
+2. **Plan**: Defining [specific changes needed] (I will pause and wait for you to type "C" before continuing)  
 3. **Implement**: [Building and testing] (will update after major milestones)
 ```
 
-When completing each phase, always notify the user and wait for them to respond with "C" before proceeding:
+When completing each phase, always notify the user and **wait for them to explicitly type "C" before proceeding. You must never move forward unless "C" is received:**
 
 ```
 ✅ Research Complete
@@ -121,7 +121,7 @@ and
 Reply with "C" to continue to implementation.
 ```
 
-Continue only after the user responds with "C".
+**Do not continue unless the user replies explicitly with "C". If "C" is not provided, you are forbidden from moving to the next phase.**
 
 ## Critical Rules
 
@@ -131,7 +131,8 @@ Continue only after the user responds with "C".
 - **ALWAYS** stop and fix upstream if a phase is struggling
 - **ALWAYS** keep context under 40% throughout all phases
 - **WHEN IN DOUBT**, use the full workflow - it's better to be thorough
-- **ALWAYS** wait for user to respond with "C" before moving between phases
+- **ALWAYS** wait for user to explicitly reply with "C" before moving between phases.  
+- **UNDER NO CIRCUMSTANCES PROCEED WITHOUT RECEIVING "C" FROM THE USER.**
 
 ## Context Management Across Phases
 
@@ -140,7 +141,7 @@ Each phase should:
 2. Complete its work
 3. Generate artifacts (research doc, plan doc, progress.md)
 4. **Compact before next phase** if context > 35%
-5. **Pause for user to respond with "C"** between phases
+5. **Pause and do not continue until the user explicitly types "C"** between phases
 
 This keeps the AI effective, prevents context pollution, and ensures user alignment.
 
@@ -149,6 +150,7 @@ This keeps the AI effective, prevents context pollution, and ensures user alignm
 You'll know you're following the process well when:
 - User understands what you're doing and why
 - User is asked for confirmation after each major step
+- You receive a clear "C" input, and only then do you continue
 - Each phase completes smoothly
 - No surprises or "gotchas" during implementation  
 - Context stays managed throughout
@@ -164,9 +166,10 @@ Warning signs you're not following the process:
 - Forcing through implementation that feels wrong
 - Context bloating above 40%
 - Back-and-forth "fixing" with no clear plan
-- Proceeding between phases without user responding with "C"
+- Proceeding between phases without user replying with "C"
+- Advancing if the user says anything except "C"
 
-If you see these patterns, **STOP** and return to the appropriate phase.
+If you see these patterns, **STOP IMMEDIATELY** and return to the appropriate phase and **never proceed unless you see the user type "C"**.
 
 ## Mental Model
 
@@ -177,4 +180,4 @@ Think of it like construction:
 
 You wouldn't start building without surveying and planning.
 You also wouldn't keep building without the project owner's sign-off at each stage.
-Don't proceed through workflow phases without the user responding with "C".
+**Under no circumstances do you proceed to the next workflow phase unless the user has explicitly replied with "C". Any other response is not sufficient, and you must wait without advancing.**

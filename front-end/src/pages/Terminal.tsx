@@ -22,6 +22,7 @@ import {
 import CreateAgentModal from '@/components/terminal/CreateAgentModal';
 import AgentListItem from '@/components/terminal/AgentListItem';
 import MessageBubble from '@/components/terminal/MessageBubble';
+import BrowserViewPanel from '@/components/terminal/BrowserViewPanel';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
 import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
@@ -107,6 +108,100 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
   );
 
   return deduplicatedMessages;
+}
+
+// Group browser messages into panels with their sub-actions
+function groupBrowserMessages(messages: Message[]): { messages: Message[]; browserPanels: Map<string, { initMessage: Message; actions: Message[]; currentBrowserUrl: string }> } {
+  const browserPanels = new Map<string, { initMessage: Message; actions: Message[]; currentBrowserUrl: string }>();
+  const nonBrowserMessages: Message[] = [];
+  
+  // Debug: Count browser messages (have task_id)
+  const browserMessages = messages.filter(m => m.metadata?.task_id);
+  const nonScreenshotBrowser = browserMessages.filter(m => !m.metadata?.title?.includes('Screenshot'));
+  if (nonScreenshotBrowser.length > 0) {
+    console.log('🟢 [Group] Grouping browser messages:', {
+      totalMessages: messages.length,
+      browserMessages: browserMessages.length,
+      nonScreenshot: nonScreenshotBrowser.length,
+      titles: nonScreenshotBrowser.map(m => m.metadata?.title),
+      messageIds: nonScreenshotBrowser.map(m => m.message_id.slice(0, 12)),
+      uniqueTaskIds: [...new Set(browserMessages.map(m => m.metadata?.task_id))].length
+    });
+  }
+
+  messages.forEach((message) => {
+    const taskId = message.metadata?.task_id;
+    const browserUrl = message.metadata?.browser_url || '';
+
+    // Only treat as browser message if task_id is present
+    if (taskId) {
+      // This is a browser-related message (has task_id metadata)
+      const existing = browserPanels.get(taskId);
+      
+      if (existing) {
+        // Already have a panel for this task - add as action (create new array to trigger React re-render)
+        const newActions = [...existing.actions, message];
+        // Update currentBrowserUrl if this message has a new one (for resume)
+        const latestBrowserUrl = browserUrl || existing.currentBrowserUrl;
+        browserPanels.set(taskId, {
+          initMessage: existing.initMessage,
+          actions: newActions,
+          currentBrowserUrl: latestBrowserUrl
+        });
+        console.log('🔵 [Group] Added action to existing panel:', {
+          taskId: taskId.slice(0, 20),
+          title: message.metadata?.title,
+          messageId: message.message_id.slice(0, 12),
+          totalActions: newActions.length,
+          actionTitles: newActions.map(a => a.metadata?.title)
+        });
+      } else {
+        // First message with this task_id - create panel
+        browserPanels.set(taskId, {
+          initMessage: message,
+          actions: [],
+          currentBrowserUrl: browserUrl
+        });
+        console.log('🟢 [Group] Created new panel:', {
+          taskId: taskId.slice(0, 20),
+          title: message.metadata?.title,
+          messageId: message.message_id.slice(0, 12)
+        });
+      }
+    } else {
+      // Regular message (not browser-related)
+      nonBrowserMessages.push(message);
+    }
+  });
+
+  // Combine browser panels into the message stream
+  // Insert each panel at the position of its init message
+  const combinedMessages: Message[] = [];
+  const processedTaskIds = new Set<string>();
+
+  messages.forEach((message) => {
+    const taskId = message.metadata?.task_id;
+
+    // If this is the first browser message with this task_id
+    if (taskId && !processedTaskIds.has(taskId)) {
+      processedTaskIds.add(taskId);
+      // Add a special marker message for the browser panel
+      combinedMessages.push({
+        ...message,
+        metadata: {
+          ...message.metadata,
+          _browserPanel: true, // Special flag to render BrowserViewPanel
+          _taskId: taskId
+        }
+      });
+    } else if (!taskId) {
+      // Regular non-browser message
+      combinedMessages.push(message);
+    }
+    // Skip subsequent browser action messages (they're rendered inside the panel)
+  });
+
+  return { messages: combinedMessages, browserPanels };
 }
 
 // Component for displaying invite code content inside popover
@@ -208,7 +303,7 @@ function InviteCodeContent() {
 // Opening messages for reveal animation [message, pauseDurationMs]
 const OPENING_MESSAGES: [string, number][] = [
   ["Hello!", 1800],
-  ["We're Navi.", 1800],
+  ["We're Rose.", 1800],
   ["A massive network of over 10,000 AIs.", 3800],
   ["We work together to form a super intelligent system.", 2500],
   ["Our purpose is to make your dreams come true.", 2500],
@@ -225,6 +320,9 @@ export default function Terminal() {
   
   // Sidebar state
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  // Browser fullscreen state - shared across all browser panels
+  const [anyBrowserFullscreen, setAnyBrowserFullscreen] = useState(false);
 
   // Agent list state
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -243,7 +341,11 @@ export default function Terminal() {
   const [isLoadingAgent, setIsLoadingAgent] = useState(false);
   
   // Message input state
-  const [messageInput, setMessageInput] = useState('');
+  const [messageInput, setMessageInput] = useState(
+    import.meta.env.DEV 
+      ? `Go to render.com and start a new instance`
+      : ''
+  );
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState('google/gemini-2.5-flash');
   
@@ -295,7 +397,8 @@ export default function Terminal() {
     "Get me a boyfriend",
     "Get me a girlfriend",
     "Make sure my parents are taken care of",
-    "Make sure I am a good friend"
+    "Make sure I am a good friend",
+    "Maximize my luck surface area",
   ];
   const [tickerOffset, setTickerOffset] = useState(0);
   const tickerRef = useRef<HTMLDivElement>(null);
@@ -684,8 +787,40 @@ export default function Terminal() {
   }, [selectedAgentId]);
 
   // Snap to bottom when messages change (only if user was already near bottom)
+  // BUT: Don't scroll for browser action messages - those only scroll their own panel
   useEffect(() => {
     if (!messagesEndRef.current) return;
+
+    // Check if the last message added was a browser action
+    // Browser actions should only scroll their panel, not the main chat
+    const lastMessage = messages[messages.length - 1];
+    const isBrowserAction = lastMessage?.metadata?.browser_url;
+    
+    if (isBrowserAction) {
+      console.log('📜 [Scroll] Skipping main chat scroll - browser action should scroll panel only');
+      return;
+    }
+
+    // Skip auto-scroll if there's an active or paused browser panel
+    // Check if any message has task_id without being completed
+    const hasActiveBrowser = messages.some(msg => {
+      const taskId = msg.metadata?.task_id;
+      if (!taskId) return false;
+      
+      // Find the last message for this task_id
+      const taskMessages = messages.filter(m => m.metadata?.task_id === taskId);
+      const lastTaskMessage = taskMessages[taskMessages.length - 1];
+      const actionType = lastTaskMessage?.metadata?.action_type;
+      
+      // Browser task is active if it exists and is not completed/error
+      const isComplete = actionType === 'task_complete' || actionType === 'error';
+      return !isComplete;
+    });
+    
+    if (hasActiveBrowser) {
+      console.log('📜 [Scroll] Skipping auto-scroll (active browser panel)');
+      return;
+    }
 
     // Find the radix scroll area viewport
     const scrollContainer = messagesEndRef.current.closest('[data-radix-scroll-area-viewport]');
@@ -712,6 +847,7 @@ export default function Terminal() {
     // This preserves scroll position if user is reading old messages
     // Larger threshold prevents new messages from pushing user out of auto-scroll
     if (distanceFromBottom < 500) {
+      console.log('📜 [Scroll] Auto-scrolling main chat to bottom');
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
     }
   }, [messages]);
@@ -743,15 +879,16 @@ export default function Terminal() {
       }
       
       // TOOL messages animate if they are FINISHED, have a message, AND are NOT sub-agent tools
-      // Sub-agent tools don't support animation, so they should never block the queue
+      // Browser actions also animate - just inside their panel instead of main chat
       if (nextMessage.role === 'TOOL') {
         const isSubAgentTool = !!nextMessage.metadata?.subAgentId;
+        const isBrowserAction = !!nextMessage.metadata?.browser_url;
         const status = nextMessage.metadata?.toolStatus;
         const message = nextMessage.text || '';
         
+        // All tool messages (including browser actions) animate and block the buffer
         if (!isSubAgentTool && status === 'FINISHED' && message.trim().length > 0) {
           shouldAnimate = true;
-          console.log(`[${performance.now().toFixed(2)}] 🎯 SHOULD COLLAPSE: FINISHED tool with message detected`);
         }
       }
       
@@ -1042,8 +1179,10 @@ export default function Terminal() {
   });
 
   // Memoize deduplicated messages to prevent unnecessary re-renders
-  const displayedMessages = useMemo(() => {
-    return deduplicateToolMessages(messages.filter((m) => m.role !== 'SYSTEM'));
+  const { displayedMessages, browserPanels } = useMemo(() => {
+    const deduplicated = deduplicateToolMessages(messages.filter((m) => m.role !== 'SYSTEM'));
+    const grouped = groupBrowserMessages(deduplicated);
+    return { displayedMessages: grouped.messages, browserPanels: grouped.browserPanels };
   }, [messages]);
 
   // Get system messages
@@ -1207,7 +1346,7 @@ export default function Terminal() {
                   'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)',
               }}
             ></div>
-            <span className="text-base font-semibold tracking-tight">Navi</span>
+            <span className="text-base font-semibold tracking-tight">Rose</span>
           </button>
         </div>
         
@@ -1332,7 +1471,7 @@ export default function Terminal() {
         />
       </div>
 
-      <div className="h-screen flex items-center justify-center overflow-hidden z-[4]">
+      <div className="h-screen flex items-center justify-center z-[4]">
         {/* Overlay */}
         {isSidebarOpen && (
           <div 
@@ -1590,15 +1729,58 @@ export default function Terminal() {
                   opacity: displayedMessages.length > 0 ? 1 : 0,
                 }}
               >
-                {displayedMessages.map((message) => (
-                  <MessageBubble 
-                    key={message.message_id} 
-                    message={message}
-                    shouldType={message.message_id === currentAnimatingId}
-                    onTypingComplete={handleAnimationComplete}
-                    onNavigateToAgent={handleSelectAgent}
-                  />
-                ))}
+                {displayedMessages.map((message) => {
+                  // Check if this is a browser panel message
+                  if (message.metadata?._browserPanel) {
+                    const taskId = message.metadata._taskId as string;
+                    const panelData = browserPanels.get(taskId);
+                    
+                    if (!panelData) {
+                      return null;
+                    }
+
+                    const mappedActions = panelData.actions.map((action) => ({
+                      id: action.message_id,
+                      title: action.metadata?.title || 'Browser action',
+                      message: action.text,
+                      status: action.metadata?.toolStatus || 'FINISHED',
+                      timestamp: action.timestamp,
+                      action_type: action.metadata?.action_type,
+                      auxiliary: action.metadata?.auxiliary
+                    }));
+                    
+                    // The last action should ALWAYS animate (whenever panel re-renders with new action)
+                    // But ONLY if this is the message currently being processed from buffer
+                    const lastAction = panelData.actions[panelData.actions.length - 1];
+                    const isThisMessageAnimating = message.message_id === currentAnimatingId;
+                    const isLastActionAnimating = lastAction && lastAction.message_id === currentAnimatingId;
+                    const shouldAnimate = isLastActionAnimating || isThisMessageAnimating;
+                    
+                    return (
+                      <BrowserViewPanel
+                        key={message.message_id}
+                        taskId={taskId}  // Use stable task_id as ID
+                        browserUrl={panelData.currentBrowserUrl}  // Current browser URL (may change on resume)
+                        actions={mappedActions}
+                        shouldAnimate={shouldAnimate}
+                        onAnimationComplete={handleAnimationComplete}
+                        isAnyBrowserFullscreen={anyBrowserFullscreen}
+                        onFullscreenToggle={setAnyBrowserFullscreen}
+                      />
+                    );
+                  }
+                  
+                  // Regular message
+                  return (
+                    <MessageBubble 
+                      key={message.message_id} 
+                      message={message}
+                      shouldType={message.message_id === currentAnimatingId}
+                      onTypingComplete={handleAnimationComplete}
+                      onNavigateToAgent={handleSelectAgent}
+                    />
+                  );
+                })}
                 
                 {/* Show paused text when agent is paused */}
                 {agentDetail?.status === 'PAUSED' && (

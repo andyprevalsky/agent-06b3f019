@@ -68,3 +68,4 @@ venv.bak/
 .pytest_cache/
 # VS Code Python settings
 .vscode/settings.json
+agents/navi-worker-log.txt

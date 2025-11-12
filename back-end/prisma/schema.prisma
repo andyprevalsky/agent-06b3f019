@@ -179,14 +179,16 @@ model ModelPricingCache {
 
 model ToolUsage {
   id             String   @id @default(uuid())
-  agentId        String
-  toolName       String // Tool name (e.g., "deep_research", "web_search")
-  totalCostCents Int // Pre-calculated total cost in cents (sum of all usage items)
-  usageItems     Json // Array of UsageItem objects: [{type, cost_cents, provider, number_of_tokens?, token_price_per_million_cents?}]
+  userId         String   // User ID for direct user-level queries (required)
+  agentId        String?  // Agent ID (optional - null for non-agent operations like embeddings)
+  toolName       String   // Tool name (e.g., "deep_research", "web_search", "generate_person_embedding")
+  totalCostCents Int      // Pre-calculated total cost in cents (sum of all usage items)
+  usageItems     Json     // Array of UsageItem objects: [{type, cost_cents, provider, number_of_tokens?, token_price_per_million_cents?}]
   createdAt      DateTime @default(now())
 
-  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agent Agent? @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
+  @@index([userId])       // Fast user-level cost queries
   @@index([agentId])
   @@index([createdAt])
   @@index([toolName])
@@ -251,4 +253,185 @@ model Subscription {
 
   @@index([userId])
   @@index([stripeSubscriptionId])
+}
+
+model BrowserContext {
+  id          String   @id @default(uuid())
+  userId      String   @unique // One context per user
+  contextId   String   @unique // Browserbase context ID (stores cookies, localStorage, etc.)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  sessions BrowserSession[]
+  
+  @@index([userId])
+  @@index([contextId])
+}
+
+model BrowserSession {
+  id         String                @id @default(uuid()) // Stable task ID for frontend grouping
+  contextId  String                // FK to BrowserContext
+  agentId    String                // Which agent created this session
+  sessionId  String                @unique // Browserbase session ID (changes on resume)
+  status     BrowserSessionStatus  @default(ACTIVE)
+  debugUrl   String?               // Browserbase debug/connect URL
+  currentUrl String?               // Last known page URL
+  createdAt  DateTime              @default(now())
+  closedAt   DateTime?
+  
+  context BrowserContext @relation(fields: [contextId], references: [id], onDelete: Cascade)
+  
+  @@index([contextId])
+  @@index([agentId])
+  @@index([sessionId])
+  @@index([status])
+}
+
+enum BrowserSessionStatus {
+  ACTIVE
+  PAUSED
+  CLOSED
+  ERROR
+}
+
+model MessageRecord {
+  id         String         @id @default(uuid())
+  personId   String
+  channel    MessageChannel
+  from       String         // Sender identifier
+  to         String         // Recipient identifier  
+  timestamp  DateTime       // When message was sent
+  message    String         @db.Text
+  createdAt  DateTime       @default(now())
+  
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+  
+  @@index([personId, channel])
+  @@index([timestamp])
+  @@index([personId, timestamp])  // For "last N messages"
+}
+
+enum MessageChannel {
+  IMESSAGE
+  WHATSAPP
+  EMAIL
+  TELEGRAM
+  TWITTER
+  INSTAGRAM_DM
+  MESSENGER
+}
+
+model Person {
+  id        String   @id @default(uuid())
+  userId    String   // Supabase user ID - whose network this person belongs to
+  
+  // ==================== CORE IDENTITY (8 signals) ====================
+  firstName         String   // REQUIRED
+  lastName          String   // REQUIRED
+  age               Int?
+  location          String?
+  profession        String?
+  company           String?
+  title             String?
+  industry          String?
+  
+  // ==================== CONTACT INFO ====================
+  email             String?
+  phoneNumber       String?
+  linkedinUrl       String?
+  instagramHandle   String?
+  facebookUrl       String?
+  twitterHandle     String?
+  emailAddresses    Json?    @default("[]")  // JSON array of additional emails
+  
+  // ==================== RELATIONSHIP (3 signals) ====================
+  relation                  String?  // e.g., "best_friend", "colleague", "mentor"
+  communicationFrequency    String?  // "daily", "weekly", "monthly", "yearly", "rarely"
+  relationshipQuality       String?  // "strong", "moderate", "weak", "strained"
+  
+  // ==================== SKILLS & INTERESTS (2 signals) ====================
+  skills            Json?    @default("[]")  // JSON array of strings
+  interests         Json?    @default("[]")  // JSON array of strings
+  
+  // ==================== INFLUENCE & REACH (3 signals) ====================
+  totalOnlineReach          Int?     // Combined social media reach
+  estimatedNetWorthUsd      Float?   // Explicit dollar amount (e.g., 1500000 = $1.5M)
+  estimatedWorldPowerRanking Int?    // 1-10 scale (1 = most powerful)
+  
+  // ==================== AVAILABILITY & STATUS (2 signals) ====================
+  currentBandwidth          String?  // "totally_free", "light", "moderate", "busy", "totally_swamped"
+  contactStatus             String?  // "active", "dormant", "lost_contact"
+  
+  // ==================== NETWORK ORIENTATION ====================
+  networkOrientation        String?  // "giver", "taker", "matcher"
+  
+  // ==================== METADATA ====================
+  notes             String?  @db.Text
+  
+  // ==================== VECTOR EMBEDDING ====================
+  embedding         Json?    // Pre-computed embedding vector (text-embedding-3-small)
+  
+  // ==================== MESSAGE HISTORIES ====================
+  messageRecords MessageRecord[]  // All messages across all channels
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Indexes for fast queries
+  @@index([userId])
+  @@index([firstName])
+  @@index([lastName])
+  @@index([email])
+  @@index([phoneNumber])
+  @@index([profession])
+  @@index([company])
+  @@index([relation])
+  @@index([communicationFrequency])
+  @@index([currentBandwidth])
+  
+  // Collision detection: userId + phone must be unique (emails can be shared)
+  @@unique([userId, phoneNumber])
+}
+
+model Integration {
+  id        String   @id @default(uuid())
+  userId    String   // Supabase user ID
+  
+  // Integration identification
+  type      IntegrationType  // Tool setup or data source
+  name      String           // e.g., "linkedin", "send_imessage", "send_email"
+  
+  // Status tracking
+  status           IntegrationStatus  @default(NOT_CONNECTED)
+  isActive         Boolean            @default(false)
+  
+  // Sync timestamps
+  lastSyncAt       DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastFailedSyncAt DateTime?
+  failureReason    String?           @db.Text
+  
+  // Configuration (JSON object with integration-specific settings)
+  config           Json?             // e.g., { oauth_token, refresh_token, file_path, etc. }
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@unique([userId, name])  // One integration per type per user
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+}
+
+enum IntegrationType {
+  TOOL_SETUP      // send_imessage, send_email
+  DATA_SOURCE     // linkedin, google, twitter, etc.
+}
+
+enum IntegrationStatus {
+  NOT_CONNECTED   // Never set up
+  CONNECTED       // Successfully connected
+  SYNCING         // Currently syncing data
+  SYNC_FAILED     // Last sync failed
+  EXPIRED         // OAuth token expired
 }

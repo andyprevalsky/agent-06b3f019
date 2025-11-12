@@ -241,6 +241,53 @@ class SendSmsTool(BaseModel):
     message: str = Field(description="The SMS message to send. Keep it concise (160 characters recommended for standard SMS).")
 
 
+class SpawnBrowserAgentTool(BaseModel):
+    """Spawn an autonomous browser agent to complete complex, multi-step web tasks. The browser agent uses AI to navigate, interact, and accomplish goals without step-by-step orchestration. Provide a complete, high-level goal - the browser agent will autonomously break it down and execute all necessary steps. Login state persists across sessions."""
+    tool: Literal["spawn_browser_agent"]
+    goal: str = Field(description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Order a Chipotle bowl from Uber Eats with white rice, steak, fajita peppers, corn, pico de gallo, and hot sauce', 'Find the top 3 trending Python repos on GitHub and summarize their READMEs', 'Check my Gmail inbox and respond to any urgent emails from my manager', 'Research and compare prices for MacBook Pro M3 across Amazon, Best Buy, and Apple Store'")
+
+
+class SearchUserNetworkTool(BaseModel):
+    """Tool for searching user's network for people matching specific criteria. Use this to find connections who can help with specific tasks, have certain skills, or meet manifestation goals."""
+    tool: Literal["search_user_network_for_people"]
+    
+    # Core identity - first_name and last_name are REQUIRED
+    first_name: str = Field(description="First name of person (REQUIRED)")
+    last_name: str = Field(description="Last name of person (REQUIRED)")
+    
+    # Optional search criteria - fill in what matters for the goal
+    age: Optional[int] = Field(None, description="Age of person (e.g., 35, 50)")
+    location: Optional[str] = Field(None, description="Location (e.g., 'San Francisco, CA', 'New York')")
+    profession: Optional[str] = Field(None, description="Profession (e.g., 'venture capitalist', 'software engineer')")
+    company: Optional[str] = Field(None, description="Company name (e.g., 'Google', 'Sequoia Capital')")
+    title: Optional[str] = Field(None, description="Job title (e.g., 'CEO', 'Partner', 'VP Engineering')")
+    industry: Optional[str] = Field(None, description="Industry (e.g., 'venture capital', 'technology', 'healthcare')")
+    
+    # Relationship criteria
+    relation: Optional[str] = Field(None, description="Relationship type (e.g., 'best_friend', 'colleague', 'mentor', 'family')")
+    communication_frequency: Optional[str] = Field(None, description="How often you communicate: 'daily', 'weekly', 'monthly', 'yearly', 'rarely'")
+    relationship_quality: Optional[str] = Field(None, description="Relationship quality: 'strong', 'moderate', 'weak', 'strained'")
+    
+    # Skills & Interests
+    skills: Optional[List[str]] = Field(None, description="Skills they possess (e.g., ['fundraising', 'product management', 'marketing'])")
+    interests: Optional[List[str]] = Field(None, description="Their interests (e.g., ['AI', 'sustainability', 'art'])")
+    
+    # Influence & Reach
+    total_online_reach: Optional[int] = Field(None, description="Minimum social media reach/followers")
+    estimated_net_worth_usd: Optional[float] = Field(None, description="Minimum estimated net worth in USD (e.g., 1500000 for $1.5M)")
+    estimated_world_power_ranking: Optional[int] = Field(None, ge=1, le=10, description="World power ranking 1-10 (1=most powerful)")
+    
+    # Availability
+    current_bandwidth: Optional[str] = Field(None, description="Their availability: 'totally_free', 'light', 'moderate', 'busy', 'totally_swamped'")
+    contact_status: Optional[str] = Field(None, description="Contact status: 'active', 'dormant', 'lost_contact'")
+    
+    # Network Orientation
+    network_orientation: Optional[str] = Field(None, description="How they network: 'giver', 'taker', 'matcher'")
+    
+    # Additional context
+    notes: Optional[str] = Field(None, description="Additional context or notes about the person you're looking for")
+
+
 # Map tool names to their Pydantic models
 # Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
@@ -250,6 +297,8 @@ TOOL_MODELS = {
     "buy_item_from_amazon": BuyItemFromAmazonTool,
     "request_user_attention": RequestUserAttentionTool,
     "send_sms": SendSmsTool,
+    "spawn_browser_agent": SpawnBrowserAgentTool,
+    "search_user_network_for_people": SearchUserNetworkTool,
 }
 
 

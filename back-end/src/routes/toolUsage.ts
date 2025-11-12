@@ -51,7 +51,8 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     // Save tool usage
     const toolUsage = await prisma.toolUsage.create({
       data: {
-        agentId: agent_id,
+        userId: user_id,      // Direct user tracking
+        agentId: agent_id,    // Agent-specific tracking
         toolName: tool_name,
         totalCostCents: total_cost_cents,
         usageItems: usage_items

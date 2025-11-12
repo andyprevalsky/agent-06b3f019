@@ -13,6 +13,7 @@ description: >
   - Write all tools as separate files in agents/tools/. Each tool is a Temporal activity
   - Activities MUST: Be idempotent (safe on retry; use idempotency keys/upserts for side effects), Support retries with exponential backoff as defined in config/fly.toml (never hardcoded), Heartbeat every 5–10 seconds if potentially long-running (over 30s), Never block for sleep/waiting purposes—use timers only in workflows
   - NEVER use activity-based waits. Use workflow.sleep() exclusively when you want time delays or schedule future actions
+  - MAKE sure when adding a new tool to connect all the pipes necessary from the workflow to the tool, make sure to read through the workflow code from start to finish and make sure we are piping in the required activities and helper functions, pay EXTRA attention to this
   
   Workflow Patterns:
   - Workflows MUST be deterministic: always produce same results for same inputs, even if replayed

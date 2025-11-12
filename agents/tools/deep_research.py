@@ -49,13 +49,30 @@ class DeepResearchManager(ToolManager):
             status=MessageStatus.IN_PROGRESS
         )
         
-        # 2. Execute research activity
+        # 2. Execute research activity (MOCKED - deep research disabled)
         try:
-            result = await workflow.execute_activity(
-                deep_research_activity,
-                args=[query, max_tokens],
-                start_to_close_timeout=timedelta(seconds=480)  # 8 minutes max
-            )
+            # Mock result - deep research is currently disabled
+            result = {
+                "report": f"Deep research is currently disabled. Query was: {query}",
+                "citations": [],
+                "query": query,
+                "model": "sonar-deep-research",
+                "report_length": 0,
+                "citation_count": 0,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "citation_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "search_count": 0,
+                }
+            }
+            # Original activity call (commented out):
+            # result = await workflow.execute_activity(
+            #     deep_research_activity,
+            #     args=[query, max_tokens],
+            #     start_to_close_timeout=timedelta(seconds=480)  # 8 minutes max
+            # )
         except Exception as e:
             # Error status
             yield ToolEvent(

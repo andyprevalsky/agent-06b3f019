@@ -129,8 +129,8 @@ const FeaturesSection = () => {
       description: "",
       details: [
         "Change the LLM provider, System Prompt & Voice to create your perfect AI companion.",
-        "Connect your own tools to Navi through MCPs, or use tools shared by other devs in our marketplace.",
-        "Navi comes with prebuilt presets to get you up and running with SOTA models in an instant."
+        "Connect your own tools to Rose through MCPs, or use tools shared by other devs in our marketplace.",
+        "Rose comes with prebuilt presets to get you up and running with SOTA models in an instant."
       ]
     },
     {
@@ -146,18 +146,18 @@ const FeaturesSection = () => {
       title: "Agent Enabled",
       description: "",
       details: [
-        "Navi agents break down, measure & iterate towards any long-term goal.",
-        "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Navi can take real-world actions on your behalf.",
+        "Rose agents break down, measure & iterate towards any long-term goal.",
+        "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Rose can take real-world actions on your behalf.",
         "Each agent runs on a SOTA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions."
       ]
     },
     {
-      title: "Navi Grows With You",
+      title: "Rose Grows With You",
       description: "",
       details: [
-        "After each conversation, Navi extracts key entity information to keep track of your most important relationships, events, and ideas.",
-        "Navi's personality evolves to match your communication style.",
-        "Time-based queries keep Navi working in the background, constantly refining its understanding of your world and ideating on ways to help you grow."
+        "After each conversation, Rose extracts key entity information to keep track of your most important relationships, events, and ideas.",
+        "Rose's personality evolves to match your communication style.",
+        "Time-based queries keep Rose working in the background, constantly refining its understanding of your world and ideating on ways to help you grow."
       ]
     },
     {
@@ -165,7 +165,7 @@ const FeaturesSection = () => {
       description: "",
       details: [
         <>
-          Your conversations stay private. Navi never stores or sells your data. View our privacy policy{" "}
+          Your conversations stay private. Rose never stores or sells your data. View our privacy policy{" "}
           <a 
             href="/privacy" 
             className="text-primary hover:text-primary/80 underline transition-colors"
@@ -173,7 +173,7 @@ const FeaturesSection = () => {
             here.
           </a>
         </>,
-        "Navi does not passively listen, and is designed to only trigger active listening according to the customizable wake word, \"Hi Navi\".",
+        "Rose does not passively listen, and is designed to only trigger active listening according to the customizable wake word, \"Hi Rose\".",
         "Audio data & transcriptions are streamed directly, securely & anonymously to AI providers."
       ]
     }
@@ -292,7 +292,7 @@ const FeaturesSection = () => {
             <span className="gradient-text">Features</span>
           </h2>
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto reveal-up reveal-delay-1">
-            Navi is a hackable smart speaker designed for developers
+            Rose is a hackable smart speaker designed for developers
           </p>
         </div>
         
@@ -477,9 +477,9 @@ const FeaturesSection = () => {
                               ></div>
                               <span className="text-foreground/80 leading-relaxed">{
                                 (index === 4 && detailIndex === 1)
-                                  ? 'Navi does not passively listen, active listening is enabled only by the customizable wake word, "Hi Navi".'
+                                  ? 'Rose does not passively listen, active listening is enabled only by the customizable wake word, "Hi Rose".'
                                   : (isMobile && index === 3 && detailIndex === 2)
-                                    ? 'Time based queries keep navi working in the background.'
+                                    ? 'Time based queries keep Rose working in the background.'
                                     : detail
                               }</span>
                             </li>

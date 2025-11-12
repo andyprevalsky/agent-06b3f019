@@ -71,6 +71,21 @@ class PerplexityConfig:
 
 
 @dataclass
+class GeminiConfig:
+    """Google Gemini configuration."""
+    
+    api_key: str
+
+
+@dataclass
+class BrowserbaseConfig:
+    """Browserbase configuration for browser automation."""
+    
+    api_key: str
+    project_id: str
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
     
@@ -79,6 +94,8 @@ class AppConfig:
     openrouter: OpenRouterConfig
     openai: OpenAIConfig
     perplexity: PerplexityConfig
+    gemini: GeminiConfig
+    browserbase: BrowserbaseConfig
     
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -133,12 +150,23 @@ def load_config() -> AppConfig:
         model=os.getenv("PERPLEXITY_MODEL", "sonar-deep-research"),
     )
     
+    gemini = GeminiConfig(
+        api_key=os.environ["GEMINI_API_KEY"],
+    )
+    
+    browserbase = BrowserbaseConfig(
+        api_key=os.environ["BROWSERBASE_API_KEY"],
+        project_id=os.environ["BROWSERBASE_PROJECT_ID"],
+    )
+    
     return AppConfig(
         temporal=temporal,
         backend=backend,
         openrouter=openrouter,
         openai=openai,
         perplexity=perplexity,
+        gemini=gemini,
+        browserbase=browserbase,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

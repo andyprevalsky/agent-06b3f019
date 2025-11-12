@@ -13,5 +13,8 @@
     "back-end",
     "front-end",
     "agents"
-  ]
+  ],
+  "dependencies": {
+    "@browserbasehq/stagehand": "^2.5.2"
+  }
 }
