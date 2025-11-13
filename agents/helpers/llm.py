@@ -481,11 +481,23 @@ async def call_llm_structured(
     
     config = load_config()
     
-    # Create OpenAI client
-    base_client = AsyncOpenAI(
-        api_key=config.openrouter.api_key,
-        base_url=config.openrouter.base_url
-    )
+    # Check if this is a Rose model - route to backend instead of OpenRouter
+    is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
+    
+    if is_rose_model:
+        # Use backend URL and backend API key for Rose models
+        base_client = AsyncOpenAI(
+            api_key=config.backend.api_key,
+            base_url=f"{config.backend.api_url}/v1",
+            default_headers={"X-API-Key": config.backend.api_key}
+        )
+        logger.info(f"🌹 Routing Rose model to backend: {model} → {config.backend.api_url}/v1")
+    else:
+        # Use OpenRouter for all other models
+        base_client = AsyncOpenAI(
+            api_key=config.openrouter.api_key,
+            base_url=config.openrouter.base_url
+        )
     
     # Patch client with Instructor for structured outputs
     # Force JSON mode instead of native function calling because:
@@ -572,12 +584,25 @@ async def call_llm(
         activity.heartbeat(f"Calling LLM with {len(messages)} messages")
         
         config = load_config()
-        client = AsyncOpenAI(
-            api_key=config.openrouter.api_key,
-            base_url=config.openrouter.base_url
-        )
-        
         model = model or config.openrouter.model
+        
+        # Check if this is a Rose model - route to backend instead of OpenRouter
+        is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
+        
+        if is_rose_model:
+            # Use backend URL and backend API key for Rose models
+            client = AsyncOpenAI(
+                api_key=config.backend.api_key,
+                base_url=f"{config.backend.api_url}/v1",
+                default_headers={"X-API-Key": config.backend.api_key}
+            )
+            logger.info(f"🌹 Routing Rose model to backend: {model} → {config.backend.api_url}/v1")
+        else:
+            # Use OpenRouter for all other models
+            client = AsyncOpenAI(
+                api_key=config.openrouter.api_key,
+                base_url=config.openrouter.base_url
+            )
         
         # Call OpenRouter
         response = await client.chat.completions.create(

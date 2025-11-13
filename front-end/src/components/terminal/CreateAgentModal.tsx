@@ -39,7 +39,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
 
   const [goal, setGoal] = useState(defaultGoal);
   const [llmJudgePrompt, setLlmJudgePrompt] = useState(defaultLlmJudgePrompt);
-  const [selectedModel, setSelectedModel] = useState('google/gemini-2.5-flash');
+  const [selectedModel, setSelectedModel] = useState('rose-labs/★-rose');
   const [reasoningEffort, setReasoningEffort] = useState<'off' | 'low' | 'medium' | 'high'>('high');
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);

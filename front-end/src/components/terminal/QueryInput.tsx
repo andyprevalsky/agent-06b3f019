@@ -42,7 +42,7 @@ export default function QueryInput({
   onSubmit,
   disabled = false,
   placeholder = 'Type your message...',
-  selectedModel = 'google/gemini-2.5-flash',
+  selectedModel = 'rose-labs/★-rose',
   onModelChange,
   availableModels = [],
   modelsLoading = false,

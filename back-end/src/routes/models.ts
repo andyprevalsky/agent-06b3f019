@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import NodeCache from 'node-cache';
+import { MODEL_POOLS } from './rose';
 
 const router = Router();
 // Cache models for 1 hour (3600 seconds)
@@ -44,6 +45,80 @@ router.delete('/cache', (req: Request, res: Response) => {
 });
 
 /**
+ * Helper function to calculate Rose pricing and context length from model pool
+ */
+async function calculateRoseMetadata(modelName: string, allModels: OpenRouterModel[]) {
+  try {
+    const pool = MODEL_POOLS[modelName as keyof typeof MODEL_POOLS];
+    if (!pool) {
+      throw new Error(`Unknown Rose model: ${modelName}`);
+    }
+
+    // Calculate average pricing and minimum context length
+    let totalPrompt = 0;
+    let totalCompletion = 0;
+    let validModels = 0;
+    let minContextLength = Infinity;
+
+    for (const modelId of pool) {
+      const modelInfo = allModels.find((m: any) => m.id === modelId);
+      
+      if (modelInfo) {
+        // Track minimum context length for all models
+        const contextLength = modelInfo.top_provider?.context_length || modelInfo.context_length;
+        if (contextLength && contextLength < minContextLength) {
+          minContextLength = contextLength;
+        }
+
+        // Track pricing only for models that have it
+        if (modelInfo.pricing) {
+          // OpenRouter returns price per token, accumulate as-is
+          const promptCost = parseFloat(modelInfo.pricing.prompt || '0');
+          const completionCost = parseFloat(modelInfo.pricing.completion || '0');
+          
+          totalPrompt += promptCost;
+          totalCompletion += completionCost;
+          validModels++;
+        }
+      }
+    }
+
+    if (validModels === 0) {
+      throw new Error('No pricing information available for models in pool');
+    }
+
+    // Calculate averages (per token)
+    const avgPrompt = totalPrompt / validModels;
+    const avgCompletion = totalCompletion / validModels;
+    
+    // Convert to per-million tokens for rounding, then back to per-token
+    const roundUpToNearestFiveCents = (perTokenPrice: number) => {
+      const perMillionPrice = perTokenPrice * 1000000;
+      const roundedPerMillion = Math.ceil(perMillionPrice / 0.05) * 0.05;
+      return roundedPerMillion / 1000000;
+    };
+
+    return {
+      pricing: {
+        prompt: roundUpToNearestFiveCents(avgPrompt).toString(),
+        completion: roundUpToNearestFiveCents(avgCompletion).toString()
+      },
+      contextLength: minContextLength === Infinity ? 200000 : minContextLength
+    };
+  } catch (error) {
+    console.error(`Error calculating ${modelName} metadata:`, error);
+    // Return fallback values
+    return {
+      pricing: {
+        prompt: '0.05',
+        completion: '0.10'
+      },
+      contextLength: 200000
+    };
+  }
+}
+
+/**
  * GET /api/models - Get available OpenRouter models
  * Returns cached list of models sorted by provider and capability
  * Filters to only models that support tool use
@@ -80,10 +155,36 @@ router.get('/', async (req: Request, res: Response) => {
     // Transform and sort models
     const sortedModels = sortModels(toolSupportedModels);
 
-    // Cache the results
-    modelCache.set('models', sortedModels);
+    // Calculate metadata for Rose models dynamically (pricing + context length)
+    const roseMetadata = await calculateRoseMetadata('★-rose', allModels);
+    const roseUltraMetadata = await calculateRoseMetadata('rose-ultra', allModels);
 
-    res.json({ models: sortedModels, cached: false, count: sortedModels.length });
+    // Inject Rose models at the beginning
+  const roseModels: SortedModel[] = [
+    {
+      id: 'rose-labs/★-rose',
+      name: '★-rose',
+      provider: 'rose-labs',
+      description: 'Rose Labs workhorse model for most tasks',
+      contextLength: roseMetadata.contextLength,
+      pricing: roseMetadata.pricing
+    },
+    {
+      id: 'rose-labs/rose-ultra',
+      name: 'rose-ultra',
+      provider: 'rose-labs',
+      description: 'Rose Labs high-end model for extremely complex tasks',
+      contextLength: roseUltraMetadata.contextLength,
+      pricing: roseUltraMetadata.pricing
+    }
+  ];
+
+    const finalModels = [...roseModels, ...sortedModels];
+
+    // Cache the results
+    modelCache.set('models', finalModels);
+
+    res.json({ models: finalModels, cached: false, count: finalModels.length });
   } catch (error) {
     console.error('Models endpoint error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
