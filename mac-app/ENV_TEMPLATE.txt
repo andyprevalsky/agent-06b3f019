@@ -1,0 +1,15 @@
+# Copy this to .env and fill in your values
+
+# Supabase Configuration
+VITE_SUPABASE_URL=your-supabase-url
+VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+
+# Backend API URL
+VITE_BACKEND_URL=http://localhost:3001
+
+# Encryption Key for electron-store (change in production)
+ENCRYPTION_KEY=change-this-in-production
+
+# Development Mode
+NODE_ENV=development
+

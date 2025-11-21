@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift, Copy, Check, Plug, Network } from 'lucide-react';
@@ -19,6 +19,7 @@ import {
   Message,
   CreateAgentPayload,
 } from '@/lib/api';
+import { getClientSource } from '@/lib/clientSource';
 import CreateAgentModal from '@/components/terminal/CreateAgentModal';
 import AgentListItem from '@/components/terminal/AgentListItem';
 import MessageBubble from '@/components/terminal/MessageBubble';
@@ -31,6 +32,7 @@ import Settings from '@/pages/Settings';
 import Integrations from '@/pages/Integrations';
 import Usage from '@/pages/Usage';
 import UsageDisplay from '@/components/UsageDisplay';
+import NetworkView from '@/components/terminal/NetworkView';
 import PhoneAuthModal from '@/components/auth/PhoneAuthModal';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData, Model } from '@/hooks/useAppData';
@@ -38,6 +40,7 @@ import { cn } from '@/lib/utils';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { colorPalette, frameSequence, getTileColorsForFrame } from '@/lib/tileAnimation';
 import SmallTileAnimationCanvas from '@/components/terminal/SmallTileAnimationCanvas';
+import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
 
 function getModelContextWindow(model: string, models: Model[]): number {
   // Look up the actual context length from the models data
@@ -312,13 +315,47 @@ const OPENING_MESSAGES: [string, number][] = [
   ["What is the first goal you have?", 0] // Last message stays visible
 ];
 
+// Non-linear mapping functions for increased sensitivity around slider positions 1%, 2%, 28%
+// Blur: More precision around slider 1% (maps to ~1px blur)
+function mapBlurSlider(slider: number): number {
+  // Compress range around 1%: 0-5% slider maps to 0-2px (more precision)
+  if (slider <= 5) {
+    return (slider / 5) * 2; // 0-5% slider -> 0-2px (1% slider ≈ 0.4px)
+  }
+  // Rest maps normally: 5-100% slider -> 2-12px
+  return 2 + ((slider - 5) / 95) * 10;
+}
+
+// Colors: More precision around slider 2% 
+function mapColorsSlider(slider: number): number {
+  // Compress range around 2%: 0-10% slider maps to 0-5% actual
+  if (slider <= 10) {
+    return (slider / 10) * 5; // 0-10% slider -> 0-5% (2% slider = 1% actual)
+  }
+  // Rest maps normally: 10-100% slider -> 5-100%
+  return 5 + ((slider - 10) / 90) * 95;
+}
+
+// Shadow: More precision around slider 28%
+function mapShadowSlider(slider: number): number {
+  // Compress range around 28%: 20-40% slider maps to 20-35% actual (more precision)
+  if (slider <= 20) {
+    return (slider / 20) * 20; // 0-20% slider -> 0-20%
+  }
+  if (slider <= 40) {
+    return 20 + ((slider - 20) / 20) * 15; // 20-40% slider -> 20-35% (28% slider ≈ 26% actual)
+  }
+  // Rest maps normally: 40-100% slider -> 35-100%
+  return 35 + ((slider - 40) / 60) * 65;
+}
+
 export default function Terminal() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [user, setUser] = useState<any>(null);
 
   // View state - which pane to show
-  const [currentView, setCurrentView] = useState<'agents' | 'integrations' | 'settings' | 'usage'>('agents');
+  const [currentView, setCurrentView] = useState<'agents' | 'integrations' | 'settings' | 'usage' | 'network'>('agents');
   
   // Sidebar state
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -335,6 +372,7 @@ export default function Terminal() {
   const [loginModalOpen, setLoginModalOpen] = useState(false);
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
   const [inviteModalPosition, setInviteModalPosition] = useState({ top: 0, right: 0 });
+  const clientSource = useMemo(() => getClientSource(), []);
   
   // Selected agent state
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -349,7 +387,7 @@ export default function Terminal() {
       : ''
   );
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('rose-labs/★-rose');
+  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-fast');
   
   // Models and tools from cached context
   const { models, modelsLoading } = useAppData();
@@ -385,6 +423,7 @@ export default function Terminal() {
   const popularGoals = [
     "Cure cancer",
     "Make me a master painter",
+    "Mitigate the impending climate crisis",
     "Get me socks",
     "Make sure my birthday is amazing",
     "Get me 5 new friends",
@@ -392,20 +431,80 @@ export default function Terminal() {
     "Make sure I accomplish my body goals",
     "Get me into Stanford",
     "Optimize my nutrition",
+    "Get me a girlfriend",
     "Raise me 1 million dollars",
     "Find me my first 10 customers",
+    "Save children in Gaza",
     "Make sure my startup succeeds",
     "Make me happy",
     "Get me a boyfriend",
-    "Get me a girlfriend",
     "Make sure my parents are taken care of",
-    "Make sure I am a good friend",
+    "Ensure my friends are well supported",
     "Maximize my luck surface area",
   ];
   const [tickerOffset, setTickerOffset] = useState(0);
   const tickerRef = useRef<HTMLDivElement>(null);
   const animationFrameRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(Date.now());
+
+  // Separate drippiness controls (0-100, persisted to localStorage)
+  const [backgroundColors, setBackgroundColors] = useState(() => {
+    const saved = localStorage.getItem('drippiness-bg-colors');
+    return saved ? Number(saved) : 3; // Default to 3% (from screenshot)
+  });
+  const [blur, setBlur] = useState(() => {
+    const saved = localStorage.getItem('drippiness-blur');
+    return saved ? Number(saved) : 10; // Default to 10% (from screenshot)
+  });
+  const [shadowIntensity, setShadowIntensity] = useState(() => {
+    const saved = localStorage.getItem('drippiness-shadow');
+    return saved ? Number(saved) : 16; // Default to 16% (from screenshot)
+  });
+  const [borderColor, setBorderColor] = useState(() => {
+    const saved = localStorage.getItem('drippiness-border');
+    return saved ? Number(saved) : 23; // Default to 23% (from screenshot)
+  });
+
+  // Persist to localStorage
+  useEffect(() => {
+    localStorage.setItem('drippiness-bg-colors', backgroundColors.toString());
+  }, [backgroundColors]);
+  useEffect(() => {
+    localStorage.setItem('drippiness-blur', blur.toString());
+  }, [blur]);
+  useEffect(() => {
+    localStorage.setItem('drippiness-shadow', shadowIntensity.toString());
+  }, [shadowIntensity]);
+  useEffect(() => {
+    localStorage.setItem('drippiness-border', borderColor.toString());
+  }, [borderColor]);
+
+  // Calculate drip styles from separate controls with non-linear mapping
+  const dripStyles = useMemo(() => {
+    const bgScalar = mapColorsSlider(backgroundColors) / 100; // 0 to 1 (non-linear)
+    const blurPx = mapBlurSlider(blur); // 0px -> 12px (non-linear, more precision around 0-2px)
+    const shadowScalar = mapShadowSlider(shadowIntensity) / 100; // 0 to 1 (non-linear, more precision around 20-35%)
+    const borderScalar = borderColor / 100; // 0 to 1
+    
+    // Interpolate border color from white (255,255,255) to dark gray (80,80,80)
+    const borderR = Math.round(255 - (borderScalar * 175)); // 255 -> 80
+    const borderG = Math.round(255 - (borderScalar * 175)); // 255 -> 80
+    const borderB = Math.round(255 - (borderScalar * 175)); // 255 -> 80
+    
+    return {
+      blur: blurPx,
+      bgOpacity: 0.6 + (bgScalar * 0.35),     // 0.6 -> 0.95 (more opaque for white marble)
+      borderOpacity: 0.4 + (bgScalar * 0.6),  // 0.4 -> 1.0
+      shadowIntensity: shadowScalar * 0.25,   // 0 -> 0.25 (softer shadows)
+      glow: shadowScalar * 16,                // 0px -> 16px (soft white glow)
+      glowOpacity: shadowScalar * 0.08,        // 0 -> 0.08 (very subtle)
+      saturation: 1.0 + (bgScalar * 0.3),      // 1.0 -> 1.3 (less saturation, more white)
+      brightness: 1.0 + (bgScalar * 0.3),     // 1.0 -> 1.3 (brighter, more ethereal)
+      backgroundColorsScalar: bgScalar,
+      borderColorScalar: borderScalar,
+      borderRgb: `rgba(${borderR}, ${borderG}, ${borderB}, ${0.5 + (borderScalar * 0.5)})`,
+    };
+  }, [backgroundColors, blur, shadowIntensity, borderColor]);
 
   // Tile animation state
   const [currentFrame, setCurrentFrame] = useState(0);
@@ -1017,7 +1116,7 @@ export default function Terminal() {
   };
 
   const handleCreateAgent = async (data: CreateAgentPayload) => {
-    const newAgent = await createAgentAPI(data);
+    const newAgent = await createAgentAPI({ ...data, source: clientSource });
     await loadAgents();
     setCurrentView('agents');
     setSelectedAgentId(newAgent.agent_id);
@@ -1078,6 +1177,7 @@ export default function Terminal() {
         const newAgent = await createAgentAPI({
           goal: messageInput,
           model: selectedModel,
+          source: clientSource,
           verifier: {
             type: 'FLOAT_LLM_JUDGE',
             llm_judge_prompt: `You are judging whether the agent has achieved the following goal: "${messageInput}"\n\nScoring Instructions:\n- Return a float between 0.0 and 1.0.\n- 0.0 means no progress or only explanations/plans.\n- 1.0 means the goal is FULLY accomplished with verifiable proof.\n- Do not award 1.0 for partial completion.\n- The agent has access to tools and can solve problems through persistence and creativity.`,
@@ -1169,6 +1269,100 @@ export default function Terminal() {
     setIsLoadingNetwork(false);
   };
 
+  // Handle quick query from launcher (Electron app)
+  const handleQuickQuery = useCallback(async (payload: QuickLauncherPayload) => {
+    const trimmed = payload.query?.trim();
+    if (!trimmed) return;
+
+    // Switch to agents view and close sidebar
+    setCurrentView('agents');
+    setIsSidebarOpen(false);
+    
+    // Set the input temporarily (for display purposes)
+    setMessageInput(trimmed);
+    
+    // Submit the query immediately by calling handleSendMessage
+    // But we need to use the trimmed value directly since state updates are async
+    if (!user) {
+      setLoginModalOpen(true);
+      toast({
+        title: 'Authentication required',
+        description: 'Please log in to continue',
+      });
+      return;
+    }
+
+    try {
+      setIsSendingMessage(true);
+      
+      // If no agent selected, create a new agent
+      if (!selectedAgentId) {
+        // Trigger loading network animation
+        setIsLoadingNetwork(true);
+        
+        const newAgent = await createAgentAPI({
+          goal: trimmed,
+          model: selectedModel,
+          source: clientSource,
+          verifier: {
+            type: 'FLOAT_LLM_JUDGE',
+            llm_judge_prompt: `You are judging whether the agent has achieved the following goal: "${trimmed}"\n\nScoring Instructions:\n- Return a float between 0.0 and 1.0.\n- 0.0 means no progress or only explanations/plans.\n- 1.0 means the goal is FULLY accomplished with verifiable proof.\n- Do not award 1.0 for partial completion.\n- The agent has access to tools and can solve problems through persistence and creativity.`,
+          },
+        });
+        await loadAgents();
+        setCurrentView('agents');
+        setSelectedAgentId(newAgent.agent_id);
+        await loadAgentDetail(newAgent.agent_id);
+        setMessageInput(''); // Clear input after agent is loaded
+        toast({
+          title: 'Agent created',
+          description: 'Your new agent has been created and is starting',
+        });
+        return;
+      }
+      
+      // Check if there's a pending attention request for this agent and respond to it
+      const respondedToRequest = await checkAndRespondToAttentionRequest(
+        selectedAgentId,
+        trimmed
+      );
+      
+      if (respondedToRequest) {
+        toast({
+          description: 'Responded to attention request',
+        });
+      } else {
+        // Regular message sending
+        await postMessageAPI(selectedAgentId, trimmed);
+      }
+      
+      setMessageInput(''); // Clear input after successful send
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to send message',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSendingMessage(false);
+    }
+  }, [user, selectedAgentId, selectedModel, toast, loadAgents, loadAgentDetail]);
+
+  // Listen for quick query events (from Electron launcher)
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<QuickLauncherPayload>).detail;
+      if (!detail) return;
+      handleQuickQuery(detail);
+    };
+
+    window.addEventListener(QUICK_QUERY_EVENT, handler as EventListener);
+
+    return () => {
+      window.removeEventListener(QUICK_QUERY_EVENT, handler as EventListener);
+    };
+  }, [handleQuickQuery]);
+
   const sortedAgents = [...agents].sort((a, b) => {
     // Completed agents go to the bottom
     if (a.status === 'COMPLETED' && b.status !== 'COMPLETED') return 1;
@@ -1226,7 +1420,7 @@ export default function Terminal() {
 
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden">
+    <div className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden" style={{ height: '100dvh' }}>
       {/* Background Pattern - z-[3] renders tile borders above animation canvases (z-[2]) */}
       <svg className="absolute inset-0 w-full h-full pointer-events-none z-[3]" xmlns="http://www.w3.org/2000/svg" style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}>
         <defs>
@@ -1329,15 +1523,34 @@ export default function Terminal() {
 
       {/* Floating Blur Header */}
       <header 
-        className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between px-1 py-1 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
+        className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between px-1 py-1 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg overflow-hidden"
         style={{
           width: '320px',
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)',
+          backdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+          WebkitBackdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+          backgroundColor: backgroundColors > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity})` : undefined,
+          borderColor: borderColor > 0 ? dripStyles.borderRgb : undefined,
+          boxShadow: shadowIntensity > 0 
+            ? `0 8px 32px rgba(0, 0, 0, ${dripStyles.shadowIntensity}), 0 0 ${dripStyles.glow}px rgba(126, 87, 194, ${dripStyles.glowOpacity}), inset 0 1px 1px rgba(255,255,255,${dripStyles.bgOpacity * 0.5})`
+            : undefined,
         }}
       >
+        {/* Marble gradient background - soft white with pastel hints */}
+        {backgroundColors > 0 && (
+          <div 
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              background: `radial-gradient(circle at 10% 20%, rgba(255, 248, 245, ${0.7 * dripStyles.backgroundColorsScalar}) 0%, transparent 40%), 
+                           radial-gradient(circle at 90% 80%, rgba(248, 245, 255, ${0.6 * dripStyles.backgroundColorsScalar}) 0%, transparent 40%),
+                           radial-gradient(circle at 50% 50%, rgba(255, 252, 255, ${0.5 * dripStyles.backgroundColorsScalar}) 0%, transparent 60%)`,
+              opacity: 0.3 + dripStyles.backgroundColorsScalar * 0.5,
+              zIndex: -1,
+            }}
+          />
+        )}
         <div className="flex items-center space-x-1">
           <button 
+            type="button"
             onClick={handleCreateNewAgent}
             className="flex items-center space-x-2.5 px-1 cursor-pointer hover:opacity-80 transition-opacity"
           >
@@ -1353,12 +1566,15 @@ export default function Terminal() {
         </div>
         
         {/* Research Button - Absolutely centered in viewport */}
-        <a
-          href="/"
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            console.log('Research button clicked');
+          }}
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors z-10"
         >
           Research
-        </a>
+        </button>
         
         {/* Attention Inbox */}
         <AttentionInbox onSelectAgent={setSelectedAgentId} />
@@ -1373,13 +1589,30 @@ export default function Terminal() {
       >
         <button
           onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-lg hover:bg-white/10 transition-colors"
+          className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-sm hover:bg-white/10 transition-colors overflow-hidden relative"
           style={{
-            backdropFilter: 'blur(12px)',
-            WebkitBackdropFilter: 'blur(12px)',
+            backdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+            WebkitBackdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+            backgroundColor: backgroundColors > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity})` : undefined,
+            borderColor: borderColor > 0 ? dripStyles.borderRgb : undefined,
+            boxShadow: shadowIntensity > 0 
+              ? `0 4px 16px rgba(0, 0, 0, ${dripStyles.shadowIntensity}), 0 0 ${dripStyles.glow}px rgba(126, 87, 194, ${dripStyles.glowOpacity})`
+              : undefined,
           }}
           aria-label="Toggle menu"
         >
+          {/* Marble gradient background - soft white with pastel hints */}
+          {backgroundColors > 0 && (
+            <div 
+              className="absolute inset-0 pointer-events-none"
+              style={{
+                background: `radial-gradient(circle at 30% 30%, rgba(255, 250, 252, ${0.6 * dripStyles.backgroundColorsScalar}) 0%, transparent 70%), 
+                             radial-gradient(circle at 70% 70%, rgba(248, 245, 255, ${0.5 * dripStyles.backgroundColorsScalar}) 0%, transparent 70%)`,
+                opacity: 0.3 + dripStyles.backgroundColorsScalar * 0.5,
+                zIndex: -1,
+              }}
+            />
+          )}
           {isSidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
       </div>
@@ -1407,7 +1640,7 @@ export default function Terminal() {
           }}
           disabled={!user}
           className={cn(
-            "w-[38px] h-[38px] flex items-center justify-center rounded-lg bg-navi-black border border-navi-light-black shadow-lg transition-all duration-200",
+            "w-[38px] h-[38px] flex items-center justify-center rounded-lg bg-navi-black border border-navi-light-black shadow-sm transition-all duration-200",
             user 
               ? "hover:bg-navi-light-black cursor-pointer opacity-100" 
               : "cursor-not-allowed opacity-50"
@@ -1433,9 +1666,13 @@ export default function Terminal() {
             style={{ 
               top: `${inviteModalPosition.top}px`,
               right: `${inviteModalPosition.right}px`,
-              backgroundColor: 'transparent',
-              backdropFilter: 'blur(24px)',
-              WebkitBackdropFilter: 'blur(12px)',
+              backgroundColor: backgroundColors > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity})` : undefined,
+              backdropFilter: blur > 0 ? `blur(${Math.max(20, dripStyles.blur)}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+              WebkitBackdropFilter: blur > 0 ? `blur(${Math.max(20, dripStyles.blur)}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+              borderColor: borderColor > 0 ? dripStyles.borderRgb : undefined,
+              boxShadow: shadowIntensity > 0 
+                ? `0 8px 32px rgba(0, 0, 0, ${dripStyles.shadowIntensity}), inset 0 1px 1px rgba(255,255,255,${dripStyles.bgOpacity * 0.5})`
+                : undefined,
             }}
           >
             <div className="p-5 space-y-4">
@@ -1444,7 +1681,7 @@ export default function Terminal() {
                   Your Invite Code
                 </p>
                 <p className="text-xs text-navi-black/70 mt-1">
-                  Share this code with friends to invite them to Navi
+                  Share this code with friends to invite them to Rose Labs
                 </p>
               </div>
 
@@ -1473,7 +1710,7 @@ export default function Terminal() {
         />
       </div>
 
-      <div className="h-screen flex items-center justify-center z-[4]">
+      <div className="h-screen flex items-center justify-center z-[4]" style={{ height: '100dvh' }}>
         {/* Overlay */}
         {isSidebarOpen && (
           <div 
@@ -1489,8 +1726,13 @@ export default function Terminal() {
             isSidebarOpen ? "translate-x-0" : "-translate-x-full"
           )}
           style={{
-            backdropFilter: 'blur(12px)',
-            WebkitBackdropFilter: 'blur(12px)',
+            backdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+            WebkitBackdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+            backgroundColor: backgroundColors > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity * 0.95})` : undefined,
+            borderColor: borderColor > 0 ? dripStyles.borderRgb : undefined,
+            boxShadow: shadowIntensity > 0 
+              ? `inset 0 1px 1px rgba(255,255,255,${dripStyles.bgOpacity * 0.5})`
+              : undefined,
           }}
         >
           {/* Create Agent Button */}
@@ -1552,6 +1794,19 @@ export default function Terminal() {
                 <span>Integrations</span>
               </button>
 
+              {/* Network Button */}
+              <button
+                onClick={() => {
+                  setCurrentView('network');
+                  setSelectedAgentId(null);
+                  setIsSidebarOpen(false);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
+              >
+                <Network className="h-4 w-4" />
+                <span>Network</span>
+              </button>
+
               {/* Settings Button */}
               <button
                 onClick={() => {
@@ -1595,7 +1850,7 @@ export default function Terminal() {
         </aside>
 
         {/* Main Content - Centered */}
-        <main className="flex flex-col relative max-w-5xl w-full h-screen">
+        <main className="flex flex-col relative max-w-5xl w-full h-screen" style={{ height: '100dvh' }}>
           {/* Breadcrumb for sub-agents - Below Header */}
           {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
             <div className="absolute top-20 left-0 right-0 z-40 px-6">
@@ -1608,8 +1863,8 @@ export default function Terminal() {
                   }}
                   className="px-4 py-2 rounded-lg text-sm flex items-center gap-2 border border-gray-200/50 dark:border-gray-700/50 bg-white/80 dark:bg-gray-800/80 shadow-lg"
                   style={{
-                    backdropFilter: 'blur(12px)',
-                    WebkitBackdropFilter: 'blur(12px)',
+                    backdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+                    WebkitBackdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
                   }}
                 >
                   <span className="truncate max-w-[200px] text-gray-600 dark:text-gray-400">{agentDetail.parent_goal}</span>
@@ -1648,6 +1903,8 @@ export default function Terminal() {
             <Integrations />
           ) : currentView === 'usage' ? (
             <Usage />
+          ) : currentView === 'network' ? (
+            <NetworkView />
           ) : (
             <>
             <ScrollArea 
@@ -1662,8 +1919,12 @@ export default function Terminal() {
               <div 
                 className="absolute inset-0 pointer-events-none ease-in-out"
                 style={{
-                  backdropFilter: selectedAgentId ? 'blur(20px)' : 'blur(0px)',
-                  WebkitBackdropFilter: selectedAgentId ? 'blur(20px)' : 'blur(0px)',
+                  backdropFilter: selectedAgentId && blur > 0 
+                    ? `blur(${dripStyles.blur + 8}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})`
+                    : undefined,
+                  WebkitBackdropFilter: selectedAgentId && blur > 0 
+                    ? `blur(${dripStyles.blur + 8}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})`
+                    : undefined,
                   maskImage: 'linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%)',
                   WebkitMaskImage: 'linear-gradient(to right, transparent 0%, black 15%, black 85%, transparent 100%)',
                   zIndex: 15,
@@ -1686,7 +1947,7 @@ export default function Terminal() {
                   opacity: (!selectedAgentId || displayedMessages.length === 0) ? 1 : 0.2,
                   transform: (!selectedAgentId || displayedMessages.length === 0) ? 'translateY(0)' : 'translateY(8px)',
                   zIndex: 18,
-                  height: '100vh',
+                  height: '100dvh',
                 }}
               >
                 <div className="text-center space-y-6" style={{ marginBottom: '20vh' }}>
@@ -1832,7 +2093,7 @@ export default function Terminal() {
           {/* Message Input - Always visible */}
           <div 
             ref={queryInputRef}
-            className="pb-6 transition-opacity duration-300 ease-in-out"
+            className="pb-6 transition-opacity duration-300 ease-in-out relative"
             style={{
               // Only fade for FAILED status, not COMPLETED (since we show a prominent button)
               opacity: agentDetail && agentDetail.status === 'FAILED' ? 0.8 : 1
@@ -1840,9 +2101,9 @@ export default function Terminal() {
           >
             {/* Popular Goals Carousel - Only visible when no agent selected */}
             {!selectedAgentId && (
-              <div className="mb-4">
+              <div className="mb-4 relative z-10">
                 <div className="flex items-center gap-3">
-                  <span className="text-sm text-muted-foreground whitespace-nowrap flex-shrink-0">Popular Goals</span>
+                  <span className="hidden md:block text-sm text-muted-foreground whitespace-nowrap flex-shrink-0">Popular Goals</span>
                   <div className="relative flex-1 overflow-hidden">
                     <div 
                       ref={tickerRef}
@@ -1858,7 +2119,10 @@ export default function Terminal() {
                           onClick={() => {
                             setMessageInput(goal);
                           }}
-                          className="px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 rounded-full whitespace-nowrap flex-shrink-0"
+                          className="px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 rounded-full whitespace-nowrap flex-shrink-0 border"
+                          style={{
+                            borderColor: borderColor > 0 ? dripStyles.borderRgb : undefined,
+                          }}
                         >
                           {goal}
                         </button>
@@ -1868,6 +2132,7 @@ export default function Terminal() {
                 </div>
               </div>
             )}
+            <div className="relative z-10">
             <QueryInput
               value={messageInput}
               onChange={setMessageInput}
@@ -1884,7 +2149,10 @@ export default function Terminal() {
               showModelSelector={!selectedAgentId}
               agentCompleted={selectedAgentId !== null && agentDetail?.status === 'COMPLETED'}
               onCreateNewAgent={handleCreateNewAgent}
+              dripStyles={dripStyles}
+              drippiness={blur}
             />
+            </div>
           </div>
           </>
           )}

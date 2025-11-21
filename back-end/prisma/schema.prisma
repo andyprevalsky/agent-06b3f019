@@ -1,50 +1,40 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
   provider  = "postgresql"
-  url       = env("DATABASE_URL")  // Pooler for queries
-  directUrl = env("DIRECT_URL")     // Direct connection for migrations
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model Agent {
-  id                 String          @id @default(uuid())
-  userId             String // Supabase user ID
-  parentAgentId      String? // Parent agent ID (for sub-agents)
-  goal               String          @db.Text
-  model              String          @default("google/gemini-2.5-flash") // LLM model driving this agent (immutable after creation)
-  reasoningEffort    ReasoningEffort @default(low) // OpenRouter reasoning effort level
-  progress           Float           @default(0.0) // 0.0 to 1.0
-  status             AgentStatus     @default(STARTING_UP)
-  statusMessage      String?         @db.Text
-  temporalWorkflowId String? // Links to Temporal workflow
-  deletedAt          DateTime? // Soft delete
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
-
-  // Pricing (saved at creation, immutable) - stored as millionths of a dollar per token
-  // Example: $0.000001/token * 1,000,000 = 1, $0.000003/token * 1,000,000 = 3
-  tokenInPriceMicrodollars  Int? // Cost per input token in microdollars (dollar * 1M)
-  tokenOutPriceMicrodollars Int? // Cost per output token in microdollars (dollar * 1M)
-
-  // Metrics
-  tokenCount   Int @default(0) // Cumulative tokens used (total)
-  tokensIn     Int @default(0) // Input tokens (prompt)
-  tokensOut    Int @default(0) // Output tokens (completion)
-  contextSize  Int @default(0) // Current context window usage in tokens
-  messageCount Int @default(0) // Total messages in context
-
-  // Relations
-  parent     Agent?       @relation("AgentHierarchy", fields: [parentAgentId], references: [id], onDelete: SetNull)
-  children   Agent[]      @relation("AgentHierarchy")
-  verifier   Verifier?
-  tools      AgentTool[]
-  messages   Message[]
-  toolUsages ToolUsage[]
+  id                        String          @id @default(uuid())
+  userId                    String
+  goal                      String
+  progress                  Float           @default(0.0)
+  status                    AgentStatus     @default(STARTING_UP)
+  statusMessage             String?
+  deletedAt                 DateTime?
+  createdAt                 DateTime        @default(now())
+  updatedAt                 DateTime        @updatedAt
+  temporalWorkflowId        String?
+  model                     String          @default("google/gemini-2.5-flash")
+  contextSize               Int             @default(0)
+  messageCount              Int             @default(0)
+  tokenCount                Int             @default(0)
+  reasoningEffort           ReasoningEffort @default(low)
+  tokensIn                  Int             @default(0)
+  tokensOut                 Int             @default(0)
+  parentAgentId             String?
+  tokenInPriceMicrodollars  Int?
+  tokenOutPriceMicrodollars Int?
+  parent                    Agent?          @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
+  children                  Agent[]         @relation("AgentHierarchy")
+  tools                     AgentTool[]
+  messages                  Message[]
+  toolUsages                ToolUsage[]
+  verifier                  Verifier?
 
   @@index([userId, deletedAt])
   @@index([createdAt])
@@ -53,21 +43,19 @@ model Agent {
 }
 
 model Tool {
-  id          String   @id @default(uuid())
-  name        String   @unique
-  description String?  @db.Text
-  createdAt   DateTime @default(now())
-
-  agents AgentTool[]
+  id          String      @id @default(uuid())
+  name        String      @unique
+  description String?
+  createdAt   DateTime    @default(now())
+  agents      AgentTool[]
 }
 
 model AgentTool {
   agentId    String
   toolId     String
   assignedAt DateTime @default(now())
-
-  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  tool  Tool  @relation(fields: [toolId], references: [id], onDelete: Cascade)
+  agent      Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  tool       Tool     @relation(fields: [toolId], references: [id], onDelete: Cascade)
 
   @@id([agentId, toolId])
   @@index([agentId])
@@ -78,52 +66,24 @@ model Verifier {
   id             String       @id @default(uuid())
   agentId        String       @unique
   type           VerifierType @default(FLOAT_LLM_JUDGE)
-  llmJudgePrompt String       @db.Text
+  llmJudgePrompt String
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
-
-  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agent          Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
 }
 
 model Message {
   id        String      @id @default(uuid())
   agentId   String
   timestamp DateTime    @default(now())
-  text      String      @db.Text
+  text      String
   role      MessageRole
-  metadata  Json?       // Structured metadata (tool type, status, sub-agent ID, etc)
   createdAt DateTime    @default(now())
-
-  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  metadata  Json?
+  agent     Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([agentId, timestamp])
   @@index([createdAt])
-}
-
-enum AgentStatus {
-  STARTING_UP
-  ACTIVE
-  PAUSED
-  COMPLETED
-  FAILED
-}
-
-enum ReasoningEffort {
-  off
-  low
-  medium
-  high
-}
-
-enum VerifierType {
-  FLOAT_LLM_JUDGE
-}
-
-enum MessageRole {
-  SYSTEM
-  ASSISTANT
-  USER
-  TOOL
 }
 
 model Waitlist {
@@ -140,12 +100,12 @@ model Waitlist {
 
 model GoalBlueprint {
   id        String   @id @default(uuid())
-  userId    String // Supabase user ID
-  title     String   @db.Text // Goal description for similarity matching
-  embedding Json? // Pre-computed embedding vector for similarity search (openai/text-embedding-3-small)
-  blueprint Json // Complete execution trace
+  userId    String
+  title     String
+  blueprint Json
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+  embedding Json?
 
   @@index([userId])
   @@index([createdAt])
@@ -153,14 +113,14 @@ model GoalBlueprint {
 
 model AgentAttentionRequest {
   id           String   @id @default(cuid())
-  userId       String // Supabase user ID (cascade delete handled by application logic)
+  userId       String
   agentId      String
-  workflowId   String // Temporal workflow ID (stable across continue_as_new)
-  question     String   @db.Text
-  imageUrl     String? // Optional image URL (e.g. product thumbnail)
-  userResponse String?  @db.Text
+  workflowId   String
+  question     String
+  userResponse String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  imageUrl     String?
 
   @@index([updatedAt])
   @@index([userId])
@@ -168,58 +128,48 @@ model AgentAttentionRequest {
 }
 
 model ModelPricingCache {
-  modelId                    String   @id // e.g., "google/gemini-2.5-flash"
-  tokenInPriceMicrodollars   Int // Cost per input token in microdollars (dollar * 1M)
-  tokenOutPriceMicrodollars  Int // Cost per output token in microdollars (dollar * 1M)
-  cachedAt                   DateTime @default(now())
-  expiresAt                  DateTime // When cache expires (24 hours from cachedAt)
+  modelId                   String   @id
+  tokenInPriceMicrodollars  Int
+  tokenOutPriceMicrodollars Int
+  cachedAt                  DateTime @default(now())
+  expiresAt                 DateTime
 
   @@index([expiresAt])
 }
 
 model ToolUsage {
   id             String   @id @default(uuid())
-  userId         String   // User ID for direct user-level queries (required)
-  agentId        String?  // Agent ID (optional - null for non-agent operations like embeddings)
-  toolName       String   // Tool name (e.g., "deep_research", "web_search", "generate_person_embedding")
-  totalCostCents Int      // Pre-calculated total cost in cents (sum of all usage items)
-  usageItems     Json     // Array of UsageItem objects: [{type, cost_cents, provider, number_of_tokens?, token_price_per_million_cents?}]
+  agentId        String?
+  toolName       String
+  totalCostCents Int
+  usageItems     Json
   createdAt      DateTime @default(now())
+  userId         String
+  agent          Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
-  agent Agent? @relation(fields: [agentId], references: [id], onDelete: Cascade)
-
-  @@index([userId])       // Fast user-level cost queries
+  @@index([userId])
   @@index([agentId])
   @@index([createdAt])
   @@index([toolName])
 }
 
 model User {
-  id           String   @id @default(uuid())
-  userId       String   @unique // Supabase auth ID
-  
-  // User Info
-  name         String?  // Full name
-  
-  // Shipping Address
-  addressLine1 String?  // Street address
-  addressLine2 String?  // Apt, suite, unit, etc.
-  city         String?
-  state        String?  // State/Province
-  postalCode   String?  // ZIP/Postal code
-  country      String?  @default("United States")
-  
-  // Invite Code System
-  inviteCode       Int?     @unique // This user's unique invite code (6-digit number)
-  usedInviteCode   Int?     // The code this user used to sign up
-  inviteCodeUses   Int      @default(0) // Number of times this user's code has been used
-  
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  // Relations
-  credits       Credit[]
-  subscriptions Subscription[]
+  id             String        @id @default(uuid())
+  userId         String        @unique
+  name           String?
+  addressLine1   String?
+  addressLine2   String?
+  city           String?
+  state          String?
+  postalCode     String?
+  country        String?       @default("United States")
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  inviteCode     Int?          @unique
+  inviteCodeUses Int           @default(0)
+  usedInviteCode Int?
+  credits        Credit[]
+  subscriptions  Subscription?
 
   @@index([userId])
   @@index([inviteCode])
@@ -229,86 +179,221 @@ model User {
 model Credit {
   id             String    @id @default(uuid())
   userId         String
-  amountCents    Int       // Amount in cents (e.g., 500 = $5.00, 2000 = $20.00)
-  expirationDate DateTime? // Null = never expires (free $5 credit)
+  amountCents    Int
+  expirationDate DateTime?
   createdAt      DateTime  @default(now())
-
-  user User @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  user           User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId])
   @@index([expirationDate])
 }
 
 model Subscription {
-  id                   String    @id @default(uuid())
-  userId               String    @unique // One active subscription per user
-  subscriptionTier     Int       // Dollars per month: 20, 30, 40, 50, 100, 200
-  stripeSubscriptionId String    @unique
+  id                   String   @id @default(uuid())
+  userId               String   @unique
+  subscriptionTier     Int
+  stripeSubscriptionId String   @unique
   stripeCustomerId     String
-  currentPeriodEnd     DateTime  // When credits expire
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
-
-  user User @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  currentPeriodEnd     DateTime
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  user                 User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId])
   @@index([stripeSubscriptionId])
 }
 
 model BrowserContext {
-  id          String   @id @default(uuid())
-  userId      String   @unique // One context per user
-  contextId   String   @unique // Browserbase context ID (stores cookies, localStorage, etc.)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
-  sessions BrowserSession[]
-  
+  id        String           @id @default(uuid())
+  userId    String           @unique
+  contextId String           @unique
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  sessions  BrowserSession[]
+
   @@index([userId])
   @@index([contextId])
 }
 
 model BrowserSession {
-  id         String                @id @default(uuid()) // Stable task ID for frontend grouping
-  contextId  String                // FK to BrowserContext
-  agentId    String                // Which agent created this session
-  sessionId  String                @unique // Browserbase session ID (changes on resume)
-  status     BrowserSessionStatus  @default(ACTIVE)
-  debugUrl   String?               // Browserbase debug/connect URL
-  currentUrl String?               // Last known page URL
-  createdAt  DateTime              @default(now())
+  id         String               @id @default(uuid())
+  contextId  String
+  agentId    String
+  sessionId  String               @unique
+  status     BrowserSessionStatus @default(ACTIVE)
+  debugUrl   String?
+  currentUrl String?
+  createdAt  DateTime             @default(now())
   closedAt   DateTime?
-  
-  context BrowserContext @relation(fields: [contextId], references: [id], onDelete: Cascade)
-  
+  context    BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
+
   @@index([contextId])
   @@index([agentId])
   @@index([sessionId])
   @@index([status])
 }
 
-enum BrowserSessionStatus {
-  ACTIVE
-  PAUSED
-  CLOSED
-  ERROR
-}
-
 model MessageRecord {
-  id         String         @id @default(uuid())
-  personId   String
-  channel    MessageChannel
-  from       String         // Sender identifier
-  to         String         // Recipient identifier  
-  timestamp  DateTime       // When message was sent
-  message    String         @db.Text
-  createdAt  DateTime       @default(now())
-  
-  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
-  
+  id        String         @id @default(uuid())
+  personId  String
+  channel   MessageChannel
+  from      String
+  to        String
+  timestamp DateTime
+  message   String
+  createdAt DateTime       @default(now())
+  person    Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+
   @@index([personId, channel])
   @@index([timestamp])
-  @@index([personId, timestamp])  // For "last N messages"
+  @@index([personId, timestamp])
+}
+
+model Person {
+  id                         String          @id @default(uuid())
+  userId                     String
+  firstName                  String
+  lastName                   String
+  age                        Int?
+  location                   String?
+  profession                 String?
+  company                    String?
+  title                      String?
+  industry                   String?
+  email                      String?
+  phoneNumber                String?
+  linkedinUrl                String?
+  instagramHandle            String?
+  facebookUrl                String?
+  twitterHandle              String?
+  embedding                  Json?
+  emailAddresses             Json?           @default("[]")
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
+  communicationFrequency     String?
+  contactStatus              String?
+  currentBandwidth           String?
+  estimatedNetWorthUsd       Float?
+  estimatedWorldPowerRanking Int?
+  interests                  Json?           @default("[]")
+  networkOrientation         String?
+  notes                      String?
+  relation                   String?
+  relationshipQuality        String?
+  skills                     Json?           @default("[]")
+  totalOnlineReach           Int?
+  messageRecords             MessageRecord[]
+
+  @@unique([userId, phoneNumber])
+  @@index([userId])
+  @@index([firstName])
+  @@index([lastName])
+  @@index([email])
+  @@index([phoneNumber])
+  @@index([profession])
+  @@index([company])
+  @@index([relation])
+  @@index([communicationFrequency])
+  @@index([currentBandwidth])
+}
+
+model Integration {
+  id                   String            @id @default(uuid())
+  userId               String
+  type                 IntegrationType
+  name                 String
+  status               IntegrationStatus @default(NOT_CONNECTED)
+  isActive             Boolean           @default(false)
+  lastSyncAt           DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastFailedSyncAt     DateTime?
+  failureReason        String?
+  config               Json?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+}
+
+model RoseApiKey {
+  id        String          @id @default(uuid())
+  userId    String
+  apiKey    String          @unique
+  name      String?
+  createdAt DateTime        @default(now())
+  logs      RoseApiKeyLog[]
+
+  @@index([userId])
+  @@index([apiKey])
+}
+
+model RoseApiKeyLog {
+  id        String     @id @default(uuid())
+  apiKeyId  String
+  userId    String
+  input     Json
+  output    Json
+  costCents Int
+  cotSteps  Int        @default(1)
+  createdAt DateTime   @default(now())
+  apiKey    RoseApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@index([apiKeyId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model BenchmarkRun {
+  id               String   @id @default(uuid())
+  userId           String
+  benchmarkName    String
+  modelConfig      Json
+  results          Json
+  aggregateScore   Float
+  totalCostCents   Int
+  sampledQuestions Int
+  durationSeconds  Int
+  createdAt        DateTime @default(now())
+
+  @@index([userId])
+  @@index([benchmarkName])
+  @@index([createdAt])
+}
+
+enum AgentStatus {
+  STARTING_UP
+  ACTIVE
+  PAUSED
+  COMPLETED
+  FAILED
+}
+
+enum ReasoningEffort {
+  low
+  medium
+  high
+  off
+}
+
+enum VerifierType {
+  FLOAT_LLM_JUDGE
+}
+
+enum MessageRole {
+  SYSTEM
+  ASSISTANT
+  USER
+  TOOL
+}
+
+enum BrowserSessionStatus {
+  ACTIVE
+  CLOSED
+  ERROR
+  PAUSED
 }
 
 enum MessageChannel {
@@ -321,117 +406,15 @@ enum MessageChannel {
   MESSENGER
 }
 
-model Person {
-  id        String   @id @default(uuid())
-  userId    String   // Supabase user ID - whose network this person belongs to
-  
-  // ==================== CORE IDENTITY (8 signals) ====================
-  firstName         String   // REQUIRED
-  lastName          String   // REQUIRED
-  age               Int?
-  location          String?
-  profession        String?
-  company           String?
-  title             String?
-  industry          String?
-  
-  // ==================== CONTACT INFO ====================
-  email             String?
-  phoneNumber       String?
-  linkedinUrl       String?
-  instagramHandle   String?
-  facebookUrl       String?
-  twitterHandle     String?
-  emailAddresses    Json?    @default("[]")  // JSON array of additional emails
-  
-  // ==================== RELATIONSHIP (3 signals) ====================
-  relation                  String?  // e.g., "best_friend", "colleague", "mentor"
-  communicationFrequency    String?  // "daily", "weekly", "monthly", "yearly", "rarely"
-  relationshipQuality       String?  // "strong", "moderate", "weak", "strained"
-  
-  // ==================== SKILLS & INTERESTS (2 signals) ====================
-  skills            Json?    @default("[]")  // JSON array of strings
-  interests         Json?    @default("[]")  // JSON array of strings
-  
-  // ==================== INFLUENCE & REACH (3 signals) ====================
-  totalOnlineReach          Int?     // Combined social media reach
-  estimatedNetWorthUsd      Float?   // Explicit dollar amount (e.g., 1500000 = $1.5M)
-  estimatedWorldPowerRanking Int?    // 1-10 scale (1 = most powerful)
-  
-  // ==================== AVAILABILITY & STATUS (2 signals) ====================
-  currentBandwidth          String?  // "totally_free", "light", "moderate", "busy", "totally_swamped"
-  contactStatus             String?  // "active", "dormant", "lost_contact"
-  
-  // ==================== NETWORK ORIENTATION ====================
-  networkOrientation        String?  // "giver", "taker", "matcher"
-  
-  // ==================== METADATA ====================
-  notes             String?  @db.Text
-  
-  // ==================== VECTOR EMBEDDING ====================
-  embedding         Json?    // Pre-computed embedding vector (text-embedding-3-small)
-  
-  // ==================== MESSAGE HISTORIES ====================
-  messageRecords MessageRecord[]  // All messages across all channels
-  
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  
-  // Indexes for fast queries
-  @@index([userId])
-  @@index([firstName])
-  @@index([lastName])
-  @@index([email])
-  @@index([phoneNumber])
-  @@index([profession])
-  @@index([company])
-  @@index([relation])
-  @@index([communicationFrequency])
-  @@index([currentBandwidth])
-  
-  // Collision detection: userId + phone must be unique (emails can be shared)
-  @@unique([userId, phoneNumber])
-}
-
-model Integration {
-  id        String   @id @default(uuid())
-  userId    String   // Supabase user ID
-  
-  // Integration identification
-  type      IntegrationType  // Tool setup or data source
-  name      String           // e.g., "linkedin", "send_imessage", "send_email"
-  
-  // Status tracking
-  status           IntegrationStatus  @default(NOT_CONNECTED)
-  isActive         Boolean            @default(false)
-  
-  // Sync timestamps
-  lastSyncAt       DateTime?
-  lastSuccessfulSyncAt DateTime?
-  lastFailedSyncAt DateTime?
-  failureReason    String?           @db.Text
-  
-  // Configuration (JSON object with integration-specific settings)
-  config           Json?             // e.g., { oauth_token, refresh_token, file_path, etc. }
-  
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  
-  @@unique([userId, name])  // One integration per type per user
-  @@index([userId])
-  @@index([type])
-  @@index([status])
-}
-
 enum IntegrationType {
-  TOOL_SETUP      // send_imessage, send_email
-  DATA_SOURCE     // linkedin, google, twitter, etc.
+  TOOL_SETUP
+  DATA_SOURCE
 }
 
 enum IntegrationStatus {
-  NOT_CONNECTED   // Never set up
-  CONNECTED       // Successfully connected
-  SYNCING         // Currently syncing data
-  SYNC_FAILED     // Last sync failed
-  EXPIRED         // OAuth token expired
+  NOT_CONNECTED
+  CONNECTED
+  SYNCING
+  SYNC_FAILED
+  EXPIRED
 }

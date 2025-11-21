@@ -1,0 +1,1248 @@
+[
+  {
+    "id": "terminal-bench-1",
+    "harborTaskId": "2Fx6Ues7VLnYo5TdH9smXE",
+    "harborTaskName": "llm-inference-batching-scheduler",
+    "question": "Terminal-Bench task llm-inference-batching-scheduler",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 1,
+      "harborTaskId": "2Fx6Ues7VLnYo5TdH9smXE",
+      "harborTaskName": "llm-inference-batching-scheduler"
+    }
+  },
+  {
+    "id": "terminal-bench-2",
+    "harborTaskId": "2gm9aAxh3ufEHTNAcZ8qB3",
+    "harborTaskName": "make-doom-for-mips",
+    "question": "Terminal-Bench task make-doom-for-mips",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 2,
+      "harborTaskId": "2gm9aAxh3ufEHTNAcZ8qB3",
+      "harborTaskName": "make-doom-for-mips"
+    }
+  },
+  {
+    "id": "terminal-bench-3",
+    "harborTaskId": "2hEZAwigfHAA5cnDNAJvfT",
+    "harborTaskName": "sqlite-db-truncate",
+    "question": "Terminal-Bench task sqlite-db-truncate",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 3,
+      "harborTaskId": "2hEZAwigfHAA5cnDNAJvfT",
+      "harborTaskName": "sqlite-db-truncate"
+    }
+  },
+  {
+    "id": "terminal-bench-4",
+    "harborTaskId": "2XNt9VEmH8r9FJdPeH9UxU",
+    "harborTaskName": "fix-code-vulnerability",
+    "question": "Terminal-Bench task fix-code-vulnerability",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 4,
+      "harborTaskId": "2XNt9VEmH8r9FJdPeH9UxU",
+      "harborTaskName": "fix-code-vulnerability"
+    }
+  },
+  {
+    "id": "terminal-bench-5",
+    "harborTaskId": "3aN2GgseP4MfXC7ixV7cXB",
+    "harborTaskName": "mteb-leaderboard",
+    "question": "Terminal-Bench task mteb-leaderboard",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 5,
+      "harborTaskId": "3aN2GgseP4MfXC7ixV7cXB",
+      "harborTaskName": "mteb-leaderboard"
+    }
+  },
+  {
+    "id": "terminal-bench-6",
+    "harborTaskId": "3HV9wmSrWRW9TuYurepoFx",
+    "harborTaskName": "extract-elf",
+    "question": "Terminal-Bench task extract-elf",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 6,
+      "harborTaskId": "3HV9wmSrWRW9TuYurepoFx",
+      "harborTaskName": "extract-elf"
+    }
+  },
+  {
+    "id": "terminal-bench-7",
+    "harborTaskId": "55spjFHXbhXqhkHUB3xfBL",
+    "harborTaskName": "query-optimize",
+    "question": "Terminal-Bench task query-optimize",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 7,
+      "harborTaskId": "55spjFHXbhXqhkHUB3xfBL",
+      "harborTaskName": "query-optimize"
+    }
+  },
+  {
+    "id": "terminal-bench-8",
+    "harborTaskId": "5CV2XfZKatcdbEk2ctQQAF",
+    "harborTaskName": "path-tracing-reverse",
+    "question": "Terminal-Bench task path-tracing-reverse",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 8,
+      "harborTaskId": "5CV2XfZKatcdbEk2ctQQAF",
+      "harborTaskName": "path-tracing-reverse"
+    }
+  },
+  {
+    "id": "terminal-bench-9",
+    "harborTaskId": "5pwPaf92MGZBJjvqnuBn9d",
+    "harborTaskName": "cancel-async-tasks",
+    "question": "Terminal-Bench task cancel-async-tasks",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 9,
+      "harborTaskId": "5pwPaf92MGZBJjvqnuBn9d",
+      "harborTaskName": "cancel-async-tasks"
+    }
+  },
+  {
+    "id": "terminal-bench-10",
+    "harborTaskId": "79ekQLXanbbMZMfTk3qzaF",
+    "harborTaskName": "portfolio-optimization",
+    "question": "Terminal-Bench task portfolio-optimization",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 10,
+      "harborTaskId": "79ekQLXanbbMZMfTk3qzaF",
+      "harborTaskName": "portfolio-optimization"
+    }
+  },
+  {
+    "id": "terminal-bench-11",
+    "harborTaskId": "7bFmFkDrFkAzWEnmNWFgw9",
+    "harborTaskName": "chess-best-move",
+    "question": "Terminal-Bench task chess-best-move",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 11,
+      "harborTaskId": "7bFmFkDrFkAzWEnmNWFgw9",
+      "harborTaskName": "chess-best-move"
+    }
+  },
+  {
+    "id": "terminal-bench-12",
+    "harborTaskId": "7C9njxdDNTb4APfNTmNsi5",
+    "harborTaskName": "custom-memory-heap-crash",
+    "question": "Terminal-Bench task custom-memory-heap-crash",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 12,
+      "harborTaskId": "7C9njxdDNTb4APfNTmNsi5",
+      "harborTaskName": "custom-memory-heap-crash"
+    }
+  },
+  {
+    "id": "terminal-bench-13",
+    "harborTaskId": "7s8y623XYuDhmBG6ERABwC",
+    "harborTaskName": "install-windows-3.11",
+    "question": "Terminal-Bench task install-windows-3.11",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 13,
+      "harborTaskId": "7s8y623XYuDhmBG6ERABwC",
+      "harborTaskName": "install-windows-3.11"
+    }
+  },
+  {
+    "id": "terminal-bench-14",
+    "harborTaskId": "7w8vEz8xG5Rmh59QkrpMp2",
+    "harborTaskName": "password-recovery",
+    "question": "Terminal-Bench task password-recovery",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 14,
+      "harborTaskId": "7w8vEz8xG5Rmh59QkrpMp2",
+      "harborTaskName": "password-recovery"
+    }
+  },
+  {
+    "id": "terminal-bench-15",
+    "harborTaskId": "869oU8dUyJHL4uUFPzhKJM",
+    "harborTaskName": "rstan-to-pystan",
+    "question": "Terminal-Bench task rstan-to-pystan",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 15,
+      "harborTaskId": "869oU8dUyJHL4uUFPzhKJM",
+      "harborTaskName": "rstan-to-pystan"
+    }
+  },
+  {
+    "id": "terminal-bench-16",
+    "harborTaskId": "8njYn5Af8tPLKjM5cFeNvR",
+    "harborTaskName": "torch-tensor-parallelism",
+    "question": "Terminal-Bench task torch-tensor-parallelism",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 16,
+      "harborTaskId": "8njYn5Af8tPLKjM5cFeNvR",
+      "harborTaskName": "torch-tensor-parallelism"
+    }
+  },
+  {
+    "id": "terminal-bench-17",
+    "harborTaskId": "8WGyid6WdyvC3RsCcr7kLU",
+    "harborTaskName": "model-extraction-relu-logits",
+    "question": "Terminal-Bench task model-extraction-relu-logits",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 17,
+      "harborTaskId": "8WGyid6WdyvC3RsCcr7kLU",
+      "harborTaskName": "model-extraction-relu-logits"
+    }
+  },
+  {
+    "id": "terminal-bench-18",
+    "harborTaskId": "9BGkwkiZs6r3NTmoLCLzr9",
+    "harborTaskName": "path-tracing",
+    "question": "Terminal-Bench task path-tracing",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 18,
+      "harborTaskId": "9BGkwkiZs6r3NTmoLCLzr9",
+      "harborTaskName": "path-tracing"
+    }
+  },
+  {
+    "id": "terminal-bench-19",
+    "harborTaskId": "ArEmuSGC435pAkSA7cv8qw",
+    "harborTaskName": "dna-assembly",
+    "question": "Terminal-Bench task dna-assembly",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 19,
+      "harborTaskId": "ArEmuSGC435pAkSA7cv8qw",
+      "harborTaskName": "dna-assembly"
+    }
+  },
+  {
+    "id": "terminal-bench-20",
+    "harborTaskId": "axUgVSxE9sjGUEHETA9Ddx",
+    "harborTaskName": "pytorch-model-recovery",
+    "question": "Terminal-Bench task pytorch-model-recovery",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 20,
+      "harborTaskId": "axUgVSxE9sjGUEHETA9Ddx",
+      "harborTaskName": "pytorch-model-recovery"
+    }
+  },
+  {
+    "id": "terminal-bench-21",
+    "harborTaskId": "bDZ3NNHZSFq2MH6CzCTykb",
+    "harborTaskName": "extract-moves-from-video",
+    "question": "Terminal-Bench task extract-moves-from-video",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 21,
+      "harborTaskId": "bDZ3NNHZSFq2MH6CzCTykb",
+      "harborTaskName": "extract-moves-from-video"
+    }
+  },
+  {
+    "id": "terminal-bench-22",
+    "harborTaskId": "ByGtvRdgQehLA6H7TL8cfS",
+    "harborTaskName": "regex-log",
+    "question": "Terminal-Bench task regex-log",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 22,
+      "harborTaskId": "ByGtvRdgQehLA6H7TL8cfS",
+      "harborTaskName": "regex-log"
+    }
+  },
+  {
+    "id": "terminal-bench-23",
+    "harborTaskId": "c3FnWBpp4RmfpMvyGn8Wpv",
+    "harborTaskName": "configure-git-webserver",
+    "question": "Terminal-Bench task configure-git-webserver",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 23,
+      "harborTaskId": "c3FnWBpp4RmfpMvyGn8Wpv",
+      "harborTaskName": "configure-git-webserver"
+    }
+  },
+  {
+    "id": "terminal-bench-24",
+    "harborTaskId": "ca36CXF7yAdWnRdpyfoihT",
+    "harborTaskName": "overfull-hbox",
+    "question": "Terminal-Bench task overfull-hbox",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 24,
+      "harborTaskId": "ca36CXF7yAdWnRdpyfoihT",
+      "harborTaskName": "overfull-hbox"
+    }
+  },
+  {
+    "id": "terminal-bench-25",
+    "harborTaskId": "cEZY7Ut37eqdNnYKPebgYq",
+    "harborTaskName": "pytorch-model-cli",
+    "question": "Terminal-Bench task pytorch-model-cli",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 25,
+      "harborTaskId": "cEZY7Ut37eqdNnYKPebgYq",
+      "harborTaskName": "pytorch-model-cli"
+    }
+  },
+  {
+    "id": "terminal-bench-26",
+    "harborTaskId": "CGqXnFmcaVcQCTbCZMpg2T",
+    "harborTaskName": "gpt2-codegolf",
+    "question": "Terminal-Bench task gpt2-codegolf",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 26,
+      "harborTaskId": "CGqXnFmcaVcQCTbCZMpg2T",
+      "harborTaskName": "gpt2-codegolf"
+    }
+  },
+  {
+    "id": "terminal-bench-27",
+    "harborTaskId": "cMPqfgxjNH2qnnDVdWSFb8",
+    "harborTaskName": "multi-source-data-merger",
+    "question": "Terminal-Bench task multi-source-data-merger",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 27,
+      "harborTaskId": "cMPqfgxjNH2qnnDVdWSFb8",
+      "harborTaskName": "multi-source-data-merger"
+    }
+  },
+  {
+    "id": "terminal-bench-28",
+    "harborTaskId": "CrxDfvhBFmo3ahvG2RfDM3",
+    "harborTaskName": "constraints-scheduling",
+    "question": "Terminal-Bench task constraints-scheduling",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 28,
+      "harborTaskId": "CrxDfvhBFmo3ahvG2RfDM3",
+      "harborTaskName": "constraints-scheduling"
+    }
+  },
+  {
+    "id": "terminal-bench-29",
+    "harborTaskId": "DcF3L5bfEpwdBkhfr3hgHe",
+    "harborTaskName": "hf-model-inference",
+    "question": "Terminal-Bench task hf-model-inference",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 29,
+      "harborTaskId": "DcF3L5bfEpwdBkhfr3hgHe",
+      "harborTaskName": "hf-model-inference"
+    }
+  },
+  {
+    "id": "terminal-bench-30",
+    "harborTaskId": "djEEswskd9fpNSUidkwrfM",
+    "harborTaskName": "prove-plus-comm",
+    "question": "Terminal-Bench task prove-plus-comm",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 30,
+      "harborTaskId": "djEEswskd9fpNSUidkwrfM",
+      "harborTaskName": "prove-plus-comm"
+    }
+  },
+  {
+    "id": "terminal-bench-31",
+    "harborTaskId": "dqWUpJXGGPsFGfnuwx6Car",
+    "harborTaskName": "circuit-fibsqrt",
+    "question": "Terminal-Bench task circuit-fibsqrt",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 31,
+      "harborTaskId": "dqWUpJXGGPsFGfnuwx6Car",
+      "harborTaskName": "circuit-fibsqrt"
+    }
+  },
+  {
+    "id": "terminal-bench-32",
+    "harborTaskId": "dWGsQxJELwQFMvHVDc5zuS",
+    "harborTaskName": "winning-avg-corewars",
+    "question": "Terminal-Bench task winning-avg-corewars",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 32,
+      "harborTaskId": "dWGsQxJELwQFMvHVDc5zuS",
+      "harborTaskName": "winning-avg-corewars"
+    }
+  },
+  {
+    "id": "terminal-bench-33",
+    "harborTaskId": "dXxv47w6VWWtstSMMiefPe",
+    "harborTaskName": "fix-ocaml-gc",
+    "question": "Terminal-Bench task fix-ocaml-gc",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 33,
+      "harborTaskId": "dXxv47w6VWWtstSMMiefPe",
+      "harborTaskName": "fix-ocaml-gc"
+    }
+  },
+  {
+    "id": "terminal-bench-34",
+    "harborTaskId": "eUViXxKXCzTue7ywZW59ct",
+    "harborTaskName": "nginx-request-logging",
+    "question": "Terminal-Bench task nginx-request-logging",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 34,
+      "harborTaskId": "eUViXxKXCzTue7ywZW59ct",
+      "harborTaskName": "nginx-request-logging"
+    }
+  },
+  {
+    "id": "terminal-bench-35",
+    "harborTaskId": "fDMeF8ncVH8hFRrdHUkDzM",
+    "harborTaskName": "reshard-c4-data",
+    "question": "Terminal-Bench task reshard-c4-data",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 35,
+      "harborTaskId": "fDMeF8ncVH8hFRrdHUkDzM",
+      "harborTaskName": "reshard-c4-data"
+    }
+  },
+  {
+    "id": "terminal-bench-36",
+    "harborTaskId": "fqGNZJec57abmbsxYbQAz5",
+    "harborTaskName": "log-summary-date-ranges",
+    "question": "Terminal-Bench task log-summary-date-ranges",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 36,
+      "harborTaskId": "fqGNZJec57abmbsxYbQAz5",
+      "harborTaskName": "log-summary-date-ranges"
+    }
+  },
+  {
+    "id": "terminal-bench-37",
+    "harborTaskId": "gaFWu2WFUf2THiMG8Ezdxo",
+    "harborTaskName": "adaptive-rejection-sampler",
+    "question": "Terminal-Bench task adaptive-rejection-sampler",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 37,
+      "harborTaskId": "gaFWu2WFUf2THiMG8Ezdxo",
+      "harborTaskName": "adaptive-rejection-sampler"
+    }
+  },
+  {
+    "id": "terminal-bench-38",
+    "harborTaskId": "GCqHhNMgC2jpcy3h8te5A7",
+    "harborTaskName": "build-cython-ext",
+    "question": "Terminal-Bench task build-cython-ext",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 38,
+      "harborTaskId": "GCqHhNMgC2jpcy3h8te5A7",
+      "harborTaskName": "build-cython-ext"
+    }
+  },
+  {
+    "id": "terminal-bench-39",
+    "harborTaskId": "gHS2mTGhPaYTuJWpCkw4J9",
+    "harborTaskName": "qemu-startup",
+    "question": "Terminal-Bench task qemu-startup",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 39,
+      "harborTaskId": "gHS2mTGhPaYTuJWpCkw4J9",
+      "harborTaskName": "qemu-startup"
+    }
+  },
+  {
+    "id": "terminal-bench-40",
+    "harborTaskId": "GZXTJdXif2uoqEMrNXfNyB",
+    "harborTaskName": "largest-eigenval",
+    "question": "Terminal-Bench task largest-eigenval",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 40,
+      "harborTaskId": "GZXTJdXif2uoqEMrNXfNyB",
+      "harborTaskName": "largest-eigenval"
+    }
+  },
+  {
+    "id": "terminal-bench-41",
+    "harborTaskId": "H9EGgCK3p6caXKKnhsqu6a",
+    "harborTaskName": "build-pov-ray",
+    "question": "Terminal-Bench task build-pov-ray",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 41,
+      "harborTaskId": "H9EGgCK3p6caXKKnhsqu6a",
+      "harborTaskName": "build-pov-ray"
+    }
+  },
+  {
+    "id": "terminal-bench-42",
+    "harborTaskId": "hf6AShq4ZZHdwGTt8JGpEG",
+    "harborTaskName": "polyglot-rust-c",
+    "question": "Terminal-Bench task polyglot-rust-c",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 42,
+      "harborTaskId": "hf6AShq4ZZHdwGTt8JGpEG",
+      "harborTaskName": "polyglot-rust-c"
+    }
+  },
+  {
+    "id": "terminal-bench-43",
+    "harborTaskId": "J63TLMqMZcCeiRe8KAiy5T",
+    "harborTaskName": "mteb-retrieve",
+    "question": "Terminal-Bench task mteb-retrieve",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 43,
+      "harborTaskId": "J63TLMqMZcCeiRe8KAiy5T",
+      "harborTaskName": "mteb-retrieve"
+    }
+  },
+  {
+    "id": "terminal-bench-44",
+    "harborTaskId": "jAoUooKp48ZpCL53Ra9yUk",
+    "harborTaskName": "mcmc-sampling-stan",
+    "question": "Terminal-Bench task mcmc-sampling-stan",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 44,
+      "harborTaskId": "jAoUooKp48ZpCL53Ra9yUk",
+      "harborTaskName": "mcmc-sampling-stan"
+    }
+  },
+  {
+    "id": "terminal-bench-45",
+    "harborTaskId": "JGX6wXigbfSgX6m298mcKW",
+    "harborTaskName": "kv-store-grpc",
+    "question": "Terminal-Bench task kv-store-grpc",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 45,
+      "harborTaskId": "JGX6wXigbfSgX6m298mcKW",
+      "harborTaskName": "kv-store-grpc"
+    }
+  },
+  {
+    "id": "terminal-bench-46",
+    "harborTaskId": "JK5CeLoen6gxrbEkrjQ94D",
+    "harborTaskName": "gcode-to-text",
+    "question": "Terminal-Bench task gcode-to-text",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 46,
+      "harborTaskId": "JK5CeLoen6gxrbEkrjQ94D",
+      "harborTaskName": "gcode-to-text"
+    }
+  },
+  {
+    "id": "terminal-bench-47",
+    "harborTaskId": "JQfDtvG4qqL3QfwErWynWU",
+    "harborTaskName": "break-filter-js-from-html",
+    "question": "Terminal-Bench task break-filter-js-from-html",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 47,
+      "harborTaskId": "JQfDtvG4qqL3QfwErWynWU",
+      "harborTaskName": "break-filter-js-from-html"
+    }
+  },
+  {
+    "id": "terminal-bench-48",
+    "harborTaskId": "jWu5FXBKfqdBD9LqMa9a2N",
+    "harborTaskName": "tune-mjcf",
+    "question": "Terminal-Bench task tune-mjcf",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 48,
+      "harborTaskId": "jWu5FXBKfqdBD9LqMa9a2N",
+      "harborTaskName": "tune-mjcf"
+    }
+  },
+  {
+    "id": "terminal-bench-49",
+    "harborTaskId": "K56RXLv9fW76nGzkYythKB",
+    "harborTaskName": "torch-pipeline-parallelism",
+    "question": "Terminal-Bench task torch-pipeline-parallelism",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 49,
+      "harborTaskId": "K56RXLv9fW76nGzkYythKB",
+      "harborTaskName": "torch-pipeline-parallelism"
+    }
+  },
+  {
+    "id": "terminal-bench-50",
+    "harborTaskId": "Kk55pgeAWyodY7sZSnMpXw",
+    "harborTaskName": "dna-insert",
+    "question": "Terminal-Bench task dna-insert",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 50,
+      "harborTaskId": "Kk55pgeAWyodY7sZSnMpXw",
+      "harborTaskName": "dna-insert"
+    }
+  },
+  {
+    "id": "terminal-bench-51",
+    "harborTaskId": "kLfrAkLDVW7LCezLUHt4oB",
+    "harborTaskName": "git-multibranch",
+    "question": "Terminal-Bench task git-multibranch",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 51,
+      "harborTaskId": "kLfrAkLDVW7LCezLUHt4oB",
+      "harborTaskName": "git-multibranch"
+    }
+  },
+  {
+    "id": "terminal-bench-52",
+    "harborTaskId": "KRPXswDf2LBuozQgKhCqnG",
+    "harborTaskName": "code-from-image",
+    "question": "Terminal-Bench task code-from-image",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 52,
+      "harborTaskId": "KRPXswDf2LBuozQgKhCqnG",
+      "harborTaskName": "code-from-image"
+    }
+  },
+  {
+    "id": "terminal-bench-53",
+    "harborTaskId": "KSwQXLapvDLmcHTvZcJVQG",
+    "harborTaskName": "headless-terminal",
+    "question": "Terminal-Bench task headless-terminal",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 53,
+      "harborTaskId": "KSwQXLapvDLmcHTvZcJVQG",
+      "harborTaskName": "headless-terminal"
+    }
+  },
+  {
+    "id": "terminal-bench-54",
+    "harborTaskId": "kWbDWup9MzjJLPn6gz9P6H",
+    "harborTaskName": "raman-fitting",
+    "question": "Terminal-Bench task raman-fitting",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 54,
+      "harborTaskId": "kWbDWup9MzjJLPn6gz9P6H",
+      "harborTaskName": "raman-fitting"
+    }
+  },
+  {
+    "id": "terminal-bench-55",
+    "harborTaskId": "kzqjKVWxvHZxV5xyLNLqJi",
+    "harborTaskName": "fix-git",
+    "question": "Terminal-Bench task fix-git",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 55,
+      "harborTaskId": "kzqjKVWxvHZxV5xyLNLqJi",
+      "harborTaskName": "fix-git"
+    }
+  },
+  {
+    "id": "terminal-bench-56",
+    "harborTaskId": "LeNjAXy6fbV5X852Td8iV9",
+    "harborTaskName": "make-mips-interpreter",
+    "question": "Terminal-Bench task make-mips-interpreter",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 56,
+      "harborTaskId": "LeNjAXy6fbV5X852Td8iV9",
+      "harborTaskName": "make-mips-interpreter"
+    }
+  },
+  {
+    "id": "terminal-bench-57",
+    "harborTaskId": "LEz4caXvpzU9rMBzsJnZA6",
+    "harborTaskName": "pypi-server",
+    "question": "Terminal-Bench task pypi-server",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 57,
+      "harborTaskId": "LEz4caXvpzU9rMBzsJnZA6",
+      "harborTaskName": "pypi-server"
+    }
+  },
+  {
+    "id": "terminal-bench-58",
+    "harborTaskId": "LVyG59RRyF7y2PiCy5VT3B",
+    "harborTaskName": "feal-linear-cryptanalysis",
+    "question": "Terminal-Bench task feal-linear-cryptanalysis",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 58,
+      "harborTaskId": "LVyG59RRyF7y2PiCy5VT3B",
+      "harborTaskName": "feal-linear-cryptanalysis"
+    }
+  },
+  {
+    "id": "terminal-bench-59",
+    "harborTaskId": "MAyhSNHCZegJvZuPyTitjJ",
+    "harborTaskName": "crack-7z-hash",
+    "question": "Terminal-Bench task crack-7z-hash",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 59,
+      "harborTaskId": "MAyhSNHCZegJvZuPyTitjJ",
+      "harborTaskName": "crack-7z-hash"
+    }
+  },
+  {
+    "id": "terminal-bench-60",
+    "harborTaskId": "mig33pqGgsU4uNZ5dgPebg",
+    "harborTaskName": "git-leak-recovery",
+    "question": "Terminal-Bench task git-leak-recovery",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 60,
+      "harborTaskId": "mig33pqGgsU4uNZ5dgPebg",
+      "harborTaskName": "git-leak-recovery"
+    }
+  },
+  {
+    "id": "terminal-bench-61",
+    "harborTaskId": "mJUNThPAPTj7sAa9DCoPrh",
+    "harborTaskName": "protein-assembly",
+    "question": "Terminal-Bench task protein-assembly",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 61,
+      "harborTaskId": "mJUNThPAPTj7sAa9DCoPrh",
+      "harborTaskName": "protein-assembly"
+    }
+  },
+  {
+    "id": "terminal-bench-62",
+    "harborTaskId": "mQoDwFSymGYHYWpETANa3y",
+    "harborTaskName": "polyglot-c-py",
+    "question": "Terminal-Bench task polyglot-c-py",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 62,
+      "harborTaskId": "mQoDwFSymGYHYWpETANa3y",
+      "harborTaskName": "polyglot-c-py"
+    }
+  },
+  {
+    "id": "terminal-bench-63",
+    "harborTaskId": "MWrHdxDHM3npYpRiLMz3iZ",
+    "harborTaskName": "write-compressor",
+    "question": "Terminal-Bench task write-compressor",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 63,
+      "harborTaskId": "MWrHdxDHM3npYpRiLMz3iZ",
+      "harborTaskName": "write-compressor"
+    }
+  },
+  {
+    "id": "terminal-bench-64",
+    "harborTaskId": "n9EXHRQn8C4KGZQgXQEvZU",
+    "harborTaskName": "sam-cell-seg",
+    "question": "Terminal-Bench task sam-cell-seg",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 64,
+      "harborTaskId": "n9EXHRQn8C4KGZQgXQEvZU",
+      "harborTaskName": "sam-cell-seg"
+    }
+  },
+  {
+    "id": "terminal-bench-65",
+    "harborTaskId": "n9YQuCoRJFAyCD3Zs6amRV",
+    "harborTaskName": "modernize-scientific-stack",
+    "question": "Terminal-Bench task modernize-scientific-stack",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 65,
+      "harborTaskId": "n9YQuCoRJFAyCD3Zs6amRV",
+      "harborTaskName": "modernize-scientific-stack"
+    }
+  },
+  {
+    "id": "terminal-bench-66",
+    "harborTaskId": "oJLBu7weukw33iq9PEf26P",
+    "harborTaskName": "mailman",
+    "question": "Terminal-Bench task mailman",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 66,
+      "harborTaskId": "oJLBu7weukw33iq9PEf26P",
+      "harborTaskName": "mailman"
+    }
+  },
+  {
+    "id": "terminal-bench-67",
+    "harborTaskId": "PBqbNgPwKfCmnNMFQbSbAJ",
+    "harborTaskName": "distribution-search",
+    "question": "Terminal-Bench task distribution-search",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 67,
+      "harborTaskId": "PBqbNgPwKfCmnNMFQbSbAJ",
+      "harborTaskName": "distribution-search"
+    }
+  },
+  {
+    "id": "terminal-bench-68",
+    "harborTaskId": "Q3LDEno2RovPVJEJXuoivq",
+    "harborTaskName": "merge-diff-arc-agi-task",
+    "question": "Terminal-Bench task merge-diff-arc-agi-task",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 68,
+      "harborTaskId": "Q3LDEno2RovPVJEJXuoivq",
+      "harborTaskName": "merge-diff-arc-agi-task"
+    }
+  },
+  {
+    "id": "terminal-bench-69",
+    "harborTaskId": "QDMuuRtnbx7cWNzKkXsGhM",
+    "harborTaskName": "compile-compcert",
+    "question": "Terminal-Bench task compile-compcert",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 69,
+      "harborTaskId": "QDMuuRtnbx7cWNzKkXsGhM",
+      "harborTaskName": "compile-compcert"
+    }
+  },
+  {
+    "id": "terminal-bench-70",
+    "harborTaskId": "QU8iD2bMsFXumTCQhnBiGz",
+    "harborTaskName": "video-processing",
+    "question": "Terminal-Bench task video-processing",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 70,
+      "harborTaskId": "QU8iD2bMsFXumTCQhnBiGz",
+      "harborTaskName": "video-processing"
+    }
+  },
+  {
+    "id": "terminal-bench-71",
+    "harborTaskId": "QUdXqzZFwRrgRZ7SPHyxto",
+    "harborTaskName": "train-fasttext",
+    "question": "Terminal-Bench task train-fasttext",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 71,
+      "harborTaskId": "QUdXqzZFwRrgRZ7SPHyxto",
+      "harborTaskName": "train-fasttext"
+    }
+  },
+  {
+    "id": "terminal-bench-72",
+    "harborTaskId": "RkUWMSfgcaHLyc3cnCt62s",
+    "harborTaskName": "vulnerable-secret",
+    "question": "Terminal-Bench task vulnerable-secret",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 72,
+      "harborTaskId": "RkUWMSfgcaHLyc3cnCt62s",
+      "harborTaskName": "vulnerable-secret"
+    }
+  },
+  {
+    "id": "terminal-bench-73",
+    "harborTaskId": "RNEJHNxbtKQgmztc6q4aKb",
+    "harborTaskName": "sparql-university",
+    "question": "Terminal-Bench task sparql-university",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 73,
+      "harborTaskId": "RNEJHNxbtKQgmztc6q4aKb",
+      "harborTaskName": "sparql-university"
+    }
+  },
+  {
+    "id": "terminal-bench-74",
+    "harborTaskId": "RyWCxfjAf9RhapMxS2dMks",
+    "harborTaskName": "feal-differential-cryptanalysis",
+    "question": "Terminal-Bench task feal-differential-cryptanalysis",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 74,
+      "harborTaskId": "RyWCxfjAf9RhapMxS2dMks",
+      "harborTaskName": "feal-differential-cryptanalysis"
+    }
+  },
+  {
+    "id": "terminal-bench-75",
+    "harborTaskId": "S2VRUfRKCUQ2hWH9KJzsbK",
+    "harborTaskName": "large-scale-text-editing",
+    "question": "Terminal-Bench task large-scale-text-editing",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 75,
+      "harborTaskId": "S2VRUfRKCUQ2hWH9KJzsbK",
+      "harborTaskName": "large-scale-text-editing"
+    }
+  },
+  {
+    "id": "terminal-bench-76",
+    "harborTaskId": "SeKnWxFXAqYwFdRQvLn2Wk",
+    "harborTaskName": "filter-js-from-html",
+    "question": "Terminal-Bench task filter-js-from-html",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 76,
+      "harborTaskId": "SeKnWxFXAqYwFdRQvLn2Wk",
+      "harborTaskName": "filter-js-from-html"
+    }
+  },
+  {
+    "id": "terminal-bench-77",
+    "harborTaskId": "Skg3RaRNtgRKSRBoJaSgjx",
+    "harborTaskName": "openssl-selfsigned-cert",
+    "question": "Terminal-Bench task openssl-selfsigned-cert",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 77,
+      "harborTaskId": "Skg3RaRNtgRKSRBoJaSgjx",
+      "harborTaskName": "openssl-selfsigned-cert"
+    }
+  },
+  {
+    "id": "terminal-bench-78",
+    "harborTaskId": "SmKKTsxNnHaHqhzng8SrD2",
+    "harborTaskName": "cobol-modernization",
+    "question": "Terminal-Bench task cobol-modernization",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 78,
+      "harborTaskId": "SmKKTsxNnHaHqhzng8SrD2",
+      "harborTaskName": "cobol-modernization"
+    }
+  },
+  {
+    "id": "terminal-bench-79",
+    "harborTaskId": "T9eC49XFCYopUM2bDKgar3",
+    "harborTaskName": "financial-document-processor",
+    "question": "Terminal-Bench task financial-document-processor",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 79,
+      "harborTaskId": "T9eC49XFCYopUM2bDKgar3",
+      "harborTaskName": "financial-document-processor"
+    }
+  },
+  {
+    "id": "terminal-bench-80",
+    "harborTaskId": "TXGXVihdFyGLhhWJdjKoXE",
+    "harborTaskName": "build-pmars",
+    "question": "Terminal-Bench task build-pmars",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 80,
+      "harborTaskId": "TXGXVihdFyGLhhWJdjKoXE",
+      "harborTaskName": "build-pmars"
+    }
+  },
+  {
+    "id": "terminal-bench-81",
+    "harborTaskId": "V8M9GUmT67TmSKo9FQTdoC",
+    "harborTaskName": "count-dataset-tokens",
+    "question": "Terminal-Bench task count-dataset-tokens",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 81,
+      "harborTaskId": "V8M9GUmT67TmSKo9FQTdoC",
+      "harborTaskName": "count-dataset-tokens"
+    }
+  },
+  {
+    "id": "terminal-bench-82",
+    "harborTaskId": "WNjEws4zKtRNWJABpoU892",
+    "harborTaskName": "sanitize-git-repo",
+    "question": "Terminal-Bench task sanitize-git-repo",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 82,
+      "harborTaskId": "WNjEws4zKtRNWJABpoU892",
+      "harborTaskName": "sanitize-git-repo"
+    }
+  },
+  {
+    "id": "terminal-bench-83",
+    "harborTaskId": "X4QTPPGhjzjJSVbTTETRUK",
+    "harborTaskName": "db-wal-recovery",
+    "question": "Terminal-Bench task db-wal-recovery",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 83,
+      "harborTaskId": "X4QTPPGhjzjJSVbTTETRUK",
+      "harborTaskName": "db-wal-recovery"
+    }
+  },
+  {
+    "id": "terminal-bench-84",
+    "harborTaskId": "XUcCMQRrLoqxtCV4Hc9F2a",
+    "harborTaskName": "caffe-cifar-10",
+    "question": "Terminal-Bench task caffe-cifar-10",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 84,
+      "harborTaskId": "XUcCMQRrLoqxtCV4Hc9F2a",
+      "harborTaskName": "caffe-cifar-10"
+    }
+  },
+  {
+    "id": "terminal-bench-85",
+    "harborTaskId": "XX65orYkXVMqTQu7C3JUZY",
+    "harborTaskName": "bn-fit-modify",
+    "question": "Terminal-Bench task bn-fit-modify",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 85,
+      "harborTaskId": "XX65orYkXVMqTQu7C3JUZY",
+      "harborTaskName": "bn-fit-modify"
+    }
+  },
+  {
+    "id": "terminal-bench-86",
+    "harborTaskId": "XyJK3D4eSbPWgNt9Bw4RyU",
+    "harborTaskName": "regex-chess",
+    "question": "Terminal-Bench task regex-chess",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 86,
+      "harborTaskId": "XyJK3D4eSbPWgNt9Bw4RyU",
+      "harborTaskName": "regex-chess"
+    }
+  },
+  {
+    "id": "terminal-bench-87",
+    "harborTaskId": "YiQMoSRPZzKeHRDhZkwmyd",
+    "harborTaskName": "qemu-alpine-ssh",
+    "question": "Terminal-Bench task qemu-alpine-ssh",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 87,
+      "harborTaskId": "YiQMoSRPZzKeHRDhZkwmyd",
+      "harborTaskName": "qemu-alpine-ssh"
+    }
+  },
+  {
+    "id": "terminal-bench-88",
+    "harborTaskId": "YkDjArg6hKdFYEmdiPrztY",
+    "harborTaskName": "schemelike-metacircular-eval",
+    "question": "Terminal-Bench task schemelike-metacircular-eval",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 88,
+      "harborTaskId": "YkDjArg6hKdFYEmdiPrztY",
+      "harborTaskName": "schemelike-metacircular-eval"
+    }
+  },
+  {
+    "id": "terminal-bench-89",
+    "harborTaskId": "ZDKh9BtehT8SorZTrWLJsn",
+    "harborTaskName": "sqlite-with-gcov",
+    "question": "Terminal-Bench task sqlite-with-gcov",
+    "correctAnswer": "pass",
+    "metadata": {
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "taskNumber": 89,
+      "harborTaskId": "ZDKh9BtehT8SorZTrWLJsn",
+      "harborTaskName": "sqlite-with-gcov"
+    }
+  }
+]

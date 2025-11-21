@@ -36,8 +36,13 @@ with workflow.unsafe.imports_passed_through():
     from tools.amazon_shopping import buy_item_from_amazon
     from tools.spawn_sub_agents import spawn_sub_agents
     from tools.send_sms import send_sms
+    from tools.send_sms_as_user import send_sms_as_user
     from tools.spawn_browser_agent import spawn_browser_agent
     from tools.search_user_network import search_user_network_for_people
+    from tools.find_all import find_all
+    from tools.enrich import enrich
+    from tools.monitor import monitor
+    from tools.check_monitor_events import check_monitor_events
 
 logger = structlog.get_logger()
 
@@ -58,7 +63,12 @@ EVENT_DRIVEN_TOOLS = {
     "buy_item_from_amazon": buy_item_from_amazon,
     "spawn_sub_agents": spawn_sub_agents,
     "send_sms": send_sms,
+    "send_sms_as_user": send_sms_as_user,
     "search_user_network_for_people": search_user_network_for_people,
+    "find_all": find_all,
+    "enrich": enrich,
+    "monitor": monitor,
+    "check_monitor_events": check_monitor_events,
 }
 
 # Tool formatter registry (maps tool names to their formatters)
@@ -83,6 +93,26 @@ SYSTEM_TOOLS = [
         "id": "system-request-user-attention",
         "name": "request_user_attention",
         "description": "Ask the User a direct question when you need clarification, preferences, decisions, or information that only they can provide. Do NOT use this for factual information that can be found via web_search or other tools - only use when the User's personal input is required."
+    },
+    {
+        "id": "system-find-all",
+        "name": "find_all",
+        "description": "Discover all entities matching specific criteria using natural language queries. Returns matched candidates with names, details, reasoning, and citations. Generators: 'preview' (cheapest, ~10 candidates for testing), 'base' (broad queries, many matches), 'core' (specific queries, moderate matches), 'pro' (highly specific/rare matches). Pricing: Fixed cost + per-match fee. Core generator: $2.00 fixed + $0.15/match. Use 'preview' first to test queries before scaling to other generators."
+    },
+    {
+        "id": "system-enrich",
+        "name": "enrich",
+        "description": "Enrich an entity (person/company) with additional structured data from the web. Provide input data (name, email, company, url, etc.) and an output_schema JSON schema defining what fields to extract. Processors: 'lite' (basic info, 5s-60s, $0.005), 'base' (simple research, 15s-100s, $0.01), 'core' (complex research, 1-5min, $0.025), 'core2x' (very complex, 2-5min, $0.05), 'pro' (exploratory, 3-9min, $0.10), 'ultra' (extensive deep research, 5-25min, $0.30), 'ultra2x/4x/8x' (advanced deep research with 2x/4x/8x compute, $0.60/$1.20/$2.40). Choose processor based on research complexity needed."
+    },
+    {
+        "id": "system-monitor",
+        "name": "monitor",
+        "description": "Continuously monitor the web for material changes relevant to a query on a schedule. Cadence options: 'hourly', 'daily', 'weekly'. Returns monitor_id for tracking. Use check_monitor_events to retrieve detected events. Cost: $0.003 per request to create monitor. Best for: tracking news, competitor changes, regulatory updates, market events."
+    },
+    {
+        "id": "system-check-monitor-events",
+        "name": "check_monitor_events",
+        "description": "Check for new events detected by a previously created monitor. Returns list of events with details about what changed on the web. Requires monitor_id from a previous monitor call. Use this periodically to retrieve updates - monitors run on their schedule but you must check for events to see results."
     },
 ]
 
@@ -135,6 +165,9 @@ class AgentWorkflow:
         self.child_tool_ids: Dict[str, str] = {}  # Map child_agent_id -> tool_call_id
         self.child_last_tokens: Dict[str, Dict[str, int]] = {}  # Track last token counts from each child
         self.depth: int = 0  # Agent nesting depth (0 = top-level, 1 = sub-agent, etc.)
+        
+        # Lock for thread-safe token counter updates during parallel execution
+        self._state_lock = asyncio.Lock()
     
     @workflow.signal
     async def pause(self):
@@ -631,10 +664,11 @@ class AgentWorkflow:
                     raise ValueError("Action usage missing 'completion_tokens'")
                 if "total_tokens" not in usage:
                     raise ValueError("Action usage missing 'total_tokens'")
-                    
-                self.tokens_in += usage["prompt_tokens"]
-                self.tokens_out += usage["completion_tokens"]
-                self.token_count += usage["total_tokens"]
+                
+                async with self._state_lock:
+                    self.tokens_in += usage["prompt_tokens"]
+                    self.tokens_out += usage["completion_tokens"]
+                    self.token_count += usage["total_tokens"]
                 
                 # 4. Post response to user (visible in UI and added to context)
                 # Reasoning is logged but not posted to chat
@@ -651,75 +685,22 @@ class AgentWorkflow:
                     metadata = {"tool_calls": tool_calls} if tool_calls else None
                     await self._post_message(response, "ASSISTANT", metadata=metadata)
                 
-                # 5. Execute all tools sequentially
-                for tool_call in tool_calls:
+                # 5. Execute all tools in parallel
+                async def execute_one_tool(tool_call):
+                    """Execute a single tool with error handling."""
                     tool_name = tool_call.get("tool", "unknown")
-                    args = tool_call.get("args", [])
-                    
-                    # Use the pre-generated ID from step 4
                     tool_call_id = tool_call['tool_call_id']
                     
                     try:
-                        # NEW SYSTEM: Event-driven tools handle their own messages
-                        if tool_name in EVENT_DRIVEN_TOOLS:
-                            workflow.logger.info(f"✨ Executing event-driven tool: {tool_name}")
-                            # Get the v2 workflow helper and call it directly
-                            v2_helper = EVENT_DRIVEN_TOOLS[tool_name]
-                            await v2_helper(self, tool_call, tool_call_id)
-                            # Skip old formatter logic - events handled everything
-                            continue
+                        if tool_name not in EVENT_DRIVEN_TOOLS:
+                            raise ValueError(f"Unknown tool: {tool_name}")
                         
-                        # OLD SYSTEM: Use formatters for legacy tools
-                        # Get tool formatter (or use defaults)
-                        formatter = TOOL_FORMATTERS.get(tool_name, {})
-                        
-                        # Format and post pre-execution message (IN_PROGRESS)
-                        if formatter.get("pre"):
-                            pre_msg = formatter["pre"](tool_call)
-                        else:
-                            # Default formatting for tools without custom formatter
-                            pre_msg = {"title": f"Executing {tool_name}", "message": f"params: {tool_call}"}
-                        
-                        # Ensure message is not empty (backend validation requires at least 1 character)
-                        message_content = pre_msg.get('message', '').strip()
-                        
-                        await self._post_message(
-                            message_content,
-                            "TOOL",
-                            metadata={
-                                "toolCallId": tool_call_id,
-                                "toolName": tool_name,
-                                "toolStatus": "IN_PROGRESS",
-                                "title": pre_msg['title']
-                            }
-                        )
-                        
-                        # Execute tool (blocking)
-                        result = await self._execute_tool(tool_call, tool_call_id)
-                        
-                        # Format and post post-execution message (FINISHED)
-                        if formatter.get("post"):
-                            post_msg = formatter["post"](tool_call, result)
-                        else:
-                            # Default formatting
-                            post_msg = {"title": f"Completed {tool_name}", "message": str(result)}
-                            
-                            # Ensure message is not empty (backend validation requires at least 1 character)
-                            message_content = post_msg.get('message', '').strip()
-                            
-                            await self._post_message(
-                                message_content,
-                                "TOOL",
-                                metadata={
-                                    "toolCallId": tool_call_id,
-                                    "toolName": tool_name,
-                                    "toolStatus": "FINISHED",
-                                    "title": post_msg['title']
-                                }
-                            )
+                        workflow.logger.info(f"✨ Executing tool: {tool_name}")
+                        v2_helper = EVENT_DRIVEN_TOOLS[tool_name]
+                        await v2_helper(self, tool_call, tool_call_id)
                         
                     except Exception as e:
-                        # Post error and add to context so agent can see what failed
+                        # Post error message to UI and context
                         error_msg = f"Tool {tool_name} failed: {str(e)}"
                         await self._post_message(
                             error_msg,
@@ -733,6 +714,9 @@ class AgentWorkflow:
                             }
                         )
                         workflow.logger.error(f"Tool execution failed: {error_msg}")
+                
+                if tool_calls:
+                    await asyncio.gather(*[execute_one_tool(tc) for tc in tool_calls])
                 
                 # 6. Check progress with verifier and update DB
                 # Generate a unique ID for this verifier call
@@ -754,9 +738,12 @@ class AgentWorkflow:
                 progress_result = await self._check_progress()
                 # Track tokens from verifier LLM call (usage is always present)
                 verifier_usage = progress_result["usage"]
-                self.tokens_in += verifier_usage.get("prompt_tokens", 0)
-                self.tokens_out += verifier_usage.get("completion_tokens", 0)
-                self.token_count += verifier_usage.get("total_tokens", 0)
+                
+                async with self._state_lock:
+                    self.tokens_in += verifier_usage.get("prompt_tokens", 0)
+                    self.tokens_out += verifier_usage.get("completion_tokens", 0)
+                    self.token_count += verifier_usage.get("total_tokens", 0)
+                
                 progress_score = progress_result.get("score", 0.0)
                 progress_reasoning = progress_result.get("reasoning", "No reasoning provided")
                 
@@ -1074,60 +1061,6 @@ class AgentWorkflow:
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
     
-    async def _execute_tool(self, tool_call: Dict, tool_call_id: str = None) -> Any:
-        """
-        Execute a single tool call. Returns result (dict for activities, str for system tools).
-        Does NOT post messages - main loop handles all posting.
-        Exception: spawn_sub_agents posts its summary message before waiting.
-        
-        NEW: If tool is in EVENT_DRIVEN_TOOLS, uses new event system (no return value).
-        """
-        tool = tool_call.get("tool")
-        args = tool_call.get("args", [])
-        
-        workflow.logger.info(f"Executing tool: {tool}")
-        
-        # NEW SYSTEM: Check if tool uses event-driven architecture
-        if tool in EVENT_DRIVEN_TOOLS:
-            workflow.logger.info(f"✨ Using new event-driven system for {tool}")
-            tool_helper = EVENT_DRIVEN_TOOLS[tool]
-            await tool_helper(self, tool_call, tool_call_id)
-            return None  # Event-driven tools don't return values
-        
-        # Map tool to activity (for old non-event-driven tools only)
-        # Note: All tools are now event-driven and never reach here
-        activity_map = {}
-        
-        activity_fn = activity_map.get(tool)
-        if not activity_fn:
-            raise ValueError(f"Unknown tool: {tool} (not in activity map - may need to be migrated to event-driven)")
-        
-        # Check if tool is available
-        available_tool_names = [t['name'] for t in self.tools]
-        if tool not in available_tool_names:
-            raise ValueError(f"Tool not available: {tool}")
-        
-        # Extract arguments from tool_call dict based on tool type
-        # Each tool has its own Pydantic model with specific fields
-        # Fallback to args if present (for backward compatibility)
-        activity_args = args
-        
-        # Execute with extreme backoff
-        result = await workflow.execute_activity(
-            activity_fn,
-            args=activity_args,
-            start_to_close_timeout=timedelta(minutes=5),
-            heartbeat_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(
-                maximum_attempts=6,
-                backoff_coefficient=4.0,
-                initial_interval=timedelta(seconds=2),
-                maximum_interval=timedelta(seconds=64)
-            )
-        )
-        
-        return result
-    
     async def _check_progress(self) -> Dict[str, Any]:
         """
         Check progress toward goal using LLM verifier.
@@ -1190,9 +1123,11 @@ class AgentWorkflow:
             
             # Track tokens from summary generation LLM call
             summary_usage = summary_result.get("usage", {})
-            self.tokens_in += summary_usage.get("prompt_tokens", 0)
-            self.tokens_out += summary_usage.get("completion_tokens", 0)
-            self.token_count += summary_usage.get("total_tokens", 0)
+            
+            async with self._state_lock:
+                self.tokens_in += summary_usage.get("prompt_tokens", 0)
+                self.tokens_out += summary_usage.get("completion_tokens", 0)
+                self.token_count += summary_usage.get("total_tokens", 0)
             
             workflow.logger.info(
                 f"Summary generated: summary_length={len(summary)}, tokens_used={summary_usage.get('total_tokens', 0)}"
@@ -1213,9 +1148,11 @@ class AgentWorkflow:
             
             # Track tokens from blueprint compression LLM call
             blueprint_usage = blueprint_result.get("usage", {})
-            self.tokens_in += blueprint_usage.get("prompt_tokens", 0)
-            self.tokens_out += blueprint_usage.get("completion_tokens", 0)
-            self.token_count += blueprint_usage.get("total_tokens", 0)
+            
+            async with self._state_lock:
+                self.tokens_in += blueprint_usage.get("prompt_tokens", 0)
+                self.tokens_out += blueprint_usage.get("completion_tokens", 0)
+                self.token_count += blueprint_usage.get("total_tokens", 0)
             
             workflow.logger.info(
                 f"Blueprint extracted and saved: tokens_used={blueprint_usage.get('total_tokens', 0)}"

@@ -25,6 +25,8 @@ navi-whisper-lux/
 ├── front-end/      → React/TypeScript web app
 ├── back-end/       → Express/TypeScript REST API
 ├── agents/         → Python Temporal workers
+├── research/       → Research, experiments, and prototypes
+├── mac-app/        → Native Mac application
 └── .cursor/        → Project-wide Cursor rules
 ```
 

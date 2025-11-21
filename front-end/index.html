@@ -2,7 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, minimal-ui" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Navi">
     <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -44,6 +46,26 @@
 
   <body>
     <div id="root"></div>
+    <script>
+      // Hide Safari UI on iOS by scrolling slightly on load
+      if (/iPhone|iPad|iPod/.test(navigator.userAgent)) {
+        window.addEventListener('load', function() {
+          setTimeout(function() {
+            window.scrollTo(0, 1);
+          }, 0);
+        });
+        
+        // Hide Safari UI on scroll
+        let lastScrollTop = 0;
+        window.addEventListener('scroll', function() {
+          const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+          if (scrollTop > lastScrollTop) {
+            // Scrolling down - Safari will auto-hide UI
+          }
+          lastScrollTop = scrollTop <= 0 ? 0 : scrollTop;
+        }, false);
+      }
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

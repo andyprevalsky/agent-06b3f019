@@ -139,13 +139,10 @@ async def test_execute_tool_activity_failure():
             async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
                 events.append(event)
             
-            # Should have 2 events: pre and error
-            assert len(events) == 2
+            # Should have 1 error event when creation fails
+            assert len(events) == 1
             
-            pre_event = events[0]
-            assert pre_event.status == MessageStatus.IN_PROGRESS
-            
-            error_event = events[1]
+            error_event = events[0]
             assert error_event.type == EventType.POST_MESSAGE
             assert error_event.status == MessageStatus.ERROR
             assert "Failed to create attention request" in error_event.title

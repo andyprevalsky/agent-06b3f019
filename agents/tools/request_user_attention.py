@@ -35,6 +35,8 @@ class RequestUserAttentionManager(ToolManager):
         """
         question = tool_call.get("question", "")
         image_url = tool_call.get("image_url")
+        metadata = tool_call.get("metadata")
+        event_metadata = None
         
         if not question:
             yield ToolEvent(
@@ -45,15 +47,7 @@ class RequestUserAttentionManager(ToolManager):
             )
             return
         
-        # 1. Pre-execution status - show the question
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="🔔 Requesting user attention",
-            message=question,
-            status=MessageStatus.IN_PROGRESS
-        )
-        
-        # 2. Create attention request in database
+        # 1. Create attention request in database
         try:
             # Get workflow info
             info = workflow.info()
@@ -70,10 +64,16 @@ class RequestUserAttentionManager(ToolManager):
                     str(agent_id) if agent_id else "",
                     str(workflow_id) if workflow_id else "",
                     str(question) if question else "",
-                    str(image_url) if image_url else ""
+                    str(image_url) if image_url else "",
+                    metadata or None,
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
             )
+            
+            if metadata or request_id:
+                payload = dict(metadata or {})
+                payload["attentionRequestId"] = request_id
+                event_metadata = {"requestUserAttention": payload}
             
             logger.info(
                 "Attention request created, waiting for user response",
@@ -87,9 +87,19 @@ class RequestUserAttentionManager(ToolManager):
                 type=EventType.POST_MESSAGE,
                 title="❌ Failed to create attention request",
                 message=str(e),
-                status=MessageStatus.ERROR
+                status=MessageStatus.ERROR,
+                metadata={"requestUserAttention": metadata} if metadata else None
             )
             return
+        
+        # 2. Pre-execution status - show the question
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="🔔 Requesting user attention",
+            message=question,
+            status=MessageStatus.IN_PROGRESS,
+            metadata=event_metadata
+        )
         
         # 3. Wait for user response
         # The signal handler will post a USER message and add it to context
@@ -134,7 +144,8 @@ class RequestUserAttentionManager(ToolManager):
             type=EventType.POST_MESSAGE,
             title="✓ User message received",
             message="",
-            status=MessageStatus.FINISHED
+            status=MessageStatus.FINISHED,
+            metadata=event_metadata
         )
 
 
@@ -149,6 +160,7 @@ async def create_attention_request_activity(
     workflow_id: str,
     question: str,
     image_url: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Activity: Create an attention request in the database.
@@ -167,7 +179,7 @@ async def create_attention_request_activity(
         config = load_config()
         backend_url = config.backend.api_url
         
-        payload = {
+        payload: Dict[str, Any] = {
             "userId": user_id,
             "agentId": agent_id,
             "workflowId": workflow_id,
@@ -177,6 +189,9 @@ async def create_attention_request_activity(
         # Only include imageUrl if provided
         if image_url:
             payload["imageUrl"] = image_url
+
+        if metadata:
+            payload["metadata"] = metadata
         
         logger.info(
             "Creating attention request",
@@ -256,6 +271,7 @@ async def request_user_attention_direct(
     workflow_instance,
     question: str,
     image_url: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """
     Direct call helper for tools that need to request user attention with simple parameters.
@@ -283,13 +299,8 @@ async def request_user_attention_direct(
     tool_call_id = workflow.uuid4()
     
     # Post pre-execution message
-    pre_event = ToolEvent(
-        type=EventType.POST_MESSAGE,
-        title="🔔 Requesting user attention",
-        message=question,
-        status=MessageStatus.IN_PROGRESS
-    )
-    await workflow_instance._handle_tool_event(pre_event, tool_call_id, "request_user_attention")
+    event_metadata = None
+    metadata_payload: Optional[Dict[str, Any]] = None
     
     # Create the attention request via activity
     try:
@@ -301,7 +312,8 @@ async def request_user_attention_direct(
                 str(agent_id) if agent_id else "",
                 str(workflow_id) if workflow_id else "",
                 str(question) if question else "",
-                str(image_url) if image_url else ""
+                str(image_url) if image_url else "",
+                metadata or None,
             ],
             start_to_close_timeout=timedelta(seconds=30),
         )
@@ -312,16 +324,30 @@ async def request_user_attention_direct(
             workflow_id=workflow_id
         )
         
+        metadata_payload = dict(metadata or {})
+        metadata_payload["attentionRequestId"] = request_id
+        event_metadata = {"requestUserAttention": metadata_payload}
+        
     except Exception as e:
         # Post error message
         error_event = ToolEvent(
             type=EventType.POST_MESSAGE,
             title="❌ Failed to create attention request",
             message=str(e),
-            status=MessageStatus.ERROR
+            status=MessageStatus.ERROR,
+            metadata={"requestUserAttention": metadata} if metadata else None
         )
         await workflow_instance._handle_tool_event(error_event, tool_call_id, "request_user_attention")
         raise
+    
+    pre_event = ToolEvent(
+        type=EventType.POST_MESSAGE,
+        title="🔔 Requesting user attention",
+        message=question,
+        status=MessageStatus.IN_PROGRESS,
+        metadata=event_metadata
+    )
+    await workflow_instance._handle_tool_event(pre_event, tool_call_id, "request_user_attention")
     
     # Wait for user response
     await workflow.wait_condition(
@@ -355,12 +381,14 @@ async def request_user_attention_direct(
         type=EventType.POST_MESSAGE,
         title="✓ User message received",
         message="",
-        status=MessageStatus.FINISHED
+        status=MessageStatus.FINISHED,
+        metadata=event_metadata
     )
     await workflow_instance._handle_tool_event(post_event, tool_call_id, "request_user_attention")
     
     return {
         "response": response_text,
-        "question": question
+        "question": question,
+        "attention_request_id": metadata_payload.get("attentionRequestId") if metadata_payload else None,
     }
 

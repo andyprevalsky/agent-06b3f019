@@ -1,0 +1,31 @@
+{
+  "version": "1.0",
+  "lastUpdated": "2025-01-16",
+  "benchmarks": {
+    "mmlu-pro": {
+      "name": "MMLU-Pro",
+      "description": "Graduate-level multiple-choice questions across 14 subjects",
+      "source": "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro",
+      "questionCount": 12032,
+      "industryStandards": [
+        { "model": "DeepSeek-R1", "score": 84.0, "date": "2025-01", "source": "llmdb.com", "notes": "With CoT" },
+        { "model": "Claude Sonnet 3.5", "score": 78.0, "date": "2024-06", "source": "Anthropic", "notes": "With CoT" },
+        { "model": "GPT-4o", "score": 72.6, "date": "2024-05", "source": "OpenAI", "notes": "With CoT" },
+        { "model": "GPT-4o", "score": 53.5, "date": "2024-05", "source": "OpenAI", "notes": "No CoT (baseline)" }
+      ],
+      "updateInstructions": "Visit https://huggingface.co/spaces/TIGER-Lab/MMLU-Pro leaderboard. Extract top models with scores ≥70%. Include: model name, score (0-100), date (YYYY-MM), source, notes about CoT usage."
+    },
+    "terminal-bench": {
+      "name": "Terminal-Bench Hard",
+      "description": "Real-world terminal task completion (47 tasks)",
+      "source": "https://www.tbench.ai",
+      "questionCount": 47,
+      "industryStandards": [
+        { "model": "GPT-4o", "score": 65.0, "date": "2024-11", "source": "tbench.ai" },
+        { "model": "Claude Sonnet 3.5", "score": 62.0, "date": "2024-11", "source": "tbench.ai" }
+      ],
+      "updateInstructions": "Visit https://www.tbench.ai. Extract Terminal-Bench Hard (47 tasks) results. Include: model name, score (0-100), date (YYYY-MM), source."
+    }
+  }
+}
+

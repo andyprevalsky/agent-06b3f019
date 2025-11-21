@@ -111,7 +111,7 @@ class SendSmsManager(ToolManager):
                 message=f"Error: {error_msg}",
                 status=MessageStatus.ERROR
             )
-            raise  # Re-raise so workflow can handle
+            # Don't raise - error event already posted the formatted message
 
 
 # ========================================

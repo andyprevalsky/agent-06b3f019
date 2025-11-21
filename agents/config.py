@@ -86,6 +86,13 @@ class BrowserbaseConfig:
 
 
 @dataclass
+class ParallelConfig:
+    """Parallel AI configuration for Find All, Enrich, and Monitor APIs."""
+    
+    api_key: str
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
     
@@ -96,6 +103,7 @@ class AppConfig:
     perplexity: PerplexityConfig
     gemini: GeminiConfig
     browserbase: BrowserbaseConfig
+    parallel: ParallelConfig
     
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -159,6 +167,10 @@ def load_config() -> AppConfig:
         project_id=os.environ["BROWSERBASE_PROJECT_ID"],
     )
     
+    parallel = ParallelConfig(
+        api_key=os.environ["PARRALLEL_API_KEY"],
+    )
+    
     return AppConfig(
         temporal=temporal,
         backend=backend,
@@ -167,6 +179,7 @@ def load_config() -> AppConfig:
         perplexity=perplexity,
         gemini=gemini,
         browserbase=browserbase,
+        parallel=parallel,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

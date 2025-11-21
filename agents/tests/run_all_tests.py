@@ -22,6 +22,10 @@ from test_wait_seconds import run_all_tests as test_wait_seconds
 from test_spawn_sub_agents import run_all_tests as test_spawn_sub_agents
 from test_knowledge_base import run_all_tests as test_knowledge_base
 from test_send_sms import run_all_tests as test_send_sms
+from test_send_sms_as_user import run_all_tests as test_send_sms_as_user
+from test_find_all import run_all_tests as test_find_all
+from test_enrich import run_all_tests as test_enrich
+from test_monitor import run_all_tests as test_monitor
 
 
 async def run_test_silent(name: str, test_func: Callable[[], Awaitable[bool]]) -> tuple[str, bool, float]:
@@ -69,9 +73,12 @@ async def main():
     test_tasks = [
         run_test_silent("Web Search", test_web_search),
         run_test_silent("Amazon Shopping", test_amazon_shopping),
-        run_test_silent("Spawn Sub-Agents", test_spawn_sub_agents),
         run_test_silent("Knowledge Base", test_knowledge_base),
         run_test_silent("Send SMS", test_send_sms),
+        run_test_silent("Send SMS As User", test_send_sms_as_user),
+        run_test_silent("Find All", test_find_all),
+        run_test_silent("Enrich", test_enrich),
+        run_test_silent("Monitor", test_monitor),
     ]
     
     # Run sync tests (these are fast, run them sequentially, silently)
@@ -91,10 +98,16 @@ async def main():
     # Wait for all async tests
     async_results = await asyncio.gather(*test_tasks)
     
+    # Run Spawn Sub-Agents after other async tests to avoid interference
+    spawn_result = await run_test_silent("Spawn Sub-Agents", test_spawn_sub_agents)
+    
     # Collect all results
     results = []
     for name, passed, duration in async_results:
         results.append((name, passed, int(duration * 1000)))  # Convert to ms
+    
+    # Include Spawn Sub-Agents result (convert duration to ms)
+    results.append((spawn_result[0], spawn_result[1], int(spawn_result[2] * 1000)))
     
     results.append(("Wait Seconds", wait_seconds_result, int(wait_seconds_duration)))
     results.append(("Request User Attention", request_attention_result, int(request_attention_duration)))

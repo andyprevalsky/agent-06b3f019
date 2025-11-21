@@ -120,9 +120,9 @@ export default function Settings() {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="h-full overflow-y-auto pt-20">
       <div className="container max-w-3xl mx-auto py-12 px-4">
-        <div className="mb-8">
+        <div className="mb-8 backdrop-blur-md bg-background/80 p-6 rounded-xl border border-border/50 dark:border-navi-light-light-black/50">
           <h1 className="text-4xl font-bold mb-2">Settings</h1>
           <p className="text-muted-foreground">
             Manage your account settings and preferences

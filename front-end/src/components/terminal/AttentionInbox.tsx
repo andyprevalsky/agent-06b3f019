@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabase';
+import { respondToAttentionRequest, skipAttentionRequest } from '@/lib/api';
 import { subscribeToAttentionRequests, unsubscribe } from '@/lib/realtime';
 import { MarkdownText } from './MarkdownText';
 import type { RealtimeChannel } from '@supabase/supabase-js';
@@ -18,6 +19,7 @@ interface AttentionRequest {
   workflow_id: string;
   question: string;
   image_url?: string | null;
+  metadata?: Record<string, any> | null;
   user_response?: string | null;
   created_at: string;
   updated_at: string;
@@ -33,6 +35,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   const [requests, setRequests] = useState<AttentionRequest[]>([]);
   const [loading, setLoading] = useState(false);
   const [responses, setResponses] = useState<Record<string, string>>({});
+  const [actionRequestId, setActionRequestId] = useState<string | null>(null);
   const { toast } = useToast();
 
   // Realtime subscription refs
@@ -105,6 +108,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
               workflow_id: data.workflowId,
               question: data.question,
               image_url: data.imageUrl,
+              metadata: data.metadata,
               user_response: data.userResponse,
               created_at: data.createdAt,
               updated_at: data.updatedAt,
@@ -124,6 +128,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                       ...req,
                       user_response: data.userResponse,
                       updated_at: data.updatedAt,
+                      metadata: data.metadata ?? req.metadata,
                       answered: !!data.userResponse,
                     }
                   : req
@@ -199,8 +204,8 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   const unansweredCount = requests.filter(r => !r.answered).length;
 
   // Handle respond
-  const handleRespond = async (requestId: string) => {
-    const response = responses[requestId];
+  const handleRespond = async (requestId: string, overrideResponse?: string) => {
+    const response = overrideResponse ?? responses[requestId];
     if (!response?.trim()) {
       toast({
         title: 'Error',
@@ -212,30 +217,17 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
 
     try {
       setLoading(true);
-      const session = await supabase.auth.getSession();
-      if (!session.data.session) return;
-
       // Count remaining requests before responding
       const remainingBeforeResponse = requests.filter(r => !r.answered && r.id !== requestId).length;
 
-      const res = await fetch(
-        `${API_BASE_WITH_PATH}/attention-requests/${requestId}/respond`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${session.data.session.access_token}`,
-          },
-          body: JSON.stringify({ response }),
-        }
-      );
-
-      if (!res.ok) throw new Error('Failed to respond');
+      await respondToAttentionRequest(requestId, response);
 
       // Clear the response
       setResponses(prev => {
         const newResponses = { ...prev };
-        delete newResponses[requestId];
+        if (!overrideResponse) {
+          delete newResponses[requestId];
+        }
         return newResponses;
       });
 
@@ -275,23 +267,10 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   const handleSkip = async (requestId: string) => {
     try {
       setLoading(true);
-      const session = await supabase.auth.getSession();
-      if (!session.data.session) return;
-
       // Count remaining requests before skipping
       const remainingBeforeSkip = requests.filter(r => !r.answered && r.id !== requestId).length;
 
-      const res = await fetch(
-        `${API_BASE_WITH_PATH}/attention-requests/${requestId}/skip`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.data.session.access_token}`,
-          },
-        }
-      );
-
-      if (!res.ok) throw new Error('Failed to skip');
+      await skipAttentionRequest(requestId);
 
       // Clear the response if any
       setResponses(prev => {
@@ -329,6 +308,64 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSendViaIMessage = async (request: AttentionRequest) => {
+    const metadata = request.metadata || {};
+    if (metadata.onSuccess !== 'sendSmsThroughIMessage') {
+      toast({
+        title: 'Unsupported action',
+        description: 'This request cannot be completed automatically.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const to = metadata.to;
+    const message = metadata.message;
+
+    if (!to || !message) {
+      toast({
+        title: 'Missing details',
+        description: 'Recipient or message is missing from the request.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const bridge = (typeof window !== 'undefined' ? (window as any).api : undefined);
+    if (!bridge?.sendIMessage) {
+      toast({
+        title: 'Mac app required',
+        description: 'Open the Navi Mac app to send this iMessage automatically.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      setActionRequestId(request.id);
+      const result = await bridge.sendIMessage({ to, message });
+      if (result && result.success === false) {
+        throw new Error(result.message || 'iMessage send failed');
+      }
+
+      await respondToAttentionRequest(request.id, 'Message sent via Mac app ✅');
+      toast({
+        title: 'iMessage sent',
+        description: 'Your approval was recorded and the agent will continue.',
+      });
+      await fetchRequests();
+    } catch (error) {
+      console.error('Failed to send via iMessage:', error);
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to send via iMessage',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionRequestId(null);
     }
   };
 
@@ -437,6 +474,43 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                       <div>
                         <MarkdownText text={currentRequest.question} />
                       </div>
+
+                      {/* Automated action for send_sms_as_user */}
+                      {currentRequest.metadata?.onSuccess === 'sendSmsThroughIMessage' && (
+                        <div className="rounded-lg border border-dashed border-primary/40 bg-primary/5 p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-semibold text-primary">
+                              Send via iMessage on your Mac
+                            </p>
+                            <span className="text-xs text-muted-foreground">
+                              Requires Mac app
+                            </span>
+                          </div>
+                          <div className="text-xs text-muted-foreground space-y-1">
+                            <p><span className="font-semibold">To:</span> {currentRequest.metadata?.to}</p>
+                            <p className="whitespace-pre-wrap">
+                              <span className="font-semibold">Message:</span> {currentRequest.metadata?.message}
+                            </p>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={
+                              actionRequestId === currentRequest.id ||
+                              loading ||
+                              !(typeof window !== 'undefined' && (window as any)?.api?.sendIMessage)
+                            }
+                            onClick={() => handleSendViaIMessage(currentRequest)}
+                          >
+                            {(() => {
+                              const hasBridge = typeof window !== 'undefined' && (window as any)?.api?.sendIMessage;
+                              if (!hasBridge) return 'Open Mac app to send';
+                              if (actionRequestId === currentRequest.id) return 'Sending...';
+                              return 'Send via iMessage';
+                            })()}
+                          </Button>
+                        </div>
+                      )}
 
                       {/* Link to agent */}
                       <Button

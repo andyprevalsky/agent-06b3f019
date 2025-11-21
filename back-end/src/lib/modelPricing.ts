@@ -7,6 +7,7 @@
  */
 
 import { prisma } from './prisma';
+import { ROSE_MODEL_POOLS, normalizeRoseAlias } from './roseModels';
 
 interface ModelPricing {
   prompt: string; // Price per token in dollars (e.g., "0.000001")
@@ -59,8 +60,32 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
     const data = await response.json() as any;
     const models: OpenRouterModel[] = data.data || [];
     
+    const normalizedAlias = normalizeRoseAlias(modelId);
     const model = models.find(m => m.id === modelId);
     
+    if (normalizedAlias) {
+      const pool = ROSE_MODEL_POOLS[normalizedAlias];
+      const pricingEntries = pool
+        .map(id => models.find(m => m.id === id))
+        .filter((m): m is OpenRouterModel & { pricing: { prompt: string; completion: string } } => !!m?.pricing);
+
+      if (pricingEntries.length === 0) {
+        console.error(`No pricing found for pool models of alias: ${modelId}`);
+        return null;
+      }
+
+      const avgPrompt = pricingEntries.reduce((sum, entry) => sum + parseFloat(entry.pricing!.prompt), 0) / pricingEntries.length;
+      const avgCompletion = pricingEntries.reduce((sum, entry) => sum + parseFloat(entry.pricing!.completion), 0) / pricingEntries.length;
+
+      const pricing: ModelPricing = {
+        prompt: avgPrompt.toString(),
+        completion: avgCompletion.toString(),
+      };
+
+      await upsertPricing(modelId, pricing, now);
+      return pricing;
+    }
+
     if (!model?.pricing) {
       console.error(`No pricing found for model: ${modelId}`);
       return null;
@@ -71,28 +96,7 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
       completion: model.pricing.completion,
     };
 
-    // Update cache in Supabase (upsert)
-    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
-    
-    await prisma.modelPricingCache.upsert({
-      where: { modelId },
-      update: {
-        tokenInPriceMicrodollars: dollarsToMicrodollars(pricing.prompt),
-        tokenOutPriceMicrodollars: dollarsToMicrodollars(pricing.completion),
-        cachedAt: now,
-        expiresAt,
-      },
-      create: {
-        modelId,
-        tokenInPriceMicrodollars: dollarsToMicrodollars(pricing.prompt),
-        tokenOutPriceMicrodollars: dollarsToMicrodollars(pricing.completion),
-        cachedAt: now,
-        expiresAt,
-      }
-    });
-
-    console.log(`✅ Cached pricing for ${modelId} (expires in 24h)`);
-    
+    await upsertPricing(modelId, pricing, now);
     return pricing;
   } catch (error) {
     console.error(`Error fetching model pricing for ${modelId}:`, error);
@@ -106,5 +110,28 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
  */
 export function dollarsToMicrodollars(dollarsPerToken: string): number {
   return Math.round(parseFloat(dollarsPerToken) * 1_000_000);
+}
+
+async function upsertPricing(modelId: string, pricing: ModelPricing, now: Date) {
+  const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+  await prisma.modelPricingCache.upsert({
+    where: { modelId },
+    update: {
+      tokenInPriceMicrodollars: dollarsToMicrodollars(pricing.prompt),
+      tokenOutPriceMicrodollars: dollarsToMicrodollars(pricing.completion),
+      cachedAt: now,
+      expiresAt,
+    },
+    create: {
+      modelId,
+      tokenInPriceMicrodollars: dollarsToMicrodollars(pricing.prompt),
+      tokenOutPriceMicrodollars: dollarsToMicrodollars(pricing.completion),
+      cachedAt: now,
+      expiresAt,
+    },
+  });
+
+  console.log(`✅ Cached pricing for ${modelId} (expires in 24h)`);
 }
 

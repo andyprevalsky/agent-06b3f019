@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import NodeCache from 'node-cache';
-import { MODEL_POOLS } from './rose';
+import { ROSE_MODEL_POOLS } from '../lib/roseModels';
 
 const router = Router();
 // Cache models for 1 hour (3600 seconds)
@@ -49,7 +49,7 @@ router.delete('/cache', (req: Request, res: Response) => {
  */
 async function calculateRoseMetadata(modelName: string, allModels: OpenRouterModel[]) {
   try {
-    const pool = MODEL_POOLS[modelName as keyof typeof MODEL_POOLS];
+    const pool = ROSE_MODEL_POOLS[modelName as keyof typeof ROSE_MODEL_POOLS];
     if (!pool) {
       throw new Error(`Unknown Rose model: ${modelName}`);
     }
@@ -156,24 +156,24 @@ router.get('/', async (req: Request, res: Response) => {
     const sortedModels = sortModels(toolSupportedModels);
 
     // Calculate metadata for Rose models dynamically (pricing + context length)
-    const roseMetadata = await calculateRoseMetadata('★-rose', allModels);
-    const roseUltraMetadata = await calculateRoseMetadata('rose-ultra', allModels);
+    const roseFastMetadata = await calculateRoseMetadata('rose-1-fast', allModels);
+    const roseUltraMetadata = await calculateRoseMetadata('rose-1-ultra', allModels);
 
     // Inject Rose models at the beginning
   const roseModels: SortedModel[] = [
     {
-      id: 'rose-labs/★-rose',
-      name: '★-rose',
+      id: 'rose-labs/rose-1-fast',
+      name: 'rose-1-fast',
       provider: 'rose-labs',
-      description: 'Rose Labs workhorse model for most tasks',
-      contextLength: roseMetadata.contextLength,
-      pricing: roseMetadata.pricing
+      description: 'Rose Labs fast model optimized for low latency (< 6s avg)',
+      contextLength: roseFastMetadata.contextLength,
+      pricing: roseFastMetadata.pricing
     },
     {
-      id: 'rose-labs/rose-ultra',
-      name: 'rose-ultra',
+      id: 'rose-labs/rose-1-ultra',
+      name: 'rose-1-ultra',
       provider: 'rose-labs',
-      description: 'Rose Labs high-end model for extremely complex tasks',
+      description: 'Rose Labs ultra model for complex tasks (> 6s avg)',
       contextLength: roseUltraMetadata.contextLength,
       pricing: roseUltraMetadata.pricing
     }

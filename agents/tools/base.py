@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 from typing import Literal, Optional, Dict, Any, List, AsyncGenerator
 from enum import Enum
+import json
+from temporalio.exceptions import ActivityError, ApplicationError
 
 
 __all__ = [
@@ -17,6 +19,10 @@ __all__ = [
     "UsageItem",
     "ToolEvent",
     "ToolManager",
+    "format_tool_message",
+    "format_error_message",
+    "format_time_elapsed",
+    "extract_root_error",
 ]
 
 
@@ -129,6 +135,227 @@ class ToolEvent:
             result["usage_items"] = None
         
         return result
+
+
+# ========================================
+# BASE MANAGER CLASS
+# ========================================
+
+# ========================================
+# HELPER FUNCTIONS
+# ========================================
+
+def format_time_elapsed(seconds: float) -> str:
+    """Format seconds into human-readable duration (e.g., '29s', '3m 26s', '1hr 3m 28s')."""
+    total_seconds = int(seconds)
+    
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    
+    if hours > 0:
+        return f"{hours}hr {minutes}m {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
+
+
+def format_params(params: Dict[str, Any]) -> str:
+    """Format tool parameters for display in markdown."""
+    if not params:
+        return "None"
+    
+    lines = []
+    for key, value in params.items():
+        # Skip internal fields
+        if key in ['tool', 'tool_call_id']:
+            continue
+        
+        # Format value nicely
+        if isinstance(value, dict):
+            value_str = json.dumps(value, indent=2)
+        elif isinstance(value, (list, tuple)):
+            if len(value) > 3:
+                value_str = f"[{', '.join(str(v) for v in value[:3])}, ... ({len(value)} total)]"
+            else:
+                value_str = str(value)
+        elif isinstance(value, str) and len(value) > 100:
+            value_str = value[:97] + "..."
+        else:
+            value_str = str(value)
+        
+        lines.append(f"- **{key}**: {value_str}")
+    
+    return "\n".join(lines) if lines else "None"
+
+
+def format_result(result: Dict[str, Any]) -> str:
+    """Format tool result for display in markdown."""
+    if not result:
+        return "No result data"
+    
+    # Extract key fields
+    lines = []
+    
+    # Common result fields
+    if "answer" in result:
+        answer = result["answer"]
+        if isinstance(answer, str) and len(answer) > 500:
+            answer = answer[:497] + "..."
+        lines.append(f"{answer}")
+    
+    if "candidates" in result:
+        candidates = result["candidates"]
+        if isinstance(candidates, list):
+            lines.append(f"\n**Found {len(candidates)} candidates**")
+            for i, candidate in enumerate(candidates[:5], 1):
+                name = candidate.get("name", "Unknown")
+                lines.append(f"{i}. {name}")
+            if len(candidates) > 5:
+                lines.append(f"...and {len(candidates) - 5} more")
+    
+    if "sources" in result:
+        sources = result.get("sources", [])
+        if sources:
+            lines.append(f"\n**Sources:**")
+            for src in sources[:5]:
+                lines.append(f"- {src}")
+            if len(sources) > 5:
+                lines.append(f"- ...and {len(sources) - 5} more")
+    
+    if "findall_id" in result:
+        lines.append(f"\nFind All ID: {result['findall_id']}")
+    
+    if "monitor_id" in result:
+        lines.append(f"\nMonitor ID: {result['monitor_id']}")
+    
+    if "output" in result:
+        output = result["output"]
+        if isinstance(output, dict) and "content" in output:
+            content = output["content"]
+            if isinstance(content, dict):
+                lines.append(f"\n**Extracted Data:**")
+                for key, value in list(content.items())[:5]:
+                    if isinstance(value, str) and len(value) > 100:
+                        value = value[:97] + "..."
+                    lines.append(f"- {key}: {value}")
+    
+    # If no specific formatting, show summary
+    if not lines:
+        result_str = json.dumps(result, indent=2)
+        if len(result_str) > 500:
+            result_str = result_str[:497] + "..."
+        lines.append(result_str)
+    
+    return "\n".join(lines)
+
+
+def format_tool_message(
+    params: Dict[str, Any],
+    result: Dict[str, Any],
+    time_elapsed: float,
+    cost_cents: int
+) -> str:
+    """
+    Format a standardized tool message with Params, Result, Time Elapsed, and Cost.
+    
+    Args:
+        params: Tool call parameters
+        result: Tool execution result
+        time_elapsed: Time elapsed in seconds
+        cost_cents: Cost in cents
+        
+    Returns:
+        Formatted markdown string
+    """
+    return f"""**Params Passed:**
+
+{format_params(params)}
+
+**Result:**
+
+{format_result(result)}
+
+**Time Elapsed:** {format_time_elapsed(time_elapsed)}
+
+**Cost:** ${cost_cents/100:.4f}"""
+
+
+def extract_root_error(error: Exception) -> str:
+    """
+    Extract the most meaningful error message from a chain of Temporal exceptions.
+    
+    Temporal wraps errors in ActivityError -> ApplicationError chains.
+    This function unwraps them to get the original, readable error message.
+    
+    Args:
+        error: Exception to extract from
+        
+    Returns:
+        Clean error message string
+    """
+    # If it's a Temporal ActivityError, unwrap to get the original cause
+    if isinstance(error, ActivityError):
+        if hasattr(error, 'cause') and error.cause:
+            return extract_root_error(error.cause)
+    
+    # If it's a Temporal ApplicationError, get the original message
+    if isinstance(error, ApplicationError):
+        if hasattr(error, 'message') and error.message:
+            return error.message
+    
+    # For other exceptions, use string representation
+    return str(error)
+
+
+def format_error_message(
+    params: Dict[str, Any],
+    error: Exception,
+    time_elapsed: float,
+    cost_cents: int = 0
+) -> str:
+    """
+    Format a standardized error message with Params, Error, Time Elapsed, and Cost.
+    
+    Args:
+        params: Tool call parameters
+        error: The exception that occurred
+        time_elapsed: Time elapsed in seconds
+        cost_cents: Cost in cents (usually 0 for failures)
+        
+    Returns:
+        Formatted markdown string
+    """
+    # Extract the meaningful error message (unwraps Temporal exception chains)
+    error_str = extract_root_error(error)
+    
+    # Try to extract API error message from HTTP errors
+    if "HTTP error" in error_str and '{"type":"error"' in error_str:
+        # Extract JSON error message from Parallel API errors
+        import json
+        try:
+            # Find the JSON part
+            start = error_str.find('{"type":"error"')
+            if start != -1:
+                json_str = error_str[start:]
+                error_data = json.loads(json_str)
+                if "error" in error_data and "message" in error_data["error"]:
+                    error_str = error_data["error"]["message"]
+        except:
+            pass  # Keep original error string if parsing fails
+    
+    return f"""**Params Passed:**
+
+{format_params(params)}
+
+**Error:**
+
+{error_str}
+
+**Time Elapsed:** {format_time_elapsed(time_elapsed)}
+
+**Cost:** ${cost_cents/100:.4f}"""
 
 
 # ========================================

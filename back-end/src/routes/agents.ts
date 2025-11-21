@@ -14,6 +14,7 @@ const createAgentSchema = z.object({
   model: z.string().optional().default('google/gemini-2.5-flash'),
   reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional().default('low'),
   tool_ids: z.array(z.string().uuid()).nullable().optional().default([]).transform(val => val ?? []),
+  source: z.enum(['WEB', 'MAC_APP']).optional().default('WEB'),
   task_queue: z.string().optional(), // Optional: for test isolation
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
   user_phone: z.string().optional(), // Optional: for internal auth (sub-agent creation)
@@ -66,6 +67,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         goal: true,
         model: true,
         reasoningEffort: true,
+        source: true,
         progress: true,
         status: true,
         statusMessage: true,
@@ -88,6 +90,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         agent_id: agent.id,
         goal: agent.goal,
         model: agent.model,
+        source: agent.source,
         reasoning_effort: agent.reasoningEffort,
         progress: agent.progress,
         status: agent.status,
@@ -131,16 +134,41 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       },
     });
 
-    // Use LLM to select relevant tools based on the goal
-    const { toolIds: llmSelectedToolIds, tokensIn, tokensOut } = await chooseTools(body.goal, allTools, body.model);
+    // Always-included default tools (by name)
+    const defaultToolNames = [
+      'spawn_browser_agent',
+      'web_search',
+      'send_sms',
+      'search_user_network_for_people'
+    ];
+
+    if (body.source === 'MAC_APP') {
+      defaultToolNames.push('send_sms_as_user');
+    }
     
-    // Merge LLM-selected tools with user-provided tools (no duplicates)
-    const mergedToolIds = Array.from(new Set([...body.tool_ids, ...llmSelectedToolIds]));
+    // Find IDs for default tools
+    const defaultToolIds = allTools
+      .filter(tool => defaultToolNames.includes(tool.name))
+      .map(tool => tool.id);
+    
+    console.log('🔧 Default tools always included', {
+      defaultToolNames,
+      defaultToolIds,
+      foundCount: defaultToolIds.length
+    });
+
+    // Use LLM to select relevant tools based on the goal
+    const { toolIds: llmSelectedToolIds, tokensIn, tokensOut } = await chooseTools(body.goal, allTools);
+    
+    // Merge default tools + LLM-selected tools + user-provided tools (no duplicates)
+    const mergedToolIds = Array.from(new Set([...defaultToolIds, ...body.tool_ids, ...llmSelectedToolIds]));
     
     console.log('🔧 Tool selection summary', {
+      defaultTools: defaultToolIds.length,
       userProvided: body.tool_ids.length,
       llmSelected: llmSelectedToolIds.length,
       merged: mergedToolIds.length,
+      defaultToolNames: allTools.filter(t => defaultToolIds.includes(t.id)).map(t => t.name),
       llmTools: allTools.filter(t => llmSelectedToolIds.includes(t.id)).map(t => t.name),
       tokensIn,
       tokensOut
@@ -180,6 +208,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
           goal: body.goal,
           model: body.model,
           reasoningEffort: body.reasoning_effort,
+          source: body.source,
           tokenInPriceMicrodollars,
           tokenOutPriceMicrodollars,
           tokensIn, // Include tokens from tool selection
@@ -284,6 +313,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       progress: agent.agent.progress,
       goal: agent.agent.goal,
       model: agent.agent.model,
+      source: body.source,
       reasoning_effort: body.reasoning_effort,
       status: agent.agent.status,
       status_message: agent.agent.statusMessage,
@@ -452,6 +482,7 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
         parent_goal: parentGoal,
         goal: agent.goal,
         model: agent.model,
+        source: agent.source,
         reasoning_effort: agent.reasoningEffort,
         progress: agent.progress,
         status: agent.status,

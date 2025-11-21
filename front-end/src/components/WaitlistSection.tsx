@@ -145,7 +145,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
                     </div>
                   </div>
                   <h3 className="text-2xl font-semibold mb-2">Custom</h3>
-                  <p className="text-muted-foreground">Bring your favorite character to life with a custom design, voice, & personality</p>
+                  <p className="text-muted-foreground">Bring your favorite character to life with a custom design, voice & personality</p>
                 </div>
               </CardContent>
             </Card>

@@ -1,34 +1,21 @@
 import { Router, Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
+import { ROSE_MODEL_POOLS, normalizeRoseAlias } from '../lib/roseModels';
+import { MMLUProHarness } from '../benchmarks/harnesses/mmlu-pro';
+import { TerminalBenchHarness, TerminalBenchTask } from '../benchmarks/harnesses/terminal-bench';
+import { prisma } from '../lib/prisma';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const router = Router();
 
-// Model pools for Rose variants
-export const MODEL_POOLS = {
-  'rose-ultra': [
-    'anthropic/claude-sonnet-4.5',
-    'openai/gpt-5'
-  ],
-  '★-rose': [
-    'moonshotai/kimi-k2-thinking',
-    'anthropic/claude-sonnet-4.5',
-    'deepseek/deepseek-chat-v3.1',
-    'google/gemini-2.5-flash'
-  ]
-};
-
 // Randomly select a model from the pool
 function selectModel(requestedModel: string): string {
-  // Normalize: 'rose-labs/rose' → 'rose', 'rose-labs/rose-ultra' → 'rose-ultra'
-  let normalized = requestedModel.toLowerCase();
-  if (normalized.startsWith('rose-labs/')) {
-    normalized = normalized.replace('rose-labs/', '');
-  }
-  
-  const pool = MODEL_POOLS[normalized as keyof typeof MODEL_POOLS];
+  const normalized = normalizeRoseAlias(requestedModel) ?? requestedModel.toLowerCase();
+  const pool = ROSE_MODEL_POOLS[normalized as keyof typeof ROSE_MODEL_POOLS];
   
   if (!pool) {
-    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/★-rose' or 'rose-labs/rose-ultra'`);
+    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast' or 'rose-labs/rose-1-ultra'`);
   }
   
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
@@ -62,13 +49,16 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Prepare request to OpenRouter
+    // Prepare request to OpenRouter with throughput optimization
     const openrouterBody = {
       model: actualModel,
       messages,
       temperature,
       max_tokens,
-      ...otherParams
+      ...otherParams,
+      provider: {
+        sort: 'throughput'  // Optimize for lowest e2e latency
+      }
     };
 
     // Call OpenRouter API
@@ -124,7 +114,7 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
     if (modelName.startsWith('rose-labs/')) {
       modelName = modelName.replace('rose-labs/', '');
     }
-    const pool = MODEL_POOLS[modelName as keyof typeof MODEL_POOLS];
+    const pool = ROSE_MODEL_POOLS[modelName as keyof typeof ROSE_MODEL_POOLS];
 
     if (!pool) {
       return res.status(404).json({ 
@@ -215,6 +205,304 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
     });
   }
 });
+
+/**
+ * POST /bench
+ * Run benchmarks against Rose models
+ */
+
+const HARNESSES = {
+  'mmlu-pro': () => new MMLUProHarness(),
+  'terminal-bench': () => new TerminalBenchHarness(),
+};
+
+interface BenchmarkRequest {
+  benchmark: string;
+  model: string;
+  cotSteps?: number;
+  samples?: number;
+  seed?: number;
+  batchSize?: number;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+interface QuestionResult {
+  questionId: string;
+  cotResponses: string[];
+  extractedAnswer: string;
+  correctAnswer: string;
+  isCorrect: boolean;
+  durationMs: number;
+  costCents: number;
+}
+
+router.post('/bench', async (req: AuthRequest, res: Response) => {
+  const {
+    benchmark,
+    model,
+    cotSteps = 1,
+    samples = 100,
+    seed = 42,
+    batchSize = 10,
+    temperature = 0.7,
+    maxTokens = 2000
+  }: BenchmarkRequest = req.body;
+  
+  // Validate
+  const createHarness = HARNESSES[benchmark as keyof typeof HARNESSES];
+  if (!createHarness) {
+    return res.status(400).json({
+      error: `Unknown benchmark: ${benchmark}`,
+      available: Object.keys(HARNESSES)
+    });
+  }
+  
+  const startTime = Date.now();
+  const harness = createHarness();
+  
+  try {
+    // Load and sample dataset
+    console.log(`Loading ${harness.name} dataset...`);
+    const allQuestions = await harness.loadDataset();
+    const maxSamples = parseInt(process.env.MAX_SAMPLES_PER_BENCH || '100');
+    const sampleCount = Math.min(samples, maxSamples);
+    const questions = harness.sampleQuestions(allQuestions, sampleCount, seed);
+    
+    console.log(`Running ${questions.length} questions with CoT=${cotSteps}, batch size=${batchSize}`);
+    
+    const results: QuestionResult[] = [];
+    
+    // Branch: Terminal-Bench uses Harbor containerized execution
+    if (benchmark === 'terminal-bench') {
+      console.log('🚢 Using Harbor containerized execution for Terminal-Bench');
+      
+      const terminalHarness = harness as TerminalBenchHarness;
+      
+      // For Terminal-Bench, run Harbor with specific sampled task IDs
+      console.log(`Running Harbor for ${questions.length} Terminal-Bench tasks...`);
+      
+      // Extract Harbor task names from sampled questions
+      const harborTaskNames = questions.map((q: TerminalBenchTask) => q.harborTaskName).filter((name): name is string => Boolean(name));
+      console.log(`  Harbor task names: ${harborTaskNames.join(', ')}`);
+      
+      try {
+        const harborResult = await terminalHarness.runBatch(harborTaskNames, model, {
+          agent: 'claude-code',
+          environment: 'daytona',
+          seed
+        });
+        
+        // Convert Harbor results to our format
+        for (const task of harborResult.tasks) {
+          results.push({
+            questionId: task.id,
+            cotResponses: [task.output || ''],
+            extractedAnswer: task.success ? 'pass' : 'fail',
+            correctAnswer: 'pass',
+            isCorrect: task.success,
+            durationMs: task.durationMs || 0,
+            costCents: 0 // Harbor doesn't provide cost breakdown yet
+          });
+        }
+      } catch (error) {
+        console.error(`Harbor batch execution failed:`, error);
+        // Return failed results for all tasks on error
+        for (let i = 0; i < questions.length; i++) {
+          const task = questions[i] as TerminalBenchTask;
+          results.push({
+            questionId: task.id,
+            cotResponses: [],
+            extractedAnswer: 'fail',
+            correctAnswer: 'pass',
+            isCorrect: false,
+            durationMs: 0,
+            costCents: 0
+          });
+        }
+      }
+    } else {
+      // MMLU-Pro and other text-based benchmarks use LLM CoT loop
+      console.log('📝 Using text-based LLM evaluation');
+      
+      // Process in batches
+      for (let i = 0; i < questions.length; i += batchSize) {
+        const batch = questions.slice(i, i + batchSize);
+        
+        const batchResults = await Promise.all(
+          batch.map(async (question) => {
+          const questionStart = Date.now();
+          const cotResponses: string[] = [];
+          let totalCost = 0;
+          
+          try {
+            // CoT loop (sequential within question)
+            for (let step = 1; step <= cotSteps; step++) {
+              const prompt = harness.formatPrompt(question, step, cotResponses);
+              
+              // Call edge function /completions
+              const response = await fetch(
+                `${process.env.SUPABASE_URL}/functions/v1/completions`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+                    'x-api-key': process.env.ROSE_API_KEY!,
+                  },
+                  body: JSON.stringify({
+                    model,
+                    messages: [{ role: 'user', content: prompt }],
+                    temperature,
+                    max_tokens: maxTokens,
+                    seed: seed + step // Different seed per step
+                  })
+                }
+              );
+              
+              if (!response.ok) {
+                throw new Error(`Completions API error: ${response.status}`);
+              }
+              
+              const data: any = await response.json();
+              const content = data.choices[0].message.content;
+              cotResponses.push(content);
+              
+              // Track cost (from usage data)
+              if (data.usage) {
+                const stepCost = calculateCost(
+                  data.usage.prompt_tokens,
+                  data.usage.completion_tokens
+                );
+                totalCost += stepCost;
+              }
+            }
+            
+            // Extract and evaluate final answer
+            const finalResponse = cotResponses[cotResponses.length - 1];
+            const extractedAnswer = harness.extractAnswer(finalResponse);
+            const isCorrect = await harness.evaluateAnswer(
+              extractedAnswer,
+              question.correctAnswer
+            );
+            
+            return {
+              questionId: question.id,
+              cotResponses,
+              extractedAnswer,
+              correctAnswer: question.correctAnswer,
+              isCorrect,
+              durationMs: Date.now() - questionStart,
+              costCents: totalCost
+            };
+          } catch (error) {
+            console.error(`Error on question ${question.id}:`, error);
+            return {
+              questionId: question.id,
+              cotResponses,
+              extractedAnswer: '',
+              correctAnswer: question.correctAnswer,
+              isCorrect: false,
+              durationMs: Date.now() - questionStart,
+              costCents: totalCost
+            };
+          }
+          })
+        );
+        
+        results.push(...batchResults);
+        console.log(`Progress: ${results.length}/${questions.length} questions`);
+      }
+    }
+    
+    // Calculate aggregate metrics
+    const correctCount = results.filter(r => r.isCorrect).length;
+    const accuracy = (correctCount / results.length) * 100;
+    const totalCost = results.reduce((sum, r) => sum + r.costCents, 0);
+    const durationSeconds = (Date.now() - startTime) / 1000;
+    const avgDurationMs = results.reduce((sum, r) => sum + r.durationMs, 0) / results.length;
+    
+    // Log to database
+    const benchmarkRun = await prisma.benchmarkRun.create({
+      data: {
+        userId: req.user?.id || 'system',
+        benchmarkName: harness.name,
+        modelConfig: { model, cotSteps, temperature, maxTokens, seed },
+        results: results as any,
+        aggregateScore: accuracy,
+        totalCostCents: totalCost,
+        sampledQuestions: results.length,
+        durationSeconds: Math.round(durationSeconds)
+      }
+    });
+    
+    console.log(`✓ Benchmark complete: ${accuracy.toFixed(1)}% accuracy`);
+    
+    // Return results with industry comparison
+    const standards = loadIndustryStandards();
+    const comparison = compareWithStandards(harness.name, accuracy, standards);
+    
+    return res.json({
+      id: benchmarkRun.id,
+      benchmarkName: harness.name,
+      model,
+      cotSteps,
+      accuracy,
+      correctAnswers: correctCount,
+      totalQuestions: allQuestions.length,
+      sampledQuestions: results.length,
+      totalCostCents: totalCost,
+      durationSeconds: Math.round(durationSeconds),
+      avgDurationMs: Math.round(avgDurationMs),
+      industryComparison: comparison,
+      results: results.map(r => ({
+        questionId: r.questionId,
+        isCorrect: r.isCorrect,
+        extractedAnswer: r.extractedAnswer,
+        durationMs: r.durationMs,
+        costCents: r.costCents
+      }))
+    });
+    
+  } catch (error) {
+    console.error('Benchmark error:', error);
+    return res.status(500).json({ error: 'Benchmark execution failed' });
+  }
+});
+
+function calculateCost(promptTokens: number, completionTokens: number): number {
+  const promptCost = (promptTokens / 1000000) * 50; // $0.50/M
+  const completionCost = (completionTokens / 1000000) * 150; // $1.50/M
+  return Math.ceil((promptCost + completionCost) * 100); // cents
+}
+
+function loadIndustryStandards() {
+  const standardsPath = path.join(__dirname, '../../benchmarks/standards.json');
+  return JSON.parse(fs.readFileSync(standardsPath, 'utf-8'));
+}
+
+function compareWithStandards(benchmarkName: string, score: number, standards: any) {
+  const benchKey = benchmarkName.toLowerCase().replace(/[^a-z]/g, '-');
+  const benchStandards = standards.benchmarks[benchKey]?.industryStandards || [];
+  
+  if (benchStandards.length === 0) {
+    return { position: 'no-data', average: null, leader: null };
+  }
+  
+  const avg = benchStandards.reduce((sum: number, s: any) => sum + s.score, 0) / benchStandards.length;
+  const leader = benchStandards[0];
+  
+  let position = 'below-average';
+  if (score >= leader.score) position = 'above-leader';
+  else if (score >= avg) position = 'above-average';
+  
+  return {
+    position,
+    average: avg,
+    leader: { model: leader.model, score: leader.score },
+    yourScore: score
+  };
+}
 
 export default router;
 

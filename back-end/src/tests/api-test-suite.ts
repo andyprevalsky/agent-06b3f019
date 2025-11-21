@@ -314,6 +314,10 @@ async function testAgentsCreateEndpoint() {
     throw new Error('Create agent response missing agent_id');
   }
 
+  if (response.data.source !== 'WEB') {
+    throw new Error(`Expected agent source WEB, got ${response.data.source}`);
+  }
+
   context.agentId = response.data.agent_id;
 }
 
@@ -334,6 +338,10 @@ async function testAgentGetEndpoint() {
   
   if (!response.data.agent || !response.data.messages) {
     throw new Error('Get agent response missing agent or messages');
+  }
+
+  if (response.data.agent.source !== 'WEB') {
+    throw new Error(`Expected fetched agent source WEB, got ${response.data.agent.source}`);
   }
 }
 

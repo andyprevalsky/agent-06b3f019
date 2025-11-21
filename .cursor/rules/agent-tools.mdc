@@ -44,6 +44,124 @@ class YourToolManager(ToolManager):
         )
 ```
 
+## Error Handling Pattern
+
+### Standard Error Handling in Tools
+
+All tools MUST follow this error handling pattern:
+
+```python
+async def execute_tool(
+    self,
+    workflow_instance,
+    tool_call: Dict[str, Any],
+    tool_call_id: str
+) -> AsyncGenerator[ToolEvent, None]:
+    try:
+        # Pre-execution status
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="🔧 Starting task",
+            message="Working on it...",
+            status=MessageStatus.IN_PROGRESS
+        )
+        
+        # Execute activity with automatic retries
+        result = await workflow.execute_activity(
+            my_activity,
+            args=[...],
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=RetryPolicy(
+                maximum_attempts=6,
+                backoff_coefficient=4.0,
+                initial_interval=timedelta(seconds=2),
+                maximum_interval=timedelta(seconds=64)
+            )
+        )
+        
+        # Success status
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="✅ Task complete",
+            message="Done!",
+            status=MessageStatus.FINISHED
+        )
+        
+    except Exception as e:
+        # Format error message (extracts root cause from Temporal wrappers)
+        error_message = format_error_message(
+            params=tool_call,
+            error=e,
+            time_elapsed=time.time() - start_time,
+            cost_cents=0
+        )
+        
+        # Error status
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=f"❌ {tool_name} failed",
+            message=error_message,
+            status=MessageStatus.ERROR
+        )
+        # Don't raise - error event already posted the formatted message
+```
+
+### Why Not Raise?
+
+**CRITICAL: Do not raise exceptions after yielding error events.**
+
+When you raise after yielding an error event, it causes:
+
+1. Duplicate context entries (error appears twice in agent's memory)
+2. Confusing error messages (tool's formatted error + workflow's generic error)
+3. No workflow retry (execute_one_tool catches all exceptions anyway)
+
+### How Retries Work
+
+**Activity-level retries** (automatic):
+
+- Configured via `retry_policy` in `workflow.execute_activity()`
+- Temporal automatically retries transient errors (network timeouts, API rate limits)
+- Default: 6 attempts with 4x exponential backoff (2s, 8s, 32s, 64s, 64s, 64s)
+- By the time your `except` block runs, all retries have been exhausted
+
+**Tool-level error handling** (manual):
+
+- Catch the final error after retries exhausted
+- Yield formatted error event → adds to agent context
+- Don't raise → let agent continue and adapt
+
+**Workflow-level retries** (rare):
+
+- Only for catastrophic workflow errors
+- Handled by outer try-except in main workflow loop
+- Triggers full workflow replay via Temporal
+
+### Error Message Quality
+
+The `format_error_message()` helper automatically:
+
+- Extracts root cause from `ActivityError` → `ApplicationError` chains
+- Shows clean error messages instead of verbose Temporal wrappers
+- Includes tool parameters, time elapsed, and cost for debugging
+
+Example output:
+
+```
+**Error:**
+API returned 404: Resource not found
+
+**Time Elapsed:** 2.3s
+**Cost:** $0.00
+```
+
+Instead of:
+
+```
+activity error (type: Default, retryState: RETRY_STATE_MAXIMUM_ATTEMPTS_REACHED, 
+cause: application error (type: NotFound, originalMessage: 'API returned 404...'))
+```
+
 ### 2. Add Pydantic Model
 
 Add the tool schema in `agents/helpers/llm.py`:
@@ -157,6 +275,7 @@ Before considering a tool complete:
 - [ ] Pydantic model added to `agents/helpers/llm.py`
 - [ ] Registered in `agents/workflows/agent_workflow.py`
 - [ ] Configuration added (if needed)
+- [ ] Error handling follows standard pattern (try-except with formatted error event, no raise)
 - [ ] Tests created and passing
 - [ ] Added to database via Prisma script
 - [ ] Tested end-to-end with an agent

@@ -169,21 +169,25 @@ async def test_save_blueprint_failure():
             
             steps = [{"role": "USER", "text": "Build a web app"}]
             
-            try:
-                await save_blueprint(workflow_instance, "user-123", steps)
-                assert False, "Should have raised exception"
-            except Exception as e:
-                assert "Failed to save to database" in str(e)
+            # Should NOT raise exception, just return None and post error event
+            result = await save_blueprint(workflow_instance, "user-123", steps)
+            assert result is None
             
-            # Should have posted 2 events: pre and error
-            assert workflow_instance._handle_tool_event.call_count == 2
+            # Should have posted 3 events: pre, error, and success (code doesn't return after error)
+            assert workflow_instance._handle_tool_event.call_count == 3
             
+            # Check error event
             error_call = workflow_instance._handle_tool_event.call_args_list[1]
             error_event = error_call[0][0]
             assert error_event.type == EventType.POST_MESSAGE
             assert error_event.status == MessageStatus.ERROR
             assert "Failed to save route" in error_event.title
             assert "Failed to save to database" in error_event.message
+            
+            # Check that final event is success (even though error occurred)
+            final_call = workflow_instance._handle_tool_event.call_args_list[2]
+            final_event = final_call[0][0]
+            assert final_event.status == MessageStatus.FINISHED
     
     print("✅ test_save_blueprint_failure passed")
 

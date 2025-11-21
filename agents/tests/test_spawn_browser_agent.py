@@ -1,4 +1,4 @@
-"""Test spawn_browser_agent tool."""
+"""Test use_browser tool."""
 
 import asyncio
 from dotenv import load_dotenv
@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
-from tools.spawn_browser_agent import spawn_browser_agent_activity
+from tools.use_browser import use_browser_activity
 
 
 async def test_activity_success():
@@ -58,15 +58,15 @@ async def test_activity_success():
     mock_config.browserbase.project_id = "test-project"
     mock_config.openrouter.api_key = "test-or-key"
     
-    with patch('tools.spawn_browser_agent.load_config', return_value=mock_config):
+    with patch('tools.use_browser.load_config', return_value=mock_config):
         with patch('httpx.AsyncClient') as mock_client:
             mock_instance = mock_client.return_value.__aenter__.return_value
             mock_instance.post = AsyncMock(side_effect=[mock_session_response, mock_close_response])
             
             with patch('stagehand.Stagehand', return_value=mock_stagehand):
                 with patch('temporalio.activity.heartbeat'):
-                    with patch('tools.spawn_browser_agent.save_browser_action_message', new_callable=AsyncMock):
-                        result = await spawn_browser_agent_activity(
+                    with patch('tools.use_browser.save_browser_action_message', new_callable=AsyncMock):
+                        result = await use_browser_activity(
                             user_id="user-123",
                             agent_id="agent-456",
                             instruction="Navigate to example.com and click the login button",
@@ -91,14 +91,14 @@ async def test_activity_session_init_failure():
     mock_config.backend.api_url = "http://test-backend"
     mock_config.backend.api_key = "test-key"
     
-    with patch('tools.spawn_browser_agent.load_config', return_value=mock_config):
+    with patch('tools.use_browser.load_config', return_value=mock_config):
         with patch('httpx.AsyncClient') as mock_client:
             mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
             
             with patch('temporalio.activity.heartbeat'):
-                with patch('tools.spawn_browser_agent.save_browser_action_message', new_callable=AsyncMock):
+                with patch('tools.use_browser.save_browser_action_message', new_callable=AsyncMock):
                     try:
-                        await spawn_browser_agent_activity(
+                        await use_browser_activity(
                             user_id="user-123",
                             agent_id="agent-456",
                             instruction="Navigate to example.com",
@@ -144,16 +144,16 @@ async def test_activity_stagehand_failure():
     mock_close_response = MagicMock()
     mock_close_response.status_code = 200
     
-    with patch('tools.spawn_browser_agent.load_config', return_value=mock_config):
+    with patch('tools.use_browser.load_config', return_value=mock_config):
         with patch('httpx.AsyncClient') as mock_client:
             mock_instance = mock_client.return_value.__aenter__.return_value
             mock_instance.post = AsyncMock(side_effect=[mock_session_response, mock_close_response])
             
             with patch('stagehand.Stagehand', return_value=mock_stagehand):
                 with patch('temporalio.activity.heartbeat'):
-                    with patch('tools.spawn_browser_agent.save_browser_action_message', new_callable=AsyncMock):
+                    with patch('tools.use_browser.save_browser_action_message', new_callable=AsyncMock):
                         try:
-                            await spawn_browser_agent_activity(
+                            await use_browser_activity(
                                 user_id="user-123",
                                 agent_id="agent-456",
                                 instruction="Navigate to example.com",
@@ -204,15 +204,15 @@ async def test_activity_usage_tracking():
     mock_config.browserbase.project_id = "test-project"
     mock_config.openrouter.api_key = "test-or-key"
     
-    with patch('tools.spawn_browser_agent.load_config', return_value=mock_config):
+    with patch('tools.use_browser.load_config', return_value=mock_config):
         with patch('httpx.AsyncClient') as mock_client:
             mock_instance = mock_client.return_value.__aenter__.return_value
             mock_instance.post = AsyncMock(side_effect=[mock_session_response, mock_close_response])
             
             with patch('stagehand.Stagehand', return_value=mock_stagehand):
                 with patch('temporalio.activity.heartbeat'):
-                    with patch('tools.spawn_browser_agent.save_browser_action_message', new_callable=AsyncMock):
-                        result = await spawn_browser_agent_activity(
+                    with patch('tools.use_browser.save_browser_action_message', new_callable=AsyncMock):
+                        result = await use_browser_activity(
                             user_id="user-123",
                             agent_id="agent-456",
                             instruction="Test",
@@ -236,7 +236,7 @@ async def test_activity_usage_tracking():
 
 async def main():
     """Run all tests."""
-    print("\n🧪 Running spawn_browser_agent tool tests...\n")
+    print("\n🧪 Running use_browser tool tests...\n")
     
     await test_activity_success()
     await test_activity_session_init_failure()

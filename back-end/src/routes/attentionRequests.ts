@@ -12,6 +12,7 @@ const createAttentionRequestSchema = z.object({
   workflowId: z.string(),
   question: z.string().min(1),
   imageUrl: z.string().url().optional(),
+  metadata: z.record(z.any()).optional(),
 });
 
 const respondSchema = z.object({
@@ -33,6 +34,7 @@ router.post('/', async (req, res) => {
         workflowId: data.workflowId,
         question: data.question,
         imageUrl: data.imageUrl,
+        metadata: data.metadata,
       },
     });
     
@@ -41,6 +43,7 @@ router.post('/', async (req, res) => {
     res.json({
       id: request.id,
       created_at: request.createdAt,
+      metadata: request.metadata,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -74,6 +77,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         workflow_id: r.workflowId,
         question: r.question,
         image_url: r.imageUrl,
+        metadata: r.metadata,
         user_response: r.userResponse,
         created_at: r.createdAt,
         updated_at: r.updatedAt,

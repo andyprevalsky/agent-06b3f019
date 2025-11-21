@@ -174,13 +174,13 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
   return (
     <Dialog open={open} onOpenChange={handleClose} modal={false}>
       <DialogContent 
-        className="p-0 border border-gray-300 shadow-lg [&>button]:hidden overflow-visible z-[100] w-[320px] max-w-[90vw] relative"
+        className="p-0 border border-gray-300 shadow-lg [&>button]:hidden overflow-visible z-[100] w-[320px] max-w-[90vw] relative rounded-lg"
         style={{ 
           position: 'fixed',
           top: `${modalPosition.top}px`,
           left: `${modalPosition.left}px`,
           transform: 'translate(-50%, -100%)',
-          backgroundColor: 'transparent',
+          backgroundColor: 'rgba(238, 239, 242, 0.95)',
           backdropFilter: 'blur(24px)',
           WebkitBackdropFilter: 'blur(12px)',
         }}

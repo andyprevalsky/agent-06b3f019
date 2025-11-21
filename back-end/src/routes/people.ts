@@ -193,20 +193,51 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
 /**
  * GET /api/people
  * 
- * Get all people in user's network
+ * Get all people in user's network with pagination and message counts
+ * 
+ * Query params:
+ * - page: Page number (default: 1)
+ * - limit: Items per page (default: 50)
+ * 
+ * Returns: Paginated list sorted by messagesExchanged (descending)
  */
 router.get('/', authenticate, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.userId;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const skip = (page - 1) * limit;
     
-    const people = await prisma.person.findMany({
+    // Get total count for pagination
+    const total = await prisma.person.count({
       where: { userId },
-      orderBy: { updatedAt: 'desc' },
     });
     
+    // Get people with message counts using raw query for performance
+    // We use a subquery to count MessageRecords for each person
+    const peopleWithCounts = await prisma.$queryRaw<Array<any>>`
+      SELECT 
+        p.*,
+        CAST(COUNT(m.id) AS INTEGER) as "messagesExchanged"
+      FROM "Person" p
+      LEFT JOIN "MessageRecord" m ON m."personId" = p.id
+      WHERE p."userId" = ${userId}
+      GROUP BY p.id
+      ORDER BY "messagesExchanged" DESC
+      LIMIT ${limit}
+      OFFSET ${skip}
+    `;
+    
+    const totalPages = Math.ceil(total / limit);
+    
     return res.json({
-      people,
-      count: people.length,
+      people: peopleWithCounts,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+      },
     });
   } catch (error) {
     console.error('Error fetching people:', error);

@@ -21,6 +21,42 @@ description: >
   - Run `npm run test:api` to verify all tests pass
   - Pre-commit hook will automatically run all tests and block commits if any fail
 
+
+
+  # Process Rule
+
+  NEVER GIVE TIME ESTIMATES OR EFFORT ESTIMATES FOR HOW LONG A FEATURE WILL TAKE
+
+  When a user asks you to make a code change, determine if it is trivial and can be done directly, or if it requires more careful consideration.
+
+
+  ## Plan Rules
+  - When making plans for multi file changes, always proceed with test driven development.
+
+  ## Building Plan Rules
+  - When you think you are done, test the changes u made (this is test driven development), while there is still errors, fix those erros. In order to mark the task complete and return back to the user, you must have a passing test along with your response.
+
+  ## Context Management
+
+  - **ALWAYS** keep context under 40% throughout work
+  - When context is above that, let the user know a summarization would be helpful.
+
+  ## Critical Rules
+
+  - **ALWAYS** keep context under 40% throughout work
+  - **WHEN IN DOUBT**, be thorough - it's better to be careful
+  - **ALWAYS** understand the system before making changes
+  - **NEVER** force through implementation that feels wrong
+  - **ALWAYS** write production-quality code with no slop
+
+  # When making a plan for complex features. Always perform this loop for building the plan, 
+  // DONT RETURN EARLY OR ASK THE USER FOR HELP WHILE IN THIS WHILE LOOP UNLESS THINGS ARE VERY DIRE
+  while test_failing: 
+    fix_errors
+    checkandupdate(test_failing)
+  Return to user w passing test
+
+
 apply:
   when: always
 ---

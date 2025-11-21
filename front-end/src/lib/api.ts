@@ -25,6 +25,7 @@ export interface Agent {
   agent_id: string;
   goal: string;
   model: string;
+  source: 'WEB' | 'MAC_APP';
   reasoning_effort: 'off' | 'low' | 'medium' | 'high';
   progress: number;
   status: 'STARTING_UP' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED';
@@ -70,6 +71,7 @@ export interface Message {
     title?: string;
     subAgentId?: string;
     progress?: number;
+    progressComplete?: number; // 0-100 or 0-1, optional - if present shows progress bar
     error?: boolean;
     [key: string]: any;
   };
@@ -79,6 +81,7 @@ export interface CreateAgentPayload {
   goal: string;
   model?: string;
   tool_ids?: string[];
+  source?: 'WEB' | 'MAC_APP';
   verifier: {
     type: 'FLOAT_LLM_JUDGE';
     llm_judge_prompt: string;
@@ -131,11 +134,12 @@ export async function getAgent(agentId: string, before?: string): Promise<{
 // Create a new agent
 export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
   const headers = await getAuthHeaders();
+  const source = payload.source ?? 'WEB';
   
   const response = await fetch(`${API_BASE_WITH_PATH}/agents`, {
     method: 'POST',
     headers,
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, source }),
   });
 
   if (!response.ok) {
@@ -201,11 +205,8 @@ export async function generateLLMJudgePrompt(goal: string): Promise<string> {
 
 // Get all available tools
 export async function getTools(): Promise<Tool[]> {
-  const headers = await getAuthHeaders();
-  
-  const response = await fetch(`${API_BASE_WITH_PATH}/tools`, {
-    headers,
-  });
+  // Tools endpoint is public (no auth required)
+  const response = await fetch(`${API_BASE_WITH_PATH}/tools`);
 
   if (!response.ok) {
     throw new Error('Failed to fetch tools');
@@ -268,6 +269,53 @@ export async function updateAgent(
   return data.agent;
 }
 
+// People / Network
+export interface Person {
+  id: string;
+  userId: string;
+  firstName: string;
+  lastName: string;
+  messagesExchanged: number;
+  age?: number | null;
+  location?: string | null;
+  profession?: string | null;
+  company?: string | null;
+  title?: string | null;
+  industry?: string | null;
+  email?: string | null;
+  phoneNumber?: string | null;
+  linkedinUrl?: string | null;
+  instagramHandle?: string | null;
+  facebookUrl?: string | null;
+  twitterHandle?: string | null;
+  relation?: string | null;
+  communicationFrequency?: string | null;
+  relationshipQuality?: string | null;
+  contactStatus?: string | null;
+  currentBandwidth?: string | null;
+  networkOrientation?: string | null;
+  totalOnlineReach?: number | null;
+  estimatedNetWorthUsd?: number | null;
+  estimatedWorldPowerRanking?: number | null;
+  notes?: string | null;
+  skills?: any;
+  interests?: any;
+  embedding?: any;
+  emailAddresses?: any;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PeoplePaginatedResponse {
+  people: Person[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
 // Attention Requests
 export interface AttentionRequest {
   id: string;
@@ -275,6 +323,7 @@ export interface AttentionRequest {
   workflow_id: string;
   question: string;
   context?: any;
+  metadata?: Record<string, any> | null;
   user_response?: string | null;
   created_at: string;
   updated_at: string;
@@ -321,6 +370,35 @@ export async function checkAndRespondToAttentionRequest(
   }
 
   return true;
+}
+
+export async function respondToAttentionRequest(requestId: string, responseText: string): Promise<void> {
+  const headers = await getAuthHeaders();
+
+  const res = await fetch(`${API_BASE_WITH_PATH}/attention-requests/${requestId}/respond`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ response: responseText }),
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to respond to attention request');
+  }
+}
+
+export async function skipAttentionRequest(requestId: string): Promise<void> {
+  const headers = await getAuthHeaders();
+
+  const res = await fetch(`${API_BASE_WITH_PATH}/attention-requests/${requestId}/skip`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to skip attention request');
+  }
 }
 
 // Invite Codes
@@ -377,5 +455,20 @@ export async function checkNeedsInviteCode(): Promise<boolean> {
 
   const data = await response.json();
   return data.needsInviteCode;
+}
+
+// Get paginated people in user's network
+export async function getPeople(page = 1, limit = 50): Promise<PeoplePaginatedResponse> {
+  const headers = await getAuthHeaders();
+  
+  const response = await fetch(`${API_BASE_WITH_PATH}/people?page=${page}&limit=${limit}`, {
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch people');
+  }
+
+  return await response.json();
 }
 

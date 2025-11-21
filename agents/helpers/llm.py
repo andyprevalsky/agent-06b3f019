@@ -6,6 +6,7 @@ import structlog
 import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, create_model
+from enum import Enum
 
 from config import load_config
 
@@ -241,6 +242,13 @@ class SendSmsTool(BaseModel):
     message: str = Field(description="The SMS message to send. Keep it concise (160 characters recommended for standard SMS).")
 
 
+class SendSmsAsUserTool(BaseModel):
+    """Tool call for sending SMS via the user's own iMessage client (Mac-only)."""
+    tool: Literal["send_sms_as_user"]
+    phone_number: str = Field(description="Recipient phone number to send via the user's Mac iMessage (E.164 format, e.g., +19729777432).")
+    message: str = Field(description="The exact SMS/iMessage text to send. Keep it conversational and ready to send without additional edits.")
+
+
 class SpawnBrowserAgentTool(BaseModel):
     """Spawn an autonomous browser agent to complete complex, multi-step web tasks. The browser agent uses AI to navigate, interact, and accomplish goals without step-by-step orchestration. Provide a complete, high-level goal - the browser agent will autonomously break it down and execute all necessary steps. Login state persists across sessions."""
     tool: Literal["spawn_browser_agent"]
@@ -288,6 +296,244 @@ class SearchUserNetworkTool(BaseModel):
     notes: Optional[str] = Field(None, description="Additional context or notes about the person you're looking for")
 
 
+class GeneratorEnum(str, Enum):
+    """Generator types for Find All operations with pricing."""
+    PREVIEW = "preview"  # $0.15 fixed, $0.00 per match. Testing queries (~10 candidates)
+    BASE = "base"        # $0.25 fixed, $0.03 per match. Broad, common queries expecting many matches
+    CORE = "core"        # $2.00 fixed, $0.15 per match. Specific queries with moderate expected matches
+    PRO = "pro"          # $10.00 fixed, $1.00 per match. Highly specific queries with rare/hard-to-find matches
+
+
+class ProcessorEnum(str, Enum):
+    """Processor types for Enrich operations with pricing."""
+    LITE = "lite"    # $0.005 per match. Simple data extraction
+    BASE = "base"    # $0.01 per match. Reliable for standard enrichments
+    CORE = "core"    # $0.025 per match. Cross-referenced data
+    PRO = "pro"      # $0.10 per match. Exploratory research
+    ULTRA = "ultra"  # $0.30 per match. Deep research
+
+
+class CadenceEnum(str, Enum):
+    """Cadence types for Monitor operations."""
+    HOURLY = "hourly"  # Check every hour. Best for fast-moving topics
+    DAILY = "daily"    # Check once per day. Best for most news and updates
+    WEEKLY = "weekly"  # Check once per week. Best for slower changes
+
+
+class FindAllTool(BaseModel):
+    """
+    Tool for discovering entities matching specific criteria using natural language queries.
+    
+    This tool uses Parallel AI's Find All API to search for entities (companies, people, etc.)
+    that match your criteria. The API converts your natural language objective into structured
+    match conditions and returns matched candidates with details, reasoning, and citations.
+    
+    Pricing: Total cost = fixed cost + (cost per match × number of matches)
+    - preview: $0.15 fixed + $0.00/match (testing only, ~10 candidates)
+    - base: $0.25 fixed + $0.03/match (broad queries, many matches expected)
+    - core: $2.00 fixed + $0.15/match (specific queries, moderate matches) [DEFAULT]
+    - pro: $10.00 fixed + $1.00/match (highly specific, rare matches)
+    
+    Example: "Find all portfolio companies of Khosla Ventures founded after 2020"
+    """
+    tool: Literal["find_all"]
+    
+    objective: str = Field(
+        ...,
+        max_length=5000,
+        description=(
+            "Natural language description of entities to find. Be specific about criteria, "
+            "sources, and context. Examples: 'Find all portfolio companies of Khosla Ventures founded after 2020', "
+            "'Find all AI startups in San Francisco that raised Series A in 2024'. "
+            "Maximum 5000 characters. "
+            "TIP: Start with 'preview' generator to test your query and estimate match count before running full search."
+        )
+    )
+    
+    generator: Optional[GeneratorEnum] = Field(
+        default=GeneratorEnum.CORE,
+        description=(
+            "Generator type determining quality and cost. "
+            "Choose based on query specificity and expected match count:\n"
+            "- 'preview' ($0.15 fixed, $0/match): Testing queries with ~10 candidates. Always test here first.\n"
+            "- 'base' ($0.25 fixed, $0.03/match): Broad queries expecting many matches (e.g., 'companies in healthcare'). "
+            "Best for <20 matches where low fixed cost matters.\n"
+            "- 'core' ($2.00 fixed, $0.15/match) [DEFAULT]: Specific queries with moderate matches (e.g., 'healthcare companies using AI for diagnostics'). "
+            "Best for 20-50 matches.\n"
+            "- 'pro' ($10.00 fixed, $1.00/match): Highly specific queries with rare matches (e.g., 'Series A healthcare AI companies with FDA-approved products'). "
+            "Best when you need the most thorough search.\n"
+            "Note: For >50 matches, per-match cost dominates. Consider generator choice carefully."
+        )
+    )
+    
+    match_limit: Optional[int] = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Maximum number of matched entities to return. Range: 1-100. Default: 10. "
+            "Cost impact: Higher limits increase total cost (fixed cost + per-match cost × matches found). "
+            "Example costs for 50 matches: base=$1.75, core=$9.50, pro=$60.00. "
+            "Consider using 'preview' generator first to estimate match count."
+        )
+    )
+
+
+class EnrichTool(BaseModel):
+    """
+    Tool for enriching entities with additional structured data using web research.
+    
+    This tool uses Parallel AI's Task API to extract additional information about an entity.
+    Provide person/company metadata (name, email, company, url, etc.) and define what
+    structured data you want to extract via the output schema.
+    
+    Processor differences:
+    - 'lite': Basic tasks with minimal complexity. Fastest, most cost-effective.
+    - 'base': Standard tasks requiring moderate processing. Reliable for most enrichments.
+    - 'core': Complex tasks needing enhanced processing. For cross-referenced data from multiple sources.
+    - 'pro': Exploratory web research with higher performance. For nuanced understanding.
+    - 'ultra': Most demanding tasks with highest processing power. For comprehensive deep research.
+    
+    Pricing varies by processor - higher quality processors cost more but provide better results.
+    """
+    tool: Literal["enrich"]
+    
+    input: Dict[str, Optional[str]] = Field(
+        ...,
+        description=(
+            "JSON object with person/company metadata to enrich. All fields are optional/nullable. "
+            "Common fields: name, email, company, url, location, title, etc. "
+            "Example: {'name': 'Andy Prevalsky', 'email': 'andyprevalsky@yahoo.com', 'company': 'Acme Corp', 'url': 'https://example.com'}"
+        )
+    )
+    
+    output_schema: Dict[str, Any] = Field(
+        ...,
+        description=(
+            "JSON schema defining what structured data to extract. "
+            "Must follow this exact format:\n"
+            "{\n"
+            "  'type': 'json',\n"
+            "  'json_schema': {\n"
+            "    'type': 'object',\n"
+            "    'properties': {\n"
+            "      'field_name': {\n"
+            "        'type': 'string',\n"
+            "        'description': 'Clear description of what this field represents'\n"
+            "      }\n"
+            "    },\n"
+            "    'required': ['field_name'],\n"
+            "    'additionalProperties': false\n"
+            "  }\n"
+            "}\n"
+            "Example - Extract email and location:\n"
+            "{'type': 'json', 'json_schema': {'type': 'object', 'properties': {'email': {'type': 'string', 'description': 'Email address'}, 'location': {'type': 'string', 'description': 'City and state'}}, 'required': ['email'], 'additionalProperties': false}}"
+        )
+    )
+    
+    processor: Optional[ProcessorEnum] = Field(
+        default=ProcessorEnum.LITE,
+        description=(
+            "Processor type for enrichment execution:\n"
+            "- 'lite' [DEFAULT]: Basic tasks, minimal complexity. Fastest and most cost-effective.\n"
+            "- 'base': Standard tasks, moderate processing. Reliable for most enrichments.\n"
+            "- 'core': Complex tasks, enhanced processing. For cross-referenced data from multiple sources.\n"
+            "- 'pro': Exploratory research, higher performance. For nuanced understanding.\n"
+            "- 'ultra': Most demanding tasks, highest processing power. For comprehensive deep research.\n"
+            "Higher quality processors cost more but provide better, more thorough results."
+        )
+    )
+
+
+class MonitorTool(BaseModel):
+    """
+    Tool for creating a continuous monitor that tracks the web for material changes relevant to a query.
+    
+    Creates a monitor that runs on a schedule you control (hourly, daily, weekly).
+    Returns a monitor_id that you can use with check_monitor_events to retrieve detected events.
+    
+    Pricing: $3.00 per 1,000 runs. Each scheduled run is billed individually.
+    Example: A monitor with 'daily' cadence costs $0.03 over 10 days (10 runs × $3/1000).
+    
+    Best for: Tracking news, product updates, regulatory changes, competitor activity, etc.
+    After creating a monitor, use check_monitor_events periodically to retrieve new events.
+    """
+    tool: Literal["monitor"]
+    
+    query: str = Field(
+        ...,
+        max_length=5000,
+        description=(
+            "Natural language query describing what to monitor. Be specific about what changes matter. "
+            "Examples: 'Latest news on AI regulations from the Federal Reserve', "
+            "'New product launches by OpenAI', 'SEC filings mentioning cryptocurrency regulations'. "
+            "Clear queries with explicit instructions lead to higher-quality event detection. "
+            "Maximum 5000 characters."
+        )
+    )
+    
+    cadence: CadenceEnum = Field(
+        default=CadenceEnum.DAILY,
+        description=(
+            "Frequency of monitoring runs. "
+            "- 'hourly': Check every hour. Best for fast-moving topics requiring immediate updates.\n"
+            "- 'daily' [DEFAULT]: Check once per day. Best for most news, announcements, and regular updates.\n"
+            "- 'weekly': Check once per week. Best for slower changes, long-term trends, or when cost optimization matters.\n"
+            "Higher frequency = more runs = higher cost. Choose based on how quickly information changes."
+        )
+    )
+    
+    webhook_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional URL to receive HTTP POST notifications when events are detected or monitors finish scheduled runs. "
+            "Format: 'https://your-domain.com/webhook'. "
+            "If not provided, use check_monitor_events tool to poll for updates. "
+            "Webhooks require backend infrastructure to receive and process notifications."
+        )
+    )
+    
+    metadata: Optional[Dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Optional metadata to store with the monitor. Keys and values must be strings. "
+            "Maximum 16 characters per key, 512 characters per value. "
+            "Useful for tracking monitor purpose, category, or related information. "
+            "Example: {'category': 'regulations', 'priority': 'high'}"
+        )
+    )
+
+
+class CheckMonitorEventsTool(BaseModel):
+    """
+    Tool for checking events from a previously created monitor.
+    
+    Retrieves recent events detected by a monitor. Use this periodically after creating a monitor
+    to check for new updates. Events are returned in chronological order.
+    
+    Requires a monitor_id from a previous monitor call.
+    """
+    tool: Literal["check_monitor_events"]
+    
+    monitor_id: str = Field(
+        ...,
+        description=(
+            "ID from a previous monitor call. Format: 'monitor_...' (e.g., 'monitor_abc123...'). "
+            "You must have successfully created a monitor first to get this ID."
+        )
+    )
+    
+    limit: Optional[int] = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Maximum number of events to return. Range: 1-100. Default: 10. "
+            "Returns most recent events first."
+        )
+    )
+
+
 # Map tool names to their Pydantic models
 # Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
@@ -297,8 +543,13 @@ TOOL_MODELS = {
     "buy_item_from_amazon": BuyItemFromAmazonTool,
     "request_user_attention": RequestUserAttentionTool,
     "send_sms": SendSmsTool,
+    "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
     "search_user_network_for_people": SearchUserNetworkTool,
+    "find_all": FindAllTool,
+    "enrich": EnrichTool,
+    "monitor": MonitorTool,
+    "check_monitor_events": CheckMonitorEventsTool,
 }
 
 

@@ -32,6 +32,19 @@ from tools.deep_research import deep_research_activity
 from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
 from tools.web_search import web_search_activity
 from tools.amazon_shopping import search_amazon_activity, fetch_user_settings_activity, rank_amazon_products_activity
+from tools.find_all import (
+    find_all_ingest_activity,
+    find_all_create_run_activity,
+    find_all_poll_status_once_activity,
+    find_all_get_results_activity,
+)
+from tools.enrich import (
+    enrich_create_task_activity,
+    enrich_poll_status_once_activity,
+    enrich_get_task_results_activity,
+)
+from tools.monitor import monitor_activity
+from tools.check_monitor_events import check_monitor_events_activity
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     poll_new_messages,
@@ -135,6 +148,17 @@ async def main():
             # New event-driven tool activities
             deep_research_activity,
             web_search_activity,
+            # Find All activities (split into sub-activities)
+            find_all_ingest_activity,
+            find_all_create_run_activity,
+            find_all_poll_status_once_activity,
+            find_all_get_results_activity,
+            # Enrich activities (split into sub-activities)
+            enrich_create_task_activity,
+            enrich_poll_status_once_activity,
+            enrich_get_task_results_activity,
+            monitor_activity,
+            check_monitor_events_activity,
             save_tool_usage,
             # Helper activities
             poll_new_messages,

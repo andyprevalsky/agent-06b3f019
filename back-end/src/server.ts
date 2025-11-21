@@ -18,7 +18,6 @@ import sendSmsRouter from './routes/sendSms';
 import browserSessionRouter from './routes/browserSession';
 import peopleRouter from './routes/people';
 import integrationsRouter from './routes/integrations';
-import roseRouter from './routes/rose';
 import { prisma } from './lib/prisma';
 
 // Load environment variables
@@ -48,7 +47,6 @@ const defaultOrigins = [
   'http://127.0.0.1:8080',
   'http://localhost:5173',
   'http://localhost:8081',
-  'https://unadmirably-unelicitable-myung.ngrok-free.dev',
 ];
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
@@ -109,7 +107,6 @@ app.use('/api/browser-session', browserSessionRouter);
 app.use('/api/people', peopleRouter);
 app.use('/api/integrations', integrationsRouter);
 app.use('/api', authenticate, formatRouter);
-app.use('/v1', authenticate, roseRouter);
 
 // Error handling middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

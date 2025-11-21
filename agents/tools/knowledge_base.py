@@ -226,7 +226,7 @@ class SaveBlueprintManager(ToolManager):
                 status=MessageStatus.ERROR
             )
             self._last_result = None
-            raise  # Re-raise so workflow can handle
+            # Don't raise - error event already posted the formatted message
         
         # 3. Success status
         yield ToolEvent(

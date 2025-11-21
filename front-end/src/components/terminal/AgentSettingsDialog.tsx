@@ -240,7 +240,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
       <DialogTrigger asChild>
         <button 
           ref={triggerRef} 
-          className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-lg hover:bg-white/10 transition-colors"
+          className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-sm hover:bg-white/10 transition-colors"
           style={{
             backdropFilter: 'blur(12px)',
             WebkitBackdropFilter: 'blur(12px)',

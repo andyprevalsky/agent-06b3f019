@@ -33,7 +33,7 @@ type ToolSelection = z.infer<typeof ToolSelectionSchema>;
 export async function chooseTools(
   goal: string,
   availableTools: Tool[],
-  model: string = 'google/gemini-2.5-flash'
+  model: string = 'anthropic/claude-sonnet-4.5'
 ): Promise<{ toolIds: string[]; tokensIn: number; tokensOut: number }> {
   try {
     console.log(`🤖 Selecting tools for goal: ${goal.substring(0, 50)}...`);
@@ -61,6 +61,10 @@ ${toolsCatalog}
 
 Return your analysis and the list of selected tool IDs.`;
 
+    const safeModel = model?.toLowerCase().includes('rose-labs')
+      ? 'anthropic/claude-sonnet-4.5'
+      : model;
+
     const client = new OpenAI({
       apiKey: process.env.OPENROUTER_API_KEY,
       baseURL: 'https://openrouter.ai/api/v1',
@@ -70,7 +74,7 @@ Return your analysis and the list of selected tool IDs.`;
     const responseFormat = zodResponseFormat(ToolSelectionSchema, 'tool_selection');
 
     const response = await client.beta.chat.completions.parse({
-      model,
+      model: safeModel,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `Goal: ${goal}\n\nWhich tools should I attach to accomplish this goal?` }

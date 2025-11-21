@@ -49,7 +49,7 @@ export function useSmallTileAnimations({
 
   // Available animations to cycle through: animation-1, animation-2, animation-3, animation-4
   const availableAnimations = ['animation-1', 'animation-2', 'animation-3', 'animation-4'];
-  const MAX_CONCURRENT_ANIMATIONS = 4; // Changed from 5 to 4
+  const MAX_CONCURRENT_ANIMATIONS = 5; // Increased from 4 to 5 to accommodate new region
   const START_DELAY_MS = 800; // 0.8 second delay after enabled
 
   // Helper function to assign tiles to groups based on proximity to large tile center
@@ -66,6 +66,15 @@ export function useSmallTileAnimations({
     // Find the center tile's row/col
     const centerTileRow = Math.floor((centerY - gridOriginY) / tileSize);
     const centerTileCol = Math.floor((centerX - gridOriginX) / tileSize);
+    
+    // Calculate the bottom boundary of the large tile area
+    const largeTileBottomRow = centerTileRow + Math.floor(largeTileSize / tileSize);
+    
+    // New region: tiles below the large tile (Group 4)
+    // Check if tile is significantly below the large tile (at least 2 rows below)
+    if (row >= largeTileBottomRow + 2) {
+      return '4'; // bottom region
+    }
     
     // Assign tiles to quadrants relative to center (creates 4 groups)
     // Group 0: top-left, Group 1: top-right, Group 2: bottom-left, Group 3: bottom-right

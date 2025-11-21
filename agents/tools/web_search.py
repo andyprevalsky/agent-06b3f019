@@ -6,8 +6,9 @@ from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
 from openai import AsyncOpenAI
+import time
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 
 # Import config with safe imports to avoid sandbox restrictions
 with workflow.unsafe.imports_passed_through():
@@ -37,6 +38,9 @@ class WebSearchManager(ToolManager):
         query = tool_call.get("query", "")
         max_tokens = tool_call.get("max_tokens", 1500)
         
+        # Track start time for elapsed time calculation
+        start_time = time.time()
+        
         # Truncate long queries for display
         display_query = query if len(query) <= 100 else query[:97] + "..."
         
@@ -63,19 +67,19 @@ class WebSearchManager(ToolManager):
                 )
             )
             
-            # 3. Format success message
-            answer = result.get("answer", "")
-            sources = result.get("sources", [])
+            # 3. Calculate elapsed time and cost
+            elapsed_time = time.time() - start_time
+            # Estimate cost - OpenAI Responses API pricing (adjust based on actual pricing)
+            # For now, estimate minimal cost
+            total_cost_cents = 0  # Will need to calculate based on actual API pricing
             
-            # Build response with sources
-            if sources:
-                source_list = "\n".join([f"- {src}" for src in sources[:5]])  # Show max 5 sources
-                if len(sources) > 5:
-                    source_list += f"\n- ...and {len(sources) - 5} more"
-                
-                message = f"{answer}\n\n**Sources:**\n{source_list}"
-            else:
-                message = answer
+            # Format success message using standardized format
+            message = format_tool_message(
+                params=tool_call,
+                result=result,
+                time_elapsed=elapsed_time,
+                cost_cents=total_cost_cents
+            )
             
             # Post-execution success
             yield ToolEvent(
@@ -86,14 +90,25 @@ class WebSearchManager(ToolManager):
             )
             
         except Exception as e:
+            # Calculate elapsed time even on error
+            elapsed_time = time.time() - start_time
+            
+            # Format error message using standardized format
+            error_message = format_error_message(
+                params=tool_call,
+                error=e,
+                time_elapsed=elapsed_time,
+                cost_cents=0
+            )
+            
             # Error status
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="❌ Web search failed",
-                message=str(e),
+                message=error_message,
                 status=MessageStatus.ERROR
             )
-            raise  # Re-raise so workflow can handle
+            # Don't raise - error event already posted the formatted message
 
 
 # ========================================

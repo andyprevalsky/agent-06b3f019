@@ -23,6 +23,12 @@ import {
   Target,
   MapPin,
   Compass,
+  FlaskConical,
+  Radio,
+  ListChecks,
+  Mail,
+  Phone,
+  Code,
   type LucideIcon
 } from 'lucide-react';
 
@@ -34,6 +40,9 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
   'spawn_browser_agent': Globe,
   'send_sms': MessageSquare,
+  'send_sms_as_user': MessageSquare,
+  'send_email': Mail,
+  'call_phone_number': Phone,
   'request_user_attention': AlertCircle,
   'buy_item_from_amazon': ShoppingCart,
   'query_blueprints': BookOpen,
@@ -43,6 +52,11 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'deep_research': FileSearch,
   'spawn_sub_agents': Users,
   'search_user_network_for_people': Users,
+  'find_all': FileSearch,
+  'enrich': FlaskConical,
+  'monitor': Radio,
+  'check_monitor_events': ListChecks,
+  'claude_code': Code,
   
   // Browser action sub-types (for spawn_browser_agent internal actions)
   'Agent Reasoning': Lightbulb,

@@ -4,8 +4,8 @@
   "description": "Agent Management Backend API",
   "main": "dist/server.js",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "dev:server": "tsx watch src/server.ts",
+    "dev": "rm -f backend-logs.log && tsx watch src/server.ts 2>&1 | tee backend-logs.log",
+    "dev:server": "rm -f backend-logs.log && tsx watch src/server.ts 2>&1 | tee backend-logs.log",
     "ngrok": "ngrok http 3001 --pooling-enabled",
     "kill:ngrok": "./scripts/kill-ngrok.sh",
     "build": "tsc",
@@ -20,6 +20,8 @@
     "backfill:pricing": "tsx scripts/backfill-agent-pricing.ts",
     "test:api": "tsx src/tests/api-test-suite.ts",
     "workers:check": "tsx scripts/query-temporal-workers.ts",
+    "harbor:install": "echo 'Harbor installation: Install uv first (https://docs.astral.sh/uv/), then run: uv tool install harbor'",
+    "harbor:check": "harbor --version || python3 -m harbor --version",
     "postinstall": "prisma generate"
   },
   "keywords": [],
@@ -43,6 +45,7 @@
     "multer": "^2.0.2",
     "node-cache": "^5.1.2",
     "openai": "^4.63.0",
+    "p-limit": "^7.2.0",
     "prisma": "^5.20.0",
     "stripe": "^17.3.1",
     "typescript": "^5.6.2",

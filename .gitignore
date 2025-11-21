@@ -69,3 +69,4 @@ venv.bak/
 # VS Code Python settings
 .vscode/settings.json
 agents/navi-worker-log.txt
+back-end/jobs/

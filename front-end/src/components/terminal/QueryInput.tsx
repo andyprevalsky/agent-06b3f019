@@ -17,6 +17,21 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAppData, Model } from '@/hooks/useAppData';
+import RoseToolSetChip from './RoseToolSetChip';
+
+interface DripStyles {
+  blur: number;
+  bgOpacity: number;
+  borderOpacity: number;
+  shadowIntensity: number;
+  glow: number;
+  glowOpacity: number;
+  saturation: number;
+  brightness: number;
+  backgroundColorsScalar: number;
+  borderColorScalar: number;
+  borderRgb: string;
+}
 
 interface QueryInputProps {
   value: string;
@@ -34,6 +49,8 @@ interface QueryInputProps {
   showModelSelector?: boolean; // Whether to show the model selector button
   agentCompleted?: boolean; // Whether the agent is completed
   onCreateNewAgent?: () => void; // Callback to create a new agent
+  dripStyles?: DripStyles; // Drippiness styling
+  drippiness?: number; // Drippiness value (0-100)
 }
 
 export default function QueryInput({
@@ -42,7 +59,7 @@ export default function QueryInput({
   onSubmit,
   disabled = false,
   placeholder = 'Type your message...',
-  selectedModel = 'rose-labs/★-rose',
+  selectedModel = 'google/gemini-2.5-flash',
   onModelChange,
   availableModels = [],
   modelsLoading = false,
@@ -52,16 +69,46 @@ export default function QueryInput({
   showModelSelector = true,
   agentCompleted = false,
   onCreateNewAgent,
+  dripStyles = {
+    blur: 12,
+    bgOpacity: 0.8,
+    borderOpacity: 0.5,
+    shadowIntensity: 0,
+    glow: 0,
+    glowOpacity: 0,
+    saturation: 1.0,
+    brightness: 1.0,
+    backgroundColorsScalar: 0,
+    borderColorScalar: 0,
+    borderRgb: 'rgba(255, 255, 255, 0.5)',
+  },
+  drippiness = 0,
 }: QueryInputProps) {
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [showToolPicker, setShowToolPicker] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
+  const [showTooltip, setShowTooltip] = useState(false);
   const [cursorPosition, setCursorPosition] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { tools, toolsLoading } = useAppData();
   
   // Ensure tools is always an array
   const availableTools = Array.isArray(tools) ? tools : [];
+
+  // Close tooltip when clicking outside on mobile
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (showTooltip && window.innerWidth < 768) {
+        const target = e.target as HTMLElement;
+        if (!target.closest('[role="tooltip"]') && !target.closest('button')) {
+          setShowTooltip(false);
+        }
+      }
+    };
+
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [showTooltip]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Check for @ symbol to show tool picker
@@ -116,27 +163,48 @@ export default function QueryInput({
     : selectedModel;
 
   return (
-    <div className="w-full">
+    <div className="w-full px-2 md:px-0">
       <div className="max-w-4xl mx-auto">
         {/* Query Wrap - Glossy modal background */}
         <div 
-          className="relative rounded-xl p-3 shadow-lg border border-border"
+          className="relative rounded-xl p-3 shadow-lg border border-border overflow-hidden"
           style={{
-            backdropFilter: 'blur(12px)',
-            WebkitBackdropFilter: 'blur(12px)',
-            backgroundColor: 'transparent',
+            backdropFilter: drippiness > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+            WebkitBackdropFilter: drippiness > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
+            backgroundColor: dripStyles.backgroundColorsScalar > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity})` : 'transparent',
+            borderColor: dripStyles.borderColorScalar > 0 ? dripStyles.borderRgb : undefined,
+            boxShadow: dripStyles.shadowIntensity > 0 
+              ? `0 8px 32px rgba(0, 0, 0, ${dripStyles.shadowIntensity}), 0 0 ${dripStyles.glow}px rgba(126, 87, 194, ${dripStyles.glowOpacity}), inset 0 1px 1px rgba(255,255,255,${dripStyles.bgOpacity * 0.5})`
+              : undefined,
           }}
         >
+          {/* Marble gradient background - soft white with pastel hints */}
+          {dripStyles.backgroundColorsScalar > 0 && (
+            <div 
+              className="absolute inset-0 pointer-events-none"
+              style={{
+                background: `radial-gradient(circle at 15% 30%, rgba(255, 248, 245, ${0.7 * dripStyles.backgroundColorsScalar}) 0%, transparent 45%), 
+                             radial-gradient(circle at 85% 70%, rgba(248, 245, 255, ${0.6 * dripStyles.backgroundColorsScalar}) 0%, transparent 45%),
+                             radial-gradient(circle at 50% 50%, rgba(255, 250, 255, ${0.5 * dripStyles.backgroundColorsScalar}) 0%, transparent 55%),
+                             radial-gradient(circle at 30% 80%, rgba(252, 248, 255, ${0.55 * dripStyles.backgroundColorsScalar}) 0%, transparent 50%)`,
+                opacity: 0.25 + dripStyles.backgroundColorsScalar * 0.5,
+                zIndex: -1,
+              }}
+            />
+          )}
           {/* Content */}
           <div className="relative z-10">
             {/* Top Bar */}
-            <div className="flex items-center justify-between gap-2 px-3 pb-2">
+            <div className="hidden md:flex items-center justify-between gap-2 px-3 pb-2">
             <div className="flex items-center gap-2">
+              {/* Rose-ToolSet Chip */}
+              <RoseToolSetChip />
+              
               {/* @ Add Tool Chip */}
               <Popover open={showToolPicker} onOpenChange={setShowToolPicker}>
                 <PopoverTrigger asChild>
                   <button
-                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-foreground/10 border border-foreground/20 text-foreground text-xs hover:bg-foreground/20 transition-colors shadow-sm"
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-xs hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors shadow-sm"
                     title="Add tools"
                   >
                     <span className="font-bold">@</span>
@@ -227,7 +295,7 @@ export default function QueryInput({
                   </Badge>
                 </div>
               </TooltipTrigger>
-              <TooltipContent>
+              <TooltipContent className="z-[100]">
                 <p className="text-xs font-mono">
                   {contextSize.toLocaleString()} / {restartThreshold.toLocaleString()} context used
                 </p>
@@ -267,32 +335,31 @@ export default function QueryInput({
           </div>
 
           {/* Bottom Bar */}
-          <div className="flex items-center justify-between gap-3 px-3 pt-2">
-            <div className="flex items-center gap-2">
-              {/* Model Selector - Always visible, clickable only when no agent */}
-              <Popover open={showModelPicker && showModelSelector} onOpenChange={(open) => showModelSelector && setShowModelPicker(open)}>
-                <PopoverTrigger asChild>
-                  <button 
-                    className={cn(
-                      "flex items-center gap-1.5 px-2 py-1 rounded-lg text-foreground text-xs",
-                      showModelSelector 
-                        ? "border border-foreground/20 bg-foreground/10 hover:bg-foreground/20 cursor-pointer transition-colors shadow-sm" 
-                        : "cursor-default"
-                    )}
-                    onClick={(e) => {
-                      if (!showModelSelector) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                      }
-                    }}
-                    disabled={!showModelSelector}
-                  >
-                    <span>{selectedModelName}</span>
-                    {showModelSelector && <ChevronDown className="h-3 w-3" />}
-                  </button>
-                </PopoverTrigger>
-                {showModelSelector && (
-                  <PopoverContent className="w-[300px] p-0 z-50" align="start">
+          <div className="flex items-center justify-between gap-3 px-3 pt-2 w-full">
+            <div className="flex items-center gap-1.5">
+                <Popover open={showModelPicker && showModelSelector} onOpenChange={(open) => showModelSelector && setShowModelPicker(open)}>
+                  <PopoverTrigger asChild>
+                    <button 
+                      className={cn(
+                        "flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs shadow-sm transition-colors",
+                        showModelSelector 
+                          ? "border border-gray-300 bg-gray-100 text-gray-700 hover:bg-gray-200 cursor-pointer dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700" 
+                          : "border border-gray-300 bg-gray-100 text-gray-700 cursor-default dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+                      )}
+                      onClick={(e) => {
+                        if (!showModelSelector) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }
+                      }}
+                      disabled={!showModelSelector}
+                    >
+                      <span>{selectedModelName}</span>
+                      {showModelSelector && <ChevronDown className="h-3 w-3" />}
+                    </button>
+                  </PopoverTrigger>
+                  {showModelSelector && (
+                    <PopoverContent className="w-[300px] p-0 z-50" align="start">
                     <Command className="bg-white">
                       <CommandInput placeholder="Search models..." />
                       <CommandList className="max-h-[400px]">
@@ -377,8 +444,48 @@ export default function QueryInput({
                       </CommandList>
                     </Command>
                   </PopoverContent>
+                  )}
+                </Popover>
+                
+                {/* Tooltip for Rose models when selected */}
+                {(selectedModel === 'rose-labs/rose-1-fast' || selectedModel === 'rose-labs/rose-1-ultra') && (
+                  <Tooltip open={showTooltip} onOpenChange={setShowTooltip}>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className="flex-shrink-0 p-1 rounded hover:bg-foreground/10 active:bg-foreground/20 transition-colors touch-manipulation"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Toggle tooltip on click (especially for mobile)
+                          setShowTooltip(!showTooltip);
+                        }}
+                        onMouseEnter={() => {
+                          // On desktop, show on hover
+                          if (window.innerWidth >= 768) {
+                            setShowTooltip(true);
+                          }
+                        }}
+                        onMouseLeave={() => {
+                          // On desktop, hide on mouse leave
+                          if (window.innerWidth >= 768) {
+                            setShowTooltip(false);
+                          }
+                        }}
+                      >
+                        <svg className="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent className="z-[100] max-w-[280px]">
+                      <p className="text-xs">
+                        {selectedModel === 'rose-labs/rose-1-fast'
+                          ? "Rose-1-Fast is a mixed-model approach from the best workhorse models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability."
+                          : "Rose-1-Ultra is a mixed-model approach from the smartest models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability."}
+                      </p>
+                    </TooltipContent>
+                  </Tooltip>
                 )}
-              </Popover>
             </div>
 
             {/* CMD + Enter hint - clickable */}
@@ -386,8 +493,8 @@ export default function QueryInput({
               onClick={onSubmit}
               disabled={disabled}
               className={cn(
-                "flex items-center gap-1 px-2 py-1 rounded-lg border border-foreground/20 bg-foreground/10 text-foreground text-xs shadow-sm transition-colors",
-                disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-foreground/20 cursor-pointer"
+                "flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-300 bg-gray-100 text-gray-700 text-xs shadow-sm transition-colors dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700",
+                disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-gray-200 cursor-pointer"
               )}
             >
               <span className="font-mono text-[17px] leading-none">⌘</span>

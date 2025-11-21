@@ -1,10 +1,12 @@
-import { Message } from '@/lib/api';
+import { Message, respondToAttentionRequest } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
 import { useState, useEffect, useMemo, memo } from 'react';
+import { Button } from '@/components/ui/button';
 import SubAgentToolBubble from './SubAgentToolBubble';
 import { MarkdownText } from './MarkdownText';
 import { getToolIcon } from '@/lib/toolIcons';
+import { useToast } from '@/hooks/use-toast';
 
 interface MessageBubbleProps {
   message: Message;
@@ -20,6 +22,8 @@ interface ToolMessageData {
   status: 'IN_PROGRESS' | 'FINISHED';
   message: string;
   error?: boolean;
+  progressComplete?: number; // 0-100 or 0-1, optional - if present shows progress bar
+  actionMetadata?: Record<string, any> | null;
 }
 
 // Extract emoji from start of text and return {emoji, text}
@@ -79,6 +83,9 @@ const ToolMessage = memo(function ToolMessage({
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [hasAnimated, setHasAnimated] = useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
+  const { toast } = useToast();
+  const actionMetadata = data.actionMetadata;
   
   // Get tool icon based on toolName
   const ToolIcon = data.toolName ? getToolIcon(data.toolName) : Wrench;
@@ -106,6 +113,72 @@ const ToolMessage = memo(function ToolMessage({
       requestAnimationFrame(() => {
         onComplete();
       });
+    }
+  };
+
+  // Calculate progress percentage (handle both 0-1 and 0-100 ranges)
+  const progressPercent = useMemo(() => {
+    if (data.progressComplete === undefined) return undefined;
+    // If value is <= 1, assume it's 0-1 range, convert to 0-100
+    return data.progressComplete <= 1 ? data.progressComplete * 100 : data.progressComplete;
+  }, [data.progressComplete]);
+
+  const showProgressBar = progressPercent !== undefined && data.status === 'IN_PROGRESS';
+
+  const handleAction = async () => {
+    if (!actionMetadata) return;
+    if (actionMetadata.onSuccess !== 'sendSmsThroughIMessage') return;
+    if (!actionMetadata.attentionRequestId) {
+      toast({
+        title: 'Missing request reference',
+        description: 'Open the attention inbox to retry.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const bridge = (typeof window !== 'undefined' ? (window as any).api : undefined);
+    if (!bridge?.sendIMessage) {
+      toast({
+        title: 'Mac app required',
+        description: 'Open the Navi Mac app to send this message automatically.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const to = actionMetadata.to;
+    const message = actionMetadata.message;
+
+    if (!to || !message) {
+      toast({
+        title: 'Missing details',
+        description: 'Recipient or message is missing from this request.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      setActionLoading(true);
+      const result = await bridge.sendIMessage({ to, message });
+      if (result && result.success === false) {
+        throw new Error(result.message || 'iMessage send failed');
+      }
+      await respondToAttentionRequest(actionMetadata.attentionRequestId, 'Message sent via Mac app ✅');
+      toast({
+        title: 'iMessage sent',
+        description: 'Approval recorded. Check the attention inbox for updates.',
+      });
+    } catch (error) {
+      console.error('Failed to send via iMessage from message bubble:', error);
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to send via iMessage',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -148,6 +221,42 @@ const ToolMessage = memo(function ToolMessage({
         )}
       </div>
 
+      {/* Progress bar - shown when progressComplete exists and status is IN_PROGRESS */}
+      {showProgressBar && (
+        <div className="w-[180px] h-[4px] bg-muted rounded-full overflow-hidden">
+          <div
+            className="h-full bg-primary transition-all duration-300 ease-out"
+            style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
+          />
+        </div>
+      )}
+
+      {actionMetadata?.onSuccess === 'sendSmsThroughIMessage' && (
+        <div className="rounded-md border border-dashed border-primary/40 bg-primary/5 p-3 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Send this via your Mac to unblock the agent.
+          </p>
+          <div className="text-xs text-muted-foreground space-y-1">
+            {actionMetadata.to && (
+              <p><span className="font-semibold">To:</span> {actionMetadata.to}</p>
+            )}
+            {actionMetadata.message && (
+              <p className="whitespace-pre-wrap break-words">
+                <span className="font-semibold">Message:</span> {actionMetadata.message}
+              </p>
+            )}
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleAction}
+            disabled={actionLoading}
+          >
+            {actionLoading ? 'Sending...' : 'Send via Mac iMessage'}
+          </Button>
+        </div>
+      )}
+
       {/* Expandable message content */}
       {hasMessage && shouldBeExpanded && (
         <div className="overflow-hidden">
@@ -187,6 +296,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       status: message.metadata.toolStatus || 'FINISHED',
       message: message.text,
       error: message.metadata.error || false,
+      progressComplete: message.metadata.progressComplete,
+      actionMetadata: message.metadata.requestUserAttention,
     } as ToolMessageData;
   }, [isTool, message.metadata, message.text]);
 

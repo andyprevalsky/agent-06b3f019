@@ -9,6 +9,26 @@ description: >
   5. Forgetting RLS is enabled: All frontend queries are filtered by user ID
   6. Using wrong database connection: Use Session Pooler (port 5432) not Direct (IPv6 incompatible)
   7. Not normalizing base URLs: Always strip trailing slashes to prevent double-slash bugs
+  8. Not using prisma db push to sync database state.
+  9. Not using prisma cli to access the database.
+  10. Asking the user for information that you already have access too (through your tools) instead of grabbing the information yourself.
+  11. Not outputting test results in markdown for readability.
+  12. Planning to do research
+  13. Not adding logs at each step of a new feature so that the feature can be debugged when it evitably works.
+  14. Not removing the logs when putting the finishing touches on a feature.
+  15. Returning back to the user without a passing test evaluation.
+  16. Not checking if a server is running on a port already, and killing what exists there. 
+  17. ASSUMING a server doesn't hot reload when it really does.
+  18. Not knowing that if the user types SETUP they want u to start 5 terminal sessions, 
+  - 1. one that starts /frontend via $ npm run dev, 
+  - 2. one thats starts, /backend via $ npm run dev, 
+  - 3. one that starts /agents via $ ./scripts/run_local_worker.sh
+  - 3. one that is just primed to run $ npm run cleanup:all (cd to /backend)
+  - 4. cd /mac-app
+  - 5. cd /research
+  - 19. Putting rules in the wrong folder or with the wrong extension—always use .cursor/rules/ for project-wide, <area>/.cursor/rules/ for area-specific, and .mdc extension with frontmatter.
+  20. Adding unnecessary fallbacks instead of fixing the root issue—prefer simple, correct implementations (see rules.mdc).
+
 
 apply:
   when: always
