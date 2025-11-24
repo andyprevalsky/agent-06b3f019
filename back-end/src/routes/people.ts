@@ -1,12 +1,11 @@
 import express, { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { authenticate } from '../middleware/auth';
 import { searchPeopleBySignals, PersonSignals, getEmbedding, buildPersonEmbeddingText } from '../lib/embeddings';
 import { findCollision, mergePersonRecords, PersonData } from '../lib/personCollision';
 import { MessageRecord } from '../types/person';
+import { prisma } from '../lib/prisma';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 /**
  * POST /api/people/search

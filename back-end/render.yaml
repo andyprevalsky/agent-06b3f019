@@ -13,20 +13,8 @@ services:
         value: production
       - key: NODE_OPTIONS
         value: --max-old-space-size=6144
-      - key: DATABASE_URL
-        sync: false  # Set manually - Supabase Session Pooler connection string
-      - key: DIRECT_URL
-        sync: false  # Set manually - Supabase Direct connection string (required for migrations)
-      - key: SUPABASE_URL
-        sync: false  # Set to: https://kzlurqihzaolhzsbkctf.supabase.co
-      - key: OPENROUTER_API_KEY
-        sync: false  # Replaces OPENAI_API_KEY
-      - key: ALLOWED_ORIGINS
-        sync: false  # e.g., https://hinavi.ai,https://www.hinavi.ai
       - key: PORT
         value: 10000
-      - key: DAYTONA_API_KEY
-        sync: false  # Set in Render dashboard to: dtn_6f10715d7345cf314d93a85002c60872d11d26e19b7daa1325582ec81664f4c6
       - key: PATH
         value: /opt/render/.local/bin:$PATH  # So 'harbor' command is found
 

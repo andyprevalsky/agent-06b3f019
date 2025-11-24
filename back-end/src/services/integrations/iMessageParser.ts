@@ -1,7 +1,6 @@
-import { PrismaClient, MessageChannel } from '@prisma/client';
+import { MessageChannel } from '@prisma/client';
 import NodeCache from 'node-cache';
-
-const prisma = new PrismaClient();
+import { prisma } from '../../lib/prisma';
 
 const INVALID_HANDLE_SENTINEL = 'unknown';
 

@@ -1,7 +1,6 @@
-import { PrismaClient, Person } from '@prisma/client';
+import { Person } from '@prisma/client';
 import { MessageRecord } from '../types/person';
-
-const prisma = new PrismaClient();
+import { prisma } from './prisma';
 
 export interface CollisionResult {
   isDuplicate: boolean;

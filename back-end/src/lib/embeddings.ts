@@ -1,11 +1,9 @@
 import OpenAI from 'openai';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from './prisma';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
-
-const prisma = new PrismaClient();
 
 /**
  * PersonSignals interface matching the 18-signal structure in Prisma schema

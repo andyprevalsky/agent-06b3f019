@@ -1,13 +1,13 @@
 import express, { Response } from 'express';
-import { PrismaClient, IntegrationType, IntegrationStatus } from '@prisma/client';
+import { IntegrationType, IntegrationStatus } from '@prisma/client';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import multer from 'multer';
 import fs from 'fs';
 import NodeCache from 'node-cache';
 import { parseIMessageData, ContactWithMessages } from '../services/integrations/iMessageParser';
+import { prisma } from '../lib/prisma';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 // Configure multer for file uploads
 const upload = multer({
