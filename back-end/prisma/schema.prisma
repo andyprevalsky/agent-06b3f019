@@ -20,6 +20,7 @@ model Agent {
   updatedAt                 DateTime        @updatedAt
   temporalWorkflowId        String?
   model                     String          @default("google/gemini-2.5-flash")
+  source                    AgentSource     @default(WEB)
   contextSize               Int             @default(0)
   messageCount              Int             @default(0)
   tokenCount                Int             @default(0)
@@ -121,6 +122,7 @@ model AgentAttentionRequest {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   imageUrl     String?
+  metadata     Json?
 
   @@index([updatedAt])
   @@index([userId])
@@ -282,6 +284,7 @@ model Person {
   relationshipQuality        String?
   skills                     Json?           @default("[]")
   totalOnlineReach           Int?
+  messagesExchanged          Int             @default(0)
   messageRecords             MessageRecord[]
 
   @@unique([userId, phoneNumber])
@@ -369,6 +372,11 @@ enum AgentStatus {
   PAUSED
   COMPLETED
   FAILED
+}
+
+enum AgentSource {
+  WEB
+  MAC_APP
 }
 
 enum ReasoningEffort {
