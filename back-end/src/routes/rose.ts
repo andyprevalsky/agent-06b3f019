@@ -1,11 +1,9 @@
 import { Router, Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { ROSE_MODEL_POOLS, normalizeRoseAlias } from '../lib/roseModels';
-import { MMLUProHarness } from '../benchmarks/harnesses/mmlu-pro';
-import { TerminalBenchHarness, TerminalBenchTask } from '../benchmarks/harnesses/terminal-bench';
+// import { MMLUProHarness } from '../benchmarks/harnesses/mmlu-pro';
+// import { TerminalBenchHarness, TerminalBenchTask } from '../benchmarks/harnesses/terminal-bench';
 import { prisma } from '../lib/prisma';
-import * as fs from 'fs';
-import * as path from 'path';
 
 const router = Router();
 
@@ -208,8 +206,20 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
 
 /**
  * POST /bench
- * Run benchmarks against Rose models
+ * Temporarily disabled while the heavy harnesses are excluded from builds.
  */
+router.post('/bench', (_req: AuthRequest, res: Response) => {
+  return res.status(503).json({
+    error: 'Benchmarking temporarily disabled',
+    detail: 'Bench harnesses were removed from the build to keep TypeScript memory usage low.'
+  });
+});
+
+/*
+import * as fs from 'fs';
+import * as path from 'path';
+import { MMLUProHarness } from '../benchmarks/harnesses/mmlu-pro';
+import { TerminalBenchHarness, TerminalBenchTask } from '../benchmarks/harnesses/terminal-bench';
 
 const HARNESSES = {
   'mmlu-pro': () => new MMLUProHarness(),
@@ -248,7 +258,9 @@ router.post('/bench', async (req: AuthRequest, res: Response) => {
     temperature = 0.7,
     maxTokens = 2000
   }: BenchmarkRequest = req.body;
-  
+  res.json({
+    message: 'Benchmarking is not supported yet'
+  });
   // Validate
   const createHarness = HARNESSES[benchmark as keyof typeof HARNESSES];
   if (!createHarness) {
@@ -331,82 +343,82 @@ router.post('/bench', async (req: AuthRequest, res: Response) => {
         
         const batchResults = await Promise.all(
           batch.map(async (question) => {
-          const questionStart = Date.now();
-          const cotResponses: string[] = [];
-          let totalCost = 0;
+            const questionStart = Date.now();
+            const cotResponses: string[] = [];
+            let totalCost = 0;
           
-          try {
-            // CoT loop (sequential within question)
-            for (let step = 1; step <= cotSteps; step++) {
-              const prompt = harness.formatPrompt(question, step, cotResponses);
-              
-              // Call edge function /completions
-              const response = await fetch(
-                `${process.env.SUPABASE_URL}/functions/v1/completions`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
-                    'x-api-key': process.env.ROSE_API_KEY!,
-                  },
-                  body: JSON.stringify({
-                    model,
-                    messages: [{ role: 'user', content: prompt }],
-                    temperature,
-                    max_tokens: maxTokens,
-                    seed: seed + step // Different seed per step
-                  })
+            try {
+              // CoT loop (sequential within question)
+              for (let step = 1; step <= cotSteps; step++) {
+                const prompt = harness.formatPrompt(question, step, cotResponses);
+                
+                // Call edge function /completions
+                const response = await fetch(
+                  `${process.env.SUPABASE_URL}/functions/v1/completions`,
+                  {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+                      'x-api-key': process.env.ROSE_API_KEY!,
+                    },
+                    body: JSON.stringify({
+                      model,
+                      messages: [{ role: 'user', content: prompt }],
+                      temperature,
+                      max_tokens: maxTokens,
+                      seed: seed + step // Different seed per step
+                    })
+                  }
+                );
+                
+                if (!response.ok) {
+                  throw new Error(`Completions API error: ${response.status}`);
                 }
+                
+                const data: any = await response.json();
+                const content = data.choices[0].message.content;
+                cotResponses.push(content);
+                
+                // Track cost (from usage data)
+                if (data.usage) {
+                  const stepCost = calculateCost(
+                    data.usage.prompt_tokens,
+                    data.usage.completion_tokens
+                  );
+                  totalCost += stepCost;
+                }
+              }
+              
+              // Extract and evaluate final answer
+              const finalResponse = cotResponses[cotResponses.length - 1];
+              const extractedAnswer = harness.extractAnswer(finalResponse);
+              const isCorrect = await harness.evaluateAnswer(
+                extractedAnswer,
+                question.correctAnswer
               );
               
-              if (!response.ok) {
-                throw new Error(`Completions API error: ${response.status}`);
-              }
-              
-              const data: any = await response.json();
-              const content = data.choices[0].message.content;
-              cotResponses.push(content);
-              
-              // Track cost (from usage data)
-              if (data.usage) {
-                const stepCost = calculateCost(
-                  data.usage.prompt_tokens,
-                  data.usage.completion_tokens
-                );
-                totalCost += stepCost;
-              }
+              return {
+                questionId: question.id,
+                cotResponses,
+                extractedAnswer,
+                correctAnswer: question.correctAnswer,
+                isCorrect,
+                durationMs: Date.now() - questionStart,
+                costCents: totalCost
+              };
+            } catch (error) {
+              console.error(`Error on question ${question.id}:`, error);
+              return {
+                questionId: question.id,
+                cotResponses,
+                extractedAnswer: '',
+                correctAnswer: question.correctAnswer,
+                isCorrect: false,
+                durationMs: Date.now() - questionStart,
+                costCents: totalCost
+              };
             }
-            
-            // Extract and evaluate final answer
-            const finalResponse = cotResponses[cotResponses.length - 1];
-            const extractedAnswer = harness.extractAnswer(finalResponse);
-            const isCorrect = await harness.evaluateAnswer(
-              extractedAnswer,
-              question.correctAnswer
-            );
-            
-            return {
-              questionId: question.id,
-              cotResponses,
-              extractedAnswer,
-              correctAnswer: question.correctAnswer,
-              isCorrect,
-              durationMs: Date.now() - questionStart,
-              costCents: totalCost
-            };
-          } catch (error) {
-            console.error(`Error on question ${question.id}:`, error);
-            return {
-              questionId: question.id,
-              cotResponses,
-              extractedAnswer: '',
-              correctAnswer: question.correctAnswer,
-              isCorrect: false,
-              durationMs: Date.now() - questionStart,
-              costCents: totalCost
-            };
-          }
           })
         );
         
@@ -489,7 +501,7 @@ function compareWithStandards(benchmarkName: string, score: number, standards: a
     return { position: 'no-data', average: null, leader: null };
   }
   
-  const avg = benchStandards.reduce((sum: number, s: any) => sum + s.score, 0) / benchStandards.length;
+  const avg = benchStandards reduce((sum: number, s: any) => sum + s.score, 0) / benchStandards.length;
   const leader = benchStandards[0];
   
   let position = 'below-average';
@@ -503,6 +515,7 @@ function compareWithStandards(benchmarkName: string, score: number, standards: a
     yourScore: score
   };
 }
+*/
 
 export default router;
 

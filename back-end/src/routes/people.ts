@@ -76,8 +76,8 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
       
       // Regenerate embedding with merged data
       const signals: PersonSignals = {
-        first_name: merged.firstName,
-        last_name: merged.lastName,
+        first_name: merged.firstName ?? personData.first_name,
+        last_name: merged.lastName ?? personData.last_name,
         age: merged.age || undefined,
         location: merged.location || undefined,
         profession: merged.profession || undefined,
