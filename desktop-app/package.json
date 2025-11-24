@@ -1,7 +1,7 @@
 {
   "name": "navi-desktop",
   "version": "1.0.0",
-  "description": "Navi Desktop - Integration Data Uploader",
+  "description": "Rose Desktop - Integration Data Uploader",
   "main": "dist/main/index.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"electron .\"",
@@ -32,7 +32,7 @@
   },
   "build": {
     "appId": "com.navi.desktop",
-    "productName": "Navi Desktop",
+    "productName": "Rose Desktop",
     "mac": {
       "category": "public.app-category.productivity",
       "target": ["dmg", "zip"],

@@ -61,7 +61,7 @@ export function Integrations() {
       <div className="max-w-3xl mx-auto">
         <h1 className="text-4xl font-bold mb-2">Integrations</h1>
         <p className="text-muted-foreground mb-8">
-          Upload your data sources to enhance Navi's knowledge
+          Upload your data sources to enhance Rose's knowledge
         </p>
         
         {error && (

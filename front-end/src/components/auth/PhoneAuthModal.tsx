@@ -277,7 +277,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
                 Enter Invite Code
               </p>
               <p className="text-xs text-navi-black/70 mt-1">
-                Navi is invite-only. Please enter your 6-digit code.
+                Rose is invite-only. Please enter your 6-digit code.
               </p>
             </div>
 

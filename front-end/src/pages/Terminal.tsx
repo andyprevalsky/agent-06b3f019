@@ -1424,8 +1424,8 @@ export default function Terminal() {
       {/* Background Pattern - z-[3] renders tile borders above animation canvases (z-[2]) */}
       <svg className="absolute inset-0 w-full h-full pointer-events-none z-[3]" xmlns="http://www.w3.org/2000/svg" style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}>
         <defs>
-          {/* Navi gradient for top corners */}
-          <linearGradient id="navi-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+          {/* Rose gradient for top corners */}
+          <linearGradient id="rose-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
             <stop offset="0%" stopColor="#FE7503" />
             <stop offset="20%" stopColor="#FC585C" />
             <stop offset="40%" stopColor="#FD5776" />
@@ -1500,11 +1500,11 @@ export default function Terminal() {
         {/* Large tile corner diamonds with concave sides (shared with surrounding small tiles) */}
         {/* Top-left corner with circle and perfectly smooth geometric diamond shape */}
         <circle cx="0" cy="0" r="25" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
-        <path d="M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z" fill="url(#navi-gradient)" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
+        <path d="M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z" fill="url(#rose-gradient)" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
         
         {/* Top-right corner with circle and perfectly smooth geometric diamond shape */}
         <circle cx="0" cy="0" r="25" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
-        <path d="M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z" fill="url(#navi-gradient)" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
+        <path d="M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z" fill="url(#rose-gradient)" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
         
         {/* Bottom corners keep original styling */}
         <path d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% + 214.5px))' }} />

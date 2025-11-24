@@ -136,7 +136,7 @@ router.get('/', async (req: Request, res: Response) => {
       headers: {
         'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
         'HTTP-Referer': process.env.BACKEND_URL || 'https://navi-j9a9.onrender.com',
-        'X-Title': 'Navi AI Agent'
+        'X-Title': 'Rose AI Agent'
       }
     });
 

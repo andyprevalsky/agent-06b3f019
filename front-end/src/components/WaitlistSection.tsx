@@ -77,7 +77,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
                         poster="/navi-midnight-black-white-background.png"
                         className="w-full h-full object-cover"
                         fallbackContent={
-                          <img src="/navi-midnight-black-white-background.png" alt="Navi Black" className="w-full h-full object-cover" />
+                          <img src="/navi-midnight-black-white-background.png" alt="Rose Black" className="w-full h-full object-cover" />
                         }
                       />
                     </div>
@@ -111,7 +111,7 @@ const WaitlistSection = ({ customOnly = false }: WaitlistSectionProps) => {
                         poster="/navi-pearl-white-white-background.png"
                         className="w-full h-full object-cover"
                         fallbackContent={
-                          <img src="/navi-pearl-white-white-background.png" alt="Navi White" className="w-full h-full object-cover" />
+                          <img src="/navi-pearl-white-white-background.png" alt="Rose White" className="w-full h-full object-cover" />
                         }
                       />
                     </div>

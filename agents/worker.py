@@ -1,4 +1,4 @@
-"""Temporal worker for Navi autonomous agents."""
+"""Temporal worker for Rose autonomous agents."""
 
 import asyncio
 import signal

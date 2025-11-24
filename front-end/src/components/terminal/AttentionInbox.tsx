@@ -338,7 +338,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
     if (!bridge?.sendIMessage) {
       toast({
         title: 'Mac app required',
-        description: 'Open the Navi Mac app to send this iMessage automatically.',
+        description: 'Open the Rose Mac app to send this iMessage automatically.',
         variant: 'destructive',
       });
       return;

@@ -1,6 +1,6 @@
-# Navi Desktop - Integration Data Uploader
+# Rose Desktop - Integration Data Uploader
 
-A Mac-only Electron application for securely uploading iMessage and Chrome Cookies data to Navi.
+A Mac-only Electron application for securely uploading iMessage and Chrome Cookies data to Rose.
 
 ## Features
 
@@ -61,7 +61,7 @@ Creates production builds:
 1. Open **System Preferences** → **Privacy & Security**
 2. Click **Full Disk Access**
 3. Click the **+** button
-4. Navigate to and select the **Navi Desktop** app
+4. Navigate to and select the **Rose Desktop** app
 5. Restart the app
 
 ## Architecture

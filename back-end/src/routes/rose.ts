@@ -66,7 +66,7 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
         'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': process.env.BACKEND_URL || 'https://navi-j9a9.onrender.com',
-        'X-Title': 'Navi AI Agent'
+        'X-Title': 'Rose AI Agent'
       },
       body: JSON.stringify(openrouterBody)
     });
@@ -125,7 +125,7 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
       headers: {
         'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
         'HTTP-Referer': process.env.BACKEND_URL || 'https://navi-j9a9.onrender.com',
-        'X-Title': 'Navi AI Agent'
+        'X-Title': 'Rose AI Agent'
       }
     });
 

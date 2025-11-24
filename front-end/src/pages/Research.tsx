@@ -31,7 +31,7 @@ export default function Research() {
             Rose-1 for software engineering
           </h1>
           <p className="text-sm text-slate-500">
-            July 2025 · Rose Labs × Navi
+            July 2025 · Rose Labs × Rose
           </p>
           <p className="text-lg text-slate-600 leading-relaxed">
             Rose-1 is our agentic model for building software in real codebases. This page shows how it performs on the same style
@@ -71,7 +71,7 @@ export default function Research() {
           <p>
             Ready to inspect the system live?{' '}
             <Link to="/terminal" className="underline decoration-slate-300 hover:decoration-slate-600 underline-offset-4">
-              Open the Navi terminal
+              Open the Rose terminal
             </Link>{' '}
             to experience Rose-1 in context.
           </p>

@@ -21,7 +21,7 @@
   }
 }
 
-/* Navi - Luxury Hardware Design System
+/* Rose - Luxury Hardware Design System
    Colors inspired by premium materials: pearl white, space gray, midnight black
    All colors MUST be HSL.
 */
@@ -905,7 +905,7 @@ html {
   }
   }
   
-  /* Animated Gradient Border - Navi Logo Colors */
+  /* Animated Gradient Border - Rose Logo Colors */
   .animated-gradient-border {
     position: relative;
     padding: 6px; /* Border thickness */

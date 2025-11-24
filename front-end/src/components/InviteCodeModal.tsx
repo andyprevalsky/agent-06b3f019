@@ -70,7 +70,7 @@ const InviteCodeModal = ({ open, onOpenChange }: InviteCodeModalProps) => {
       >
         <div className="space-y-6">
           <div className="text-center space-y-2">
-            <h2 className="text-xl font-semibold">Navi is an invite only system</h2>
+            <h2 className="text-xl font-semibold">Rose is an invite only system</h2>
             <p className="text-sm text-muted-foreground">Your invite code is</p>
           </div>
 

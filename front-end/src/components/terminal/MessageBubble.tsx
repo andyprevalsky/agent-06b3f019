@@ -141,7 +141,7 @@ const ToolMessage = memo(function ToolMessage({
     if (!bridge?.sendIMessage) {
       toast({
         title: 'Mac app required',
-        description: 'Open the Navi Mac app to send this message automatically.',
+        description: 'Open the Rose Mac app to send this message automatically.',
         variant: 'destructive',
       });
       return;

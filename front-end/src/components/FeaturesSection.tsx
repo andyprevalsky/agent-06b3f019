@@ -32,7 +32,7 @@ const FeaturesSection = () => {
   
   // Orchestrator manages playback; no direct video refs needed here
 
-  // Navi logo gradient stops (left-to-right) for sequential card backgrounds
+  // Rose logo gradient stops (left-to-right) for sequential card backgrounds
   const logoStops = ['#FE7503', '#FC585C', '#FD5776', '#E062CC', '#A76CED', '#7A6BEC'];
   const getStopForIndex = (index: number) => logoStops[index % logoStops.length];
   const hexToRgb = (hex: string) => {
