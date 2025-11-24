@@ -39,7 +39,7 @@ const PORT = process.env.PORT || 3001;
 app.use('/webhooks', webhooksRouter);
 
 // Middleware
-app.use(express.json({ limit: '10mb' })); // Increased from 100kb default for blueprint storage
+app.use(express.json({ limit: '100mb' })); // Increased to handle large encrypted payloads
 
 // CORS configuration - allow all localhost origins for development
 const defaultOrigins = [

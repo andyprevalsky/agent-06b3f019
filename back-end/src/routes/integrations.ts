@@ -2,8 +2,9 @@ import express, { Response } from 'express';
 import { PrismaClient, IntegrationType, IntegrationStatus } from '@prisma/client';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import multer from 'multer';
-import path from 'path';
 import fs from 'fs';
+import NodeCache from 'node-cache';
+import { parseIMessageData, ContactWithMessages } from '../services/integrations/iMessageParser';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -218,6 +219,109 @@ router.post('/upload', authenticate, upload.single('file') as any, async (req: A
     
     return res.status(500).json({
       error: 'Failed to upload file',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/imessage/upload
+ *
+ * Upload encrypted iMessage payloads from the Mac app.
+ */
+router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { contacts } = req.body as { contacts?: ContactWithMessages[] };
+
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      return res.status(400).json({
+        error: 'contacts array is required',
+      });
+    }
+
+    const totalMessages = contacts.reduce(
+      (sum, contact) => sum + (contact.messages?.length ?? 0),
+      0
+    );
+
+    console.log(
+      `[Integrations] Received iMessage payload from user ${userId} (${contacts.length} contacts, ${totalMessages} messages)`
+    );
+
+    const integration = await prisma.integration.upsert({
+      where: {
+        userId_name: {
+          userId,
+          name: 'imessage',
+        },
+      },
+      create: {
+        userId,
+        name: 'imessage',
+        type: IntegrationType.DATA_SOURCE,
+        status: IntegrationStatus.SYNCING,
+        config: {
+          contacts: contacts.length,
+          messages: totalMessages,
+          uploadedAt: new Date().toISOString(),
+        },
+      },
+      update: {
+        status: IntegrationStatus.SYNCING,
+        config: {
+          contacts: contacts.length,
+          messages: totalMessages,
+          uploadedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    const jobId = `imessage-upload-${userId}-${Date.now()}`;
+    res.json({
+      message: 'iMessage payload received, processing in background',
+      integration,
+      jobId,
+    });
+
+    (async () => {
+      try {
+        const jobCache = new NodeCache({ stdTTL: 60 * 60 });
+        await parseIMessageData(userId, contacts, jobId, jobCache);
+
+        await prisma.integration.update({
+          where: { id: integration.id },
+          data: {
+            status: IntegrationStatus.CONNECTED,
+            isActive: true,
+            lastSyncAt: new Date(),
+            lastSuccessfulSyncAt: new Date(),
+            config: {
+              ...(integration.config as Record<string, unknown>),
+              contacts: contacts.length,
+              messages: totalMessages,
+              lastJobId: jobId,
+              lastUploadedAt: new Date().toISOString(),
+            },
+          },
+        });
+      } catch (error) {
+        console.error('Error processing iMessage payload:', error);
+        await prisma.integration.update({
+          where: { id: integration.id },
+          data: {
+            status: IntegrationStatus.SYNC_FAILED,
+            lastSyncAt: new Date(),
+            lastFailedSyncAt: new Date(),
+            failureReason: error instanceof Error ? error.message : 'Unknown error',
+          },
+        });
+      }
+    })();
+  } catch (error) {
+    console.error('Error uploading iMessage payload:', error);
+    return res.status(500).json({
+      error: 'Failed to upload iMessage payload',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

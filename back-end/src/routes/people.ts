@@ -217,13 +217,10 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
     // We use a subquery to count MessageRecords for each person
     const peopleWithCounts = await prisma.$queryRaw<Array<any>>`
       SELECT 
-        p.*,
-        CAST(COUNT(m.id) AS INTEGER) as "messagesExchanged"
+        p.*
       FROM "Person" p
-      LEFT JOIN "MessageRecord" m ON m."personId" = p.id
       WHERE p."userId" = ${userId}
-      GROUP BY p.id
-      ORDER BY "messagesExchanged" DESC
+      ORDER BY p."messagesExchanged" DESC
       LIMIT ${limit}
       OFFSET ${skip}
     `;

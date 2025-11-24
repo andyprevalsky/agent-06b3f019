@@ -7,12 +7,32 @@ const store = new Store<{ session: AuthSession | null }>({
   encryptionKey: config.encryptionKey,
 });
 
+const toMillis = (value: number | undefined | null) => {
+  if (!value) return value ?? null;
+  return value < 1_000_000_000_000 ? value * 1000 : value;
+};
+
+const normalizeSession = (session: AuthSession | null): AuthSession | null => {
+  if (!session) return null;
+  const expiresAtMs = toMillis(session.expires_at);
+  if (!expiresAtMs) return session;
+  if (expiresAtMs === session.expires_at) return session;
+  return {
+    ...session,
+    expires_at: expiresAtMs,
+  };
+};
+
 export class AuthService {
   static getSession(): AuthSession | null {
-    const session = store.get('session');
+    const stored = store.get('session');
+    const session = normalizeSession(stored);
     if (!session) return null;
     
-    // Check expiration
+    if (session !== stored) {
+      store.set('session', session);
+    }
+    
     if (Date.now() >= session.expires_at) {
       this.clearSession();
       return null;
@@ -22,7 +42,12 @@ export class AuthService {
   }
   
   static setSession(session: AuthSession): void {
-    store.set('session', session);
+    const normalized = normalizeSession(session);
+    if (!normalized) {
+      this.clearSession();
+      return;
+    }
+    store.set('session', normalized);
   }
   
   static clearSession(): void {

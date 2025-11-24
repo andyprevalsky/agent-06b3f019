@@ -7,13 +7,61 @@ if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error('Missing Supabase environment variables');
 }
 
+type StorageAdapter = {
+  getItem: (key: string) => string | null | Promise<string | null>;
+  setItem: (key: string, value: string) => void | Promise<void>;
+  removeItem: (key: string) => void | Promise<void>;
+};
+
+const getElectronStorage = (): StorageAdapter | undefined => {
+  if (typeof window === 'undefined') return undefined;
+  const authBridge = window.api?.auth;
+  if (!authBridge) return undefined;
+
+  return {
+    getItem: async () => {
+      const session = await authBridge.check();
+      return session ? JSON.stringify(session) : null;
+    },
+    setItem: async (_, value) => {
+      if (!value) {
+        await authBridge.clear();
+        return;
+      }
+      try {
+        const session = JSON.parse(value);
+        await authBridge.save(session);
+      } catch (error) {
+        console.warn('[Supabase] Failed to parse session for Electron storage', error);
+      }
+    },
+    removeItem: async () => {
+      await authBridge.clear();
+    },
+  };
+};
+
+const electronStorage = getElectronStorage();
+const browserStorage = typeof window !== 'undefined' ? window.localStorage : undefined;
+const authStorage = electronStorage ?? browserStorage;
+
+const supabaseAuthConfig: {
+  autoRefreshToken: boolean;
+  persistSession: boolean;
+  detectSessionInUrl: boolean;
+  storage?: StorageAdapter | Storage;
+} = {
+  autoRefreshToken: true,
+  persistSession: true,
+  detectSessionInUrl: false,
+};
+
+if (authStorage) {
+  supabaseAuthConfig.storage = authStorage;
+}
+
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: false,
-    storage: window.localStorage,
-  },
+  auth: supabaseAuthConfig,
   realtime: {
     params: {
       eventsPerSecond: 10,

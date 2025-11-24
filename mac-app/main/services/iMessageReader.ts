@@ -16,9 +16,7 @@ const IMESSAGE_DB_PATH = path.join(
 );
 
 const INVALID_HANDLE_SENTINEL = 'unknown';
-const MAX_ATTRIBUTED_LOGS = 20;
 const columnPresenceCache = new Map<string, boolean>();
-let attributedLogCount = 0;
 
 interface RawMessageRow {
   id: number;
@@ -66,6 +64,28 @@ const stripLeadingMarkers = (value: string): string => {
   return value;
 };
 
+const applyAttributedSplitHeuristic = (value: string): string => {
+  let result = value;
+  const startDelimiter = 'NSString��+';
+  const endDelimiter = '��';
+  if (!value.includes(startDelimiter)) return value;
+  result = value.split(startDelimiter)[1]
+  result = result.substring(1);
+  // Remove all leading '�' characters until a non-'�' character is seen
+  let firstNonReplacementChar = 0;
+  while (result[firstNonReplacementChar] === '�') {
+    firstNonReplacementChar++;
+  }
+  if (firstNonReplacementChar > 0) {
+    result = result.substring(firstNonReplacementChar);
+  }
+  result = result.split(endDelimiter)[0]
+
+  result = stripControlCharacters(result);
+  result = stripLeadingMarkers(result);
+  return result.trim();
+};
+
 const sanitizeMessageCandidate = (
   candidate: unknown,
   messageId: number,
@@ -88,12 +108,11 @@ const sanitizeMessageCandidate = (
 
   normalized = stripLeadingMarkers(normalized);
 
-  if (source === 'attributed' && attributedLogCount < MAX_ATTRIBUTED_LOGS) {
-    console.log(`[IMessageReader] Decoded attributed text for message ${messageId}: "${normalized.substring(0, 80)}"`);
-    attributedLogCount++;
+  if (source === 'attributed') {
+    normalized = applyAttributedSplitHeuristic(String(value || ''));
   }
 
-  return normalized || null;
+  return normalized
 };
 
 const extractTextFromAttributedBody = (buffer?: Buffer | null): string | null => {
@@ -229,8 +248,8 @@ export class IMessageReader {
         WHERE 
           ${contentWhereClause}
           AND (
-            h.id IS NOT NULL 
-            OR (c.chat_identifier IS NOT NULL AND c.chat_identifier NOT LIKE 'chat%')
+            c.chat_identifier IS NULL 
+            OR c.chat_identifier NOT LIKE 'chat%'
           )
         ORDER BY m.date DESC
       `).all() as RawMessageRow[];
@@ -262,17 +281,19 @@ export class IMessageReader {
           continue;
         }
 
+        let source = 'text';
         let cleanedText = sanitizeMessageCandidate(msg.text, msg.id);
-
+        
         if ((!cleanedText || !cleanedText.trim()) && hasAssociatedTextColumn && msg.associated_message_text) {
+          source = 'associated';
           cleanedText = sanitizeMessageCandidate(msg.associated_message_text, msg.id, 'associated');
         }
 
         if ((!cleanedText || !cleanedText.trim()) && hasAttributedBodyColumn && msg.attributedBody) {
+          source = 'attributed';
           const decoded = extractTextFromAttributedBody(msg.attributedBody);
           cleanedText = sanitizeMessageCandidate(decoded, msg.id, 'attributed');
         }
-
         if (!cleanedText) {
           skippedEmptyText++;
           continue;
@@ -294,6 +315,12 @@ export class IMessageReader {
           is_from_me: msg.is_from_me === 1,
           contact_id: contactId,
           contact_name: contactName,
+          contact_firstName: contactInfo?.firstName || null,
+          contact_lastName: contactInfo?.lastName || null,
+          contact_email: contactInfo?.emails?.[0] || null,
+          contact_company: contactInfo?.company || null,
+          contact_title: contactInfo?.jobTitle || null,
+          contact_emailAddresses: contactInfo?.emails || [],
         });
       }
 
@@ -312,7 +339,29 @@ export class IMessageReader {
         console.log(`[IMessageReader] ⚠️ Skipped ${skippedEmptyText} photo-only / empty messages`);
       }
 
-      return cleanedMessages;
+      const repliedHandles = new Set<string>();
+      const namedHandles = new Set<string>();
+      for (const msg of cleanedMessages) {
+        if (msg.is_from_me) {
+          repliedHandles.add(msg.contact_id);
+        }
+        if (msg.contact_firstName || msg.contact_lastName) {
+          namedHandles.add(msg.contact_id);
+        }
+      }
+
+      const filteredMessages = cleanedMessages.filter(
+        msg => repliedHandles.has(msg.contact_id) || namedHandles.has(msg.contact_id)
+      );
+
+      if (filteredMessages.length !== cleanedMessages.length) {
+        const dropped = cleanedMessages.length - filteredMessages.length;
+        console.log(
+          `[IMessageReader] Filtered out ${dropped} message(s) from contacts the user never replied to`
+        );
+      }
+
+      return filteredMessages;
     } finally {
       db.close();
     }

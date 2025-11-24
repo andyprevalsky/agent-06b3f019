@@ -17,7 +17,7 @@ const normalizeHandle = (handle?: string | null) => {
 const PERSON_CHUNK_SIZE = 50;
 const MESSAGE_BATCH_SIZE = 10000;
 
-interface ContactWithMessages {
+export interface ContactWithMessages {
   contact_id: string;
   contact_name: string | null;
   // Contact enrichment data from Contacts DB
@@ -34,7 +34,7 @@ interface ContactWithMessages {
   messages: MessageData[];
 }
 
-interface MessageData {
+export interface MessageData {
   id: number;
   text: string;
   date: number;
@@ -51,34 +51,59 @@ function appleTimestampToDate(appleTimestamp: number): Date {
 
 function calculateCommunicationFrequency(messages: MessageData[]): string {
   if (messages.length === 0) return 'never';
-  
+
   const now = new Date();
+  const datesSeen = new Set<string>();
   const sortedMessages = messages
     .map(m => appleTimestampToDate(m.date))
     .sort((a, b) => b.getTime() - a.getTime()); // Newest first
-  
-  // Define cutoff dates (from most recent to least recent)
+
   const dailyCutoff = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
   const weeklyCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
   const monthlyCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
   const yearlyCutoff = new Date(now.getTime() - 360 * 24 * 60 * 60 * 1000);
-  
-  let count = 0;
-  
-  // Single pass through sorted messages
+
+  let dailyCount = 0;
+  let weeklyCount = 0;
+  let monthlyCount = 0;
+  let yearlyCount = 0;
+
   for (const msgDate of sortedMessages) {
-    // Stop if we've gone past the yearly window
-    if (msgDate < yearlyCutoff) break;
+    const msgDateString = msgDate.toISOString().slice(0, 10);
+    if (datesSeen.has(msgDateString)) continue;
+    datesSeen.add(msgDateString);
     
-    count++;
-    
-    // Check thresholds in order (most frequent to least frequent)
-    if (msgDate >= dailyCutoff && count >= 4) return 'daily';
-    if (msgDate >= weeklyCutoff && count >= 4) return 'weekly';
-    if (msgDate >= monthlyCutoff && count >= 4) return 'monthly';
-    if (msgDate >= yearlyCutoff && count >= 1) return 'yearly';
+
+    if (msgDate >= dailyCutoff) {
+      dailyCount++;
+      weeklyCount++;
+      monthlyCount++;
+      yearlyCount++;
+      if (dailyCount >= 4) return 'daily';
+      continue;
+    }
+
+    if (msgDate >= weeklyCutoff) {
+      weeklyCount++;
+      monthlyCount++;
+      yearlyCount++;
+      if (weeklyCount >= 4) return 'weekly';
+      continue;
+    }
+
+    if (msgDate >= monthlyCutoff) {
+      monthlyCount++;
+      yearlyCount++;
+      if (monthlyCount >= 4) return 'monthly';
+      continue;
+    }
+
+    if (msgDate >= yearlyCutoff) {
+      yearlyCount++;
+      if (yearlyCount >= 4) return 'yearly';
+      continue;
+    }
   }
-  
   return 'rarely';
 }
 
@@ -175,6 +200,7 @@ export async function parseIMessageData(
         
         // Calculate and update communication stats
         const frequency = calculateCommunicationFrequency(contact.messages);
+
         await prisma.person.update({
           where: { id: personId },
           data: {

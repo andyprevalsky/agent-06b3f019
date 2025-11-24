@@ -32,7 +32,38 @@ export interface IMessageData {
   date: number;
   is_from_me: boolean;
   contact_id: string;
-  contact_name: string;
+  contact_name: string | null;
+  contact_firstName?: string | null;
+  contact_lastName?: string | null;
+  contact_email?: string | null;
+  contact_company?: string | null;
+  contact_title?: string | null;
+  contact_emailAddresses?: string[];
+}
+
+export interface IMessageUploadMessage {
+  id: number;
+  text: string;
+  date: number;
+  is_from_me: boolean;
+  contactHandle?: string;
+}
+
+export interface IMessageUploadContact {
+  contact_id: string;
+  contact_name: string | null;
+  phoneNumber?: string | null;
+  email?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  company?: string | null;
+  title?: string | null;
+  emailAddresses?: string[];
+  messages: IMessageUploadMessage[];
+}
+
+export interface IMessageUploadPayload {
+  contacts: IMessageUploadContact[];
 }
 
 export interface CookieData {
