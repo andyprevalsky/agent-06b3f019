@@ -11,6 +11,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=6144
       - key: DATABASE_URL
         sync: false  # Set manually - Supabase Session Pooler connection string
       - key: DIRECT_URL
