@@ -221,7 +221,6 @@ export class IMessageReader {
     }
     
     const db = new Database(IMESSAGE_DB_PATH, { readonly: true });
-    attributedLogCount = 0;
     
     try {
       const hasAssociatedTextColumn = hasColumn(db, 'message', 'associated_message_text');
