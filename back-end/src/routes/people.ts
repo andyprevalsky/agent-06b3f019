@@ -1,5 +1,5 @@
-import express, { Request, Response } from 'express';
-import { authenticate } from '../middleware/auth';
+import express, { Response } from 'express';
+import { authenticate, AuthRequest } from '../middleware/auth';
 import { searchPeopleBySignals, PersonSignals, getEmbedding, buildPersonEmbeddingText } from '../lib/embeddings';
 import { findCollision, mergePersonRecords, PersonData } from '../lib/personCollision';
 import { MessageRecord } from '../types/person';
@@ -15,9 +15,14 @@ const router = express.Router();
  * Body: PersonSignals object (18 signals)
  * Returns: Array of matching people with similarity scores
  */
-router.post('/search', authenticate, async (req: Request, res: Response) => {
+router.post('/search', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).user.userId;
+    const userId = req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    
     const querySignals: PersonSignals = req.body;
     
     // Validate required fields
@@ -54,9 +59,14 @@ router.post('/search', authenticate, async (req: Request, res: Response) => {
  * Body: PersonData object
  * Returns: Created/updated person record
  */
-router.post('/', authenticate, async (req: Request, res: Response) => {
+router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).user.userId;
+    const userId = req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    
     const personData: PersonData = req.body;
     
     // Validate required fields
@@ -200,9 +210,14 @@ router.post('/', authenticate, async (req: Request, res: Response) => {
  * 
  * Returns: Paginated list sorted by messagesExchanged (descending)
  */
-router.get('/', authenticate, async (req: Request, res: Response) => {
+router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).user.userId;
+    const userId = req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
     const skip = (page - 1) * limit;
@@ -249,9 +264,14 @@ router.get('/', authenticate, async (req: Request, res: Response) => {
  * 
  * Get a specific person by ID
  */
-router.get('/:id', authenticate, async (req: Request, res: Response) => {
+router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).user.userId;
+    const userId = req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    
     const { id } = req.params;
     
     const person = await prisma.person.findFirst({
@@ -282,9 +302,14 @@ router.get('/:id', authenticate, async (req: Request, res: Response) => {
  * 
  * Delete a person from user's network
  */
-router.delete('/:id', authenticate, async (req: Request, res: Response) => {
+router.delete('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const userId = (req as any).user.userId;
+    const userId = req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    
     const { id } = req.params;
     
     // Verify person belongs to user
