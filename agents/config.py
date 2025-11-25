@@ -93,6 +93,15 @@ class ParallelConfig:
 
 
 @dataclass
+class RoseConfig:
+    """Rose API configuration for routing Rose models to Supabase edge function."""
+    
+    api_url: str = "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions"
+    api_key: str = ""  # Rose API key (x-api-key header)
+    supabase_anon_key: str = ""  # Supabase anon key (Authorization header)
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
     
@@ -104,6 +113,7 @@ class AppConfig:
     gemini: GeminiConfig
     browserbase: BrowserbaseConfig
     parallel: ParallelConfig
+    rose: RoseConfig
     
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -171,6 +181,12 @@ def load_config() -> AppConfig:
         api_key=os.environ["PARRALLEL_API_KEY"],
     )
     
+    rose = RoseConfig(
+        api_url=os.getenv("ROSE_API_URL", "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions"),
+        api_key=os.getenv("ROSE_API_KEY", ""),
+        supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", ""),
+    )
+    
     return AppConfig(
         temporal=temporal,
         backend=backend,
@@ -180,6 +196,7 @@ def load_config() -> AppConfig:
         gemini=gemini,
         browserbase=browserbase,
         parallel=parallel,
+        rose=rose,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

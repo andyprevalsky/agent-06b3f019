@@ -314,11 +314,33 @@ model Integration {
   config               Json?
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
+  emailCredentials     EmailIntegrationCredential[]
 
   @@unique([userId, name])
   @@index([userId])
   @@index([type])
   @@index([status])
+}
+
+model EmailIntegrationCredential {
+  id            String          @id @default(uuid())
+  userId        String
+  integrationId String
+  provider      EmailProvider
+  pkceVerifier  String?
+  stateToken    String?
+  accessToken   String?
+  refreshToken  String?
+  expiresAt     DateTime?
+  scopes        String[]        @default([])
+  metadata      Json?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  integration   Integration     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@index([integrationId])
 }
 
 model RoseApiKey {
@@ -425,4 +447,9 @@ enum IntegrationStatus {
   SYNCING
   SYNC_FAILED
   EXPIRED
+}
+
+enum EmailProvider {
+  GMAIL
+  YAHOO
 }

@@ -139,7 +139,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
       // Reset form
       setGoal(defaultGoal);
       setLlmJudgePrompt(defaultLlmJudgePrompt);
-      setSelectedModel('google/gemini-2.5-flash');
+      setSelectedModel('rose-labs/rose-1-fast');
       setReasoningEffort('high');
       
       // Reset tools to amazon_shopping in dev mode

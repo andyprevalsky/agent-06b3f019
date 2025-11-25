@@ -28,6 +28,7 @@ description: >
   - 5. cd /research
   - 19. Putting rules in the wrong folder or with the wrong extension—always use .cursor/rules/ for project-wide, <area>/.cursor/rules/ for area-specific, and .mdc extension with frontmatter.
   20. Adding unnecessary fallbacks instead of fixing the root issue—prefer simple, correct implementations (see rules.mdc).
+  21. Not importing PrismaClient from the singleton
 
 
 apply:

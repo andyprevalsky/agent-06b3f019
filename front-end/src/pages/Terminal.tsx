@@ -387,7 +387,7 @@ export default function Terminal() {
       : ''
   );
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('google/gemini-2.5-flash');
+  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-fast');
   
   // Models and tools from cached context
   const { models, modelsLoading } = useAppData();

@@ -732,23 +732,82 @@ async def call_llm_structured(
     
     config = load_config()
     
-    # Check if this is a Rose model - route to backend instead of OpenRouter
+    # Check if this is a Rose model - route to Supabase edge function
     is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
     
     if is_rose_model:
-        # Use backend URL and backend API key for Rose models
-        base_client = AsyncOpenAI(
-            api_key=config.backend.api_key,
-            base_url=f"{config.backend.api_url}/v1",
-            default_headers={"X-API-Key": config.backend.api_key}
-        )
-        logger.info(f"🌹 Routing Rose model to backend: {model} → {config.backend.api_url}/v1")
-    else:
-        # Use OpenRouter for all other models
-        base_client = AsyncOpenAI(
-            api_key=config.openrouter.api_key,
-            base_url=config.openrouter.base_url
-        )
+        # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
+        import httpx
+        
+        logger.info(f"🌹 Routing Rose model to Supabase: {model} → {config.rose.api_url}")
+        
+        # Build JSON schema from Pydantic model for structured output
+        schema = response_model.model_json_schema()
+        
+        request_body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_model.__name__,
+                    "schema": schema,
+                    "strict": True
+                }
+            }
+        }
+        
+        # Make direct HTTP call to Supabase function
+        async with httpx.AsyncClient(timeout=120.0) as http_client:
+            for attempt in range(3):
+                try:
+                    http_response = await http_client.post(
+                        config.rose.api_url,
+                        json=request_body,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                            "x-api-key": config.rose.api_key,
+                        }
+                    )
+                    http_response.raise_for_status()
+                    break
+                except httpx.HTTPStatusError as e:
+                    logger.warning(f"Rose API attempt {attempt + 1} failed: {e.response.status_code}")
+                    if attempt == 2:
+                        raise
+                except Exception as e:
+                    logger.warning(f"Rose API attempt {attempt + 1} failed: {str(e)}")
+                    if attempt == 2:
+                        raise
+        
+        data = http_response.json()
+        
+        # Parse the response content as JSON and validate with Pydantic
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        try:
+            parsed_content = json.loads(content)
+            response = response_model.model_validate(parsed_content)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error(f"Failed to parse Rose response: {content[:500]}", error=str(e))
+            raise ValueError(f"Failed to parse Rose response as {response_model.__name__}: {str(e)}")
+        
+        # Extract usage
+        usage = {
+            "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
+            "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
+            "total_tokens": data.get("usage", {}).get("total_tokens", 0)
+        }
+        
+        return response, usage
+    
+    # Use OpenRouter for all other models
+    base_client = AsyncOpenAI(
+        api_key=config.openrouter.api_key,
+        base_url=config.openrouter.base_url
+    )
     
     # Patch client with Instructor for structured outputs
     # Force JSON mode instead of native function calling because:
@@ -837,23 +896,65 @@ async def call_llm(
         config = load_config()
         model = model or config.openrouter.model
         
-        # Check if this is a Rose model - route to backend instead of OpenRouter
+        # Check if this is a Rose model - route to Supabase edge function
         is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
         
         if is_rose_model:
-            # Use backend URL and backend API key for Rose models
-            client = AsyncOpenAI(
-                api_key=config.backend.api_key,
-                base_url=f"{config.backend.api_url}/v1",
-                default_headers={"X-API-Key": config.backend.api_key}
+            # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
+            import httpx
+            
+            logger.info(f"🌹 Routing Rose model to Supabase: {model} → {config.rose.api_url}")
+            
+            request_body = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if response_format:
+                request_body["response_format"] = response_format
+            
+            async with httpx.AsyncClient(timeout=120.0) as http_client:
+                http_response = await http_client.post(
+                    config.rose.api_url,
+                    json=request_body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                        "x-api-key": config.rose.api_key,
+                    }
+                )
+                http_response.raise_for_status()
+            
+            data = http_response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            result = {
+                "content": content,
+                "model": data.get("model", model),
+                "finish_reason": data.get("choices", [{}])[0].get("finish_reason", "stop"),
+                "usage": {
+                    "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
+                    "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
+                    "total_tokens": data.get("usage", {}).get("total_tokens", 0)
+                }
+            }
+            
+            logger.info(
+                "LLM call complete (Rose)",
+                model=model,
+                tokens=result["usage"]["total_tokens"],
+                content_length=len(content),
+                content_preview=content[:100] if content else "EMPTY"
             )
-            logger.info(f"🌹 Routing Rose model to backend: {model} → {config.backend.api_url}/v1")
-        else:
-            # Use OpenRouter for all other models
-            client = AsyncOpenAI(
-                api_key=config.openrouter.api_key,
-                base_url=config.openrouter.base_url
-            )
+            
+            return result
+        
+        # Use OpenRouter for all other models
+        client = AsyncOpenAI(
+            api_key=config.openrouter.api_key,
+            base_url=config.openrouter.base_url
+        )
         
         # Call OpenRouter
         response = await client.chat.completions.create(
