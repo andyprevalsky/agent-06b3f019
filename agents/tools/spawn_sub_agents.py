@@ -234,10 +234,9 @@ async def spawn_sub_agents_activity(
                     "pause_state": parent_is_paused  # Inherit parent's pause state
                 }
                 
-                # Only include model and reasoning_effort if they're not None
-                model = agent.get("model")
-                if model is not None:
-                    payload["model"] = model
+                # Default to rose-1-fast if no model specified
+                model = agent.get("model") or "rose-labs/rose-1-fast"
+                payload["model"] = model
                 
                 reasoning_effort = agent.get("reasoning_effort")
                 if reasoning_effort is not None:

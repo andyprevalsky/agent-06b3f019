@@ -7,6 +7,7 @@ import NodeCache from 'node-cache';
 import { parseIMessageData, ContactWithMessages } from '../services/integrations/iMessageParser';
 import { parseVcfContent, importVcfContacts } from '../services/integrations/vcfParser';
 import { parseEmailZip, importEmailsToDb } from '../services/integrations/emailParser';
+import { fetchGmailEmails, parseGmailOAuthEmails } from '../services/integrations/gmailParser';
 import { prisma } from '../lib/prisma';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
@@ -830,10 +831,62 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
     });
 
     const displayEmail = tokenResult.userEmail ? ` (${tokenResult.userEmail})` : '';
-    return sendOAuthResultPage(res, {
+    sendOAuthResultPage(res, {
       success: true,
       message: `Successfully connected ${providerKey.toUpperCase()}${displayEmail}. You can close this window.`,
     });
+
+    // Process emails after returning response (same as iMessage pattern)
+    if (providerKey === 'gmail' && tokenResult.accessToken && tokenResult.userEmail) {
+      (async () => {
+        try {
+          const jobCache = new NodeCache({ stdTTL: 60 * 60 });
+          const jobId = `gmail-oauth-${credential.userId}-${Date.now()}`;
+
+          console.log(`[Job ${jobId}] Starting Gmail email sync for user ${credential.userId}`);
+
+          const emails = await fetchGmailEmails(tokenResult.accessToken);
+          const result = await parseGmailOAuthEmails(
+            credential.userId,
+            tokenResult.userEmail!,
+            emails,
+            jobId,
+            jobCache
+          );
+
+          // Update integration with contact/message counts
+          const existingIntegration = await prisma.integration.findUnique({
+            where: { id: credential.integrationId },
+          });
+          const existingConfig = (existingIntegration?.config as Record<string, unknown>) || {};
+
+          await prisma.integration.update({
+            where: { id: credential.integrationId },
+            data: {
+              config: {
+                ...existingConfig,
+                contacts: result.contacts,
+                messages: result.messages,
+                lastSyncedAt: new Date().toISOString(),
+              },
+            },
+          });
+
+          console.log(`[Job ${jobId}] ✅ Gmail sync complete: ${result.contacts} contacts, ${result.messages} messages`);
+        } catch (error) {
+          console.error('Error syncing Gmail emails:', error);
+          // Update integration with error status
+          await prisma.integration.update({
+            where: { id: credential.integrationId },
+            data: {
+              status: IntegrationStatus.SYNC_FAILED,
+              lastFailedSyncAt: new Date(),
+              failureReason: error instanceof Error ? error.message : 'Unknown error',
+            },
+          });
+        }
+      })();
+    }
   } catch (error) {
     console.error('Error handling email OAuth callback:', error);
     return sendOAuthResultPage(res, {
@@ -941,6 +994,233 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
     console.error('Error uploading iMessage payload:', error);
     return res.status(500).json({
       error: 'Failed to upload iMessage payload',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * Refresh Gmail access token using refresh token
+ */
+async function refreshGmailToken(credential: {
+  id: string;
+  refreshToken: string | null;
+}): Promise<string | null> {
+  if (!credential.refreshToken) {
+    return null;
+  }
+
+  const config = EMAIL_PROVIDER_CONFIG.gmail;
+  if (!config.clientId || !config.clientSecret) {
+    console.error('[Gmail] Missing client ID or secret for token refresh');
+    return null;
+  }
+
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: credential.refreshToken,
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+    });
+
+    const response = await fetch(config.tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+
+    const json = (await response.json()) as Record<string, any>;
+    if (!response.ok || !json.access_token) {
+      console.error('[Gmail] Token refresh failed:', json.error_description || json.error);
+      return null;
+    }
+
+    // Update credential with new access token
+    const expiresAt = json.expires_in
+      ? new Date(Date.now() + json.expires_in * 1000)
+      : null;
+
+    await prisma.emailIntegrationCredential.update({
+      where: { id: credential.id },
+      data: {
+        accessToken: json.access_token,
+        expiresAt,
+        // Google may return a new refresh token
+        ...(json.refresh_token && { refreshToken: json.refresh_token }),
+      },
+    });
+
+    return json.access_token as string;
+  } catch (error) {
+    console.error('[Gmail] Error refreshing token:', error);
+    return null;
+  }
+}
+
+/**
+ * Build RFC 2822 formatted email message
+ */
+function buildRawEmail(params: {
+  from: string;
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+}): string {
+  const lines: string[] = [];
+  lines.push(`From: ${params.from}`);
+  lines.push(`To: ${params.to}`);
+  if (params.cc) {
+    lines.push(`Cc: ${params.cc}`);
+  }
+  lines.push(`Subject: ${params.subject}`);
+  lines.push('Content-Type: text/plain; charset=UTF-8');
+  lines.push('');
+  lines.push(params.body);
+
+  const rawMessage = lines.join('\r\n');
+  // Gmail API requires base64url encoding
+  return Buffer.from(rawMessage)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+/**
+ * POST /api/integrations/email/send
+ *
+ * Send an email via the user's connected Gmail account
+ */
+router.post('/email/send', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { to, subject, body, cc, user_id } = req.body;
+    // For internal calls (API key), accept user_id from body
+    // For user calls (JWT), extract from token
+    const userId = req.isInternal ? user_id : req.user!.id;
+
+    if (!userId) {
+      return res.status(401).json({ 
+        error: 'Unauthorized: user_id required for internal auth' 
+      });
+    }
+
+    // Validate required fields
+    if (!to || typeof to !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: to' });
+    }
+    if (!subject || typeof subject !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: subject' });
+    }
+    if (!body || typeof body !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: body' });
+    }
+
+    // Check if user has Gmail credentials
+    const credential = await prisma.emailIntegrationCredential.findUnique({
+      where: {
+        userId_provider: {
+          userId,
+          provider: EmailProvider.GMAIL,
+        },
+      },
+      include: {
+        integration: true,
+      },
+    });
+
+    if (!credential || !credential.accessToken) {
+      return res.status(400).json({
+        error: 'Gmail not connected',
+        message:
+          'Connect your Gmail in order to allow Rose to send emails on your behalf. To connect your Gmail click on the hamburger icon > Integrations > Connect Gmail',
+      });
+    }
+
+    // Check if token is expired and refresh if needed
+    let accessToken = credential.accessToken;
+    const isExpired = credential.expiresAt && new Date(credential.expiresAt) <= new Date();
+
+    if (isExpired) {
+      console.log(`[Gmail] Access token expired for user ${userId}, refreshing...`);
+      const newToken = await refreshGmailToken({
+        id: credential.id,
+        refreshToken: credential.refreshToken,
+      });
+
+      if (!newToken) {
+        return res.status(400).json({
+          error: 'Gmail token expired',
+          message:
+            'Your Gmail connection has expired. Please reconnect your Gmail by clicking on the hamburger icon > Integrations > Connect Gmail',
+        });
+      }
+      accessToken = newToken;
+    }
+
+    // Get sender email from integration config
+    const integrationConfig = (credential.integration?.config as Record<string, unknown>) || {};
+    const senderEmail = (integrationConfig.connectedEmail as string) || req.user!.email;
+
+    if (!senderEmail) {
+      return res.status(400).json({
+        error: 'Unable to determine sender email address',
+      });
+    }
+
+    // Build and send the email
+    const rawMessage = buildRawEmail({
+      from: senderEmail,
+      to,
+      cc,
+      subject,
+      body,
+    });
+
+    const gmailResponse = await fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ raw: rawMessage }),
+      }
+    );
+
+    if (!gmailResponse.ok) {
+      const errorData = (await gmailResponse.json()) as Record<string, any>;
+      console.error('[Gmail] Send email failed:', errorData);
+
+      // Check for specific auth errors that indicate token is invalid
+      if (gmailResponse.status === 401) {
+        return res.status(400).json({
+          error: 'Gmail authentication failed',
+          message:
+            'Your Gmail connection has expired. Please reconnect your Gmail by clicking on the hamburger icon > Integrations > Connect Gmail',
+        });
+      }
+
+      return res.status(500).json({
+        error: 'Failed to send email',
+        details: errorData.error?.message || 'Unknown Gmail API error',
+      });
+    }
+
+    const result = (await gmailResponse.json()) as { id: string; threadId: string };
+    console.log(`[Gmail] Email sent successfully for user ${userId}, messageId: ${result.id}`);
+
+    return res.json({
+      success: true,
+      messageId: result.id,
+      threadId: result.threadId,
+    });
+  } catch (error) {
+    console.error('Error sending email:', error);
+    return res.status(500).json({
+      error: 'Failed to send email',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

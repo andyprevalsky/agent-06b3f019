@@ -2,9 +2,7 @@ import { MessageChannel } from '@prisma/client';
 import NodeCache from 'node-cache';
 import { prisma } from '../../lib/prisma';
 import AdmZip from 'adm-zip';
-
-const PERSON_CHUNK_SIZE = 50;
-const MESSAGE_BATCH_SIZE = 5000;
+import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
 export interface ParsedEmail {
   from: string;
@@ -40,29 +38,29 @@ export function parseEmlContent(emlContent: string): ParsedEmail | null {
   try {
     // Normalize line endings to \n
     const normalizedContent = emlContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    
+
     // Handle line folding (lines starting with space/tab are continuations)
     const unfoldedContent = normalizedContent.replace(/\n[ \t]+/g, ' ');
-    
+
     // Split headers and body
     const headerBodySplit = unfoldedContent.indexOf('\n\n');
     if (headerBodySplit === -1) return null;
-    
+
     const headerSection = unfoldedContent.substring(0, headerBodySplit);
     const bodySection = unfoldedContent.substring(headerBodySplit + 2);
-    
+
     const headers = parseHeaders(headerSection);
-    
+
     const from = extractEmailAddress(headers['from'] || '');
     if (!from) return null;
-    
+
     const fromName = extractName(headers['from'] || '');
     const to = extractEmailAddresses(headers['to'] || '');
     const cc = extractEmailAddresses(headers['cc'] || '');
     const subject = decodeHeader(headers['subject'] || '(No Subject)');
     const dateStr = headers['date'] || '';
     const messageId = headers['message-id'] || null;
-    
+
     // Parse date
     let date: Date;
     try {
@@ -73,12 +71,12 @@ export function parseEmlContent(emlContent: string): ParsedEmail | null {
     } catch {
       date = new Date();
     }
-    
+
     // Parse body
     const contentType = headers['content-type'] || 'text/plain';
     let bodyText: string | null = null;
     let bodyHtml: string | null = null;
-    
+
     if (contentType.includes('multipart')) {
       const boundary = extractBoundary(contentType);
       if (boundary) {
@@ -91,7 +89,7 @@ export function parseEmlContent(emlContent: string): ParsedEmail | null {
     } else {
       bodyText = decodeBody(bodySection, headers['content-transfer-encoding']);
     }
-    
+
     return {
       from,
       fromName,
@@ -112,10 +110,10 @@ export function parseEmlContent(emlContent: string): ParsedEmail | null {
 function parseHeaders(headerSection: string): Record<string, string> {
   const headers: Record<string, string> = {};
   const lines = headerSection.split('\n');
-  
+
   let currentKey = '';
   let currentValue = '';
-  
+
   for (const line of lines) {
     const colonIndex = line.indexOf(':');
     if (colonIndex > 0 && !line.startsWith(' ') && !line.startsWith('\t')) {
@@ -130,12 +128,12 @@ function parseHeaders(headerSection: string): Record<string, string> {
       currentValue += ' ' + line.trim();
     }
   }
-  
+
   // Save last header
   if (currentKey) {
     headers[currentKey.toLowerCase()] = currentValue.trim();
   }
-  
+
   return headers;
 }
 
@@ -143,25 +141,25 @@ function extractEmailAddress(str: string): string | null {
   // Match email in angle brackets: "Name <email@domain.com>"
   const angleMatch = str.match(/<([^>]+@[^>]+)>/);
   if (angleMatch) return angleMatch[1].toLowerCase();
-  
+
   // Match plain email
   const plainMatch = str.match(/[\w.-]+@[\w.-]+\.\w+/);
   if (plainMatch) return plainMatch[0].toLowerCase();
-  
+
   return null;
 }
 
 function extractEmailAddresses(str: string): string[] {
   const emails: string[] = [];
-  
+
   // Split by comma, handling quoted names
   const parts = str.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
-  
+
   for (const part of parts) {
     const email = extractEmailAddress(part);
     if (email) emails.push(email);
   }
-  
+
   return emails;
 }
 
@@ -169,11 +167,11 @@ function extractName(str: string): string | null {
   // Match name before angle brackets: "Name <email@domain.com>"
   const match = str.match(/^"?([^"<]+)"?\s*</);
   if (match) return match[1].trim();
-  
+
   // Match quoted name
   const quotedMatch = str.match(/^"([^"]+)"/);
   if (quotedMatch) return quotedMatch[1].trim();
-  
+
   return null;
 }
 
@@ -185,20 +183,20 @@ function extractBoundary(contentType: string): string | null {
 function parseMultipart(body: string, boundary: string): { text: string | null; html: string | null } {
   let text: string | null = null;
   let html: string | null = null;
-  
+
   const parts = body.split('--' + boundary);
-  
+
   for (const part of parts) {
     if (part.trim() === '' || part.trim() === '--') continue;
-    
+
     const partHeaderEnd = part.indexOf('\n\n');
     if (partHeaderEnd === -1) continue;
-    
+
     const partHeaders = parseHeaders(part.substring(0, partHeaderEnd));
     const partBody = part.substring(partHeaderEnd + 2);
     const partContentType = partHeaders['content-type'] || 'text/plain';
     const encoding = partHeaders['content-transfer-encoding'];
-    
+
     if (partContentType.includes('text/plain') && !text) {
       text = decodeBody(partBody, encoding);
     } else if (partContentType.includes('text/html') && !html) {
@@ -213,15 +211,15 @@ function parseMultipart(body: string, boundary: string): { text: string | null; 
       }
     }
   }
-  
+
   return { text, html };
 }
 
 function decodeBody(body: string, encoding?: string): string {
   if (!encoding) return body.trim();
-  
+
   const enc = encoding.toLowerCase();
-  
+
   if (enc === 'base64') {
     try {
       return Buffer.from(body.replace(/\s/g, ''), 'base64').toString('utf-8');
@@ -229,11 +227,11 @@ function decodeBody(body: string, encoding?: string): string {
       return body.trim();
     }
   }
-  
+
   if (enc === 'quoted-printable') {
     return decodeQuotedPrintable(body);
   }
-  
+
   return body.trim();
 }
 
@@ -266,7 +264,7 @@ export function parseEmailZip(zipPath: string): ParsedEmail[] {
   const zip = new AdmZip(zipPath);
   const entries = zip.getEntries();
   const emails: ParsedEmail[] = [];
-  
+
   for (const entry of entries) {
     if (entry.entryName.endsWith('.eml') && !entry.isDirectory) {
       try {
@@ -280,214 +278,8 @@ export function parseEmailZip(zipPath: string): ParsedEmail[] {
       }
     }
   }
-  
-  return emails;
-}
 
-/**
- * Import parsed emails into the database
- */
-export async function importEmailsToDb(
-  userId: string,
-  userEmails: string[], // User's email addresses to identify sent vs received
-  emails: ParsedEmail[],
-  jobId: string,
-  jobCache: NodeCache
-): Promise<{ contacts: number; messages: number }> {
-  console.log(`[Job ${jobId}] Processing ${emails.length} emails for user ${userId}`);
-  
-  // Normalize user emails
-  const userEmailSet = new Set(userEmails.map(e => e.toLowerCase()));
-  
-  // Group emails by contact
-  const contactMap = new Map<string, EmailContact>();
-  
-  for (const email of emails) {
-    const isFromMe = userEmailSet.has(email.from);
-    
-    // Determine the contact email(s)
-    let contactEmails: string[] = [];
-    
-    if (isFromMe) {
-      // User sent this email - contacts are recipients
-      contactEmails = [...email.to, ...email.cc].filter(e => !userEmailSet.has(e));
-    } else {
-      // User received this email - contact is sender
-      contactEmails = [email.from];
-    }
-    
-    // Get plain text body, stripping HTML if needed
-    let bodyContent = email.bodyText;
-    if (!bodyContent && email.bodyHtml) {
-      bodyContent = stripHtml(email.bodyHtml);
-    }
-    
-    // Truncate body to reasonable length
-    if (bodyContent && bodyContent.length > 10000) {
-      bodyContent = bodyContent.substring(0, 10000) + '...';
-    }
-    
-    for (const contactEmail of contactEmails) {
-      if (!contactMap.has(contactEmail)) {
-        contactMap.set(contactEmail, {
-          email: contactEmail,
-          name: isFromMe ? null : email.fromName,
-          sentCount: 0,
-          receivedCount: 0,
-          messages: [],
-        });
-      }
-      
-      const contact = contactMap.get(contactEmail)!;
-      
-      if (isFromMe) {
-        contact.sentCount++;
-      } else {
-        contact.receivedCount++;
-        // Update name if we have one
-        if (email.fromName && !contact.name) {
-          contact.name = email.fromName;
-        }
-      }
-      
-      contact.messages.push({
-        from: email.from,
-        to: contactEmail,
-        subject: email.subject,
-        date: email.date,
-        body: bodyContent,
-        isFromMe,
-      });
-    }
-  }
-  
-  // Filter contacts: user must have SENT at least one email to them
-  const validContacts = Array.from(contactMap.values()).filter(c => c.sentCount > 0);
-  
-  console.log(`[Job ${jobId}] Found ${validContacts.length} valid contacts (sent at least one email)`);
-  
-  // Get or create integration
-  const integration = await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'email' } },
-    create: {
-      userId,
-      name: 'email',
-      type: 'DATA_SOURCE',
-      status: 'SYNCING',
-      isActive: true,
-    },
-    update: {
-      status: 'SYNCING',
-    },
-  });
-  
-  let contactsProcessed = 0;
-  let messagesProcessed = 0;
-  const totalMessages = validContacts.reduce((sum, c) => sum + c.messages.length, 0);
-  
-  // Process contacts in chunks
-  for (let i = 0; i < validContacts.length; i += PERSON_CHUNK_SIZE) {
-    const chunk = validContacts.slice(i, i + PERSON_CHUNK_SIZE);
-    
-    // Upsert persons
-    for (const contact of chunk) {
-      try {
-        // Find or create person by email
-        let person = await prisma.person.findFirst({
-          where: {
-            userId,
-            OR: [
-              { email: contact.email },
-              { emailAddresses: { array_contains: [contact.email] } },
-            ],
-          },
-        });
-        
-        if (!person) {
-          // Parse name
-          let firstName = '';
-          let lastName = '';
-          if (contact.name) {
-            const nameParts = contact.name.split(' ');
-            firstName = nameParts[0] || '';
-            lastName = nameParts.slice(1).join(' ') || '';
-          }
-          
-          person = await prisma.person.create({
-            data: {
-              userId,
-              email: contact.email,
-              emailAddresses: [contact.email],
-              firstName,
-              lastName,
-            },
-          });
-        }
-        
-        // Insert messages in batches
-        for (let batchIdx = 0; batchIdx < contact.messages.length; batchIdx += MESSAGE_BATCH_SIZE) {
-          const batch = contact.messages.slice(batchIdx, batchIdx + MESSAGE_BATCH_SIZE);
-          
-          await prisma.messageRecord.createMany({
-            data: batch.map(msg => ({
-              personId: person!.id,
-              channel: MessageChannel.EMAIL,
-              from: msg.from,
-              to: msg.to,
-              timestamp: msg.date,
-              message: msg.subject + (msg.body ? '\n\n' + msg.body : ''),
-            })),
-            skipDuplicates: true,
-          });
-          
-          messagesProcessed += batch.length;
-        }
-        
-        // Update person stats
-        await prisma.person.update({
-          where: { id: person.id },
-          data: {
-            messagesExchanged: { increment: contact.messages.length },
-          },
-        });
-        
-        contactsProcessed++;
-        
-        // Update job progress
-        const currentState = jobCache.get<any>(jobId);
-        if (currentState) {
-          jobCache.set(jobId, {
-            ...currentState,
-            messagesProcessed,
-            contactsCreated: contactsProcessed,
-            progress: Math.round((messagesProcessed / totalMessages) * 100),
-          });
-        }
-        
-      } catch (error) {
-        console.error(`[Job ${jobId}] Error processing contact ${contact.email}:`, error);
-      }
-    }
-  }
-  
-  // Update integration status
-  await prisma.integration.update({
-    where: { id: integration.id },
-    data: {
-      status: 'CONNECTED',
-      lastSyncAt: new Date(),
-      lastSuccessfulSyncAt: new Date(),
-      config: {
-        lastUploadedAt: new Date().toISOString(),
-        totalEmailsProcessed: emails.length,
-        totalContactsFound: validContacts.length,
-      },
-    },
-  });
-  
-  console.log(`[Job ${jobId}] ✅ Imported ${messagesProcessed} messages from ${contactsProcessed} contacts`);
-  
-  return { contacts: contactsProcessed, messages: messagesProcessed };
+  return emails;
 }
 
 function stripHtml(html: string): string {
@@ -505,3 +297,153 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+/**
+ * Transform emails into ContactToUpsert format grouped by contact
+ */
+function transformEmailsToContacts(emails: ParsedEmail[], userEmails: string[]): ContactToUpsert[] {
+  const userEmailSet = new Set(userEmails.map(e => e.toLowerCase()));
+  const contactMap = new Map<string, EmailContact>();
+
+  for (const email of emails) {
+    const isFromMe = userEmailSet.has(email.from);
+
+    // Determine the contact email(s)
+    let contactEmails: string[] = [];
+
+    if (isFromMe) {
+      // User sent this email - contacts are recipients
+      contactEmails = [...email.to, ...email.cc].filter(e => !userEmailSet.has(e));
+    } else {
+      // User received this email - contact is sender
+      contactEmails = [email.from];
+    }
+
+    // Get plain text body, stripping HTML if needed
+    let bodyContent = email.bodyText;
+    if (!bodyContent && email.bodyHtml) {
+      bodyContent = stripHtml(email.bodyHtml);
+    }
+
+    // Truncate body to reasonable length
+    if (bodyContent && bodyContent.length > 10000) {
+      bodyContent = bodyContent.substring(0, 10000) + '...';
+    }
+
+    for (const contactEmail of contactEmails) {
+      if (!contactMap.has(contactEmail)) {
+        contactMap.set(contactEmail, {
+          email: contactEmail,
+          name: isFromMe ? null : email.fromName,
+          sentCount: 0,
+          receivedCount: 0,
+          messages: [],
+        });
+      }
+
+      const contact = contactMap.get(contactEmail)!;
+
+      if (isFromMe) {
+        contact.sentCount++;
+      } else {
+        contact.receivedCount++;
+        // Update name if we have one
+        if (email.fromName && !contact.name) {
+          contact.name = email.fromName;
+        }
+      }
+
+      contact.messages.push({
+        from: email.from,
+        to: contactEmail,
+        subject: email.subject,
+        date: email.date,
+        body: bodyContent,
+        isFromMe,
+      });
+    }
+  }
+
+  // Filter contacts: user must have SENT at least one email to them
+  const validContacts = Array.from(contactMap.values()).filter(c => c.sentCount > 0);
+
+  // Transform to ContactToUpsert format
+  return validContacts.map(contact => {
+    // Parse name into firstName/lastName
+    let firstName = '';
+    let lastName = '';
+    if (contact.name) {
+      const nameParts = contact.name.split(' ');
+      firstName = nameParts[0] || '';
+      lastName = nameParts.slice(1).join(' ') || '';
+    }
+
+    return {
+      identifier: contact.email,
+      identifierType: 'email' as const,
+      firstName,
+      lastName,
+      email: contact.email,
+      emailAddresses: [contact.email],
+      messages: contact.messages.map(msg => ({
+        channel: MessageChannel.EMAIL,
+        from: msg.from,
+        to: msg.to,
+        timestamp: msg.date,
+        message: msg.subject + (msg.body ? '\n\n' + msg.body : ''),
+      })),
+    };
+  });
+}
+
+/**
+ * Import parsed emails into the database using the shared manager
+ */
+export async function importEmailsToDb(
+  userId: string,
+  userEmails: string[], // User's email addresses to identify sent vs received
+  emails: ParsedEmail[],
+  jobId: string,
+  jobCache: NodeCache
+): Promise<{ contacts: number; messages: number }> {
+  console.log(`[Job ${jobId}] Processing ${emails.length} emails for user ${userId}`);
+
+  // Transform emails to contacts format
+  const contactsToUpsert = transformEmailsToContacts(emails, userEmails);
+  console.log(`[Job ${jobId}] Found ${contactsToUpsert.length} valid contacts (sent at least one email)`);
+
+  // Get or create integration
+  const integration = await prisma.integration.upsert({
+    where: { userId_name: { userId, name: 'email' } },
+    create: {
+      userId,
+      name: 'email',
+      type: 'DATA_SOURCE',
+      status: 'SYNCING',
+      isActive: true,
+    },
+    update: {
+      status: 'SYNCING',
+    },
+  });
+
+  // Use shared manager for DB operations
+  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId, jobCache);
+
+  // Update integration status
+  await prisma.integration.update({
+    where: { id: integration.id },
+    data: {
+      status: 'CONNECTED',
+      lastSyncAt: new Date(),
+      lastSuccessfulSyncAt: new Date(),
+      config: {
+        lastUploadedAt: new Date().toISOString(),
+        totalEmailsProcessed: emails.length,
+        totalContactsFound: contactsToUpsert.length,
+      },
+    },
+  });
+
+  console.log(`[Job ${jobId}] ✅ Email import complete: ${result.contacts} contacts, ${result.messages} messages`);
+  return result;
+}

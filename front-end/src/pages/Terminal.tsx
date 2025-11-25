@@ -979,7 +979,7 @@ export default function Terminal() {
         shouldAnimate = true;
       }
       
-      // TOOL messages animate if they are FINISHED, have a message, AND are NOT sub-agent tools
+      // TOOL messages animate if they are FINISHED or ERROR, have a message, AND are NOT sub-agent tools
       // Browser actions also animate - just inside their panel instead of main chat
       if (nextMessage.role === 'TOOL') {
         const isSubAgentTool = !!nextMessage.metadata?.subAgentId;
@@ -988,7 +988,8 @@ export default function Terminal() {
         const message = nextMessage.text || '';
         
         // All tool messages (including browser actions) animate and block the buffer
-        if (!isSubAgentTool && status === 'FINISHED' && message.trim().length > 0) {
+        // Include ERROR status so error messages are displayed
+        if (!isSubAgentTool && (status === 'FINISHED' || status === 'ERROR') && message.trim().length > 0) {
           shouldAnimate = true;
         }
       }

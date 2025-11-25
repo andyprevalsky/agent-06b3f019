@@ -37,6 +37,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.spawn_sub_agents import spawn_sub_agents
     from tools.send_sms import send_sms
     from tools.send_sms_as_user import send_sms_as_user
+    from tools.send_email import send_email
     from tools.spawn_browser_agent import spawn_browser_agent
     from tools.search_user_network import search_user_network_for_people
     from tools.find_all import find_all
@@ -64,6 +65,7 @@ EVENT_DRIVEN_TOOLS = {
     "spawn_sub_agents": spawn_sub_agents,
     "send_sms": send_sms,
     "send_sms_as_user": send_sms_as_user,
+    "send_email": send_email,
     "search_user_network_for_people": search_user_network_for_people,
     "find_all": find_all,
     "enrich": enrich,
@@ -113,6 +115,11 @@ SYSTEM_TOOLS = [
         "id": "system-check-monitor-events",
         "name": "check_monitor_events",
         "description": "Check for new events detected by a previously created monitor. Returns list of events with details about what changed on the web. Requires monitor_id from a previous monitor call. Use this periodically to retrieve updates - monitors run on their schedule but you must check for events to see results."
+    },
+    {
+        "id": "system-send-email",
+        "name": "send_email",
+        "description": "Send an email via the user's connected Gmail account. Requires: 'to' (recipient email), 'subject', 'body'. Optional: 'cc' (carbon copy recipient). If Gmail is not connected, returns an error with instructions to connect via Integrations settings."
     },
 ]
 
@@ -961,6 +968,9 @@ class AgentWorkflow:
             # Include status if provided (IN_PROGRESS, FINISHED, ERROR)
             if event.status:
                 metadata["toolStatus"] = event.status.value
+                # Frontend expects 'error' flag for ERROR status messages
+                if event.status == MessageStatus.ERROR:
+                    metadata["error"] = True
             
             # Merge in any additional metadata from the event
             if event.metadata:

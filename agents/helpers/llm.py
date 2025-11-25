@@ -249,6 +249,15 @@ class SendSmsAsUserTool(BaseModel):
     message: str = Field(description="The exact SMS/iMessage text to send. Keep it conversational and ready to send without additional edits.")
 
 
+class SendEmailTool(BaseModel):
+    """Tool call for sending email via the user's connected Gmail account."""
+    tool: Literal["send_email"]
+    to: str = Field(description="Recipient email address (e.g., 'john@example.com')")
+    subject: str = Field(description="Email subject line")
+    body: str = Field(description="Email body content. Use plain text formatting.")
+    cc: Optional[str] = Field(None, description="Optional CC recipient email address")
+
+
 class SpawnBrowserAgentTool(BaseModel):
     """Spawn an autonomous browser agent to complete complex, multi-step web tasks. The browser agent uses AI to navigate, interact, and accomplish goals without step-by-step orchestration. Provide a complete, high-level goal - the browser agent will autonomously break it down and execute all necessary steps. Login state persists across sessions."""
     tool: Literal["spawn_browser_agent"]
@@ -544,6 +553,7 @@ TOOL_MODELS = {
     "request_user_attention": RequestUserAttentionTool,
     "send_sms": SendSmsTool,
     "send_sms_as_user": SendSmsAsUserTool,
+    "send_email": SendEmailTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
     "search_user_network_for_people": SearchUserNetworkTool,
     "find_all": FindAllTool,

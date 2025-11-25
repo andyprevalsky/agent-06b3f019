@@ -95,8 +95,9 @@ const ToolMessage = memo(function ToolMessage({
   
   // Memoize computed values
   const hasMessage = useMemo(() => data.message.trim().length > 0, [data.message]);
-  const isFinished = useMemo(() => data.status === 'FINISHED', [data.status]);
-  const showChevron = useMemo(() => hasMessage && isFinished, [hasMessage, isFinished]);
+  // FINISHED and ERROR statuses should both be expandable (not IN_PROGRESS)
+  const isExpandable = useMemo(() => data.status === 'FINISHED' || data.status === 'ERROR', [data.status]);
+  const showChevron = useMemo(() => hasMessage && isExpandable, [hasMessage, isExpandable]);
   const shouldBeExpanded = useMemo(() => 
     (shouldType && !hasAnimated) || isExpanded, 
     [shouldType, hasAnimated, isExpanded]
@@ -188,9 +189,9 @@ const ToolMessage = memo(function ToolMessage({
       <div 
         className={cn(
           "flex items-center gap-2",
-          hasMessage && isFinished && "cursor-pointer hover:opacity-80 transition-opacity"
+          hasMessage && isExpandable && "cursor-pointer hover:opacity-80 transition-opacity"
         )}
-        onClick={hasMessage && isFinished ? () => setIsExpanded(!isExpanded) : undefined}
+        onClick={hasMessage && isExpandable ? () => setIsExpanded(!isExpanded) : undefined}
       >
         {/* Tool Icon */}
         <ToolIcon className={cn(

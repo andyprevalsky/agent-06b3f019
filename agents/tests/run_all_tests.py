@@ -23,6 +23,7 @@ from test_spawn_sub_agents import run_all_tests as test_spawn_sub_agents
 from test_knowledge_base import run_all_tests as test_knowledge_base
 from test_send_sms import run_all_tests as test_send_sms
 from test_send_sms_as_user import run_all_tests as test_send_sms_as_user
+from test_send_email import run_all_tests as test_send_email
 from test_find_all import run_all_tests as test_find_all
 from test_enrich import run_all_tests as test_enrich
 from test_monitor import run_all_tests as test_monitor
@@ -76,6 +77,7 @@ async def main():
         run_test_silent("Knowledge Base", test_knowledge_base),
         run_test_silent("Send SMS", test_send_sms),
         run_test_silent("Send SMS As User", test_send_sms_as_user),
+        run_test_silent("Send Email", test_send_email),
         run_test_silent("Find All", test_find_all),
         run_test_silent("Enrich", test_enrich),
         run_test_silent("Monitor", test_monitor),
