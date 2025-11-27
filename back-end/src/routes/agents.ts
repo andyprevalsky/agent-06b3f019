@@ -135,12 +135,9 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
     });
 
     // Always-included default tools (by name)
-    const defaultToolNames = [
-      'spawn_browser_agent',
-      'web_search',
-      'send_sms',
-      'search_user_network_for_people'
-    ];
+    // Note: All core tools are now SYSTEM_TOOLS in the workflow (always available, no DB lookup needed)
+    // DB tools are optional extras that can be assigned per-agent
+    const defaultToolNames: string[] = [];
 
     if (body.source === 'MAC_APP') {
       defaultToolNames.push('send_sms_as_user');

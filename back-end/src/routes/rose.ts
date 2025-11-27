@@ -1,29 +1,34 @@
 import { Router, Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
-import { ROSE_MODEL_POOLS, normalizeRoseAlias } from '../lib/roseModels';
+import { ROSE_MODEL_POOLS, normalizeRoseAlias, isCerebrasPool } from '../lib/roseModels';
 // import { MMLUProHarness } from '../benchmarks/harnesses/mmlu-pro';
 // import { TerminalBenchHarness, TerminalBenchTask } from '../benchmarks/harnesses/terminal-bench';
 import { prisma } from '../lib/prisma';
 
 const router = Router();
 
+// Cerebras API base URL (OpenAI-compatible)
+const CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions';
+
 // Randomly select a model from the pool
-function selectModel(requestedModel: string): string {
+function selectModel(requestedModel: string): { model: string; isCerebras: boolean } {
   const normalized = normalizeRoseAlias(requestedModel) ?? requestedModel.toLowerCase();
   const pool = ROSE_MODEL_POOLS[normalized as keyof typeof ROSE_MODEL_POOLS];
   
   if (!pool) {
-    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast' or 'rose-labs/rose-1-ultra'`);
+    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast', 'rose-labs/rose-1-ultra', or 'rose-labs/rose-hyper'`);
   }
   
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
-  console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel}`);
-  return selectedModel;
+  const isCerebras = isCerebrasPool(normalized);
+  console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel} (Cerebras: ${isCerebras})`);
+  return { model: selectedModel, isCerebras };
 }
 
 /**
  * POST /v1/chat/completions
  * OpenRouter-compatible chat completions endpoint
+ * Routes to Cerebras API for rose-hyper, OpenRouter for other models
  */
 router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
   try {
@@ -38,49 +43,83 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
     }
 
     // Select actual model from pool
-    let actualModel: string;
+    let selection: { model: string; isCerebras: boolean };
     try {
-      actualModel = selectModel(model);
+      selection = selectModel(model);
     } catch (error) {
       return res.status(400).json({ 
         error: error instanceof Error ? error.message : 'Invalid model' 
       });
     }
 
-    // Prepare request to OpenRouter with throughput optimization
-    const openrouterBody = {
-      model: actualModel,
-      messages,
-      temperature,
-      max_tokens,
-      ...otherParams,
-      provider: {
-        sort: 'throughput'  // Optimize for lowest e2e latency
-      }
-    };
+    let data: any;
 
-    // Call OpenRouter API
-    const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': process.env.BACKEND_URL || 'https://navi-j9a9.onrender.com',
-        'X-Title': 'Rose AI Agent'
-      },
-      body: JSON.stringify(openrouterBody)
-    });
+    if (selection.isCerebras) {
+      // Call Cerebras API directly for rose-hyper
+      const cerebrasBody = {
+        model: selection.model,
+        messages,
+        temperature,
+        max_tokens,
+        // Cerebras doesn't support provider sorting, but is already optimized
+      };
 
-    if (!openrouterResponse.ok) {
-      const errorText = await openrouterResponse.text();
-      console.error('OpenRouter API error:', openrouterResponse.status, errorText);
-      return res.status(openrouterResponse.status).json({ 
-        error: 'OpenRouter API error',
-        details: errorText 
+      console.log(`⚡ Calling Cerebras API with model: ${selection.model}`);
+      
+      const cerebrasResponse = await fetch(CEREBRAS_API_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.CEREBRAS_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(cerebrasBody)
       });
-    }
 
-    const data = await openrouterResponse.json() as any;
+      if (!cerebrasResponse.ok) {
+        const errorText = await cerebrasResponse.text();
+        console.error('Cerebras API error:', cerebrasResponse.status, errorText);
+        return res.status(cerebrasResponse.status).json({ 
+          error: 'Cerebras API error',
+          details: errorText 
+        });
+      }
+
+      data = await cerebrasResponse.json();
+    } else {
+      // Call OpenRouter API for other Rose models
+      const openrouterBody = {
+        model: selection.model,
+        messages,
+        temperature,
+        max_tokens,
+        ...otherParams,
+        provider: {
+          sort: 'throughput'  // Optimize for lowest e2e latency
+        }
+      };
+
+      const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': process.env.BACKEND_URL || 'https://navi-j9a9.onrender.com',
+          'X-Title': 'Rose AI Agent'
+        },
+        body: JSON.stringify(openrouterBody)
+      });
+
+      if (!openrouterResponse.ok) {
+        const errorText = await openrouterResponse.text();
+        console.error('OpenRouter API error:', openrouterResponse.status, errorText);
+        return res.status(openrouterResponse.status).json({ 
+          error: 'OpenRouter API error',
+          details: errorText 
+        });
+      }
+
+      data = await openrouterResponse.json();
+    }
 
     // Mask the actual model in the response - return the requested model name
     if (data.model) {

@@ -9,9 +9,9 @@ const openai = new OpenAI({
  * PersonSignals interface matching the 18-signal structure in Prisma schema
  */
 export interface PersonSignals {
-  // Core identity (8 signals)
-  first_name: string;   // REQUIRED
-  last_name: string;    // REQUIRED
+  // Core identity (8 signals) - all optional for flexible semantic search
+  first_name?: string;
+  last_name?: string;
   age?: number;
   location?: string;
   profession?: string;
@@ -53,8 +53,11 @@ export interface PersonSignals {
 export function buildPersonEmbeddingText(signals: PersonSignals): string {
   const parts: string[] = [];
   
-  // Core identity
-  parts.push(`Name: ${signals.first_name} ${signals.last_name}`);
+  // Core identity - only add name if provided
+  if (signals.first_name || signals.last_name) {
+    const name = [signals.first_name, signals.last_name].filter(Boolean).join(' ');
+    parts.push(`Name: ${name}`);
+  }
   if (signals.age) parts.push(`Age: ${signals.age}`);
   if (signals.location) parts.push(`Location: ${signals.location}`);
   if (signals.profession) parts.push(`Profession: ${signals.profession}`);

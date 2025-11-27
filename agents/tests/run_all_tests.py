@@ -27,6 +27,8 @@ from test_send_email import run_all_tests as test_send_email
 from test_find_all import run_all_tests as test_find_all
 from test_enrich import run_all_tests as test_enrich
 from test_monitor import run_all_tests as test_monitor
+from test_read_message_history import run_all_tests as test_read_message_history
+from test_message_person import run_all_tests as test_message_person
 
 
 async def run_test_silent(name: str, test_func: Callable[[], Awaitable[bool]]) -> tuple[str, bool, float]:
@@ -81,6 +83,8 @@ async def main():
         run_test_silent("Find All", test_find_all),
         run_test_silent("Enrich", test_enrich),
         run_test_silent("Monitor", test_monitor),
+        run_test_silent("Read Message History", test_read_message_history),
+        run_test_silent("Message Person", test_message_person),
     ]
     
     # Run sync tests (these are fast, run them sequentially, silently)

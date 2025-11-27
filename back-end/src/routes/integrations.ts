@@ -265,6 +265,7 @@ const upload = multer({
   dest: '/tmp/integration-uploads/',
   limits: {
     fileSize: 500 * 1024 * 1024, // 500MB max file size
+    fieldSize: 50 * 1024 * 1024,  // 50MB max field size (for cookie uploads)
   },
 });
 
@@ -994,6 +995,122 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
     console.error('Error uploading iMessage payload:', error);
     return res.status(500).json({
       error: 'Failed to upload iMessage payload',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/cookies/upload
+ *
+ * Upload encrypted Chrome cookies from the Mac app.
+ * Receives AES-256-CBC encrypted payload with iv and key.
+ */
+router.post('/cookies/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { data, iv, key } = req.body;
+
+    if (!data || !iv || !key) {
+      return res.status(400).json({
+        error: 'Missing required fields: data, iv, key',
+      });
+    }
+
+    // Decrypt the AES-256-CBC encrypted payload
+    let cookies: any[];
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-cbc',
+        Buffer.from(key, 'hex'),
+        Buffer.from(iv, 'hex')
+      );
+      let decrypted = decipher.update(data, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      cookies = JSON.parse(decrypted);
+    } catch (decryptError) {
+      console.error('[Integrations] Cookie decryption failed:', decryptError);
+      return res.status(400).json({
+        error: 'Failed to decrypt cookie payload',
+      });
+    }
+
+    if (!Array.isArray(cookies)) {
+      return res.status(400).json({
+        error: 'Invalid cookie payload: expected array',
+      });
+    }
+
+    // Sanitize cookies: remove null bytes that PostgreSQL can't store
+    // Some decrypted cookie values may contain \u0000 characters
+    const sanitizeString = (str: string): string => {
+      if (typeof str !== 'string') return str;
+      // Remove null bytes and other control characters except newlines/tabs
+      return str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+    };
+
+    const sanitizedCookies = cookies.map((cookie: any) => ({
+      ...cookie,
+      value: sanitizeString(cookie.value || ''),
+      name: sanitizeString(cookie.name || ''),
+      host_key: sanitizeString(cookie.host_key || ''),
+      path: sanitizeString(cookie.path || ''),
+    })).filter((cookie: any) => cookie.name && cookie.value); // Remove cookies with empty names/values
+
+    console.log(
+      `[Integrations] Received ${cookies.length} cookies, ${sanitizedCookies.length} after sanitization for user ${userId}`
+    );
+
+    // Store cookies in Integration.config
+    const integration = await prisma.integration.upsert({
+      where: {
+        userId_name: {
+          userId,
+          name: 'chrome_cookies',
+        },
+      },
+      create: {
+        userId,
+        name: 'chrome_cookies',
+        type: IntegrationType.DATA_SOURCE,
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        lastSyncAt: new Date(),
+        lastSuccessfulSyncAt: new Date(),
+        config: {
+          cookies: sanitizedCookies,
+          cookieCount: sanitizedCookies.length,
+          uploadedAt: new Date().toISOString(),
+        },
+      },
+      update: {
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        lastSyncAt: new Date(),
+        lastSuccessfulSyncAt: new Date(),
+        config: {
+          cookies: sanitizedCookies,
+          cookieCount: sanitizedCookies.length,
+          uploadedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    console.log(`[Integrations] ✅ Stored ${sanitizedCookies.length} cookies for user ${userId}`);
+
+    return res.json({
+      message: 'Cookies uploaded successfully',
+      cookieCount: sanitizedCookies.length,
+      integration: {
+        id: integration.id,
+        name: integration.name,
+        status: integration.status,
+      },
+    });
+  } catch (error) {
+    console.error('Error uploading cookies:', error);
+    return res.status(500).json({
+      error: 'Failed to upload cookies',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

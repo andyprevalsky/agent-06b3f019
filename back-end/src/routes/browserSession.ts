@@ -7,7 +7,8 @@ import {
   createSessionWithContext, 
   closeSession,
   resumeSession,
-  getSession
+  getSession,
+  injectUserCookies
 } from '../lib/browserbase';
 
 const router = Router();
@@ -31,7 +32,8 @@ const resumeSessionSchema = z.object({
 /**
  * POST /api/browser-session/init
  * Initialize or get browser session for user.
- * Fast operation - just creates session, doesn't execute anything.
+ * Automatically injects user's stored Chrome cookies if available.
+ * Fast operation - just creates session and injects cookies.
  */
 router.post('/init', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -45,6 +47,9 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     // 2. Create temporary session for this task
     const session = await createSessionWithContext(contextId, agent_id);
     
+    // 3. Inject user's stored Chrome cookies (if available)
+    const cookieResult = await injectUserCookies(session.sessionId, user_id);
+    
     res.json({
       success: true,
       task_id: session.taskId,  // Stable ID for grouping browser actions
@@ -52,6 +57,8 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       session_id: session.sessionId,
       debug_url: session.debugUrl,
       project_id: process.env.BROWSERBASE_PROJECT_ID,
+      cookies_injected: cookieResult.injected,
+      cookies_count: cookieResult.cookieCount,
     });
     
   } catch (error) {
@@ -93,6 +100,7 @@ router.post('/close', authenticate, async (req: AuthRequest, res) => {
 /**
  * POST /api/browser-session/resume
  * Resume a paused browser task by creating a new session with the same context.
+ * Automatically injects user's stored Chrome cookies if available.
  * Fast operation.
  */
 router.post('/resume', authenticate, async (req: AuthRequest, res) => {
@@ -103,6 +111,18 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
     
     const result = await resumeSession(task_id);
     
+    // Get user_id from the session's context
+    const session = await prisma.browserSession.findUnique({
+      where: { id: task_id },
+      include: { context: true }
+    });
+    
+    // Inject cookies into resumed session
+    let cookieResult = { injected: false, cookieCount: 0 };
+    if (session?.context?.userId) {
+      cookieResult = await injectUserCookies(result.sessionId, session.context.userId);
+    }
+    
     res.json({
       success: true,
       task_id,  // Same stable task ID
@@ -110,6 +130,8 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
       debug_url: result.debugUrl,
       saved_url: result.savedUrl,  // URL to navigate back to
       status: 'ACTIVE',
+      cookies_injected: cookieResult.injected,
+      cookies_count: cookieResult.cookieCount,
     });
     
   } catch (error) {

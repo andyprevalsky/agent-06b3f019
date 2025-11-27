@@ -1,0 +1,46 @@
+name: Release Mac App
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers on version tags like v1.0.0, v1.2.3
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: mac-app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: mac-app
+        run: npm ci
+
+      - name: Build Electron app
+        working-directory: mac-app
+        run: npm run build
+        env:
+          # Add any env vars your app needs for building
+          # VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          # VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            mac-app/dist/Rose-mac.dmg
+            mac-app/dist/Rose-mac.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

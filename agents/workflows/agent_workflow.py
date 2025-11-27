@@ -33,17 +33,16 @@ with workflow.unsafe.imports_passed_through():
     from tools.request_user_attention import request_user_attention
     from tools.knowledge_base import query_blueprints, save_blueprint
     from tools.web_search import web_search
-    from tools.amazon_shopping import buy_item_from_amazon
     from tools.spawn_sub_agents import spawn_sub_agents
-    from tools.send_sms import send_sms
     from tools.send_sms_as_user import send_sms_as_user
-    from tools.send_email import send_email
     from tools.spawn_browser_agent import spawn_browser_agent
     from tools.search_user_network import search_user_network_for_people
     from tools.find_all import find_all
     from tools.enrich import enrich
     from tools.monitor import monitor
     from tools.check_monitor_events import check_monitor_events
+    from tools.read_message_history import read_message_history_with_person
+    from tools.message_person import message_person
 
 logger = structlog.get_logger()
 
@@ -61,16 +60,15 @@ EVENT_DRIVEN_TOOLS = {
     "query_blueprints": query_blueprints,
     "save_blueprint": save_blueprint,
     "web_search": web_search,
-    "buy_item_from_amazon": buy_item_from_amazon,
     "spawn_sub_agents": spawn_sub_agents,
-    "send_sms": send_sms,
     "send_sms_as_user": send_sms_as_user,
-    "send_email": send_email,
     "search_user_network_for_people": search_user_network_for_people,
     "find_all": find_all,
     "enrich": enrich,
     "monitor": monitor,
     "check_monitor_events": check_monitor_events,
+    "read_message_history_with_person": read_message_history_with_person,
+    "message_person": message_person,
 }
 
 # Tool formatter registry (maps tool names to their formatters)
@@ -117,9 +115,34 @@ SYSTEM_TOOLS = [
         "description": "Check for new events detected by a previously created monitor. Returns list of events with details about what changed on the web. Requires monitor_id from a previous monitor call. Use this periodically to retrieve updates - monitors run on their schedule but you must check for events to see results."
     },
     {
-        "id": "system-send-email",
-        "name": "send_email",
-        "description": "Send an email via the user's connected Gmail account. Requires: 'to' (recipient email), 'subject', 'body'. Optional: 'cc' (carbon copy recipient). If Gmail is not connected, returns an error with instructions to connect via Integrations settings."
+        "id": "system-search-user-network",
+        "name": "search_user_network_for_people",
+        "description": "Search the user's personal network for people matching specific criteria. Performs semantic search across contacts, finding people by name, profession, company, skills, relationship type, location, or any combination. Use this to find connections who can help with specific tasks or goals. All fields are optional - search by whatever criteria you have."
+    },
+    {
+        "id": "system-read-message-history",
+        "name": "read_message_history_with_person",
+        "description": "Read message history with a person. Retrieves past conversations across all channels (iMessage, WhatsApp, email, etc.). Provide at least one identifier: phone number, email address, or first+last name. You MUST call this tool before using message_person to send any message - it ensures you have context about previous conversations."
+    },
+    {
+        "id": "system-message-person",
+        "name": "message_person",
+        "description": "Send a message to a person via SMS or email. IMPORTANT: You MUST first call read_message_history_with_person for the SAME person before using this tool - if you haven't read their message history, this tool will fail with an error. Requires: 'channel' ('sms' or 'email'), person identifier (phone for SMS, email for email), and 'message'. For email, 'subject' is also required."
+    },
+    {
+        "id": "system-spawn-browser-agent",
+        "name": "spawn_browser_agent",
+        "description": "Spawn an autonomous browser agent to complete web tasks. The agent can navigate websites, fill forms, click buttons, and interact with web pages. Use this for any task that requires browsing the web interactively. Browser cookies have been injected - assume the user is logged in until proven otherwise."
+    },
+    {
+        "id": "system-web-search",
+        "name": "web_search",
+        "description": "Search the web for information using Perplexity AI. Returns comprehensive answers with citations. Use for factual questions, current events, research, and any information gathering that doesn't require browsing interactively."
+    },
+    {
+        "id": "system-deep-research",
+        "name": "deep_research",
+        "description": "Conduct deep, comprehensive research on a topic using multiple sources and extended reasoning. More thorough than web_search but takes longer and costs more. Use for complex research questions requiring synthesis of multiple sources."
     },
 ]
 

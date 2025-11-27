@@ -17,7 +17,11 @@ const router = express.Router();
  */
 router.post('/search', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user?.id;
+    // For internal calls (API key auth), get user_id from X-User-Id header
+    // For user calls (JWT auth), get from req.user
+    const userId = req.isInternal 
+      ? (req.headers['x-user-id'] as string) 
+      : req.user?.id;
     
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -25,10 +29,17 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
     
     const querySignals: PersonSignals = req.body;
     
-    // Validate required fields
-    if (!querySignals.first_name || !querySignals.last_name) {
+    // Validate that at least one search criterion is provided
+    const hasAnyCriteria = Object.entries(querySignals).some(([key, value]) => {
+      if (value === null || value === undefined) return false;
+      if (Array.isArray(value)) return value.length > 0;
+      if (typeof value === 'string') return value.trim().length > 0;
+      return true;
+    });
+    
+    if (!hasAnyCriteria) {
       return res.status(400).json({
-        error: 'first_name and last_name are required',
+        error: 'At least one search criterion is required (name, profession, skills, etc.)',
       });
     }
     
@@ -254,6 +265,137 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
     console.error('Error fetching people:', error);
     return res.status(500).json({
       error: 'Failed to fetch people',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/people/messages
+ * 
+ * Get message history for a person by phone, email, or name
+ * 
+ * Body:
+ * - user_id: User ID (required for internal calls)
+ * - phone: Phone number (E.164 format)
+ * - email: Email address
+ * - firstName: First name (requires lastName)
+ * - lastName: Last name (requires firstName)
+ * 
+ * At least one identifier (phone, email, or firstName+lastName) is required.
+ * 
+ * Returns: Array of message records with channel info, or "No messages present" message
+ */
+router.post('/messages', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    // For internal calls (API key auth), get user_id from body
+    // For user calls (JWT auth), get from req.user
+    const { user_id, phone, email, firstName, lastName } = req.body;
+    const userId = req.isInternal ? user_id : req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    
+    // Validate that at least one identifier is provided
+    const hasPhone = phone && typeof phone === 'string' && phone.trim().length > 0;
+    const hasEmail = email && typeof email === 'string' && email.trim().length > 0;
+    const hasName = firstName && lastName && 
+      typeof firstName === 'string' && typeof lastName === 'string' &&
+      firstName.trim().length > 0 && lastName.trim().length > 0;
+    
+    if (!hasPhone && !hasEmail && !hasName) {
+      return res.status(400).json({
+        error: 'At least one identifier is required: phone, email, or firstName+lastName',
+      });
+    }
+    
+    // Normalize phone number for comparison (keep only digits and leading +)
+    const normalizePhone = (p: string): string => {
+      return p.replace(/[^\d+]/g, '');
+    };
+    
+    // Build where clause to find the person
+    const whereConditions: any[] = [];
+    
+    if (hasPhone) {
+      // Normalize phone for matching - search for normalized version
+      const normalizedPhone = normalizePhone(phone as string);
+      whereConditions.push({ phoneNumber: normalizedPhone });
+    }
+    if (hasEmail) {
+      // Email matching is case-insensitive
+      whereConditions.push({ email: { equals: email as string, mode: 'insensitive' } });
+    }
+    if (hasName) {
+      whereConditions.push({
+        firstName: { equals: firstName as string, mode: 'insensitive' },
+        lastName: { equals: lastName as string, mode: 'insensitive' },
+      });
+    }
+    
+    // Find person matching any of the criteria
+    // Limit to 50 most recent messages to avoid performance issues
+    const person = await prisma.person.findFirst({
+      where: {
+        userId,
+        OR: whereConditions,
+      },
+      include: {
+        messageRecords: {
+          orderBy: { timestamp: 'desc' },
+          take: 50,
+        },
+      },
+    });
+    
+    // Build person identifier string for messages
+    const personIdentifier = hasName 
+      ? `${firstName} ${lastName}` 
+      : hasEmail 
+        ? email as string 
+        : phone as string;
+    
+    if (!person) {
+      return res.json({
+        person: null,
+        messages: [],
+        message: `No person found matching: ${personIdentifier}`,
+      });
+    }
+    
+    // Filter person object to non-null fields (exclude messageRecords relation)
+    const { messageRecords, ...personRow } = person;
+    const personData = Object.fromEntries(
+      Object.entries(personRow).filter(([_, v]) => v !== null && v !== undefined)
+    );
+
+    if (person.messageRecords.length === 0) {
+      return res.json({
+        person: personData,
+        messages: [],
+        message: `No messages present for ${person.firstName} ${person.lastName}`,
+      });
+    }
+    
+    // Format message records with channel info
+    const formattedMessages = person.messageRecords.map(record => ({
+      channel: record.channel,
+      from: record.from,
+      to: record.to,
+      timestamp: record.timestamp.toISOString(),
+      message: record.message,
+    }));
+    
+    return res.json({
+      person: personData,
+      messages: formattedMessages,
+      count: formattedMessages.length,
+    });
+  } catch (error) {
+    console.error('Error fetching message history:', error);
+    return res.status(500).json({
+      error: 'Failed to fetch message history',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

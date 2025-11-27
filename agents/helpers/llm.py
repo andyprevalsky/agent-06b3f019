@@ -258,6 +258,27 @@ class SendEmailTool(BaseModel):
     cc: Optional[str] = Field(None, description="Optional CC recipient email address")
 
 
+class ReadMessageHistoryTool(BaseModel):
+    """Read message history with a person. Use this to retrieve past conversations before sending a new message. You MUST call this tool before using message_person to send any message."""
+    tool: Literal["read_message_history_with_person"]
+    phone: Optional[str] = Field(None, description="Phone number in E.164 format (e.g., +19729777432)")
+    email: Optional[str] = Field(None, description="Email address of the person")
+    first_name: Optional[str] = Field(None, description="First name of the person (use with last_name)")
+    last_name: Optional[str] = Field(None, description="Last name of the person (use with first_name)")
+
+
+class MessagePersonTool(BaseModel):
+    """Send a message to a person via SMS or email. IMPORTANT: You MUST first call read_message_history_with_person for the SAME person before using this tool. If you haven't read their message history, this tool will fail."""
+    tool: Literal["message_person"]
+    channel: Literal["sms", "email"] = Field(description="Communication channel: 'sms' for text message, 'email' for email")
+    phone: Optional[str] = Field(None, description="Phone number in E.164 format (required for SMS channel)")
+    email: Optional[str] = Field(None, description="Email address (required for email channel)")
+    first_name: Optional[str] = Field(None, description="First name of the person (optional, for context matching)")
+    last_name: Optional[str] = Field(None, description="Last name of the person (optional, for context matching)")
+    message: str = Field(description="The message content to send")
+    subject: Optional[str] = Field(None, description="Email subject line (required for email channel)")
+
+
 class SpawnBrowserAgentTool(BaseModel):
     """Spawn an autonomous browser agent to complete complex, multi-step web tasks. The browser agent uses AI to navigate, interact, and accomplish goals without step-by-step orchestration. Provide a complete, high-level goal - the browser agent will autonomously break it down and execute all necessary steps. Login state persists across sessions."""
     tool: Literal["spawn_browser_agent"]
@@ -265,12 +286,12 @@ class SpawnBrowserAgentTool(BaseModel):
 
 
 class SearchUserNetworkTool(BaseModel):
-    """Tool for searching user's network for people matching specific criteria. Use this to find connections who can help with specific tasks, have certain skills, or meet manifestation goals."""
+    """Search the user's personal network for people matching specific criteria. Performs semantic search across contacts. All fields are optional - search by name, profession, skills, relationship, or any combination of criteria."""
     tool: Literal["search_user_network_for_people"]
     
-    # Core identity - first_name and last_name are REQUIRED
-    first_name: str = Field(description="First name of person (REQUIRED)")
-    last_name: str = Field(description="Last name of person (REQUIRED)")
+    # Core identity - all fields are optional for flexible semantic search
+    first_name: Optional[str] = Field(None, description="First name of person to search for")
+    last_name: Optional[str] = Field(None, description="Last name of person to search for")
     
     # Optional search criteria - fill in what matters for the goal
     age: Optional[int] = Field(None, description="Age of person (e.g., 35, 50)")
@@ -331,7 +352,7 @@ class CadenceEnum(str, Enum):
 
 class FindAllTool(BaseModel):
     """
-    Tool for discovering entities matching specific criteria using natural language queries.
+    Tool for discovering entities on the open internet matching specific criteria using natural language queries.
     
     This tool uses Parallel AI's Find All API to search for entities (companies, people, etc.)
     that match your criteria. The API converts your natural language objective into structured
@@ -551,15 +572,15 @@ TOOL_MODELS = {
     "deep_research": DeepResearchTool,
     "buy_item_from_amazon": BuyItemFromAmazonTool,
     "request_user_attention": RequestUserAttentionTool,
-    "send_sms": SendSmsTool,
     "send_sms_as_user": SendSmsAsUserTool,
-    "send_email": SendEmailTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
     "search_user_network_for_people": SearchUserNetworkTool,
     "find_all": FindAllTool,
     "enrich": EnrichTool,
     "monitor": MonitorTool,
     "check_monitor_events": CheckMonitorEventsTool,
+    "read_message_history_with_person": ReadMessageHistoryTool,
+    "message_person": MessagePersonTool,
 }
 
 
@@ -753,6 +774,10 @@ async def call_llm_structured(
         
         # Build JSON schema from Pydantic model for structured output
         schema = response_model.model_json_schema()
+        schema_str = json.dumps(schema)
+        logger.info(f"📋 Schema size: {len(schema_str)} chars (Cerebras limit: 5000)")
+        if len(schema_str) > 5000:
+            logger.warning(f"⚠️ Schema exceeds Cerebras 5000 char limit! May cause 400 error.")
         
         request_body = {
             "model": model,
@@ -785,7 +810,8 @@ async def call_llm_structured(
                     http_response.raise_for_status()
                     break
                 except httpx.HTTPStatusError as e:
-                    logger.warning(f"Rose API attempt {attempt + 1} failed: {e.response.status_code}")
+                    error_body = e.response.text[:1000] if e.response.text else "No response body"
+                    logger.warning(f"Rose API attempt {attempt + 1} failed: {e.response.status_code}", error_body=error_body)
                     if attempt == 2:
                         raise
                 except Exception as e:

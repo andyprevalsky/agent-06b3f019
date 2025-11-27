@@ -11,11 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
-from tools.search_user_network import (
-    search_user_network_activity,
-    format_pre_message,
-    format_post_message
-)
+from tools.search_user_network import search_user_network_activity
 
 
 async def test_activity_success():
@@ -48,7 +44,6 @@ async def test_activity_success():
         with patch('temporalio.activity.heartbeat'):
             result = await search_user_network_activity(
                 user_id="test-user-123",
-                agent_id="test-agent-456",
                 tool_call={
                     "first_name": "Sarah",
                     "last_name": "Chen",
@@ -80,7 +75,6 @@ async def test_activity_no_matches():
         with patch('temporalio.activity.heartbeat'):
             result = await search_user_network_activity(
                 user_id="test-user-123",
-                agent_id="test-agent-456",
                 tool_call={
                     "first_name": "NonExistent",
                     "last_name": "Person"
@@ -93,26 +87,8 @@ async def test_activity_no_matches():
     print("✅ test_activity_no_matches passed")
 
 
-async def test_activity_missing_required_fields():
-    """Test activity with missing required fields."""
-    with patch('temporalio.activity.heartbeat'):
-        result = await search_user_network_activity(
-            user_id="test-user-123",
-            agent_id="test-agent-456",
-            tool_call={
-                "profession": "engineer"  # Missing first_name and last_name
-            }
-        )
-    
-    assert "error" in result
-    assert result["count"] == 0
-    assert "required" in result["error"].lower()
-    
-    print("✅ test_activity_missing_required_fields passed")
-
-
 async def test_activity_api_error():
-    """Test activity error handling."""
+    """Test activity error handling for API errors."""
     mock_response = MagicMock()
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
@@ -121,113 +97,138 @@ async def test_activity_api_error():
         mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
         
         with patch('temporalio.activity.heartbeat'):
+            try:
+                await search_user_network_activity(
+                    user_id="test-user-123",
+                    tool_call={
+                        "first_name": "Test",
+                        "last_name": "User"
+                    }
+                )
+                assert False, "Expected ValueError to be raised"
+            except ValueError as e:
+                assert "500" in str(e) or "Backend API error" in str(e)
+    
+    print("✅ test_activity_api_error passed")
+
+
+async def test_activity_timeout():
+    """Test activity error handling for timeout."""
+    import httpx
+    
+    with patch('httpx.AsyncClient') as mock_client:
+        mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+            side_effect=httpx.TimeoutException("Connection timed out")
+        )
+        
+        with patch('temporalio.activity.heartbeat'):
+            try:
+                await search_user_network_activity(
+                    user_id="test-user-123",
+                    tool_call={
+                        "first_name": "Test",
+                        "last_name": "User"
+                    }
+                )
+                assert False, "Expected ValueError to be raised"
+            except ValueError as e:
+                assert "timed out" in str(e).lower()
+    
+    print("✅ test_activity_timeout passed")
+
+
+async def test_activity_with_all_signals():
+    """Test activity with all person signals."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "results": [
+            {
+                "firstName": "John",
+                "lastName": "Doe",
+                "profession": "Software Engineer",
+                "company": "Google",
+                "title": "Senior Engineer",
+                "location": "San Francisco",
+                "skills": ["Python", "Go", "Kubernetes"],
+                "similarity": 0.88,
+            }
+        ],
+        "count": 1,
+        "query": {}
+    }
+    
+    tool_call = {
+        "first_name": "John",
+        "last_name": "Doe",
+        "profession": "Software Engineer",
+        "company": "Google",
+        "title": "Senior Engineer",
+        "industry": "Technology",
+        "location": "San Francisco",
+        "relation": "colleague",
+        "skills": ["Python", "Go"],
+        "interests": ["AI", "Cloud"],
+        "total_online_reach": 5000,
+    }
+    
+    with patch('httpx.AsyncClient') as mock_client:
+        mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
+        
+        with patch('temporalio.activity.heartbeat'):
             result = await search_user_network_activity(
                 user_id="test-user-123",
-                agent_id="test-agent-456",
+                tool_call=tool_call
+            )
+        
+        assert result["count"] == 1
+        assert result["results"][0]["firstName"] == "John"
+        
+        # Verify the query was passed correctly (excluding 'tool' key)
+        assert "first_name" in result["query"]
+        assert "last_name" in result["query"]
+    
+    print("✅ test_activity_with_all_signals passed")
+
+
+async def test_activity_excludes_internal_fields():
+    """Test that internal fields like 'tool' are excluded from query."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "results": [],
+        "count": 0,
+        "query": {}
+    }
+    
+    captured_json = None
+    
+    async def capture_post(*args, **kwargs):
+        nonlocal captured_json
+        captured_json = kwargs.get('json', {})
+        return mock_response
+    
+    with patch('httpx.AsyncClient') as mock_client:
+        mock_client.return_value.__aenter__.return_value.post = AsyncMock(side_effect=capture_post)
+        
+        with patch('temporalio.activity.heartbeat'):
+            await search_user_network_activity(
+                user_id="test-user-123",
                 tool_call={
+                    "tool": "search_user_network_for_people",
+                    "tool_call_id": "abc123",
                     "first_name": "Test",
                     "last_name": "User"
                 }
             )
         
-        assert "error" in result
-        assert result["count"] == 0
+        # Verify internal fields were excluded
+        assert "tool" not in captured_json
+        assert "tool_call_id" not in captured_json
+        assert "first_name" in captured_json
+        assert "last_name" in captured_json
     
-    print("✅ test_activity_api_error passed")
-
-
-def test_format_pre_message():
-    """Test pre-message formatting."""
-    tool_call = {
-        "first_name": "Sarah",
-        "last_name": "Chen",
-        "profession": "venture capitalist",
-        "company": "Sequoia Capital",
-        "skills": ["fundraising", "networking"]
-    }
-    result = format_pre_message(tool_call)
-    
-    assert "title" in result
-    assert "message" in result
-    assert "Searching" in result["title"]
-    assert "Sarah Chen" in result["message"]
-    assert "venture capitalist" in result["message"]
-    assert "Sequoia Capital" in result["message"]
-    
-    print("✅ test_format_pre_message passed")
-
-
-def test_format_post_message_success():
-    """Test post-message formatting with results."""
-    tool_call = {
-        "first_name": "Sarah",
-        "last_name": "Chen"
-    }
-    result_data = {
-        "count": 1,
-        "results": [
-            {
-                "firstName": "Sarah",
-                "lastName": "Chen",
-                "profession": "Venture Capitalist",
-                "company": "Sequoia Capital",
-                "title": "Partner",
-                "email": "sarah@sequoia.com",
-                "similarity": 0.95,
-            }
-        ],
-        "query": {"first_name": "Sarah", "last_name": "Chen"}
-    }
-    result = format_post_message(tool_call, result_data)
-    
-    assert "title" in result
-    assert "message" in result
-    assert "Complete" in result["title"]
-    assert "Sarah Chen" in result["message"]
-    assert "Partner at Sequoia Capital" in result["message"]
-    
-    print("✅ test_format_post_message_success passed")
-
-
-def test_format_post_message_no_results():
-    """Test post-message formatting with no results."""
-    tool_call = {
-        "first_name": "NonExistent",
-        "last_name": "Person"
-    }
-    result_data = {
-        "count": 0,
-        "results": [],
-        "query": {"first_name": "NonExistent", "last_name": "Person"}
-    }
-    result = format_post_message(tool_call, result_data)
-    
-    assert "title" in result
-    assert "message" in result
-    assert "No matching" in result["message"]
-    
-    print("✅ test_format_post_message_no_results passed")
-
-
-def test_format_post_message_error():
-    """Test post-message formatting with error."""
-    tool_call = {
-        "first_name": "Test",
-        "last_name": "User"
-    }
-    result_data = {
-        "error": "API connection failed",
-        "count": 0,
-        "results": []
-    }
-    result = format_post_message(tool_call, result_data)
-    
-    assert "title" in result
-    assert "message" in result
-    assert "Failed" in result["title"]
-    assert "Error" in result["message"]
-    
-    print("✅ test_format_post_message_error passed")
+    print("✅ test_activity_excludes_internal_fields passed")
 
 
 async def run_all_tests():
@@ -240,14 +241,10 @@ async def run_all_tests():
         # Async tests for activities
         await test_activity_success()
         await test_activity_no_matches()
-        await test_activity_missing_required_fields()
         await test_activity_api_error()
-        
-        # Sync tests for formatters
-        test_format_pre_message()
-        test_format_post_message_success()
-        test_format_post_message_no_results()
-        test_format_post_message_error()
+        await test_activity_timeout()
+        await test_activity_with_all_signals()
+        await test_activity_excludes_internal_fields()
         
         print("\n✅ All search_user_network tests passed!")
         return True
@@ -261,4 +258,3 @@ async def run_all_tests():
 if __name__ == "__main__":
     success = asyncio.run(run_all_tests())
     sys.exit(0 if success else 1)
-

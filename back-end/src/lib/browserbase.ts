@@ -277,6 +277,126 @@ export async function getSession(sessionId: string) {
 }
 
 /**
+ * Cookie data structure from mac-app
+ */
+interface StoredCookie {
+  host_key: string;
+  name: string;
+  value: string;
+  path: string;
+  expires_utc: number;
+  is_secure: boolean;
+  is_httponly: boolean;
+}
+
+/**
+ * Inject user's stored Chrome cookies into a browser session.
+ * Should be called after session creation to restore authentication state.
+ * 
+ * @param sessionId - The BrowserBase session ID
+ * @param userId - The user's ID to fetch cookies for
+ * @returns Object with injected count and whether cookies were found
+ */
+export async function injectUserCookies(
+  sessionId: string,
+  userId: string
+): Promise<{ injected: boolean; cookieCount: number }> {
+  console.log(`🍪 Checking for stored cookies for user ${userId}...`);
+  
+  // Fetch user's chrome_cookies integration
+  const integration = await prisma.integration.findUnique({
+    where: {
+      userId_name: {
+        userId,
+        name: 'chrome_cookies',
+      },
+    },
+  });
+  
+  if (!integration || !integration.config) {
+    console.log(`  No chrome_cookies integration found for user`);
+    return { injected: false, cookieCount: 0 };
+  }
+  
+  const config = integration.config as { cookies?: StoredCookie[] };
+  if (!config.cookies || !Array.isArray(config.cookies) || config.cookies.length === 0) {
+    console.log(`  No cookies stored in integration`);
+    return { injected: false, cookieCount: 0 };
+  }
+  
+  console.log(`  Found ${config.cookies.length} stored cookies, injecting...`);
+  
+  try {
+    // Get the session's websocket URL
+    const liveUrls = await bb.sessions.debug(sessionId);
+    
+    // Connect to the session via Playwright
+    const { chromium } = await import('playwright');
+    const browser = await chromium.connectOverCDP(liveUrls.wsUrl);
+    const context = browser.contexts()[0];
+    
+    // Transform cookies to Playwright format
+    // Playwright cookie format: https://playwright.dev/docs/api/class-browsercontext#browser-context-add-cookies
+    const playwrightCookies = config.cookies.map((cookie: StoredCookie) => {
+      // Chrome stores expiry as microseconds since Windows epoch (Jan 1, 1601)
+      // Playwright expects Unix timestamp in seconds
+      // Chrome epoch to Unix epoch offset: 11644473600 seconds
+      // Chrome stores in microseconds, so divide by 1,000,000
+      const CHROME_EPOCH_OFFSET = 11644473600;
+      let expires: number | undefined;
+      
+      if (cookie.expires_utc && cookie.expires_utc > 0) {
+        // Convert from Chrome's microseconds-since-1601 to Unix timestamp
+        expires = Math.floor(cookie.expires_utc / 1000000) - CHROME_EPOCH_OFFSET;
+        // If expiry is in the past, skip setting it (let it be a session cookie)
+        if (expires < Date.now() / 1000) {
+          expires = undefined;
+        }
+      }
+      
+      return {
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.host_key,
+        path: cookie.path || '/',
+        expires,
+        secure: cookie.is_secure,
+        httpOnly: cookie.is_httponly,
+        sameSite: 'Lax' as const, // Default to Lax for compatibility
+      };
+    });
+    
+    // Filter out cookies with empty names or values (invalid)
+    const validCookies = playwrightCookies.filter(c => c.name && c.value);
+    
+    // Inject cookies in batches to avoid overwhelming
+    const BATCH_SIZE = 100;
+    let injectedCount = 0;
+    
+    for (let i = 0; i < validCookies.length; i += BATCH_SIZE) {
+      const batch = validCookies.slice(i, i + BATCH_SIZE);
+      try {
+        await context.addCookies(batch);
+        injectedCount += batch.length;
+      } catch (batchError) {
+        console.error(`  ⚠️ Failed to inject cookie batch ${i}-${i + batch.length}:`, batchError);
+        // Continue with other batches
+      }
+    }
+    
+    console.log(`  ✅ Injected ${injectedCount}/${validCookies.length} cookies`);
+    
+    // Don't close browser - let connection drop naturally
+    // Closing would terminate the BrowserBase session
+    
+    return { injected: true, cookieCount: injectedCount };
+  } catch (error) {
+    console.error(`  ❌ Failed to inject cookies:`, error);
+    return { injected: false, cookieCount: 0 };
+  }
+}
+
+/**
  * Close all active browser sessions (for cleanup).
  * Returns count of sessions closed.
  */

@@ -607,7 +607,7 @@ async def spawn_browser_agent_activity(
 
         # === INITIALIZE CONVERSATION ===
         # Build initial message with system prompt (screenshot already captured above)
-        system_prompt = "Your browser is in full screen mode. There is no search bar, or navigation bar, or shortcut to control it. You can use browser actions to complete tasks. Use request_user_attention if you need human help (login, CAPTCHA, payments). Use mark_task_completed when the task is done."
+        system_prompt = "Your browser is in full screen mode. There is no search bar, or navigation bar, or shortcut to control it. You can use browser actions to complete tasks. Browser cookies have been injected - assume the user is logged in until proven otherwise. Use request_user_attention if you need human help (login, CAPTCHA, payments). Use mark_task_completed when the task is done."
 
         # Use Stagehand's formatting for initial message
         google_cua_client._format_initial_messages(

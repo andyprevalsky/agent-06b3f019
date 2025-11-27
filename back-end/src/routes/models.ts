@@ -159,6 +159,10 @@ router.get('/', async (req: Request, res: Response) => {
     const roseFastMetadata = await calculateRoseMetadata('rose-1-fast', allModels);
     const roseUltraMetadata = await calculateRoseMetadata('rose-1-ultra', allModels);
 
+    // NOTE: rose-hyper disabled - Cerebras doesn't support complex JSON schemas
+    // (maxLength not supported, anyOf limited to 5 options, schema max 5000 chars)
+    // Keep the code for future reference when Cerebras improves structured output support
+
     // Inject Rose models at the beginning
   const roseModels: SortedModel[] = [
     {

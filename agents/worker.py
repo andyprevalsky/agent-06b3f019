@@ -46,6 +46,8 @@ from tools.enrich import (
 )
 from tools.monitor import monitor_activity
 from tools.check_monitor_events import check_monitor_events_activity
+from tools.search_user_network import search_user_network_activity
+from tools.read_message_history import read_message_history_activity
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     poll_new_messages,
@@ -162,6 +164,8 @@ async def main():
             monitor_activity,
             check_monitor_events_activity,
             save_tool_usage,
+            search_user_network_activity,
+            read_message_history_activity,
             # Helper activities
             poll_new_messages,
             post_agent_message,

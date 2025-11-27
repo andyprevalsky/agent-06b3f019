@@ -2,6 +2,7 @@ import { app, BrowserWindow, nativeImage, globalShortcut, ipcMain, screen } from
 import path from 'path';
 import { config } from './base/config';
 import './handlers/registry'; // Register IPC handlers
+import { initAutoUpdater } from './services/autoUpdater';
 
 app.name = 'Rose';
 
@@ -197,6 +198,11 @@ app.whenReady().then(() => {
   createQuickQueryWindow();
   registerGlobalShortcuts();
   registerQuickQueryIpc();
+  
+  // Initialize auto-updater
+  if (mainWindow) {
+    initAutoUpdater(mainWindow);
+  }
 });
 
 app.on('window-all-closed', () => {

@@ -39,6 +39,7 @@ interface ConnectedIntegration {
     provider?: string;
     contacts?: number;
     messages?: number;
+    cookieCount?: number;
     [key: string]: unknown;
   };
   lastSuccessfulSyncAt?: string;
@@ -87,14 +88,14 @@ export default function Integrations() {
     // { name: 'Contacts (VCF)', Icon: Users, fileUpload: 'vcf', backendKey: 'contacts' },
     // { name: 'Email Export (ZIP)', Icon: Upload, fileUpload: 'email-zip', backendKey: 'email' },
     { name: 'Gmail', Icon: Mail, provider: 'gmail', backendKey: 'gmail' },
+    { name: 'iMessage', Icon: MessageSquare, handlerKey: 'iMessage', backendKey: 'imessage' },
+    { name: 'Browser Credentials', Icon: Chrome, handlerKey: 'chromeCookies', backendKey: 'chrome_cookies' },
     { name: 'Twitter/X', Icon: Twitter },
     { name: 'LinkedIn', Icon: Linkedin },
-    { name: 'iMessage', Icon: MessageSquare, handlerKey: 'iMessage', backendKey: 'imessage' },
     { name: 'WhatsApp', Icon: MessageCircle },
     { name: 'Telegram', Icon: Send },
     { name: 'Instagram', Icon: Instagram },
     { name: 'Facebook Messenger', Icon: Facebook },
-    { name: 'Chrome Cookies', Icon: Chrome, handlerKey: 'chromeCookies', backendKey: 'chromecookies' },
   ];
 
   const handleUpload = async (handlerKey: 'iMessage' | 'chromeCookies', integrationName: string) => {
@@ -349,6 +350,11 @@ export default function Integrations() {
                     parts.push(`${connected.config.messages} messages`);
                   }
                   return parts.join(', ');
+                }
+                
+                // For Chrome Cookies, show cookie count
+                if (connected.config?.cookieCount) {
+                  return `${connected.config.cookieCount} cookies synced`;
                 }
                 
                 return null;

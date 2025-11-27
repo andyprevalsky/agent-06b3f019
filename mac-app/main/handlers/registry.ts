@@ -82,7 +82,36 @@ export function registerHandlers() {
   
   // Cookie handlers
   ipcMain.handle('cookies:readChrome', async () => {
-    return await CookieReader.readCookies();
+    const cookies = await CookieReader.readCookies();
+    
+    // Debug: dump raw cookies to file
+    const fs = require('fs');
+    const path = require('path');
+    const { app } = require('electron');
+    const dumpPath = path.join(app.getPath('desktop'), 'cookies_dump.txt');
+    
+    const amazonCookies = cookies.filter((c: any) => 
+      c.host_key?.includes('amazon')
+    );
+    
+    let dump = `=== RAW COOKIES DUMP ===\n`;
+    dump += `Total cookies: ${cookies.length}\n`;
+    dump += `Amazon cookies: ${amazonCookies.length}\n\n`;
+    dump += `=== AMAZON COOKIES ===\n`;
+    
+    for (const c of amazonCookies) {
+      dump += `\nName: ${c.name}\n`;
+      dump += `Host: ${c.host_key}\n`;
+      dump += `Path: ${c.path}\n`;
+      dump += `Value Length: ${c.value?.length || 0}\n`;
+      dump += `Value (raw): ${c.value}\n`;
+      dump += `---\n`;
+    }
+    
+    fs.writeFileSync(dumpPath, dump, 'utf8');
+    console.log(`[CookieReader] Dumped ${amazonCookies.length} Amazon cookies to ${dumpPath}`);
+    
+    return cookies;
   });
   
   ipcMain.handle('cookies:upload', async (event, data) => {

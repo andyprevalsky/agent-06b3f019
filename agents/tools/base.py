@@ -241,6 +241,27 @@ def format_result(result: Dict[str, Any]) -> str:
                         value = value[:97] + "..."
                     lines.append(f"- {key}: {value}")
     
+    # Handle message history results (read_message_history_with_person)
+    if "messages" in result and "message_count" in result:
+        person = result.get("person", {})
+        if person:
+            person_name = f"{person.get('firstName', '')} {person.get('lastName', '')}".strip()
+            person_email = person.get("email", "")
+            person_phone = person.get("phoneNumber", "")
+            person_info = [person_name]
+            if person_email:
+                person_info.append(person_email)
+            if person_phone:
+                person_info.append(person_phone)
+            lines.append(f"**Person:** {' | '.join(person_info)}")
+        
+        lines.append(f"**Message Count:** {result['message_count']}")
+        
+        # Include full message text - this is already formatted nicely
+        messages_text = result["messages"]
+        if messages_text:
+            lines.append(f"\n**Messages:**\n\n{messages_text}")
+    
     # If no specific formatting, show summary
     if not lines:
         result_str = json.dumps(result, indent=2)
