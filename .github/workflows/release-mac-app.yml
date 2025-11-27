@@ -17,12 +17,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: mac-app/package-lock.json
 
       - name: Install dependencies
         working-directory: mac-app
-        run: npm ci
+        run: npm install
 
       - name: Build Electron app
         working-directory: mac-app

@@ -14,7 +14,7 @@ const MODEL_POOLS = {
     'moonshotai/kimi-k2-0905',
     'meta-llama/llama-4-maverick',
     'deepseek/deepseek-v3.2-exp',
-    'z-ai/glm-4.6',
+    // 'z-ai/glm-4.6', // Disabled - causes tool call confusion (calls wrong tools)
     'openai/gpt-5.1',
     'mistralai/mistral-medium-3.1',
     'google/gemini-2.5-flash',
@@ -29,11 +29,71 @@ const MODEL_POOLS = {
     'moonshotai/kimi-k2-thinking',
     'google/gemini-2.5-pro',
     'x-ai/grok-4-fast'
+  ],
+  // Cerebras-powered hyper model - direct API calls for ultra-fast inference
+  'rose-hyper': [
+    'gpt-oss-120b',                    // $0.35 input, $0.75 output per 1M tokens
+    'qwen-3-235b-a22b-instruct-2507',  // $0.60 input, $1.20 output per 1M tokens
   ]
 };
 
+// Cerebras API base URL (OpenAI-compatible)
+const CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions';
+
+// Transform JSON schema to be Cerebras-compatible
+// Cerebras requires: additionalProperties: false for all objects with required arrays
+// See: https://inference-docs.cerebras.ai/capabilities/structured-outputs
+function transformSchemaForCerebras(schema: any): any {
+  if (!schema || typeof schema !== 'object') {
+    return schema;
+  }
+
+  const transformed = { ...schema };
+
+  // If it's an object type with properties, add additionalProperties: false
+  if (transformed.type === 'object' && transformed.properties) {
+    transformed.additionalProperties = false;
+    
+    // Cerebras requires all properties to be in required array
+    if (!transformed.required) {
+      transformed.required = Object.keys(transformed.properties);
+    }
+    
+    // Recursively transform nested properties
+    for (const key of Object.keys(transformed.properties)) {
+      transformed.properties[key] = transformSchemaForCerebras(transformed.properties[key]);
+    }
+  }
+
+  // Handle $defs (definitions)
+  if (transformed.$defs) {
+    for (const key of Object.keys(transformed.$defs)) {
+      transformed.$defs[key] = transformSchemaForCerebras(transformed.$defs[key]);
+    }
+  }
+
+  // Handle array items
+  if (transformed.type === 'array' && transformed.items) {
+    transformed.items = transformSchemaForCerebras(transformed.items);
+  }
+
+  // Handle anyOf/oneOf/allOf
+  for (const keyword of ['anyOf', 'oneOf', 'allOf']) {
+    if (transformed[keyword] && Array.isArray(transformed[keyword])) {
+      transformed[keyword] = transformed[keyword].map((item: any) => transformSchemaForCerebras(item));
+    }
+  }
+
+  return transformed;
+}
+
+// Check if a model pool uses Cerebras
+function isCerebrasPool(poolName: string): boolean {
+  return poolName === 'rose-hyper';
+}
+
 // Randomly select a model from the pool
-function selectModel(requestedModel: string): string {
+function selectModel(requestedModel: string): { model: string; isCerebras: boolean; poolName: string } {
   let normalized = requestedModel.toLowerCase();
   if (normalized.startsWith('rose-labs/')) {
     normalized = normalized.replace('rose-labs/', '');
@@ -42,12 +102,13 @@ function selectModel(requestedModel: string): string {
   const pool = MODEL_POOLS[normalized as keyof typeof MODEL_POOLS];
   
   if (!pool) {
-    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast' or 'rose-labs/rose-1-ultra'`);
+    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast', 'rose-labs/rose-1-ultra', or 'rose-labs/rose-hyper'`);
   }
   
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
-  console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel}`);
-  return selectedModel;
+  const isCerebras = isCerebrasPool(normalized);
+  console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel} (Cerebras: ${isCerebras})`);
+  return { model: selectedModel, isCerebras, poolName: normalized };
 }
 
 // Validate API key and return user info
@@ -111,34 +172,71 @@ async function handleStreaming(
   toolChoice: any,
   openRouterKey: string,
   supabaseUrl: string,
-  requestedModel: string
+  requestedModel: string,
+  isCerebras: boolean
 ) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openRouterKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': supabaseUrl,
-            'X-Title': 'Rose Benchmark Suite'
-          },
-          body: JSON.stringify({
+        let response: globalThis.Response;
+        
+        if (isCerebras) {
+          // Call Cerebras API directly for rose-hyper
+          const cerebrasKey = Deno.env.get('CEREBRAS_API_KEY');
+          console.log(`⚡ Streaming from Cerebras API with model: ${actualModel}`);
+          
+          // Build Cerebras streaming request - supports tools with gpt-oss-120b
+          const cerebrasStreamBody: any = {
             model: actualModel,
             messages,
             temperature,
             max_tokens: maxTokens,
-            seed,
-            tools,
-            tool_choice: toolChoice,
             stream: true
-          })
-        });
+          };
+          
+          // Add tools for streaming (gpt-oss-120b supports this)
+          if (tools && tools.length > 0) {
+            cerebrasStreamBody.tools = tools;
+          }
+          if (toolChoice) {
+            cerebrasStreamBody.tool_choice = toolChoice;
+          }
+          
+          response = await fetch(CEREBRAS_API_URL, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${cerebrasKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(cerebrasStreamBody)
+          });
+        } else {
+          // Call OpenRouter API for other Rose models
+          response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${openRouterKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': supabaseUrl,
+              'X-Title': 'Rose Benchmark Suite'
+            },
+            body: JSON.stringify({
+              model: actualModel,
+              messages,
+              temperature,
+              max_tokens: maxTokens,
+              seed,
+              tools,
+              tool_choice: toolChoice,
+              stream: true
+            })
+          });
+        }
 
         if (!response.ok) {
-          throw new Error(`OpenRouter API error: ${response.status}`);
+          const provider = isCerebras ? 'Cerebras' : 'OpenRouter';
+          throw new Error(`${provider} API error: ${response.status}`);
         }
 
         const reader = response.body?.getReader();
@@ -232,7 +330,7 @@ serve(async (req) => {
     // Parse request body
     const { 
       model, 
-      messages, 
+      messages: originalMessages, 
       temperature, 
       max_tokens, 
       seed,
@@ -240,11 +338,13 @@ serve(async (req) => {
       tools,
       tool_choice,
       cot_steps,
+      response_format,
       ...otherParams
     } = await req.json();
     
     const cotSteps = cot_steps || 1;
     const maxTokens = max_tokens;
+    let messages = originalMessages;
 
     if (!model) {
       return new Response(JSON.stringify({ error: 'Missing required field: model' }), {
@@ -260,9 +360,9 @@ serve(async (req) => {
     }
 
     // Select actual model from pool
-    let actualModel: string;
+    let selection: { model: string; isCerebras: boolean; poolName: string };
     try {
-      actualModel = selectModel(model);
+      selection = selectModel(model);
     } catch (error) {
       return new Response(JSON.stringify({ 
         error: error instanceof Error ? error.message : 'Invalid model' 
@@ -271,6 +371,9 @@ serve(async (req) => {
         status: 400,
       });
     }
+
+    const actualModel = selection.model;
+    const isCerebras = selection.isCerebras;
 
     // Handle streaming
     if (stream) {
@@ -284,7 +387,8 @@ serve(async (req) => {
         tool_choice,
         Deno.env.get('OPENROUTER_API_KEY')!,
         supabaseUrl,
-        model
+        model,
+        isCerebras
       );
     }
 
@@ -293,9 +397,78 @@ serve(async (req) => {
     let totalPromptTokens = 0;
     let totalCompletionTokens = 0;
 
+    // Helper function to make API call to appropriate provider
+    async function makeApiCall(body: any): Promise<globalThis.Response> {
+      if (isCerebras) {
+        console.log(`⚡ Calling Cerebras API with model: ${actualModel}`);
+        
+        // Build Cerebras request body - Cerebras is OpenAI-compatible but doesn't support some params
+        // See: https://inference-docs.cerebras.ai/resources/openai
+        const cerebrasBody: any = {
+          model: body.model,
+          messages: body.messages,
+          temperature: body.temperature,
+          max_tokens: body.max_tokens,
+          seed: body.seed,
+        };
+        
+        // Add tools if provided - Cerebras supports tool calling
+        // See: https://inference-docs.cerebras.ai/capabilities/tool-use
+        if (body.tools && body.tools.length > 0) {
+          cerebrasBody.tools = body.tools;
+          // Note: parallel_tool_calls is NOT supported by Cerebras - causes 400 error
+        }
+        if (body.tool_choice) {
+          cerebrasBody.tool_choice = body.tool_choice;
+        }
+        
+        // Add response_format if provided - Cerebras supports structured outputs
+        // See: https://inference-docs.cerebras.ai/capabilities/structured-outputs
+        // Important: Cerebras requires additionalProperties: false for all objects with required
+        if (body.response_format) {
+          // Transform schema to be Cerebras-compatible
+          if (body.response_format.type === 'json_schema' && body.response_format.json_schema?.schema) {
+            const transformedSchema = transformSchemaForCerebras(body.response_format.json_schema.schema);
+            cerebrasBody.response_format = {
+              type: 'json_schema',
+              json_schema: {
+                name: body.response_format.json_schema.name || 'response',
+                strict: true,
+                schema: transformedSchema
+              }
+            };
+          } else {
+            cerebrasBody.response_format = body.response_format;
+          }
+        }
+        
+        console.log(`📤 Cerebras request body:`, JSON.stringify(cerebrasBody, null, 2));
+        
+        return await fetch(CEREBRAS_API_URL, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${Deno.env.get('CEREBRAS_API_KEY')}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(cerebrasBody)
+        });
+      } else {
+        return await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': supabaseUrl,
+            'X-Title': 'Rose Benchmark Suite'
+          },
+          body: JSON.stringify(body)
+        });
+      }
+    }
+
     if (cotSteps === 1) {
       // Direct answer (no CoT)
-      const openrouterBody = {
+      const requestBody: any = {
         model: actualModel,
         messages,
         temperature,
@@ -303,33 +476,47 @@ serve(async (req) => {
         seed,
         tools,
         tool_choice,
-        ...otherParams
       };
+      
+      // Add response_format if provided
+      if (response_format) {
+        requestBody.response_format = response_format;
+      }
+      
+      // Add other params only for non-Cerebras (some params like parallel_tool_calls cause 400 on Cerebras)
+      if (!isCerebras) {
+        Object.assign(requestBody, otherParams);
+      }
 
-      const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': supabaseUrl,
-          'X-Title': 'Rose Benchmark Suite'
-        },
-        body: JSON.stringify(openrouterBody)
-      });
+      const apiResponse = await makeApiCall(requestBody);
 
-      if (!openrouterResponse.ok) {
-        const errorText = await openrouterResponse.text();
-        console.error('OpenRouter API error:', openrouterResponse.status, errorText);
+      if (!apiResponse.ok) {
+        const errorText = await apiResponse.text();
+        const provider = isCerebras ? 'Cerebras' : 'OpenRouter';
+        console.error(`${provider} API error:`, apiResponse.status, errorText);
+        console.error(`Request body was:`, JSON.stringify(requestBody, null, 2));
+        
+        // Try to parse error for more details
+        let errorDetails = errorText;
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorDetails = JSON.stringify(errorJson, null, 2);
+          console.error(`${provider} error details:`, errorJson);
+        } catch (e) {
+          // errorText is not JSON, keep as-is
+        }
+        
         return new Response(JSON.stringify({ 
-          error: 'OpenRouter API error',
-          details: errorText 
+          error: `${provider} API error`,
+          status: apiResponse.status,
+          details: errorDetails 
         }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: openrouterResponse.status,
+          status: apiResponse.status,
         });
       }
 
-      finalResponse = await openrouterResponse.json();
+      finalResponse = await apiResponse.json();
       totalPromptTokens = finalResponse.usage?.prompt_tokens || 0;
       totalCompletionTokens = finalResponse.usage?.completion_tokens || 0;
 
@@ -337,6 +524,7 @@ serve(async (req) => {
       // Multi-step CoT (tool calls not supported with CoT currently)
       const thinkingMessages = [...messages];
       const intermediateResponses = [];
+      const provider = isCerebras ? 'Cerebras' : 'OpenRouter';
 
       // Thinking steps (N-1 steps)
       for (let i = 0; i < cotSteps - 1; i++) {
@@ -347,28 +535,19 @@ serve(async (req) => {
 
         const stepMessages = [...thinkingMessages, thinkingPrompt];
 
-        const stepResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': supabaseUrl,
-            'X-Title': 'Rose Benchmark Suite'
-          },
-          body: JSON.stringify({
-            model: actualModel,
-            messages: stepMessages,
-            temperature,
-            max_tokens: maxTokens,
-            seed,
-          })
+        const stepResponse = await makeApiCall({
+          model: actualModel,
+          messages: stepMessages,
+          temperature,
+          max_tokens: maxTokens,
+          seed,
         });
 
         if (!stepResponse.ok) {
           const errorText = await stepResponse.text();
-          console.error('OpenRouter API error in CoT step:', stepResponse.status, errorText);
+          console.error(`${provider} API error in CoT step:`, stepResponse.status, errorText);
           return new Response(JSON.stringify({ 
-            error: 'OpenRouter API error in CoT step',
+            error: `${provider} API error in CoT step`,
             details: errorText 
           }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -395,36 +574,27 @@ serve(async (req) => {
       };
       const finalMessages = [...thinkingMessages, finalPrompt];
 
-      const finalOpenrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': supabaseUrl,
-          'X-Title': 'Rose Benchmark Suite'
-        },
-        body: JSON.stringify({
-          model: actualModel,
-          messages: finalMessages,
-          temperature,
-          max_tokens: maxTokens,
-          seed,
-        })
+      const finalApiResponse = await makeApiCall({
+        model: actualModel,
+        messages: finalMessages,
+        temperature,
+        max_tokens: maxTokens,
+        seed,
       });
 
-      if (!finalOpenrouterResponse.ok) {
-        const errorText = await finalOpenrouterResponse.text();
-        console.error('OpenRouter API error in final step:', finalOpenrouterResponse.status, errorText);
+      if (!finalApiResponse.ok) {
+        const errorText = await finalApiResponse.text();
+        console.error(`${provider} API error in final step:`, finalApiResponse.status, errorText);
         return new Response(JSON.stringify({ 
-          error: 'OpenRouter API error in final step',
+          error: `${provider} API error in final step`,
           details: errorText 
         }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: finalOpenrouterResponse.status,
+          status: finalApiResponse.status,
         });
       }
 
-      finalResponse = await finalOpenrouterResponse.json();
+      finalResponse = await finalApiResponse.json();
       totalPromptTokens += finalResponse.usage?.prompt_tokens || 0;
       totalCompletionTokens += finalResponse.usage?.completion_tokens || 0;
     }
