@@ -16,11 +16,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '18'
 
       - name: Install dependencies
         working-directory: mac-app
         run: npm install
+
+      - name: Rebuild native modules for Electron
+        working-directory: mac-app
+        run: npx electron-rebuild
 
       - name: Build Electron app
         working-directory: mac-app
