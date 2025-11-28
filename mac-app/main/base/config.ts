@@ -1,10 +1,21 @@
-import dotenv from 'dotenv';
+import fs from 'fs';
 import path from 'path';
+import dotenv from 'dotenv';
 
 // Load .env file from project root
 // When compiled, __dirname will be dist/main/main/base/, so go up 4 levels to project root
 const projectRoot = path.resolve(__dirname, '../../../../');
-dotenv.config({ path: path.join(projectRoot, '.env') });
+
+const envCandidates = [
+  path.join(projectRoot, '.env.production'),
+  path.join(projectRoot, '.env'),
+];
+
+const envPath = envCandidates.find((candidate) => fs.existsSync(candidate));
+
+if (envPath) {
+  dotenv.config({ path: envPath });
+}
 
 export const config = {
   apiUrl: process.env.VITE_BACKEND_URL || 'http://localhost:3001',

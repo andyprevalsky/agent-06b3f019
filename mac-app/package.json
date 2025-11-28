@@ -68,7 +68,8 @@
     "files": [
       "dist/**/*",
       "assets/**/*",
-      "package.json"
+      "package.json",
+      ".env.production"
     ]
   }
 }
