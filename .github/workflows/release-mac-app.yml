@@ -18,6 +18,10 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install frontend dependencies (shared UI)
+        working-directory: front-end
+        run: npm install --ignore-scripts
+
       - name: Install dependencies (skip native compilation)
         working-directory: mac-app
         run: npm install --ignore-scripts
