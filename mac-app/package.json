@@ -53,6 +53,7 @@
     "appId": "com.rose.desktop",
     "productName": "Rose",
     "artifactName": "${productName}-mac.${ext}",
+    "publish": null,
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icons/app.icns",
