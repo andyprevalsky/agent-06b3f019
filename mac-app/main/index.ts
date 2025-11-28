@@ -53,7 +53,7 @@ function createMainWindow() {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../ui/index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../../ui/index.html'));
   }
 
   mainWindow.on('closed', () => {
@@ -96,7 +96,7 @@ function createQuickQueryWindow() {
   if (config.isDev) {
     quickQueryWindow.loadURL('http://localhost:5173/launcher.html');
   } else {
-    quickQueryWindow.loadFile(path.join(__dirname, '../ui/launcher.html'));
+    quickQueryWindow.loadFile(path.join(__dirname, '../../ui/launcher.html'));
   }
 
   quickQueryWindow.on('blur', () => {
