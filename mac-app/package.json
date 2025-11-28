@@ -3,6 +3,10 @@
   "productName": "Rose",
   "version": "1.0.0",
   "description": "Rose - Integration Data Uploader",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/andyprevalsky/navi-whisper-lux.git"
+  },
   "main": "dist/main/main/index.js",
   "scripts": {
     "dev": "tsc -p tsconfig.main.json && concurrently \"tsc -p tsconfig.main.json --watch\" \"vite\" \"wait-on http://localhost:5173 && electron .\"",
