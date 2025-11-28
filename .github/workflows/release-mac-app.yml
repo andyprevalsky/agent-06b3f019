@@ -16,17 +16,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
-      - name: Install dependencies
+      - name: Install dependencies (skip native compilation)
         working-directory: mac-app
-        run: npm install
+        run: npm install --ignore-scripts
 
-      - name: Rebuild native modules for Electron
-        working-directory: mac-app
-        run: npx electron-rebuild
-
-      - name: Build Electron app
+      - name: Build Electron app (rebuilds native modules)
         working-directory: mac-app
         run: npm run build
         env:
