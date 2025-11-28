@@ -49,11 +49,6 @@
     "appId": "com.rose.desktop",
     "productName": "Rose",
     "artifactName": "${productName}-mac.${ext}",
-    "publish": {
-      "provider": "github",
-      "owner": "andyprevalsky",
-      "repo": "navi-whisper-lux"
-    },
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icons/app.icns",

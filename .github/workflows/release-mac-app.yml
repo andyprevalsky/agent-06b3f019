@@ -42,6 +42,9 @@ jobs:
           files: |
             mac-app/dist/Rose-mac.dmg
             mac-app/dist/Rose-mac.zip
+            mac-app/dist/Rose-mac.dmg.blockmap
+            mac-app/dist/Rose-mac.zip.blockmap
+            mac-app/dist/latest-mac.yml
           draft: false
           prerelease: false
         env:
