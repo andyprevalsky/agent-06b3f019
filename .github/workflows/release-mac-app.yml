@@ -30,6 +30,7 @@ jobs:
         working-directory: mac-app
         run: npm run build
         env:
+          NODE_OPTIONS: --max-old-space-size=4096
           # Add any env vars your app needs for building
           # VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           # VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
