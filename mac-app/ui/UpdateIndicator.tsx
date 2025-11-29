@@ -10,6 +10,7 @@ const ACTIVE_STATES: Array<UpdateStatusPayload["state"]> = [
   "downloaded",
   "building",
   "error",
+  "none", // Show briefly before auto-dismiss
 ];
 
 const stateCopy: Record<
@@ -76,8 +77,17 @@ export default function UpdateIndicator() {
   }, [container]);
 
   useEffect(() => {
+    let autoDismissTimer: ReturnType<typeof setTimeout> | null = null;
+
     window.api.onUpdateStatus((payload) => {
       setStatus(payload);
+      
+      // Clear any pending auto-dismiss
+      if (autoDismissTimer) {
+        clearTimeout(autoDismissTimer);
+        autoDismissTimer = null;
+      }
+
       const shouldDisplay =
         ACTIVE_STATES.includes(payload.state) &&
         !(payload.state === "available" && dismissedVersionRef.current === payload.version);
@@ -86,17 +96,25 @@ export default function UpdateIndicator() {
         dismissedVersionRef.current = null;
       }
 
-      if (payload.state === "none") {
-        setVisible(false);
-        return;
-      }
-
       setVisible(shouldDisplay);
+
+      // Auto-dismiss "You're up to date" after 3 seconds
+      if (payload.state === "none") {
+        autoDismissTimer = setTimeout(() => {
+          setVisible(false);
+        }, 3000);
+      }
     });
 
     window.api.onUpdateProgress((percent) => {
       setProgress(percent);
     });
+
+    return () => {
+      if (autoDismissTimer) {
+        clearTimeout(autoDismissTimer);
+      }
+    };
   }, []);
 
   if (!visible || !container) {
@@ -160,6 +178,12 @@ export default function UpdateIndicator() {
             <span className="h-3 w-3 animate-spin rounded-full border-[1.5px] border-white/30 border-t-transparent" />
             Checking…
           </div>
+        );
+      case "none":
+        return (
+          <Button size="sm" variant="ghost" onClick={dismiss}>
+            Dismiss
+          </Button>
         );
       default:
         return null;
