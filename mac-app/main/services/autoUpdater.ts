@@ -1,8 +1,47 @@
 import { autoUpdater } from 'electron-updater';
-import { BrowserWindow, dialog } from 'electron';
+import { BrowserWindow, dialog, MenuItem } from 'electron';
 import { config } from '../base/config';
 
 let mainWindow: BrowserWindow | null = null;
+let updateDownloaded = false;
+
+export function isUpdateDownloaded() {
+  return updateDownloaded;
+}
+
+export function restartToUpdate() {
+  if (updateDownloaded) {
+    autoUpdater.quitAndInstall();
+  }
+}
+
+export function manualCheckForUpdates() {
+  if (config.isDev) {
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Development Mode',
+      message: 'Auto-updates are disabled in development mode.',
+    });
+    return;
+  }
+  
+  autoUpdater.checkForUpdates().then((result) => {
+    if (!result || !result.updateInfo) {
+      dialog.showMessageBox(mainWindow!, {
+        type: 'info',
+        title: 'No Updates',
+        message: 'You are running the latest version.',
+      });
+    }
+  }).catch((err) => {
+    console.error('[AutoUpdater] Manual check failed:', err);
+    dialog.showMessageBox(mainWindow!, {
+      type: 'error',
+      title: 'Update Check Failed',
+      message: `Could not check for updates: ${err.message}`,
+    });
+  });
+}
 
 export function initAutoUpdater(window: BrowserWindow) {
   mainWindow = window;
@@ -68,6 +107,7 @@ export function initAutoUpdater(window: BrowserWindow) {
 
   autoUpdater.on('update-downloaded', async (info) => {
     console.log('[AutoUpdater] Update downloaded:', info.version);
+    updateDownloaded = true;
     
     const result = await dialog.showMessageBox(mainWindow!, {
       type: 'info',
