@@ -5,6 +5,13 @@ import { config } from '../base/config';
 let mainWindow: BrowserWindow | null = null;
 let updateDownloaded = false;
 
+function isMissingChannelFileError(err: unknown) {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: string }).code;
+  const message = (err as { message?: string }).message ?? '';
+  return code === 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND' || message.includes('latest-mac.yml');
+}
+
 export function isUpdateDownloaded() {
   return updateDownloaded;
 }
@@ -34,6 +41,14 @@ export function manualCheckForUpdates() {
       });
     }
   }).catch((err) => {
+    if (isMissingChannelFileError(err)) {
+      dialog.showMessageBox(mainWindow!, {
+        type: 'info',
+        title: 'No Updates Available Yet',
+        message: 'A new build is still processing. Please try again in a few minutes.',
+      });
+      return;
+    }
     console.error('[AutoUpdater] Manual check failed:', err);
     dialog.showMessageBox(mainWindow!, {
       type: 'error',
@@ -137,6 +152,10 @@ export function initAutoUpdater(window: BrowserWindow) {
   });
 
   autoUpdater.on('error', (error) => {
+    if (isMissingChannelFileError(error)) {
+      console.warn('[AutoUpdater] Channel file missing, release likely still building.');
+      return;
+    }
     console.error('[AutoUpdater] Error:', error);
   });
 }
@@ -145,6 +164,10 @@ export function checkForUpdates() {
   if (config.isDev) return;
   
   autoUpdater.checkForUpdates().catch((err) => {
+    if (isMissingChannelFileError(err)) {
+      console.warn('[AutoUpdater] Channel file missing, release likely still building.');
+      return;
+    }
     console.error('[AutoUpdater] Check failed:', err);
   });
 }
