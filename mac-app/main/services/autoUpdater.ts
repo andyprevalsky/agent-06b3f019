@@ -32,7 +32,11 @@ export function isUpdateDownloaded() {
 
 export function restartToUpdate() {
   if (updateDownloaded) {
-    autoUpdater.quitAndInstall();
+    // isSilent: false = show install progress
+    // isForceRunAfter: true = restart app after install
+    setImmediate(() => {
+      autoUpdater.quitAndInstall(false, true);
+    });
   }
 }
 

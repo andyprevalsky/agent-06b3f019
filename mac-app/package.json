@@ -1,7 +1,7 @@
 {
   "name": "rose-desktop",
   "productName": "Rose",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Rose - Integration Data Uploader",
   "repository": {
     "type": "git",
