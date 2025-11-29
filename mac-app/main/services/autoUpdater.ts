@@ -52,6 +52,18 @@ export function initAutoUpdater(window: BrowserWindow) {
     return;
   }
 
+  // Configure for private GitHub repo
+  const ghToken = process.env.GH_UPDATE_TOKEN;
+  if (ghToken) {
+    autoUpdater.setFeedURL({
+      provider: 'github',
+      owner: 'andyprevalsky',
+      repo: 'navi-whisper-lux',
+      private: true,
+      token: ghToken,
+    });
+  }
+
   // Configure auto-updater
   autoUpdater.autoDownload = false; // Don't auto-download, ask user first
   autoUpdater.autoInstallOnAppQuit = true;
