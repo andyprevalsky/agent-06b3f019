@@ -1,7 +1,7 @@
 {
   "name": "rose-desktop",
   "productName": "Rose",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Rose - Integration Data Uploader",
   "repository": {
     "type": "git",
@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "tsc -p tsconfig.main.json && concurrently \"tsc -p tsconfig.main.json --watch\" \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "vite build && tsc -p tsconfig.main.json && electron-builder",
+    "build:vite": "vite build && tsc -p tsconfig.main.json",
     "type-check": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit"
   },
   "dependencies": {
@@ -55,7 +56,12 @@
     "appId": "com.rose.desktop",
     "productName": "Rose",
     "artifactName": "${productName}-mac.${ext}",
-    "publish": null,
+    "publish": {
+      "provider": "github",
+      "owner": "andyprevalsky",
+      "repo": "navi-whisper-lux",
+      "releaseType": "release"
+    },
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icons/app.icns",

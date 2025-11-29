@@ -44,12 +44,11 @@ EOF
 
       - name: Build Electron app (rebuilds native modules)
         working-directory: mac-app
-        run: npm run build
+        run: |
+          npm run build:vite
+          npx electron-builder --publish=never
         env:
           NODE_OPTIONS: --max-old-space-size=4096
-          # Add any env vars your app needs for building
-          # VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          # VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifacts to GitHub Release
