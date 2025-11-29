@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Command as CommandIcon, Loader2, ChevronDown } from 'lucide-react';
+import * as amplitude from '@amplitude/analytics-browser';
 import { cn } from '@/lib/utils';
 import {
   Command,
@@ -89,6 +90,8 @@ export default function QueryInput({
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showTooltip, setShowTooltip] = useState(false);
   const [cursorPosition, setCursorPosition] = useState(0);
+  const [hasTrackedFocus, setHasTrackedFocus] = useState(false);
+  const [hasTrackedTyping, setHasTrackedTyping] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { tools, toolsLoading } = useAppData();
   
@@ -132,8 +135,21 @@ export default function QueryInput({
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    // Track first keystroke (goal typing started)
+    if (!hasTrackedTyping && e.target.value.length > 0) {
+      amplitude.track('goal_typed');
+      setHasTrackedTyping(true);
+    }
     onChange(e.target.value);
     setCursorPosition(e.target.selectionStart);
+  };
+
+  const handleFocus = () => {
+    // Track querybox click (first focus only per session)
+    if (!hasTrackedFocus) {
+      amplitude.track('querybox_clicked');
+      setHasTrackedFocus(true);
+    }
   };
 
   const handleToolSelect = (toolId: string) => {
@@ -322,6 +338,7 @@ export default function QueryInput({
                 value={value}
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
+                onFocus={handleFocus}
                 disabled={disabled}
                 placeholder={placeholder}
                 className={cn(

@@ -5,6 +5,14 @@ import { Toaster as Sonner } from '@/components/ui/sonner'
 import { IntegrationHandlersProvider } from '@/contexts/IntegrationHandlersContext'
 import './index.css'
 
+// Amplitude Analytics
+import * as amplitude from '@amplitude/analytics-browser';
+import { sessionReplayPlugin } from '@amplitude/plugin-session-replay-browser';
+
+// Initialize Amplitude with Session Replay
+amplitude.add(sessionReplayPlugin({ sampleRate: 1 }));
+amplitude.init('ff5280db0f34594af90323d5ef9e3e34', { autocapture: true });
+
 // Fix iOS Safari viewport height issues
 const setVH = () => {
   const vh = window.innerHeight * 0.01;

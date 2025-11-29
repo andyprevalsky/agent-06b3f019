@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
+import * as amplitude from '@amplitude/analytics-browser';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift, Copy, Check, Plug, Network } from 'lucide-react';
@@ -13,6 +14,7 @@ import {
   resumeAgent,
   checkAndRespondToAttentionRequest,
   getMyInviteCode,
+  checkNeedsInviteCode,
   InviteCodeInfo,
   Agent,
   AgentDetail,
@@ -401,6 +403,8 @@ export default function Terminal() {
   const loginButtonRef = useRef<HTMLButtonElement>(null);
   const queryInputRef = useRef<HTMLDivElement>(null);
   const giftButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingSubmitAfterLoginRef = useRef<boolean>(false);
+  const messageInputRef = useRef<string>('');
   
   // Message buffer queue - messages wait here before being displayed
   const [messageBuffer, setMessageBuffer] = useState<Message[]>([]);
@@ -478,6 +482,52 @@ export default function Terminal() {
   useEffect(() => {
     localStorage.setItem('drippiness-border', borderColor.toString());
   }, [borderColor]);
+
+  // Keep messageInputRef in sync with messageInput for auth callback access
+  useEffect(() => {
+    messageInputRef.current = messageInput;
+  }, [messageInput]);
+
+  // State to trigger auto-submit after login completes
+  const [triggerAutoSubmit, setTriggerAutoSubmit] = useState(false);
+
+  // Listen for invite code accepted event to complete auth
+  useEffect(() => {
+    const handleInviteAccepted = async () => {
+      // Re-fetch and set user now that invite code is complete
+      const currentUser = await getCurrentUser();
+      if (currentUser) {
+        setUser(currentUser);
+        
+        // Identify user in Amplitude
+        if (currentUser.phone) {
+          amplitude.setUserId(currentUser.phone);
+        } else if (currentUser.id) {
+          amplitude.setUserId(currentUser.id);
+        }
+        
+        // Initialize realtime
+        await initializeRealtime();
+        
+        // Trigger auto-submit if there was a pending goal
+        if (pendingSubmitAfterLoginRef.current && messageInputRef.current.trim()) {
+          pendingSubmitAfterLoginRef.current = false;
+          setTriggerAutoSubmit(true);
+        }
+      }
+    };
+    
+    window.addEventListener('invite-code-accepted', handleInviteAccepted);
+    return () => window.removeEventListener('invite-code-accepted', handleInviteAccepted);
+  }, []);
+
+  // Auto-submit when triggered and user is set
+  useEffect(() => {
+    if (triggerAutoSubmit && user && messageInput.trim()) {
+      setTriggerAutoSubmit(false);
+      handleSendMessage();
+    }
+  }, [triggerAutoSubmit, user, messageInput]);
 
   // Calculate drip styles from separate controls with non-linear mapping
   const dripStyles = useMemo(() => {
@@ -669,9 +719,32 @@ export default function Terminal() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (event === 'SIGNED_IN' && session?.user) {
         await supabase.realtime.setAuth(session.access_token);
+        
+        // Check if user has completed invite code requirement
+        try {
+          const needsInvite = await checkNeedsInviteCode();
+          if (needsInvite) {
+            // User authenticated but hasn't completed invite code - don't set user yet
+            return;
+          }
+        } catch (error) {
+          // If check fails, don't set user
+          console.error('Failed to check invite code status:', error);
+          return;
+        }
+        
         setUser(session.user);
+        
+        // Identify user in Amplitude on sign in
+        if (session.user.phone) {
+          amplitude.setUserId(session.user.phone);
+        } else if (session.user.id) {
+          amplitude.setUserId(session.user.id);
+        }
       } else if (event === 'SIGNED_OUT') {
         setUser(null);
+        // Reset Amplitude user on sign out
+        amplitude.reset();
       }
     });
     
@@ -684,15 +757,32 @@ export default function Terminal() {
     try {
       const currentUser = await getCurrentUser();
       if (!currentUser) {
-        navigate('/');
+        // No Supabase user - not logged in, but don't redirect (allow guest browsing)
         return;
       }
+      
+      // Check if user has completed invite code requirement
+      const needsInvite = await checkNeedsInviteCode();
+      if (needsInvite) {
+        // User is authenticated with Supabase but hasn't completed invite code
+        // Don't set user state - they're not fully signed in
+        return;
+      }
+      
       setUser(currentUser);
+      
+      // Identify returning user in Amplitude
+      if (currentUser.phone) {
+        amplitude.setUserId(currentUser.phone);
+      } else if (currentUser.id) {
+        amplitude.setUserId(currentUser.id);
+      }
       
       // Initialize realtime with auth token after authentication
       await initializeRealtime();
     } catch (error) {
-      navigate('/');
+      // Error checking auth - don't redirect, just leave user as null
+      console.error('Auth check error:', error);
     }
   };
 
@@ -1155,10 +1245,19 @@ export default function Terminal() {
   const handleSendMessage = async () => {
     if (!messageInput.trim()) return;
 
+    // Track goal submitted event (fires once on submit, regardless of login status)
+    if (!selectedAgentId) {
+      amplitude.track('goal_submitted', {
+        goal: messageInput,
+        model: selectedModel,
+      });
+    }
+
     // Check if user is logged in before attempting any API calls
     console.log('user', user);
     if (!user) {
       console.log('User not logged in, opening login modal');
+      pendingSubmitAfterLoginRef.current = true; // Flag to auto-submit after login
       setLoginModalOpen(true);
       toast({
         title: 'Authentication required',
@@ -1184,6 +1283,7 @@ export default function Terminal() {
             llm_judge_prompt: `You are judging whether the agent has achieved the following goal: "${messageInput}"\n\nScoring Instructions:\n- Return a float between 0.0 and 1.0.\n- 0.0 means no progress or only explanations/plans.\n- 1.0 means the goal is FULLY accomplished with verifiable proof.\n- Do not award 1.0 for partial completion.\n- The agent has access to tools and can solve problems through persistence and creativity.`,
           },
         });
+        
         await loadAgents();
         setCurrentView('agents');
         setSelectedAgentId(newAgent.agent_id);
@@ -1239,7 +1339,18 @@ export default function Terminal() {
   const handleLogout = async () => {
     try {
       await signOut();
-      navigate('/');
+      // Clear all local state
+      setAgents([]);
+      setSelectedAgentId(null);
+      setAgentDetail(null);
+      setMessages([]);
+      setMessageInput('');
+      setCurrentView('agents');
+      setUser(null);
+      setIsSidebarOpen(false);
+      
+      // Reset Amplitude user identity on logout
+      amplitude.reset();
     } catch (error) {
       toast({
         title: 'Error',
@@ -1247,6 +1358,11 @@ export default function Terminal() {
         variant: 'destructive',
       });
     }
+  };
+
+  const handleLoginClick = () => {
+    setLoginModalOpen(true);
+    setIsSidebarOpen(false);
   };
 
   const handleCreateNewAgent = () => {
@@ -1282,6 +1398,15 @@ export default function Terminal() {
     // Set the input temporarily (for display purposes)
     setMessageInput(trimmed);
     
+    // Track goal submitted event (fires once on submit, regardless of login status)
+    if (!selectedAgentId) {
+      amplitude.track('goal_submitted', {
+        goal: trimmed,
+        model: selectedModel,
+        source: 'quick_launcher',
+      });
+    }
+    
     // Submit the query immediately by calling handleSendMessage
     // But we need to use the trimmed value directly since state updates are async
     if (!user) {
@@ -1310,6 +1435,7 @@ export default function Terminal() {
             llm_judge_prompt: `You are judging whether the agent has achieved the following goal: "${trimmed}"\n\nScoring Instructions:\n- Return a float between 0.0 and 1.0.\n- 0.0 means no progress or only explanations/plans.\n- 1.0 means the goal is FULLY accomplished with verifiable proof.\n- Do not award 1.0 for partial completion.\n- The agent has access to tools and can solve problems through persistence and creativity.`,
           },
         });
+        
         await loadAgents();
         setCurrentView('agents');
         setSelectedAgentId(newAgent.agent_id);
@@ -1836,16 +1962,26 @@ export default function Terminal() {
             </div>
           </div>
 
-          {/* Logout - Separate border */}
+          {/* Login/Logout - Separate border */}
           <div className="border-t border-border dark:border-navi-light-black">
             <div className="p-3">
-              <button
-                onClick={handleLogout}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
-              >
-                <LogOut className="h-4 w-4" />
-                <span>Logout</span>
-              </button>
+              {user ? (
+                <button
+                  onClick={handleLogout}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span>Logout</span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleLoginClick}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
+                >
+                  <LogOut className="h-4 w-4 rotate-180" />
+                  <span>Login</span>
+                </button>
+              )}
             </div>
           </div>
         </aside>

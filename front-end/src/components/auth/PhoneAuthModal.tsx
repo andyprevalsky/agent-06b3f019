@@ -3,8 +3,9 @@ import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect, RefObject } from "react";
 import { sendOTP, verifyOTP } from "@/lib/supabase";
 import { useNavigate } from "react-router-dom";
-import { Phone } from "lucide-react";
+import { X } from "lucide-react";
 import { checkNeedsInviteCode, useInviteCode } from "@/lib/api";
+import * as amplitude from '@amplitude/analytics-browser';
 
 interface PhoneAuthModalProps {
   open: boolean;
@@ -33,25 +34,59 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
     }
   }, [open, triggerRef]);
 
+  // Format phone number as user types: +1 (XXX)-XXX-XXXX
   const formatPhoneNumber = (value: string) => {
-    // Remove all non-numeric characters except +
-    return value.replace(/[^\d+]/g, '');
-  };
-
-  const handlePhoneBlur = () => {
-    if (!phone) return;
+    // Strip to just digits
+    const digits = value.replace(/\D/g, '');
     
-    // If phone doesn't start with +, add it
-    if (!phone.startsWith('+')) {
-      // If it's all digits and looks like a US number (10 digits), add +1
-      const digitsOnly = phone.replace(/\D/g, '');
-      if (digitsOnly.length === 10) {
-        setPhone(`+1${digitsOnly}`);
-      } else if (digitsOnly.length > 0) {
-        // Otherwise just add +
-        setPhone(`+${digitsOnly}`);
+    // Build formatted string
+    let formatted = '';
+    
+    if (digits.length === 0) {
+      return '';
+    }
+    
+    // Handle country code (assume US +1 if starts with 1 or has 10+ digits)
+    if (digits.length >= 1) {
+      if (digits[0] === '1') {
+        formatted = '+1';
+        const remaining = digits.slice(1);
+        if (remaining.length > 0) {
+          formatted += ' (' + remaining.slice(0, 3);
+          if (remaining.length >= 3) {
+            formatted += ')';
+            if (remaining.length > 3) {
+              formatted += '-' + remaining.slice(3, 6);
+              if (remaining.length > 6) {
+                formatted += '-' + remaining.slice(6, 10);
+              }
+            }
+          }
+        }
+      } else if (digits.length <= 10) {
+        // Assume US number without country code
+        formatted = '+1 (' + digits.slice(0, 3);
+        if (digits.length >= 3) {
+          formatted += ')';
+          if (digits.length > 3) {
+            formatted += '-' + digits.slice(3, 6);
+            if (digits.length > 6) {
+              formatted += '-' + digits.slice(6, 10);
+            }
+          }
+        }
+      } else {
+        // International number - just format with +
+        formatted = '+' + digits;
       }
     }
+    
+    return formatted;
+  };
+
+  // Strip phone to E.164 format for API: +19729777432
+  const stripPhoneNumber = (formatted: string) => {
+    return '+' + formatted.replace(/\D/g, '');
   };
 
   const handleSendOTP = async (e: React.FormEvent) => {
@@ -59,7 +94,12 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
     setLoading(true);
 
     try {
-      await sendOTP(phone);
+      const strippedPhone = stripPhoneNumber(phone);
+      await sendOTP(strippedPhone);
+      
+      // Track phone entered event
+      amplitude.track('phone_entered');
+      
       setStep('otp');
       toast({
         title: "Code sent!",
@@ -82,7 +122,14 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
     setLoading(true);
 
     try {
-      await verifyOTP(phone, otp);
+      const strippedPhone = stripPhoneNumber(phone);
+      await verifyOTP(strippedPhone, otp);
+      
+      // Track OTP code submitted event
+      amplitude.track('otp_code_submitted');
+      
+      // Identify user in Amplitude with phone number
+      amplitude.setUserId(strippedPhone);
       
       // Check if user needs to enter an invite code
       const needsInvite = await checkNeedsInviteCode();
@@ -103,8 +150,9 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
         setPhone('');
         setOtp('');
         setInviteCode('');
-        // Navigate to terminal - but we're already on it in this spec
-        // The modal will just close and they can continue
+        
+        // Dispatch event to trigger auth re-check (existing user, fully signed in)
+        window.dispatchEvent(new CustomEvent('invite-code-accepted'));
       }
     } catch (error: any) {
       console.error('Verify OTP error:', error);
@@ -129,6 +177,9 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
 
       await useInviteCode(inviteCodeNum);
       
+      // Track invite code submitted event
+      amplitude.track('invite_code_submitted');
+      
       toast({
         title: "Success!",
         description: "Invite code accepted. You're all set!",
@@ -141,8 +192,8 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
       setOtp('');
       setInviteCode('');
       
-      // Reload the page to ensure user data is fresh
-      window.location.reload();
+      // Dispatch event to trigger auth re-check (user is now fully signed in)
+      window.dispatchEvent(new CustomEvent('invite-code-accepted'));
     } catch (error: any) {
       console.error('Invite code error:', error);
       toast({
@@ -174,7 +225,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
   return (
     <Dialog open={open} onOpenChange={handleClose} modal={false}>
       <DialogContent 
-        className="p-0 border border-gray-300 shadow-lg [&>button]:hidden overflow-visible z-[100] w-[320px] max-w-[90vw] relative rounded-lg"
+        className="p-0 border border-gray-300 shadow-lg [&>button]:hidden overflow-visible z-[100] w-[380px] max-w-[90vw] relative rounded-xl"
         style={{ 
           position: 'fixed',
           top: `${modalPosition.top}px`,
@@ -206,103 +257,184 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
           }}
         />
         {step === 'phone' ? (
-          <form onSubmit={handleSendOTP} className="p-5 space-y-4">
-            <div className="relative">
-              <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input
-                id="phone"
-                type="tel"
-                placeholder="+1234567890"
-                value={phone}
-                onChange={(e) => setPhone(formatPhoneNumber(e.target.value))}
-                onBlur={handlePhoneBlur}
-                required
-                className="w-full pl-11 pr-4 py-3 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black placeholder-navi-black/50 focus:outline-none focus:border-gray-400"
-                disabled={loading}
+          <form onSubmit={handleSendOTP} className="p-6">
+            {/* Header: Logo left, X right */}
+            <div className="flex items-start justify-between mb-6">
+              <img 
+                src="/web-app-manifest-192x192.png" 
+                alt="Rose" 
+                className="w-10 h-10"
               />
+              <button
+                type="button"
+                onClick={handleClose}
+                className="text-gray-400 hover:text-gray-600 transition-colors p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
-            <button
-              type="submit"
-              disabled={loading || !phone}
-              className="w-full px-4 py-3 bg-[#EEEFF2] text-navi-black rounded-lg hover:bg-[#e8e9ec] transition-colors disabled:cursor-not-allowed border border-[#93c5a8]"
-            >
-              {loading ? 'Sending...' : 'Send Code'}
-            </button>
+            {/* Titles */}
+            <div className="mb-6">
+              <h2 className="text-2xl font-semibold text-navi-black">
+                Start Building.
+              </h2>
+              <p className="text-xl text-gray-400 mt-1">
+                Create free account
+              </p>
+            </div>
+
+            {/* Phone Input */}
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="phone" className="block text-sm text-gray-500 mb-1">
+                  Phone Number
+                </label>
+                <input
+                  id="phone"
+                  type="tel"
+                  placeholder="+1 (972)-977-7432"
+                  value={phone}
+                  onChange={(e) => setPhone(formatPhoneNumber(e.target.value))}
+                  required
+                  className="w-full px-3 py-2 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-sm placeholder-navi-black/30 focus:outline-none focus:border-gray-400"
+                  disabled={loading}
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading || !phone}
+                className="w-full px-3 py-2 bg-navi-black text-white text-sm rounded-lg hover:bg-navi-black/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Sending...' : 'Continue'}
+              </button>
+            </div>
           </form>
         ) : step === 'otp' ? (
-          <form onSubmit={handleVerifyOTP} className="p-5 space-y-4">
-            <div className="text-center mb-2">
-              <p className="text-sm text-navi-black/70">
+          <form onSubmit={handleVerifyOTP} className="p-6">
+            {/* Header: Logo left, X right */}
+            <div className="flex items-start justify-between mb-6">
+              <img 
+                src="/web-app-manifest-192x192.png" 
+                alt="Rose" 
+                className="w-10 h-10"
+              />
+              <button
+                type="button"
+                onClick={handleClose}
+                className="text-gray-400 hover:text-gray-600 transition-colors p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Titles */}
+            <div className="mb-6">
+              <h2 className="text-2xl font-semibold text-navi-black">
+                Verify Code
+              </h2>
+              <p className="text-xl text-gray-400 mt-1">
                 Code sent to {phone}
               </p>
             </div>
 
-            <input
-              id="otp"
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]{6}"
-              maxLength={6}
-              placeholder="000000"
-              value={otp}
-              onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-              required
-              className="w-full px-4 py-3 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-center text-2xl font-mono tracking-widest placeholder-navi-black/50 focus:outline-none focus:border-gray-400"
-              disabled={loading}
-              autoFocus
-            />
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="otp" className="block text-sm text-gray-500 mb-1">
+                  Verification Code
+                </label>
+                <input
+                  id="otp"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                  placeholder="000000"
+                  value={otp}
+                  onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+                  required
+                  className="w-full px-3 py-2 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-center text-sm font-mono tracking-widest placeholder-navi-black/30 focus:outline-none focus:border-gray-400"
+                  disabled={loading}
+                  autoFocus
+                />
+              </div>
 
-            <button
-              type="submit"
-              disabled={loading || otp.length !== 6}
-              className="w-full px-4 py-3 bg-[#EEEFF2] text-navi-black rounded-lg hover:bg-[#e8e9ec] transition-colors disabled:cursor-not-allowed border border-[#93c5a8]"
-            >
-              {loading ? 'Verifying...' : 'Verify'}
-            </button>
+              <button
+                type="submit"
+                disabled={loading || otp.length !== 6}
+                className="w-full px-3 py-2 bg-navi-black text-white text-sm rounded-lg hover:bg-navi-black/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Verifying...' : 'Verify'}
+              </button>
 
-            <button
-              type="button"
-              onClick={handleBack}
-              className="w-full text-xs text-navi-black/70 hover:text-navi-black transition-colors mt-4"
-              disabled={loading}
-            >
-              ← Change phone number
-            </button>
+              <button
+                type="button"
+                onClick={handleBack}
+                className="w-full text-xs text-gray-500 hover:text-navi-black transition-colors"
+                disabled={loading}
+              >
+                ← Change phone number
+              </button>
+            </div>
           </form>
         ) : (
-          <form onSubmit={handleSubmitInviteCode} className="p-5 space-y-4">
-            <div className="text-center mb-2">
-              <p className="text-sm font-medium text-navi-black">
+          <form onSubmit={handleSubmitInviteCode} className="p-6">
+            {/* Header: Logo left, X right */}
+            <div className="flex items-start justify-between mb-6">
+              <img 
+                src="/web-app-manifest-192x192.png" 
+                alt="Rose" 
+                className="w-10 h-10"
+              />
+              <button
+                type="button"
+                onClick={handleClose}
+                className="text-gray-400 hover:text-gray-600 transition-colors p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Titles */}
+            <div className="mb-6">
+              <h2 className="text-2xl font-semibold text-navi-black">
                 Enter Invite Code
-              </p>
-              <p className="text-xs text-navi-black/70 mt-1">
-                Rose is invite-only. Please enter your 6-digit code.
+              </h2>
+              <p className="text-xl text-gray-400 mt-1">
+                Rose is invite-only
               </p>
             </div>
 
-            <input
-              id="inviteCode"
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]{6}"
-              maxLength={6}
-              placeholder="000000"
-              value={inviteCode}
-              onChange={(e) => setInviteCode(e.target.value.replace(/\D/g, ''))}
-              required
-              className="w-full px-4 py-3 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-center text-2xl font-mono tracking-widest placeholder-navi-black/50 focus:outline-none focus:border-gray-400"
-              disabled={loading}
-              autoFocus
-            />
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="inviteCode" className="block text-sm text-gray-500 mb-1">
+                  6-digit Invite Code
+                </label>
+                <input
+                  id="inviteCode"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                  placeholder="000000"
+                  value={inviteCode}
+                  onChange={(e) => setInviteCode(e.target.value.replace(/\D/g, ''))}
+                  required
+                  className="w-full px-3 py-2 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-center text-sm font-mono tracking-widest placeholder-navi-black/30 focus:outline-none focus:border-gray-400"
+                  disabled={loading}
+                  autoFocus
+                />
+              </div>
 
-            <button
-              type="submit"
-              disabled={loading || inviteCode.length !== 6}
-              className="w-full px-4 py-3 bg-[#EEEFF2] text-navi-black rounded-lg hover:bg-[#e8e9ec] transition-colors disabled:cursor-not-allowed border border-[#93c5a8]"
-            >
-              {loading ? 'Verifying...' : 'Submit'}
-            </button>
+              <button
+                type="submit"
+                disabled={loading || inviteCode.length !== 6}
+                className="w-full px-3 py-2 bg-navi-black text-white text-sm rounded-lg hover:bg-navi-black/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Verifying...' : 'Submit'}
+              </button>
+            </div>
           </form>
         )}
       </DialogContent>
