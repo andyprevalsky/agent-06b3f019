@@ -8,6 +8,7 @@ import type {
   QuickQueryToggleState,
   QuickQueryPayload,
   DirectIMessagePayload,
+  UpdateStatusPayload,
 } from '../shared/types/ipc';
 
 // Expose type-safe API to renderer
@@ -43,9 +44,18 @@ const api: IPC = {
   onQuickQuerySubmit: (callback: (payload: QuickQueryPayload) => void) => {
     ipcRenderer.on('quick-query:submit', (_, payload) => callback(payload as QuickQueryPayload));
   },
+  onUpdateStatus: (callback: (payload: UpdateStatusPayload) => void) => {
+    ipcRenderer.on('update:status', (_, payload) => callback(payload as UpdateStatusPayload));
+  },
+  onUpdateProgress: (callback: (percent: number) => void) => {
+    ipcRenderer.on('update:progress', (_, data) => callback((data as { percent: number }).percent));
+  },
   submitQuickQuery: (payload: string | QuickQueryPayload) =>
     ipcRenderer.invoke('quick-query:submit', payload) as Promise<{ success: boolean }>,
   hideQuickQuery: () => ipcRenderer.invoke('quick-query:hide') as Promise<{ success: boolean }>,
+  checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<{ success: boolean }>,
+  downloadUpdate: () => ipcRenderer.invoke('updates:download') as Promise<{ success: boolean }>,
+  restartToUpdate: () => ipcRenderer.invoke('updates:install') as Promise<{ success: boolean }>,
 };
 
 contextBridge.exposeInMainWorld('api', api);

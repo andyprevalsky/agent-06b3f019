@@ -2,7 +2,13 @@ import { app, BrowserWindow, nativeImage, globalShortcut, ipcMain, screen, Menu 
 import path from 'path';
 import { config } from './base/config';
 import './handlers/registry'; // Register IPC handlers
-import { initAutoUpdater, manualCheckForUpdates, restartToUpdate, isUpdateDownloaded } from './services/autoUpdater';
+import {
+  initAutoUpdater,
+  manualCheckForUpdates,
+  restartToUpdate,
+  isUpdateDownloaded,
+  registerUpdateIpc,
+} from './services/autoUpdater';
 
 app.name = 'Rose';
 
@@ -51,12 +57,10 @@ function createMainWindow() {
 
   if (config.isDev) {
     mainWindow.loadURL('http://localhost:5173');
+    mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../ui/index.html'));
   }
-  
-  // Always open DevTools for debugging (remove in final production)
-  mainWindow.webContents.openDevTools();
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -268,6 +272,7 @@ app.whenReady().then(() => {
   createQuickQueryWindow();
   registerGlobalShortcuts();
   registerQuickQueryIpc();
+  registerUpdateIpc();
   
   // Initialize auto-updater
   if (mainWindow) {

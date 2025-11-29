@@ -22,10 +22,15 @@ export interface IPC {
   onProgress: (callback: (progress: UploadProgress) => void) => void;
   onQuickQueryToggle: (callback: (state: QuickQueryToggleState) => void) => void;
   onQuickQuerySubmit: (callback: (payload: QuickQueryPayload) => void) => void;
+  onUpdateStatus: (callback: (payload: UpdateStatusPayload) => void) => void;
+  onUpdateProgress: (callback: (percent: number) => void) => void;
 
   // Quick query actions
   submitQuickQuery: (payload: string | QuickQueryPayload) => Promise<{ success: boolean }>;
   hideQuickQuery: () => Promise<{ success: boolean }>;
+  checkForUpdates: () => Promise<{ success: boolean }>;
+  downloadUpdate: () => Promise<{ success: boolean }>;
+  restartToUpdate: () => Promise<{ success: boolean }>;
 }
 
 // Data types
@@ -108,5 +113,22 @@ export interface QuickQueryPayload {
 
 export interface QuickQueryToggleState {
   open: boolean;
+}
+
+export type UpdateStatusState =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'none'
+  | 'building'
+  | 'error';
+
+export interface UpdateStatusPayload {
+  state: UpdateStatusState;
+  version?: string;
+  message?: string;
+  percent?: number;
 }
 

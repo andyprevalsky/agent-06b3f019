@@ -1,15 +1,29 @@
 import { autoUpdater } from 'electron-updater';
-import { BrowserWindow, dialog, MenuItem } from 'electron';
+import { BrowserWindow, ipcMain } from 'electron';
 import { config } from '../base/config';
+import type { UpdateStatusPayload } from '../../shared/types/ipc';
 
 let mainWindow: BrowserWindow | null = null;
 let updateDownloaded = false;
+let pendingVersion: string | undefined;
+let ipcRegistered = false;
 
 function isMissingChannelFileError(err: unknown) {
   if (!err || typeof err !== 'object') return false;
   const code = (err as { code?: string }).code;
   const message = (err as { message?: string }).message ?? '';
   return code === 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND' || message.includes('latest-mac.yml');
+}
+
+function sendStatus(status: UpdateStatusPayload) {
+  mainWindow?.webContents.send('update:status', {
+    ...status,
+    version: status.version ?? pendingVersion,
+  });
+}
+
+function sendProgress(percent: number) {
+  mainWindow?.webContents.send('update:progress', { percent });
 }
 
 export function isUpdateDownloaded() {
@@ -22,52 +36,19 @@ export function restartToUpdate() {
   }
 }
 
-export function manualCheckForUpdates() {
-  if (config.isDev) {
-    dialog.showMessageBox({
-      type: 'info',
-      title: 'Development Mode',
-      message: 'Auto-updates are disabled in development mode.',
-    });
-    return;
-  }
-  
-  autoUpdater.checkForUpdates().then((result) => {
-    if (!result || !result.updateInfo) {
-      dialog.showMessageBox(mainWindow!, {
-        type: 'info',
-        title: 'No Updates',
-        message: 'You are running the latest version.',
-      });
-    }
-  }).catch((err) => {
-    if (isMissingChannelFileError(err)) {
-      dialog.showMessageBox(mainWindow!, {
-        type: 'info',
-        title: 'No Updates Available Yet',
-        message: 'A new build is still processing. Please try again in a few minutes.',
-      });
-      return;
-    }
-    console.error('[AutoUpdater] Manual check failed:', err);
-    dialog.showMessageBox(mainWindow!, {
-      type: 'error',
-      title: 'Update Check Failed',
-      message: `Could not check for updates: ${err.message}`,
-    });
-  });
+export async function manualCheckForUpdates() {
+  await runCheck();
 }
 
 export function initAutoUpdater(window: BrowserWindow) {
   mainWindow = window;
 
-  // Don't check for updates in dev mode
   if (config.isDev) {
     console.log('[AutoUpdater] Skipping in dev mode');
+    sendStatus({ state: 'idle' });
     return;
   }
 
-  // Configure for private GitHub repo
   const ghToken = process.env.GH_UPDATE_TOKEN;
   if (ghToken) {
     autoUpdater.setFeedURL({
@@ -79,96 +60,141 @@ export function initAutoUpdater(window: BrowserWindow) {
     });
   }
 
-  // Configure auto-updater
-  autoUpdater.autoDownload = false; // Don't auto-download, ask user first
+  autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 
-  // Check for updates on startup (after a short delay)
   setTimeout(() => {
     checkForUpdates();
   }, 5000);
 
-  // Check for updates every 4 hours
   setInterval(() => {
     checkForUpdates();
   }, 4 * 60 * 60 * 1000);
 
-  // Event handlers
   autoUpdater.on('checking-for-update', () => {
     console.log('[AutoUpdater] Checking for updates...');
+    sendStatus({ state: 'checking' });
   });
 
-  autoUpdater.on('update-available', async (info) => {
+  autoUpdater.on('update-available', (info) => {
     console.log('[AutoUpdater] Update available:', info.version);
-    
-    const result = await dialog.showMessageBox(mainWindow!, {
-      type: 'info',
-      title: 'Update Available',
-      message: `A new version (${info.version}) is available!`,
-      detail: 'Would you like to download and install it now?',
-      buttons: ['Update Now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-    });
-
-    if (result.response === 0) {
-      autoUpdater.downloadUpdate();
-    }
+    pendingVersion = info.version;
+    sendStatus({ state: 'available', version: info.version });
   });
 
   autoUpdater.on('update-not-available', () => {
     console.log('[AutoUpdater] No updates available');
+    pendingVersion = undefined;
+    sendStatus({ state: 'none' });
   });
 
   autoUpdater.on('download-progress', (progress) => {
-    console.log(`[AutoUpdater] Download progress: ${Math.round(progress.percent)}%`);
-    
-    // Send progress to renderer if needed
-    mainWindow?.webContents.send('update:progress', {
+    const percent = Math.round(progress.percent);
+    console.log(`[AutoUpdater] Download progress: ${percent}%`);
+    sendProgress(progress.percent);
+    sendStatus({
+      state: 'downloading',
       percent: progress.percent,
-      bytesPerSecond: progress.bytesPerSecond,
-      transferred: progress.transferred,
-      total: progress.total,
     });
   });
 
-  autoUpdater.on('update-downloaded', async (info) => {
+  autoUpdater.on('update-downloaded', (info) => {
     console.log('[AutoUpdater] Update downloaded:', info.version);
     updateDownloaded = true;
-    
-    const result = await dialog.showMessageBox(mainWindow!, {
-      type: 'info',
-      title: 'Update Ready',
-      message: 'Update downloaded!',
-      detail: 'The update will be installed when you restart the app. Restart now?',
-      buttons: ['Restart Now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-    });
-
-    if (result.response === 0) {
-      autoUpdater.quitAndInstall();
-    }
+    pendingVersion = info.version;
+    sendStatus({ state: 'downloaded', version: info.version });
   });
 
   autoUpdater.on('error', (error) => {
     if (isMissingChannelFileError(error)) {
       console.warn('[AutoUpdater] Channel file missing, release likely still building.');
+      sendStatus({
+        state: 'building',
+        message: 'Latest build is still publishing. Please try again shortly.',
+      });
       return;
     }
+
+    const message = error instanceof Error ? error.message : 'Unknown error';
     console.error('[AutoUpdater] Error:', error);
+    sendStatus({ state: 'error', message });
   });
 }
 
-export function checkForUpdates() {
-  if (config.isDev) return;
-  
-  autoUpdater.checkForUpdates().catch((err) => {
+async function runCheck() {
+  if (config.isDev) {
+    sendStatus({
+      state: 'error',
+      message: 'Auto-updates are disabled in development mode.',
+    });
+    return;
+  }
+
+  sendStatus({ state: 'checking' });
+
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    if (!result || !result.updateInfo) {
+      sendStatus({ state: 'none' });
+    }
+  } catch (err) {
     if (isMissingChannelFileError(err)) {
-      console.warn('[AutoUpdater] Channel file missing, release likely still building.');
+      sendStatus({
+        state: 'building',
+        message: 'Latest build is still publishing. Please try again shortly.',
+      });
       return;
     }
+
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    sendStatus({ state: 'error', message });
     console.error('[AutoUpdater] Check failed:', err);
+  }
+}
+
+export function checkForUpdates() {
+  runCheck();
+}
+
+export async function downloadUpdate() {
+  if (config.isDev) return;
+
+  try {
+    sendStatus({ state: 'downloading' });
+    await autoUpdater.downloadUpdate();
+  } catch (err) {
+    if (isMissingChannelFileError(err)) {
+      sendStatus({
+        state: 'building',
+        message: 'Latest build is still publishing. Please try again shortly.',
+      });
+      return;
+    }
+
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    sendStatus({ state: 'error', message });
+    console.error('[AutoUpdater] Download failed:', err);
+    throw err;
+  }
+}
+
+export function registerUpdateIpc() {
+  if (ipcRegistered) return;
+  ipcRegistered = true;
+
+  ipcMain.handle('updates:check', async () => {
+    await manualCheckForUpdates();
+    return { success: true };
+  });
+
+  ipcMain.handle('updates:download', async () => {
+    await downloadUpdate();
+    return { success: true };
+  });
+
+  ipcMain.handle('updates:install', async () => {
+    restartToUpdate();
+    return { success: true };
   });
 }
 
