@@ -172,6 +172,47 @@ export default function UpdateIndicator() {
     );
   }
 
+  // Show chip for "available" state - new update available
+  if (status.state === "available") {
+    return createPortal(
+      <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
+        <div className="flex items-center justify-between gap-4 rounded-full bg-neutral-100 border border-neutral-200 px-3 py-1.5 shadow-sm">
+          <div className="flex items-center gap-2">
+            <svg
+              className="h-3.5 w-3.5 text-neutral-600"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 3.5c1.5-1.5 4-1.5 5 0s1 3.5-1 5h4v3H4v-3h4c-2-1.5-2-4-1-5s3.5-1.5 5 0zM5 11.5v9h14v-9M12 8.5v12"
+              />
+            </svg>
+            <span className="text-xs font-medium text-neutral-600">New update available</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={dismiss}
+              className="text-xs font-medium text-neutral-500 hover:text-neutral-700 transition-colors"
+            >
+              Later
+            </button>
+            <button
+              onClick={() => window.api.downloadUpdate()}
+              className="text-xs font-medium text-neutral-700 bg-neutral-200 hover:bg-neutral-300 px-2.5 py-1 rounded-full transition-colors"
+            >
+              Install Now
+            </button>
+          </div>
+        </div>
+      </div>,
+      container
+    );
+  }
+
   // Don't show for non-active states
   if (!isActive) return null;
 
