@@ -33,15 +33,15 @@ jobs:
             echo "VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY secrets are required."
             exit 1
           fi
-          cat <<EOF > .env.production
-VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
-VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
-VITE_BACKEND_URL=${{ secrets.VITE_BACKEND_API_URL }}
-VITE_BACKEND_API_URL=${{ secrets.VITE_BACKEND_API_URL }}
-ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}
-GH_UPDATE_TOKEN=${{ secrets.GH_UPDATE_TOKEN }}
-NODE_ENV=production
-EOF
+          cat <<'EOF' | sed 's/^ *//' > .env.production
+            VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
+            VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
+            VITE_BACKEND_URL=${{ secrets.VITE_BACKEND_API_URL }}
+            VITE_BACKEND_API_URL=${{ secrets.VITE_BACKEND_API_URL }}
+            ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}
+            GH_UPDATE_TOKEN=${{ secrets.GH_UPDATE_TOKEN }}
+            NODE_ENV=production
+          EOF
 
       - name: Build Electron app (rebuilds native modules)
         working-directory: mac-app
