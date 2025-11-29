@@ -51,10 +51,12 @@ function createMainWindow() {
 
   if (config.isDev) {
     mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../ui/index.html'));
   }
+  
+  // Always open DevTools for debugging (remove in final production)
+  mainWindow.webContents.openDevTools();
 
   mainWindow.on('closed', () => {
     mainWindow = null;
