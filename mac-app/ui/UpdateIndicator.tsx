@@ -10,21 +10,17 @@ const ACTIVE_STATES: Array<UpdateStatusPayload["state"]> = [
   "downloaded",
   "building",
   "error",
-  "none", // Show briefly before auto-dismiss
+  "none",
 ];
+
+const NONE_DISMISS_DELAY = 3000;
 
 const stateCopy: Record<
   UpdateStatusPayload["state"],
   { title: string; description: string }
 > = {
-  idle: {
-    title: "",
-    description: "",
-  },
-  none: {
-    title: "You're up to date",
-    description: "",
-  },
+  idle: { title: "", description: "" },
+  none: { title: "You're up to date", description: "" },
   checking: {
     title: "Checking for updates…",
     description: "Hang tight while we look for the latest build.",
@@ -55,54 +51,51 @@ const portalId = "rose-update-indicator";
 
 export default function UpdateIndicator() {
   const [status, setStatus] = useState<UpdateStatusPayload>({ state: "idle" });
-  const [visible, setVisible] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [showNoneChip, setShowNoneChip] = useState(false);
   const dismissedVersionRef = useRef<string | null>(null);
+  const noneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const listenerAttachedRef = useRef(false);
 
   const container = useMemo(() => {
-    const node =
-      document.getElementById(portalId) ?? Object.assign(document.createElement("div"), { id: portalId });
-    if (!node.isConnected) {
-      document.body.appendChild(node);
-    }
+    const existing = document.getElementById(portalId);
+    if (existing) return existing;
+    const node = document.createElement("div");
+    node.id = portalId;
+    document.body.appendChild(node);
     return node;
   }, []);
 
   useEffect(() => {
     return () => {
-      if (container.isConnected) {
-        container.remove();
-      }
+      const node = document.getElementById(portalId);
+      if (node) node.remove();
     };
-  }, [container]);
+  }, []);
 
   useEffect(() => {
-    let autoDismissTimer: ReturnType<typeof setTimeout> | null = null;
+    // Prevent duplicate listeners
+    if (listenerAttachedRef.current) return;
+    listenerAttachedRef.current = true;
 
     window.api.onUpdateStatus((payload) => {
+      // Clear any pending "none" timer when new status arrives
+      if (noneTimerRef.current) {
+        clearTimeout(noneTimerRef.current);
+        noneTimerRef.current = null;
+      }
+
       setStatus(payload);
-      
-      // Clear any pending auto-dismiss
-      if (autoDismissTimer) {
-        clearTimeout(autoDismissTimer);
-        autoDismissTimer = null;
-      }
 
-      const shouldDisplay =
-        ACTIVE_STATES.includes(payload.state) &&
-        !(payload.state === "available" && dismissedVersionRef.current === payload.version);
-
-      if (payload.state === "available") {
-        dismissedVersionRef.current = null;
-      }
-
-      setVisible(shouldDisplay);
-
-      // Auto-dismiss "You're up to date" after 3 seconds
+      // Handle "none" state specially - show chip then auto-dismiss
       if (payload.state === "none") {
-        autoDismissTimer = setTimeout(() => {
-          setVisible(false);
-        }, 3000);
+        setShowNoneChip(true);
+        noneTimerRef.current = setTimeout(() => {
+          setShowNoneChip(false);
+          noneTimerRef.current = null;
+        }, NONE_DISMISS_DELAY);
+      } else {
+        setShowNoneChip(false);
       }
     });
 
@@ -111,26 +104,81 @@ export default function UpdateIndicator() {
     });
 
     return () => {
-      if (autoDismissTimer) {
-        clearTimeout(autoDismissTimer);
+      if (noneTimerRef.current) {
+        clearTimeout(noneTimerRef.current);
       }
     };
   }, []);
-
-  if (!visible || !container) {
-    return null;
-  }
-
-  const { title, description } = stateCopy[status.state] ?? stateCopy.idle;
-  const percent = Math.round(status.percent ?? progress ?? 0);
-  const versionLabel = status.version ? `v${status.version}` : null;
 
   const dismiss = () => {
     if (status.state === "available" && status.version) {
       dismissedVersionRef.current = status.version;
     }
-    setVisible(false);
+    setStatus({ state: "idle" });
+    setShowNoneChip(false);
+    if (noneTimerRef.current) {
+      clearTimeout(noneTimerRef.current);
+      noneTimerRef.current = null;
+    }
   };
+
+  // Determine what to show
+  const isActive = ACTIVE_STATES.includes(status.state);
+  const isDismissedVersion =
+    status.state === "available" &&
+    dismissedVersionRef.current === status.version;
+
+  // Don't show anything for idle or dismissed versions
+  if (status.state === "idle" || isDismissedVersion) {
+    return null;
+  }
+
+  // Show spinner only for checking
+  if (status.state === "checking") {
+    return createPortal(
+      <div className="pointer-events-none fixed bottom-6 left-6 z-[9999]">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-400 border-t-transparent" />
+      </div>,
+      container
+    );
+  }
+
+  // Show chip for "none" state (up to date) - controlled by showNoneChip flag
+  if (status.state === "none") {
+    if (!showNoneChip) return null;
+    return createPortal(
+      <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
+        <div
+          className="flex items-center gap-2 rounded-full bg-neutral-100 border border-neutral-200 px-3 py-1.5 shadow-sm cursor-pointer hover:bg-neutral-200 transition-colors"
+          onClick={dismiss}
+        >
+          <svg
+            className="h-3.5 w-3.5 text-neutral-600"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2.5}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M5 13l4 4L19 7"
+            />
+          </svg>
+          <span className="text-xs font-medium text-neutral-600">Up to date</span>
+        </div>
+      </div>,
+      container
+    );
+  }
+
+  // Don't show for non-active states
+  if (!isActive) return null;
+
+  const { title, description } = stateCopy[status.state] ?? stateCopy.idle;
+  const percent = Math.round(status.percent ?? progress ?? 0);
+  const versionLabel = status.version ? `v${status.version}` : null;
+  const showProgressBar = status.state === "downloading";
 
   const actions = () => {
     switch (status.state) {
@@ -168,21 +216,12 @@ export default function UpdateIndicator() {
         );
       case "building":
         return (
-          <Button size="sm" variant="ghost" onClick={() => window.api.checkForUpdates()}>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => window.api.checkForUpdates()}
+          >
             Refresh
-          </Button>
-        );
-      case "checking":
-        return (
-          <div className="flex items-center gap-2 text-xs text-neutral-300">
-            <span className="h-3 w-3 animate-spin rounded-full border-[1.5px] border-white/30 border-t-transparent" />
-            Checking…
-          </div>
-        );
-      case "none":
-        return (
-          <Button size="sm" variant="ghost" onClick={dismiss}>
-            Dismiss
           </Button>
         );
       default:
@@ -190,23 +229,20 @@ export default function UpdateIndicator() {
     }
   };
 
-  const showProgressBar = status.state === "downloading";
-
   return createPortal(
-    <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999] w-full max-w-xs animate-in fade-in slide-in-from-bottom-2">
+    <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999] w-full max-w-xs">
       <div className="rounded-2xl border border-white/10 bg-[#050505]/90 p-4 shadow-2xl backdrop-blur">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm font-semibold text-white">{title}</p>
-          {versionLabel ? (
+          {versionLabel && (
             <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-medium text-neutral-300">
               {versionLabel}
             </span>
-          ) : null}
+          )}
         </div>
         {description && (
           <p className="mt-1 text-xs text-neutral-400">{description}</p>
         )}
-
         {showProgressBar && (
           <div className="mt-4 h-2 rounded-full bg-white/10">
             <div
@@ -215,11 +251,9 @@ export default function UpdateIndicator() {
             />
           </div>
         )}
-
         <div className="mt-4 flex flex-wrap items-center gap-2">{actions()}</div>
       </div>
     </div>,
     container
   );
 }
-

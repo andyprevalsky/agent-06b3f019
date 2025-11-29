@@ -63,9 +63,10 @@ export function initAutoUpdater(window: BrowserWindow) {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 
+  // Check for updates shortly after launch (wait for renderer to be ready)
   setTimeout(() => {
     checkForUpdates();
-  }, 5000);
+  }, 2000);
 
   setInterval(() => {
     checkForUpdates();
