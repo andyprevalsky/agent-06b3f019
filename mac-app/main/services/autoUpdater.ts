@@ -107,12 +107,15 @@ export function initAutoUpdater(window: BrowserWindow) {
   });
 
   autoUpdater.on('error', (error) => {
+    // Don't overwrite downloaded state with error
+    if (updateDownloaded) {
+      console.warn('[AutoUpdater] Ignoring error after download completed');
+      return;
+    }
+
     if (isMissingChannelFileError(error)) {
-      console.warn('[AutoUpdater] Channel file missing, release likely still building.');
-      sendStatus({
-        state: 'building',
-        message: 'Latest build is still publishing. Please try again shortly.',
-      });
+      console.warn('[AutoUpdater] Channel file missing, treating as up to date.');
+      sendStatus({ state: 'none' });
       return;
     }
 
@@ -140,10 +143,8 @@ async function runCheck() {
     }
   } catch (err) {
     if (isMissingChannelFileError(err)) {
-      sendStatus({
-        state: 'building',
-        message: 'Latest build is still publishing. Please try again shortly.',
-      });
+      // Treat missing channel file as "up to date"
+      sendStatus({ state: 'none' });
       return;
     }
 
@@ -164,18 +165,19 @@ export async function downloadUpdate() {
     sendStatus({ state: 'downloading' });
     await autoUpdater.downloadUpdate();
   } catch (err) {
+    // Don't show error if download actually succeeded
+    if (updateDownloaded) {
+      return;
+    }
+
     if (isMissingChannelFileError(err)) {
-      sendStatus({
-        state: 'building',
-        message: 'Latest build is still publishing. Please try again shortly.',
-      });
+      sendStatus({ state: 'none' });
       return;
     }
 
     const message = err instanceof Error ? err.message : 'Unknown error';
     sendStatus({ state: 'error', message });
     console.error('[AutoUpdater] Download failed:', err);
-    throw err;
   }
 }
 

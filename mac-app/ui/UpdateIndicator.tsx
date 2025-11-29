@@ -1,53 +1,62 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Button } from "@/components/ui/button";
 import type { UpdateStatusPayload } from "../shared/types/ipc";
 
-const ACTIVE_STATES: Array<UpdateStatusPayload["state"]> = [
-  "checking",
-  "available",
-  "downloading",
-  "downloaded",
-  "building",
-  "error",
-  "none",
-];
-
 const NONE_DISMISS_DELAY = 3000;
-
-const stateCopy: Record<
-  UpdateStatusPayload["state"],
-  { title: string; description: string }
-> = {
-  idle: { title: "", description: "" },
-  none: { title: "You're up to date", description: "" },
-  checking: {
-    title: "Checking for updates…",
-    description: "Hang tight while we look for the latest build.",
-  },
-  available: {
-    title: "New version available",
-    description: "Download to get the latest improvements.",
-  },
-  downloading: {
-    title: "Downloading update…",
-    description: "We'll restart once the download finishes.",
-  },
-  downloaded: {
-    title: "Update ready to install",
-    description: "Restart Rose to finish updating.",
-  },
-  building: {
-    title: "Publishing build…",
-    description: "GitHub is still preparing the latest release.",
-  },
-  error: {
-    title: "Update check failed",
-    description: "We couldn't reach GitHub. Please try again.",
-  },
-};
-
 const portalId = "rose-update-indicator";
+
+// Rose gradient colors for progress bar
+const ROSE_GRADIENT = "linear-gradient(90deg, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)";
+
+// Gift icon SVG path
+const GiftIcon = () => (
+  <svg
+    className="h-3.5 w-3.5 text-neutral-600"
+    fill="none"
+    viewBox="0 0 24 24"
+    stroke="currentColor"
+    strokeWidth={2}
+  >
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M12 3.5c1.5-1.5 4-1.5 5 0s1 3.5-1 5h4v3H4v-3h4c-2-1.5-2-4-1-5s3.5-1.5 5 0zM5 11.5v9h14v-9M12 8.5v12"
+    />
+  </svg>
+);
+
+// Checkmark icon
+const CheckIcon = () => (
+  <svg
+    className="h-3.5 w-3.5 text-neutral-600"
+    fill="none"
+    viewBox="0 0 24 24"
+    stroke="currentColor"
+    strokeWidth={2.5}
+  >
+    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+  </svg>
+);
+
+// Warning icon
+const WarningIcon = () => (
+  <svg
+    className="h-3.5 w-3.5 text-neutral-600"
+    fill="none"
+    viewBox="0 0 24 24"
+    stroke="currentColor"
+    strokeWidth={2}
+  >
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+    />
+  </svg>
+);
+
+// Base chip styling
+const chipBase = "flex items-center rounded-full bg-neutral-100 border border-neutral-200 px-3 py-1.5 shadow-sm";
 
 export default function UpdateIndicator() {
   const [status, setStatus] = useState<UpdateStatusPayload>({ state: "idle" });
@@ -74,21 +83,24 @@ export default function UpdateIndicator() {
   }, []);
 
   useEffect(() => {
-    // Prevent duplicate listeners
     if (listenerAttachedRef.current) return;
     listenerAttachedRef.current = true;
 
     window.api.onUpdateStatus((payload) => {
-      // Clear any pending "none" timer when new status arrives
       if (noneTimerRef.current) {
         clearTimeout(noneTimerRef.current);
         noneTimerRef.current = null;
       }
 
-      setStatus(payload);
+      // Map "building" state to "none" (treat as up to date)
+      const effectivePayload = payload.state === "building" 
+        ? { ...payload, state: "none" as const }
+        : payload;
 
-      // Handle "none" state specially - show chip then auto-dismiss
-      if (payload.state === "none") {
+      setStatus(effectivePayload);
+
+      // Handle "none" state - show chip then auto-dismiss
+      if (effectivePayload.state === "none") {
         setShowNoneChip(true);
         noneTimerRef.current = setTimeout(() => {
           setShowNoneChip(false);
@@ -111,7 +123,7 @@ export default function UpdateIndicator() {
   }, []);
 
   const dismiss = () => {
-    if (status.state === "available" && status.version) {
+    if ((status.state === "available" || status.state === "downloaded") && status.version) {
       dismissedVersionRef.current = status.version;
     }
     setStatus({ state: "idle" });
@@ -122,10 +134,8 @@ export default function UpdateIndicator() {
     }
   };
 
-  // Determine what to show
-  const isActive = ACTIVE_STATES.includes(status.state);
   const isDismissedVersion =
-    status.state === "available" &&
+    (status.state === "available" || status.state === "downloaded") &&
     dismissedVersionRef.current === status.version;
 
   // Don't show anything for idle or dismissed versions
@@ -133,7 +143,7 @@ export default function UpdateIndicator() {
     return null;
   }
 
-  // Show spinner only for checking
+  // CHECKING - Spinner only
   if (status.state === "checking") {
     return createPortal(
       <div className="pointer-events-none fixed bottom-6 left-6 z-[9999]">
@@ -143,28 +153,16 @@ export default function UpdateIndicator() {
     );
   }
 
-  // Show chip for "none" state (up to date) - controlled by showNoneChip flag
+  // NONE (Up to date) - Auto-dismissing chip
   if (status.state === "none") {
     if (!showNoneChip) return null;
     return createPortal(
       <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
         <div
-          className="flex items-center gap-2 rounded-full bg-neutral-100 border border-neutral-200 px-3 py-1.5 shadow-sm cursor-pointer hover:bg-neutral-200 transition-colors"
+          className={`${chipBase} gap-2 cursor-pointer hover:bg-neutral-200 transition-colors`}
           onClick={dismiss}
         >
-          <svg
-            className="h-3.5 w-3.5 text-neutral-600"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2.5}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M5 13l4 4L19 7"
-            />
-          </svg>
+          <CheckIcon />
           <span className="text-xs font-medium text-neutral-600">Up to date</span>
         </div>
       </div>,
@@ -172,25 +170,13 @@ export default function UpdateIndicator() {
     );
   }
 
-  // Show chip for "available" state - new update available
+  // AVAILABLE - New update available with Install Now
   if (status.state === "available") {
     return createPortal(
       <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
-        <div className="flex items-center justify-between gap-4 rounded-full bg-neutral-100 border border-neutral-200 px-3 py-1.5 shadow-sm">
+        <div className={`${chipBase} justify-between gap-4`}>
           <div className="flex items-center gap-2">
-            <svg
-              className="h-3.5 w-3.5 text-neutral-600"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 3.5c1.5-1.5 4-1.5 5 0s1 3.5-1 5h4v3H4v-3h4c-2-1.5-2-4-1-5s3.5-1.5 5 0zM5 11.5v9h14v-9M12 8.5v12"
-              />
-            </svg>
+            <GiftIcon />
             <span className="text-xs font-medium text-neutral-600">New update available</span>
           </div>
           <div className="flex items-center gap-2">
@@ -213,88 +199,77 @@ export default function UpdateIndicator() {
     );
   }
 
-  // Don't show for non-active states
-  if (!isActive) return null;
-
-  const { title, description } = stateCopy[status.state] ?? stateCopy.idle;
-  const percent = Math.round(status.percent ?? progress ?? 0);
-  const versionLabel = status.version ? `v${status.version}` : null;
-  const showProgressBar = status.state === "downloading";
-
-  const actions = () => {
-    switch (status.state) {
-      case "available":
-        return (
-          <>
-            <Button size="sm" onClick={() => window.api.downloadUpdate()}>
-              Download
-            </Button>
-            <Button size="sm" variant="ghost" onClick={dismiss}>
-              Later
-            </Button>
-          </>
-        );
-      case "downloading":
-        return (
-          <span className="text-xs text-neutral-400">{percent}% complete</span>
-        );
-      case "downloaded":
-        return (
-          <>
-            <Button size="sm" onClick={() => window.api.restartToUpdate()}>
-              Restart to Update
-            </Button>
-            <Button size="sm" variant="ghost" onClick={dismiss}>
-              Later
-            </Button>
-          </>
-        );
-      case "error":
-        return (
-          <Button size="sm" onClick={() => window.api.checkForUpdates()}>
-            Retry
-          </Button>
-        );
-      case "building":
-        return (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => window.api.checkForUpdates()}
-          >
-            Refresh
-          </Button>
-        );
-      default:
-        return null;
-    }
-  };
-
-  return createPortal(
-    <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999] w-full max-w-xs">
-      <div className="rounded-2xl border border-white/10 bg-[#050505]/90 p-4 shadow-2xl backdrop-blur">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-white">{title}</p>
-          {versionLabel && (
-            <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-medium text-neutral-300">
-              {versionLabel}
-            </span>
-          )}
-        </div>
-        {description && (
-          <p className="mt-1 text-xs text-neutral-400">{description}</p>
-        )}
-        {showProgressBar && (
-          <div className="mt-4 h-2 rounded-full bg-white/10">
+  // DOWNLOADING - Progress bar with rose gradient
+  if (status.state === "downloading") {
+    const percent = Math.round(status.percent ?? progress ?? 0);
+    return createPortal(
+      <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
+        <div className={`${chipBase} gap-3 min-w-[200px]`}>
+          <span className="text-xs font-medium text-neutral-600">Downloading...</span>
+          <div className="flex-1 h-1.5 rounded-full bg-neutral-200 overflow-hidden">
             <div
-              className="h-full rounded-full bg-white transition-all duration-200"
-              style={{ width: `${Math.min(percent, 100)}%` }}
+              className="h-full rounded-full transition-all duration-200"
+              style={{
+                width: `${Math.min(percent, 100)}%`,
+                background: ROSE_GRADIENT,
+              }}
             />
           </div>
-        )}
-        <div className="mt-4 flex flex-wrap items-center gap-2">{actions()}</div>
-      </div>
-    </div>,
-    container
-  );
+        </div>
+      </div>,
+      container
+    );
+  }
+
+  // DOWNLOADED - Ready to restart
+  if (status.state === "downloaded") {
+    return createPortal(
+      <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
+        <div className={`${chipBase} justify-between gap-4`}>
+          <div className="flex items-center gap-2">
+            <GiftIcon />
+            <span className="text-xs font-medium text-neutral-600">New update available</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={dismiss}
+              className="text-xs font-medium text-neutral-500 hover:text-neutral-700 transition-colors"
+            >
+              Later
+            </button>
+            <button
+              onClick={() => window.api.restartToUpdate()}
+              className="text-xs font-medium text-neutral-700 bg-neutral-200 hover:bg-neutral-300 px-2.5 py-1 rounded-full transition-colors"
+            >
+              Restart Now
+            </button>
+          </div>
+        </div>
+      </div>,
+      container
+    );
+  }
+
+  // ERROR - Chip with retry
+  if (status.state === "error") {
+    return createPortal(
+      <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
+        <div className={`${chipBase} justify-between gap-4`}>
+          <div className="flex items-center gap-2">
+            <WarningIcon />
+            <span className="text-xs font-medium text-neutral-600">Update failed</span>
+          </div>
+          <button
+            onClick={() => window.api.checkForUpdates()}
+            className="text-xs font-medium text-neutral-700 bg-neutral-200 hover:bg-neutral-300 px-2.5 py-1 rounded-full transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      </div>,
+      container
+    );
+  }
+
+  return null;
 }
