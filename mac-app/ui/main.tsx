@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client';
-import App from '@/App';
+import ElectronApp from './ElectronApp';
 import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/contexts/IntegrationHandlersContext';
@@ -65,7 +65,7 @@ createRoot(document.getElementById('root')!).render(
   <IntegrationHandlersProvider handlers={electronHandlers}>
     <>
       <DragOverlay />
-      <App />
+      <ElectronApp />
       <QuickQueryListener />
     </>
   </IntegrationHandlersProvider>
