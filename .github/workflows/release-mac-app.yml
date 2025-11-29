@@ -34,13 +34,13 @@ jobs:
             exit 1
           fi
           cat <<EOF > .env.production
-          VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_BACKEND_URL=${{ secrets.VITE_BACKEND_URL || secrets.VITE_BACKEND_API_URL }}
-          VITE_BACKEND_API_URL=${{ secrets.VITE_BACKEND_API_URL }}
-          ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}
-          NODE_ENV=production
-          EOF
+VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
+VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
+VITE_BACKEND_URL=${{ secrets.VITE_BACKEND_API_URL }}
+VITE_BACKEND_API_URL=${{ secrets.VITE_BACKEND_API_URL }}
+ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}
+NODE_ENV=production
+EOF
 
       - name: Build Electron app (rebuilds native modules)
         working-directory: mac-app
