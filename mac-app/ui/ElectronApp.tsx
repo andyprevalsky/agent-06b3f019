@@ -31,4 +31,3 @@ const ElectronApp = () => (
 );
 
 export default ElectronApp;
-

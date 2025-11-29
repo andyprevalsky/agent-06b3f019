@@ -20,6 +20,12 @@ export default defineConfig({
       '@': path.resolve(__dirname, '../front-end/src'),
       '@shared': path.resolve(__dirname, '../front-end/src'),
     },
+    // Resolve dependencies from front-end's node_modules
+    dedupe: ['react', 'react-dom', 'react-router-dom', '@tanstack/react-query'],
+  },
+  // Also look in front-end/node_modules for dependencies
+  optimizeDeps: {
+    include: ['react', 'react-dom', 'react-router-dom', '@tanstack/react-query'],
   },
 });
 
