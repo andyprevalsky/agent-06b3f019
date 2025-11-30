@@ -905,7 +905,7 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
 router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const { contacts } = req.body as { contacts?: ContactWithMessages[] };
+    const { contacts, accessedAt } = req.body as { contacts?: ContactWithMessages[]; accessedAt?: string };
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({
@@ -938,6 +938,7 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
           contacts: contacts.length,
           messages: totalMessages,
           uploadedAt: new Date().toISOString(),
+          lastFrontendAccessAt: accessedAt || new Date().toISOString(),
         },
       },
       update: {
@@ -946,6 +947,7 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
           contacts: contacts.length,
           messages: totalMessages,
           uploadedAt: new Date().toISOString(),
+          lastFrontendAccessAt: accessedAt || new Date().toISOString(),
         },
       },
     });
@@ -975,6 +977,7 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
               messages: totalMessages,
               lastJobId: jobId,
               lastUploadedAt: new Date().toISOString(),
+              lastFrontendAccessAt: accessedAt || (integration.config as Record<string, unknown>)?.lastFrontendAccessAt || new Date().toISOString(),
             },
           },
         });

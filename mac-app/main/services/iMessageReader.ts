@@ -205,6 +205,13 @@ const normalizeHandle = (handle: string): string => {
   return trimmed.includes('@') ? trimmed.toLowerCase() : trimmed;
 };
 
+// Convert ISO timestamp to iMessage timestamp (nanoseconds since 2001-01-01)
+const isoToImessageTimestamp = (isoString: string): number => {
+  const APPLE_EPOCH_OFFSET = 978307200; // Seconds between Unix epoch (1970) and Apple epoch (2001)
+  const unixSeconds = Math.floor(new Date(isoString).getTime() / 1000);
+  return (unixSeconds - APPLE_EPOCH_OFFSET) * 1_000_000_000;
+};
+
 export class IMessageReader {
   static checkAccess(): boolean {
     try {
@@ -215,7 +222,7 @@ export class IMessageReader {
     }
   }
   
-  static async readMessages(): Promise<IMessageData[]> {
+  static async readMessages(sinceTimestamp?: string, isSync = false): Promise<IMessageData[]> {
     if (!this.checkAccess()) {
       throw new Error('No access to iMessage database. Grant Full Disk Access in System Preferences.');
     }
@@ -228,6 +235,11 @@ export class IMessageReader {
       const contentWhereClause = hasAssociatedTextColumn || hasAttributedBodyColumn
         ? `(m.text IS NOT NULL OR ${hasAssociatedTextColumn ? 'm.associated_message_text IS NOT NULL' : '0'} OR ${hasAttributedBodyColumn ? 'm.attributedBody IS NOT NULL' : '0'})`
         : 'm.text IS NOT NULL';
+      
+      // Add timestamp filter if provided
+      const timestampClause = sinceTimestamp 
+        ? `AND m.date > ${isoToImessageTimestamp(sinceTimestamp)}`
+        : '';
       
       const rawMessages = db.prepare(`
         SELECT 
@@ -250,10 +262,16 @@ export class IMessageReader {
             c.chat_identifier IS NULL 
             OR c.chat_identifier NOT LIKE 'chat%'
           )
+          ${timestampClause}
         ORDER BY m.date DESC
       `).all() as RawMessageRow[];
 
       console.log(`[IMessageReader] Read ${rawMessages.length} raw messages from database`);
+
+      // Early return if no messages - skip contact loading
+      if (rawMessages.length === 0) {
+        return [];
+      }
 
       let contactMap = new Map<string, ContactRecord>();
       try {
@@ -347,6 +365,30 @@ export class IMessageReader {
         if (msg.contact_firstName || msg.contact_lastName) {
           namedHandles.add(msg.contact_id);
         }
+      }
+
+      // For sync operations, check if user has EVER replied to contacts in this batch
+      // This prevents filtering out messages from contacts the user replied to historically
+      if (isSync && cleanedMessages.length > 0) {
+        const uniqueContactIds = [...new Set(cleanedMessages.map(m => m.contact_id))];
+        const placeholders = uniqueContactIds.map(() => '?').join(',');
+        
+        const historicalReplies = db.prepare(`
+          SELECT DISTINCT h.id as handle_id
+          FROM message m
+          JOIN handle h ON m.handle_id = h.ROWID
+          WHERE m.is_from_me = 1
+            AND h.id IN (${placeholders})
+        `).all(...uniqueContactIds) as Array<{ handle_id: string }>;
+
+        for (const row of historicalReplies) {
+          const normalized = normalizeHandle(row.handle_id);
+          if (normalized !== INVALID_HANDLE_SENTINEL) {
+            repliedHandles.add(normalized);
+          }
+        }
+        
+        console.log(`[IMessageReader] Found ${historicalReplies.length} contacts with historical replies`);
       }
 
       const filteredMessages = cleanedMessages.filter(

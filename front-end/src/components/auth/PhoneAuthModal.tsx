@@ -260,10 +260,11 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
           <form onSubmit={handleSendOTP} className="p-6">
             {/* Header: Logo left, X right */}
             <div className="flex items-start justify-between mb-6">
-              <img 
-                src="/web-app-manifest-192x192.png" 
-                alt="Rose" 
-                className="w-10 h-10"
+              <div 
+                className="w-10 h-10 rounded-lg" 
+                style={{ 
+                  background: 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)' 
+                }}
               />
               <button
                 type="button"
@@ -315,10 +316,11 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
           <form onSubmit={handleVerifyOTP} className="p-6">
             {/* Header: Logo left, X right */}
             <div className="flex items-start justify-between mb-6">
-              <img 
-                src="/web-app-manifest-192x192.png" 
-                alt="Rose" 
-                className="w-10 h-10"
+              <div 
+                className="w-10 h-10 rounded-lg" 
+                style={{ 
+                  background: 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)' 
+                }}
               />
               <button
                 type="button"
@@ -382,10 +384,11 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
           <form onSubmit={handleSubmitInviteCode} className="p-6">
             {/* Header: Logo left, X right */}
             <div className="flex items-start justify-between mb-6">
-              <img 
-                src="/web-app-manifest-192x192.png" 
-                alt="Rose" 
-                className="w-10 h-10"
+              <div 
+                className="w-10 h-10 rounded-lg" 
+                style={{ 
+                  background: 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)' 
+                }}
               />
               <button
                 type="button"

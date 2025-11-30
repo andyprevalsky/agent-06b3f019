@@ -5,6 +5,7 @@ import { Uploader } from '../services/uploader';
 import { BatchUploader } from '../services/batchUploader';
 import { AuthService } from '../services/auth';
 import { IMessageSender } from '../services/iMessageSender';
+import { IMessageSync } from '../services/iMessageSync';
 
 export function registerHandlers() {
   // Auth handlers
@@ -20,6 +21,10 @@ export function registerHandlers() {
     console.log('[IPC Auth] Expires at:', session?.expires_at, session?.expires_at ? new Date(session.expires_at * 1000) : 'N/A');
     AuthService.setSession(session);
     console.log('[IPC Auth] ✅ Session saved to store');
+    
+    // Trigger iMessage sync after successful auth
+    IMessageSync.sync().catch(err => console.error('[IPC Auth] Post-auth sync error:', err));
+    
     return { success: true };
   });
   
@@ -135,4 +140,9 @@ export function registerHandlers() {
 
 // Auto-register on import
 registerHandlers();
+
+// Initialize iMessage sync on startup
+// Run initial sync (if already authenticated) and start background sync
+IMessageSync.sync().catch(err => console.error('[Startup] Initial sync error:', err));
+IMessageSync.startBackgroundSync();
 

@@ -2,6 +2,9 @@
   "name": "rose-desktop",
   "productName": "Rose",
   "version": "1.0.13",
+  "engines": {
+    "node": "20.10.0"
+  },
   "description": "Rose - Integration Data Uploader",
   "repository": {
     "type": "git",

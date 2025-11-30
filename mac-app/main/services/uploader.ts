@@ -96,8 +96,9 @@ export class Uploader {
       
       if (isIMessage) {
         const payload = buildIMessagePayload(data as IMessageData[] | IMessageUploadContact[]);
-        const body: IMessageUploadPayload = {
+        const body: IMessageUploadPayload & { accessedAt: string } = {
           contacts: payload.contacts,
+          accessedAt: new Date().toISOString(),
         };
         
         response = await fetch(`${config.apiUrl}/api/integrations/imessage/upload`, {
