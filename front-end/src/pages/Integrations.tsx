@@ -2,14 +2,14 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Linkedin, Twitter, MessageSquare, Mail, MessageCircle, Send, Instagram, Facebook, Chrome, Loader2, Users, Upload, RefreshCw, type LucideIcon } from 'lucide-react';
 import { useIntegrationHandlers } from '@/contexts/IntegrationHandlersContext';
-import { supabase } from '@/lib/supabase';
+import { getStoredSession } from '@/lib/supabase';
 
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
-async function getAuthHeaders() {
-  const session = await supabase.auth.getSession();
-  const token = session.data.session?.access_token;
+function getAuthHeaders() {
+  const session = getStoredSession();
+  const token = session?.access_token;
   if (!token) {
     throw new Error('Not authenticated');
   }
@@ -58,7 +58,7 @@ export default function Integrations() {
 
   const fetchIntegrations = useCallback(async () => {
     try {
-      const headers = await getAuthHeaders();
+      const headers = getAuthHeaders();
       const response = await fetch(`${API_BASE_WITH_PATH}/integrations`, {
         headers,
       });
@@ -123,8 +123,8 @@ export default function Integrations() {
     setSuccess(null);
 
     try {
-      const session = await supabase.auth.getSession();
-      const token = session.data.session?.access_token;
+      const session = getStoredSession();
+      const token = session?.access_token;
       if (!token) {
         throw new Error('Not authenticated');
       }
@@ -166,7 +166,7 @@ export default function Integrations() {
     setError(null);
 
     try {
-      const headers = await getAuthHeaders();
+      const headers = getAuthHeaders();
       const response = await fetch(`${API_BASE_WITH_PATH}/integrations/email/${provider}/start`, {
         method: 'POST',
         headers,

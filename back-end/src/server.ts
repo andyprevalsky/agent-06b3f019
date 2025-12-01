@@ -19,6 +19,8 @@ import browserSessionRouter from './routes/browserSession';
 import peopleRouter from './routes/people';
 import integrationsRouter from './routes/integrations';
 import { prisma } from './lib/prisma';
+import cron from 'node-cron';
+import { runGmailSyncJob } from './services/integrations/gmailSync';
 
 // Load environment variables
 dotenv.config();
@@ -133,6 +135,15 @@ app.listen(PORT, () => {
   console.log(`🔐 Auth: JWKS (Supabase)`);
   console.log(`🗄️  Database: Supabase PostgreSQL (RLS enabled)`);
   console.log(`💬 Real-time: Use Supabase Realtime from frontend`);
+
+  // Start Gmail sync cron job (every 5 minutes)
+  cron.schedule('*/5 * * * *', () => {
+    console.log('[Cron] Running Gmail sync job...');
+    runGmailSyncJob().catch(err => {
+      console.error('[Cron] Gmail sync job error:', err);
+    });
+  });
+  console.log(`⏰ Cron: Gmail sync scheduled (every 5 minutes)`);
 });
 
 // Graceful shutdown

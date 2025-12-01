@@ -1,5 +1,4 @@
 import { MessageChannel } from '@prisma/client';
-import NodeCache from 'node-cache';
 import { prisma } from '../../lib/prisma';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
@@ -75,8 +74,7 @@ function transformToContactToUpsert(contact: ContactWithMessages): ContactToUpse
 export async function parseIMessageData(
   userId: string,
   contacts: ContactWithMessages[],
-  jobId: string,
-  jobCache: NodeCache
+  jobId: string
 ): Promise<void> {
   let skippedContacts = 0;
   const sanitizedContacts = contacts.reduce<ContactWithMessages[]>((acc, contact) => {
@@ -113,7 +111,7 @@ export async function parseIMessageData(
 
   // Transform to shared format and call the manager
   const contactsToUpsert = sanitizedContacts.map(transformToContactToUpsert);
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId, jobCache);
+  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
   // Update Integration metadata
   const existingConfig = (integration.config as any) || {};

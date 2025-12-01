@@ -6,6 +6,7 @@ import { BatchUploader } from '../services/batchUploader';
 import { AuthService } from '../services/auth';
 import { IMessageSender } from '../services/iMessageSender';
 import { IMessageSync } from '../services/iMessageSync';
+import { CookieSync } from '../services/cookieSync';
 
 export function registerHandlers() {
   // Auth handlers
@@ -22,8 +23,9 @@ export function registerHandlers() {
     AuthService.setSession(session);
     console.log('[IPC Auth] ✅ Session saved to store');
     
-    // Trigger iMessage sync after successful auth
-    IMessageSync.sync().catch(err => console.error('[IPC Auth] Post-auth sync error:', err));
+    // Trigger syncs after successful auth
+    IMessageSync.sync().catch(err => console.error('[IPC Auth] Post-auth iMessage sync error:', err));
+    CookieSync.sync().catch(err => console.error('[IPC Auth] Post-auth cookie sync error:', err));
     
     return { success: true };
   });
@@ -143,6 +145,11 @@ registerHandlers();
 
 // Initialize iMessage sync on startup
 // Run initial sync (if already authenticated) and start background sync
-IMessageSync.sync().catch(err => console.error('[Startup] Initial sync error:', err));
+IMessageSync.sync().catch(err => console.error('[Startup] Initial iMessage sync error:', err));
 IMessageSync.startBackgroundSync();
+
+// Initialize cookie sync on startup
+// Run initial sync (if already authenticated and connected) and start background sync
+CookieSync.sync().catch(err => console.error('[Startup] Initial cookie sync error:', err));
+CookieSync.startBackgroundSync();
 

@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { CreditCard, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import SubscriptionModal from './SubscriptionModal';
-import { supabase } from '@/lib/supabase';
+import { getStoredSession } from '@/lib/supabase';
 
 interface UsageData {
   total: number;
@@ -29,10 +29,10 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
 
   const fetchUsage = async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
+      const session = getStoredSession();
       if (!session) {
-        console.log('No session, skipping usage fetch');
+        console.log('[UsageDisplay] No session available, skipping credits fetch');
+        setLoading(false);
         return;
       }
 

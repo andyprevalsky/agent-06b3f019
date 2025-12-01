@@ -1,5 +1,4 @@
 import { MessageChannel } from '@prisma/client';
-import NodeCache from 'node-cache';
 import fetch from 'node-fetch';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
@@ -19,6 +18,23 @@ interface GmailMessageListResponse {
   messages?: Array<{ id: string; threadId: string }>;
   nextPageToken?: string;
   resultSizeEstimate?: number;
+}
+
+interface GmailProfileResponse {
+  emailAddress: string;
+  messagesTotal: number;
+  threadsTotal: number;
+  historyId: string;
+}
+
+interface GmailHistoryResponse {
+  history?: Array<{
+    id: string;
+    messagesAdded?: Array<{ message: { id: string; threadId: string } }>;
+    messagesDeleted?: Array<{ message: { id: string; threadId: string } }>;
+  }>;
+  nextPageToken?: string;
+  historyId: string;
 }
 
 interface GmailMessageResponse {
@@ -60,6 +76,115 @@ interface EmailContact {
 }
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Get Gmail profile including current historyId
+ */
+export async function getGmailProfile(accessToken: string): Promise<GmailProfileResponse> {
+  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`[Gmail] Failed to get profile: ${response.status} - ${errorText}`);
+    throw new Error(`Gmail API error: ${response.status}`);
+  }
+
+  return (await response.json()) as GmailProfileResponse;
+}
+
+/**
+ * Fetch history of changes since a given historyId
+ * Returns message IDs that were added since the historyId, and the new historyId
+ */
+export async function fetchGmailHistory(
+  accessToken: string,
+  startHistoryId: string
+): Promise<{ addedMessageIds: string[]; newHistoryId: string }> {
+  const addedMessageIds: string[] = [];
+  let pageToken: string | undefined;
+  let newHistoryId = startHistoryId;
+
+  console.log(`[Gmail] Fetching history since historyId: ${startHistoryId}`);
+
+  do {
+    const url = new URL('https://gmail.googleapis.com/gmail/v1/users/me/history');
+    url.searchParams.set('startHistoryId', startHistoryId);
+    url.searchParams.set('historyTypes', 'messageAdded');
+    if (pageToken) {
+      url.searchParams.set('pageToken', pageToken);
+    }
+
+    const response = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      // 404 means historyId is too old or invalid - need full sync
+      if (response.status === 404) {
+        console.log('[Gmail] History expired, full sync required');
+        return { addedMessageIds: [], newHistoryId: '' };
+      }
+      console.error(`[Gmail] Failed to fetch history: ${response.status} - ${errorText}`);
+      throw new Error(`Gmail API error: ${response.status}`);
+    }
+
+    const data = (await response.json()) as GmailHistoryResponse;
+
+    if (data.history) {
+      for (const historyItem of data.history) {
+        if (historyItem.messagesAdded) {
+          for (const added of historyItem.messagesAdded) {
+            addedMessageIds.push(added.message.id);
+          }
+        }
+      }
+    }
+
+    newHistoryId = data.historyId;
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  console.log(`[Gmail] Found ${addedMessageIds.length} new messages, new historyId: ${newHistoryId}`);
+  return { addedMessageIds, newHistoryId };
+}
+
+/**
+ * Fetch specific messages by their IDs
+ */
+export async function fetchMessagesByIds(
+  accessToken: string,
+  messageIds: string[]
+): Promise<ParsedEmail[]> {
+  if (messageIds.length === 0) return [];
+
+  const emails: ParsedEmail[] = [];
+  const BATCH_SIZE = 100;
+
+  console.log(`[Gmail] Fetching ${messageIds.length} messages by ID...`);
+
+  for (let i = 0; i < messageIds.length; i += BATCH_SIZE) {
+    const batch = messageIds.slice(i, i + BATCH_SIZE);
+
+    try {
+      const batchResults = await fetchMessagesBatch(accessToken, batch);
+      const validEmails = batchResults.filter((e): e is ParsedEmail => e !== null);
+      emails.push(...validEmails);
+    } catch (error) {
+      console.error(`[Gmail] Batch request failed:`, error);
+    }
+
+    // Small delay between batches
+    if (i + BATCH_SIZE < messageIds.length) {
+      await sleep(100);
+    }
+  }
+
+  console.log(`[Gmail] Successfully fetched ${emails.length} messages`);
+  return emails;
+}
 
 /**
  * Fetch multiple messages using Gmail Batch API (up to 100 per request)
@@ -495,8 +620,7 @@ export async function parseGmailOAuthEmails(
   userId: string,
   userEmail: string,
   emails: ParsedEmail[],
-  jobId: string,
-  jobCache: NodeCache
+  jobId: string
 ): Promise<{ contacts: number; messages: number }> {
   console.log(`[Job ${jobId}] Processing ${emails.length} Gmail emails for user ${userId}`);
 
@@ -505,7 +629,7 @@ export async function parseGmailOAuthEmails(
   console.log(`[Job ${jobId}] Found ${contactsToUpsert.length} valid contacts (sent at least one email)`);
 
   // Use shared manager for DB operations
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId, jobCache);
+  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
   console.log(`[Job ${jobId}] ✅ Gmail sync complete: ${result.contacts} contacts, ${result.messages} messages`);
   return result;

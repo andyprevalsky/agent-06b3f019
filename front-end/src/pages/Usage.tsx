@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabase';
+import { getStoredSession } from '@/lib/supabase';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Loader2 } from 'lucide-react';
 
@@ -28,8 +28,7 @@ export default function Usage() {
 
   const fetchUsageData = async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
+      const session = getStoredSession();
       if (!session) {
         console.log('No session');
         return;

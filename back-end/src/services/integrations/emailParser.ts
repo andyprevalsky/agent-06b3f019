@@ -1,5 +1,4 @@
 import { MessageChannel } from '@prisma/client';
-import NodeCache from 'node-cache';
 import { prisma } from '../../lib/prisma';
 import AdmZip from 'adm-zip';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
@@ -402,8 +401,7 @@ export async function importEmailsToDb(
   userId: string,
   userEmails: string[], // User's email addresses to identify sent vs received
   emails: ParsedEmail[],
-  jobId: string,
-  jobCache: NodeCache
+  jobId: string
 ): Promise<{ contacts: number; messages: number }> {
   console.log(`[Job ${jobId}] Processing ${emails.length} emails for user ${userId}`);
 
@@ -427,7 +425,7 @@ export async function importEmailsToDb(
   });
 
   // Use shared manager for DB operations
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId, jobCache);
+  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
   // Update integration status
   await prisma.integration.update({

@@ -1,5 +1,4 @@
 import { MessageChannel } from '@prisma/client';
-import NodeCache from 'node-cache';
 import { prisma } from '../../lib/prisma';
 
 const PERSON_CHUNK_SIZE = 50;
@@ -95,8 +94,7 @@ function calculateCommunicationFrequency(messages: Array<{ timestamp: Date }>): 
 export async function upsertPersonAndMessageRecords(
   userId: string,
   contacts: ContactToUpsert[],
-  jobId: string,
-  jobCache: NodeCache
+  jobId: string
 ): Promise<{ contacts: number; messages: number }> {
   const totalMessages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
   console.log(`[Job ${jobId}] Processing ${totalMessages} messages from ${contacts.length} contacts for user ${userId}`);
@@ -203,17 +201,6 @@ export async function upsertPersonAndMessageRecords(
 
         contactsProcessed++;
         messagesProcessed += contact.messages.length;
-
-        // Update job progress
-        const currentState = jobCache.get<any>(jobId);
-        if (currentState) {
-          jobCache.set(jobId, {
-            ...currentState,
-            messagesProcessed,
-            contactsCreated: contactsProcessed,
-            progress: Math.round((messagesProcessed / totalMessages) * 100),
-          });
-        }
 
         console.log(`[Job ${jobId}] Processed contact ${contact.identifier}: ${contact.messages.length} messages (${messagesProcessed}/${totalMessages} total)`);
       } catch (error) {

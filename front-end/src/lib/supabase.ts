@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type Session, type User } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -13,52 +13,177 @@ type StorageAdapter = {
   removeItem: (key: string) => void | Promise<void>;
 };
 
+// Check if we're actually running in Electron (not just web with window.api potentially defined)
+const isElectron = () => {
+  if (typeof window === 'undefined') return false;
+  // Check for Electron-specific properties
+  const result = !!(window.api?.auth && typeof window.api.auth.check === 'function');
+  console.log('[Supabase] isElectron check:', result, 'window.api:', !!window.api, 'window.api?.auth:', !!window.api?.auth);
+  return result;
+};
+
+// In-memory storage for non-session Supabase keys (like PKCE code verifiers)
+// This is needed because the Electron auth bridge only stores the session
+const auxiliaryStorage = new Map<string, string>();
+let cachedSession: Session | null = null;
+
+const SUPABASE_SESSION_PREFIX = 'sb-';
+const SUPABASE_SESSION_SUFFIX = '-auth-token';
+const USER_CACHE_KEY = 'app-user';
+
+const findSupabaseSessionKey = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const key = window.localStorage.key(i);
+    if (key && key.startsWith(SUPABASE_SESSION_PREFIX) && key.endsWith(SUPABASE_SESSION_SUFFIX)) {
+      return key;
+    }
+  }
+  return null;
+};
+
+export const getStoredSession = (): Session | null => {
+  if (cachedSession) {
+    return cachedSession;
+  }
+  if (typeof window === 'undefined') return null;
+  const key = findSupabaseSessionKey();
+  if (!key) return null;
+  const stored = window.localStorage.getItem(key);
+  if (!stored) return null;
+  try {
+    const parsed = JSON.parse(stored);
+    cachedSession = parsed;
+    return parsed;
+  } catch (error) {
+    console.warn('[Supabase] Failed to parse stored session', error);
+    return null;
+  }
+};
+
+export const clearStoredSession = () => {
+  if (typeof window === 'undefined') return;
+  cachedSession = null;
+  if (window.api?.auth) {
+    window.api.auth.clear().catch((error: unknown) => {
+      console.warn('[Supabase] Failed to clear Electron auth session', error);
+    });
+  }
+  const key = findSupabaseSessionKey();
+  if (key) {
+    window.localStorage.removeItem(key);
+  }
+};
+
+export const persistCachedUser = (user: User | null) => {
+  if (typeof window === 'undefined') return;
+  if (user) {
+    window.localStorage.setItem(USER_CACHE_KEY, JSON.stringify(user));
+  } else {
+    window.localStorage.removeItem(USER_CACHE_KEY);
+  }
+};
+
+export const getCachedUser = (): User | null => {
+  if (typeof window === 'undefined') return null;
+  const stored = window.localStorage.getItem(USER_CACHE_KEY);
+  if (!stored) return null;
+  try {
+    return JSON.parse(stored);
+  } catch (error) {
+    console.warn('[Supabase] Failed to parse cached user', error);
+    return null;
+  }
+};
+
 const getElectronStorage = (): StorageAdapter | undefined => {
-  if (typeof window === 'undefined') return undefined;
-  const authBridge = window.api?.auth;
-  if (!authBridge) return undefined;
+  if (!isElectron()) return undefined;
+  const authBridge = window.api!.auth!;
 
   return {
-    getItem: async () => {
-      const session = await authBridge.check();
-      return session ? JSON.stringify(session) : null;
+    getItem: async (key: string) => {
+      // For session token, use the auth bridge
+      if (key.endsWith('-auth-token') && !key.includes('code-verifier')) {
+        const session = await authBridge.check();
+        if (session) {
+          cachedSession = session;
+        }
+        return session ? JSON.stringify(session) : null;
+      }
+      // For other keys (like code verifier), use auxiliary storage
+      return auxiliaryStorage.get(key) ?? null;
     },
-    setItem: async (_, value) => {
-      if (!value) {
-        await authBridge.clear();
+    setItem: async (key: string, value: string) => {
+      // For session token, use the auth bridge
+      if (key.endsWith('-auth-token') && !key.includes('code-verifier')) {
+        if (!value) {
+          await authBridge.clear();
+          return;
+        }
+        try {
+          const session = JSON.parse(value);
+          await authBridge.save(session);
+          cachedSession = session;
+        } catch (error) {
+          console.warn('[Supabase] Failed to parse session for Electron storage', error);
+        }
         return;
       }
-      try {
-        const session = JSON.parse(value);
-        await authBridge.save(session);
-      } catch (error) {
-        console.warn('[Supabase] Failed to parse session for Electron storage', error);
+      // For other keys (like code verifier), use auxiliary storage
+      if (value) {
+        auxiliaryStorage.set(key, value);
+      } else {
+        auxiliaryStorage.delete(key);
       }
     },
-    removeItem: async () => {
-      await authBridge.clear();
+    removeItem: async (key: string) => {
+      // For session token, use the auth bridge
+      if (key.endsWith('-auth-token') && !key.includes('code-verifier')) {
+        await authBridge.clear();
+        cachedSession = null;
+        return;
+      }
+      // For other keys, use auxiliary storage
+      auxiliaryStorage.delete(key);
     },
   };
 };
 
+// Only use custom storage for Electron - let Supabase use its default localStorage for web
 const electronStorage = getElectronStorage();
-const browserStorage = typeof window !== 'undefined' ? window.localStorage : undefined;
-const authStorage = electronStorage ?? browserStorage;
+
+if (typeof window !== 'undefined' && window.api?.auth) {
+  window.api.auth
+    .check()
+    .then((session) => {
+      cachedSession = session ?? null;
+    })
+    .catch((error) => {
+      console.warn('[Supabase] Failed to prime cached session from Electron bridge', error);
+    });
+}
+
+console.log('[Supabase] 🔧 Environment:', electronStorage ? 'Electron (custom storage)' : 'Web (default localStorage)');
 
 const supabaseAuthConfig: {
   autoRefreshToken: boolean;
   persistSession: boolean;
   detectSessionInUrl: boolean;
-  storage?: StorageAdapter | Storage;
+  storage?: StorageAdapter;
 } = {
   autoRefreshToken: true,
   persistSession: true,
   detectSessionInUrl: false,
 };
 
-if (authStorage) {
-  supabaseAuthConfig.storage = authStorage;
+// IMPORTANT: Only set storage for Electron. For web, let Supabase use its built-in localStorage handling.
+// Explicitly passing localStorage can interfere with Supabase's internal initialization.
+if (electronStorage) {
+  supabaseAuthConfig.storage = electronStorage;
 }
+
+console.log('[Supabase] 🏗️ Creating Supabase client...');
+console.log('[Supabase] 📋 Using custom storage:', !!electronStorage);
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: supabaseAuthConfig,
@@ -76,6 +201,9 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     },
   },
 });
+
+console.log('[Supabase] ✅ Supabase client created');
+console.log('[Supabase] 📋 supabase.auth:', !!supabase.auth);
 
 // Phone Auth helpers
 export const sendOTP = async (phone: string) => {
@@ -102,8 +230,33 @@ export const verifyOTP = async (phone: string, token: string) => {
 };
 
 export const signOut = async () => {
-  const { error } = await supabase.auth.signOut();
-  if (error) throw error;
+  console.log('[Supabase] signOut() called');
+  const start = performance.now();
+  const timeoutMs = 3000;
+  let timedOut = false;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<null>((resolve) => {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      console.warn('[Supabase] signOut() timed out after', timeoutMs, 'ms. Proceeding with manual cleanup.');
+      resolve(null);
+    }, timeoutMs);
+  });
+
+  const response = (await Promise.race([
+    supabase.auth.signOut({ scope: 'local' }),
+    timeoutPromise,
+  ])) as { error: Error | null } | null;
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+  }
+
+  const duration = performance.now() - start;
+  console.log('[Supabase] signOut() finished', { durationMs: duration.toFixed(2), timedOut, error: response?.error ?? null });
+
+  if (!timedOut && response?.error) {
+    throw response.error;
+  }
 };
 
 export const getCurrentUser = async () => {

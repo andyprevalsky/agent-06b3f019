@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase, getStoredSession } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 /**
@@ -32,9 +32,11 @@ export async function subscribeToAgent(
   handlers: AgentHandlers
 ): Promise<RealtimeChannel> {
   // Ensure realtime has auth token
-  const { data: { session } } = await supabase.auth.getSession();
+  const session = getStoredSession();
   if (session?.access_token) {
     await supabase.realtime.setAuth(session.access_token);
+  } else {
+    throw new Error('Not authenticated');
   }
 
   const channel = supabase.channel(`agent:${agentId}`, {
@@ -82,9 +84,11 @@ export async function subscribeToAttentionRequests(
   handlers: AttentionRequestHandlers
 ): Promise<RealtimeChannel> {
   // Ensure realtime has auth token
-  const { data: { session } } = await supabase.auth.getSession();
+  const session = getStoredSession();
   if (session?.access_token) {
     await supabase.realtime.setAuth(session.access_token);
+  } else {
+    throw new Error('Not authenticated');
   }
 
   const channel = supabase.channel(`user:${userId}`, {

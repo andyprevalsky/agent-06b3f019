@@ -2,7 +2,6 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect, RefObject } from "react";
 import { sendOTP, verifyOTP } from "@/lib/supabase";
-import { useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
 import { checkNeedsInviteCode, useInviteCode } from "@/lib/api";
 import * as amplitude from '@amplitude/analytics-browser';
@@ -11,11 +10,11 @@ interface PhoneAuthModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   triggerRef: RefObject<HTMLDivElement>;
+  onAuthComplete?: () => void; // Called when user is fully signed in
 }
 
-const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps) => {
+const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: PhoneAuthModalProps) => {
   const { toast } = useToast();
-  const navigate = useNavigate();
   const [step, setStep] = useState<'phone' | 'otp' | 'invite'>('phone');
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
@@ -123,13 +122,16 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
 
     try {
       const strippedPhone = stripPhoneNumber(phone);
+      
+      // Verify OTP with Supabase
       await verifyOTP(strippedPhone, otp);
       
-      // Track OTP code submitted event
+      // Track in Amplitude
       amplitude.track('otp_code_submitted');
-      
-      // Identify user in Amplitude with phone number
       amplitude.setUserId(strippedPhone);
+      
+      // Small delay to let Supabase finish internal state updates
+      await new Promise(resolve => setTimeout(resolve, 100));
       
       // Check if user needs to enter an invite code
       const needsInvite = await checkNeedsInviteCode();
@@ -139,20 +141,8 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
         setStep('invite');
         setLoading(false);
       } else {
-        // User already has invite code, proceed to terminal
-        toast({
-          title: "Success!",
-          description: "You're now logged in.",
-        });
-        onOpenChange(false);
-        // Reset state
-        setStep('phone');
-        setPhone('');
-        setOtp('');
-        setInviteCode('');
-        
-        // Dispatch event to trigger auth re-check (existing user, fully signed in)
-        window.dispatchEvent(new CustomEvent('invite-code-accepted'));
+        // User already has invite code - complete the flow
+        completeAuth();
       }
     } catch (error: any) {
       console.error('Verify OTP error:', error);
@@ -163,6 +153,25 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
       });
       setLoading(false);
     }
+  };
+
+  // Called when auth flow is fully complete (user has session + invite code)
+  const completeAuth = () => {
+    toast({
+      title: "Success!",
+      description: "You're now logged in.",
+    });
+    setLoading(false);
+    onOpenChange(false);
+    
+    // Reset state
+    setStep('phone');
+    setPhone('');
+    setOtp('');
+    setInviteCode('');
+    
+    // Notify parent that auth is complete
+    onAuthComplete?.();
   };
 
   const handleSubmitInviteCode = async (e: React.FormEvent) => {
@@ -180,20 +189,8 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
       // Track invite code submitted event
       amplitude.track('invite_code_submitted');
       
-      toast({
-        title: "Success!",
-        description: "Invite code accepted. You're all set!",
-      });
-      
-      onOpenChange(false);
-      // Reset state
-      setStep('phone');
-      setPhone('');
-      setOtp('');
-      setInviteCode('');
-      
-      // Dispatch event to trigger auth re-check (user is now fully signed in)
-      window.dispatchEvent(new CustomEvent('invite-code-accepted'));
+      // Complete the auth flow
+      completeAuth();
     } catch (error: any) {
       console.error('Invite code error:', error);
       toast({
@@ -201,7 +198,6 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef }: PhoneAuthModalProps)
         description: error.message || "Please check the code and try again.",
         variant: "destructive",
       });
-    } finally {
       setLoading(false);
     }
   };

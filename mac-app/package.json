@@ -77,7 +77,8 @@
       "entitlementsInherit": "entitlements.mac.plist"
     },
     "files": [
-      "dist/**/*",
+      "dist/main/**/*",
+      "dist/ui/**/*",
       "assets/**/*",
       "package.json",
       ".env.production"

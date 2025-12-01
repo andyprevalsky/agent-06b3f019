@@ -3,7 +3,6 @@ import { IntegrationType, IntegrationStatus, EmailProvider, Prisma } from '@pris
 import { authenticate, AuthRequest } from '../middleware/auth';
 import multer from 'multer';
 import fs from 'fs';
-import NodeCache from 'node-cache';
 import { parseIMessageData, ContactWithMessages } from '../services/integrations/iMessageParser';
 import { parseVcfContent, importVcfContacts } from '../services/integrations/vcfParser';
 import { parseEmailZip, importEmailsToDb } from '../services/integrations/emailParser';
@@ -580,7 +579,6 @@ router.post('/contacts/upload', authenticate, upload.single('file') as any, asyn
  */
 router.post('/email/upload', authenticate, upload.single('file') as any, async (req: AuthRequest, res: Response) => {
   const jobId = `email-upload-${Date.now()}`;
-  const localJobCache = new NodeCache({ stdTTL: 60 * 60 });
   
   try {
     const userId = req.user!.id;
@@ -610,34 +608,16 @@ router.post('/email/upload', authenticate, upload.single('file') as any, async (
     // User's email addresses (could be expanded to include aliases)
     const userEmails = [userEmail];
 
-    // Initialize job in cache
-    localJobCache.set(jobId, {
-      status: 'processing',
-      progress: 0,
-      messagesProcessed: 0,
-      contactsCreated: 0,
-      startedAt: new Date().toISOString(),
-    });
-
     // Parse the ZIP file
     console.log(`[Job ${jobId}] Parsing email ZIP...`);
     const emails = parseEmailZip(filePath);
     console.log(`[Job ${jobId}] Parsed ${emails.length} emails from ZIP`);
 
     // Import emails to database
-    const result = await importEmailsToDb(userId, userEmails, emails, jobId, localJobCache);
+    const result = await importEmailsToDb(userId, userEmails, emails, jobId);
 
     // Clean up file
     fs.unlinkSync(filePath);
-
-    // Update job status
-    localJobCache.set(jobId, {
-      status: 'completed',
-      progress: 100,
-      messagesProcessed: result.messages,
-      contactsCreated: result.contacts,
-      completedAt: new Date().toISOString(),
-    });
 
     return res.json({
       message: 'Emails imported successfully',
@@ -648,12 +628,6 @@ router.post('/email/upload', authenticate, upload.single('file') as any, async (
     });
   } catch (error) {
     console.error(`[Job ${jobId}] Error uploading email ZIP:`, error);
-
-    // Update job status
-    localJobCache.set(jobId, {
-      status: 'failed',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
 
     // Clean up file on error
     if (req.file) {
@@ -841,7 +815,6 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
     if (providerKey === 'gmail' && tokenResult.accessToken && tokenResult.userEmail) {
       (async () => {
         try {
-          const jobCache = new NodeCache({ stdTTL: 60 * 60 });
           const jobId = `gmail-oauth-${credential.userId}-${Date.now()}`;
 
           console.log(`[Job ${jobId}] Starting Gmail email sync for user ${credential.userId}`);
@@ -851,29 +824,30 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
             credential.userId,
             tokenResult.userEmail!,
             emails,
-            jobId,
-            jobCache
+            jobId
           );
 
-          // Update integration with contact/message counts
+          // Get existing counts and add new counts
           const existingIntegration = await prisma.integration.findUnique({
             where: { id: credential.integrationId },
           });
           const existingConfig = (existingIntegration?.config as Record<string, unknown>) || {};
+          const existingContacts = (existingConfig.contacts as number) || 0;
+          const existingMessages = (existingConfig.messages as number) || 0;
 
           await prisma.integration.update({
             where: { id: credential.integrationId },
             data: {
               config: {
                 ...existingConfig,
-                contacts: result.contacts,
-                messages: result.messages,
+                contacts: existingContacts + result.contacts,
+                messages: existingMessages + result.messages,
                 lastSyncedAt: new Date().toISOString(),
               },
             },
           });
 
-          console.log(`[Job ${jobId}] ✅ Gmail sync complete: ${result.contacts} contacts, ${result.messages} messages`);
+          console.log(`[Job ${jobId}] ✅ Gmail sync complete: ${result.contacts} new contacts, ${result.messages} new messages (total: ${existingContacts + result.contacts} contacts, ${existingMessages + result.messages} messages)`);
         } catch (error) {
           console.error('Error syncing Gmail emails:', error);
           // Update integration with error status
@@ -961,8 +935,12 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
 
     (async () => {
       try {
-        const jobCache = new NodeCache({ stdTTL: 60 * 60 });
-        await parseIMessageData(userId, contacts, jobId, jobCache);
+        await parseIMessageData(userId, contacts, jobId);
+
+        // Get existing counts and add new counts
+        const existingConfig = (integration.config as Record<string, unknown>) || {};
+        const existingContacts = (existingConfig.contacts as number) || 0;
+        const existingMessages = (existingConfig.messages as number) || 0;
 
         await prisma.integration.update({
           where: { id: integration.id },
@@ -972,12 +950,12 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
             lastSyncAt: new Date(),
             lastSuccessfulSyncAt: new Date(),
             config: {
-              ...(integration.config as Record<string, unknown>),
-              contacts: contacts.length,
-              messages: totalMessages,
+              ...existingConfig,
+              contacts: existingContacts + contacts.length,
+              messages: existingMessages + totalMessages,
               lastJobId: jobId,
               lastUploadedAt: new Date().toISOString(),
-              lastFrontendAccessAt: accessedAt || (integration.config as Record<string, unknown>)?.lastFrontendAccessAt || new Date().toISOString(),
+              lastFrontendAccessAt: accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
             },
           },
         });

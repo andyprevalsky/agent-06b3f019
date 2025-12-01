@@ -4,16 +4,16 @@ import { Maximize2, X, CheckCircle2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MarkdownText } from './MarkdownText';
 import { getToolIcon } from '@/lib/toolIcons';
-import { supabase } from '@/lib/supabase';
+import { getStoredSession } from '@/lib/supabase';
 
 // API Configuration - match pattern used in lib/api.ts
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
 // Helper function to get auth headers (same as lib/api.ts)
-async function getAuthHeaders() {
-  const session = await supabase.auth.getSession();
-  const token = session.data.session?.access_token;
+function getAuthHeaders() {
+  const session = getStoredSession();
+  const token = session?.access_token;
   
   if (!token) {
     throw new Error('Not authenticated');
@@ -271,7 +271,7 @@ export default function BrowserViewPanel({
     setIsResuming(true);
     try {
       // Get auth headers
-      const headers = await getAuthHeaders();
+      const headers = getAuthHeaders();
       
       // Resume using stable task_id (backend creates new session with same context)
       const response = await fetch(`${API_BASE_WITH_PATH}/browser-session/resume`, {

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '../lib/supabase';
+import { getStoredSession } from '../lib/supabase';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -42,7 +42,7 @@ export default function Settings() {
       setLoading(true);
       setError(null);
 
-      const { data: { session } } = await supabase.auth.getSession();
+      const session = getStoredSession();
       if (!session) {
         setError('Not authenticated');
         return;
@@ -82,7 +82,7 @@ export default function Settings() {
       setError(null);
       setSaved(false);
 
-      const { data: { session } } = await supabase.auth.getSession();
+      const session = getStoredSession();
       if (!session) {
         setError('Not authenticated');
         return;

@@ -4,7 +4,8 @@ import * as amplitude from '@amplitude/analytics-browser';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift, Copy, Check, Plug, Network } from 'lucide-react';
-import { supabase, signOut, getCurrentUser, initializeRealtime } from '@/lib/supabase';
+import { supabase, signOut, initializeRealtime, clearStoredSession } from '@/lib/supabase';
+import { useAuth } from '@/hooks/useAuth';
 import { subscribeToAgent, unsubscribe } from '@/lib/realtime';
 import {
   getAllAgents,
@@ -14,7 +15,6 @@ import {
   resumeAgent,
   checkAndRespondToAttentionRequest,
   getMyInviteCode,
-  checkNeedsInviteCode,
   InviteCodeInfo,
   Agent,
   AgentDetail,
@@ -354,7 +354,12 @@ function mapShadowSlider(slider: number): number {
 export default function Terminal() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [user, setUser] = useState<any>(null);
+  
+  // Auth state from hook - isFullySignedIn is TRUE only when session exists AND invite code is used
+  const { user: authUser, isFullySignedIn, refreshAuthState, loading: authLoading } = useAuth();
+  
+  // User is only considered "logged in" for Terminal features when fully signed in
+  const user = isFullySignedIn ? authUser : null;
 
   // View state - which pane to show
   const [currentView, setCurrentView] = useState<'agents' | 'integrations' | 'settings' | 'usage' | 'network'>('agents');
@@ -404,6 +409,7 @@ export default function Terminal() {
   const queryInputRef = useRef<HTMLDivElement>(null);
   const giftButtonRef = useRef<HTMLButtonElement>(null);
   const pendingSubmitAfterLoginRef = useRef<boolean>(false);
+  const autoSubmitInFlightRef = useRef<boolean>(false);
   const messageInputRef = useRef<string>('');
   
   // Message buffer queue - messages wait here before being displayed
@@ -491,43 +497,28 @@ export default function Terminal() {
   // State to trigger auto-submit after login completes
   const [triggerAutoSubmit, setTriggerAutoSubmit] = useState(false);
 
-  // Listen for invite code accepted event to complete auth
+  // Auto-submit when user becomes fully signed in (if there's a pending goal)
   useEffect(() => {
-    const handleInviteAccepted = async () => {
-      // Re-fetch and set user now that invite code is complete
-      const currentUser = await getCurrentUser();
-      if (currentUser) {
-        setUser(currentUser);
-        
-        // Identify user in Amplitude
-        if (currentUser.phone) {
-          amplitude.setUserId(currentUser.phone);
-        } else if (currentUser.id) {
-          amplitude.setUserId(currentUser.id);
-        }
-        
-        // Initialize realtime
-        await initializeRealtime();
-        
-        // Trigger auto-submit if there was a pending goal
-        if (pendingSubmitAfterLoginRef.current && messageInputRef.current.trim()) {
-          pendingSubmitAfterLoginRef.current = false;
-          setTriggerAutoSubmit(true);
-        }
-      }
-    };
-    
-    window.addEventListener('invite-code-accepted', handleInviteAccepted);
-    return () => window.removeEventListener('invite-code-accepted', handleInviteAccepted);
-  }, []);
-
-  // Auto-submit when triggered and user is set
-  useEffect(() => {
-    if (triggerAutoSubmit && user && messageInput.trim()) {
-      setTriggerAutoSubmit(false);
-      handleSendMessage();
+    if (!isFullySignedIn) {
+      autoSubmitInFlightRef.current = false;
+      return;
     }
-  }, [triggerAutoSubmit, user, messageInput]);
+    if (!pendingSubmitAfterLoginRef.current) return;
+    if (!messageInputRef.current.trim()) return;
+    if (isSendingMessage || autoSubmitInFlightRef.current) return;
+
+    pendingSubmitAfterLoginRef.current = false;
+    autoSubmitInFlightRef.current = true;
+    console.log('[Auth] Auto-submitting queued goal after login');
+
+    handleSendMessage()
+      .catch(error => {
+        console.error('[Auth] Auto-submit failed', error);
+      })
+      .finally(() => {
+        autoSubmitInFlightRef.current = false;
+      });
+  }, [isFullySignedIn, isSendingMessage]);
 
   // Calculate drip styles from separate controls with non-linear mapping
   const dripStyles = useMemo(() => {
@@ -711,80 +702,31 @@ export default function Terminal() {
     };
   }, [FRAME_DURATION_MS, animationComplete]);
 
-  // Check authentication and set up auth state listener
+  // Initialize realtime and Amplitude when user becomes fully signed in
   useEffect(() => {
-    checkAuth();
-    
-    // Listen for auth state changes and update realtime connection and user state
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_IN' && session?.user) {
-        await supabase.realtime.setAuth(session.access_token);
-        
-        // Check if user has completed invite code requirement
-        try {
-          const needsInvite = await checkNeedsInviteCode();
-          if (needsInvite) {
-            // User authenticated but hasn't completed invite code - don't set user yet
-            return;
-          }
-        } catch (error) {
-          // If check fails, don't set user
-          console.error('Failed to check invite code status:', error);
-          return;
-        }
-        
-        setUser(session.user);
-        
-        // Identify user in Amplitude on sign in
-        if (session.user.phone) {
-          amplitude.setUserId(session.user.phone);
-        } else if (session.user.id) {
-          amplitude.setUserId(session.user.id);
-        }
-      } else if (event === 'SIGNED_OUT') {
-        setUser(null);
-        // Reset Amplitude user on sign out
+    if (isFullySignedIn && authUser) {
+      // Set up realtime connection
+      initializeRealtime();
+      
+      // Identify user in Amplitude
+      if (authUser.phone) {
+        amplitude.setUserId(authUser.phone);
+      } else if (authUser.id) {
+        amplitude.setUserId(authUser.id);
+      }
+    }
+  }, [isFullySignedIn, authUser]);
+  
+  // Handle sign out - reset Amplitude
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT') {
         amplitude.reset();
       }
     });
     
-    return () => {
-      subscription.unsubscribe();
-    };
+    return () => subscription.unsubscribe();
   }, []);
-
-  const checkAuth = async () => {
-    try {
-      const currentUser = await getCurrentUser();
-      if (!currentUser) {
-        // No Supabase user - not logged in, but don't redirect (allow guest browsing)
-        return;
-      }
-      
-      // Check if user has completed invite code requirement
-      const needsInvite = await checkNeedsInviteCode();
-      if (needsInvite) {
-        // User is authenticated with Supabase but hasn't completed invite code
-        // Don't set user state - they're not fully signed in
-        return;
-      }
-      
-      setUser(currentUser);
-      
-      // Identify returning user in Amplitude
-      if (currentUser.phone) {
-        amplitude.setUserId(currentUser.phone);
-      } else if (currentUser.id) {
-        amplitude.setUserId(currentUser.id);
-      }
-      
-      // Initialize realtime with auth token after authentication
-      await initializeRealtime();
-    } catch (error) {
-      // Error checking auth - don't redirect, just leave user as null
-      console.error('Auth check error:', error);
-    }
-  };
 
   // Load agents on mount
   useEffect(() => {
@@ -1338,20 +1280,26 @@ export default function Terminal() {
 
   const handleLogout = async () => {
     try {
+      console.log('[Auth] Logout requested');
       await signOut();
-      // Clear all local state
+      console.log('[Auth] Supabase signOut complete, clearing local session cache');
+      clearStoredSession();
+      await refreshAuthState('logout');
+      console.log('[Auth] refreshAuthState finished after logout');
+      // Clear all local state (user state is handled by useAuth hook)
       setAgents([]);
       setSelectedAgentId(null);
       setAgentDetail(null);
       setMessages([]);
       setMessageInput('');
       setCurrentView('agents');
-      setUser(null);
       setIsSidebarOpen(false);
       
       // Reset Amplitude user identity on logout
       amplitude.reset();
+      console.log('[Auth] Logout flow completed');
     } catch (error) {
+      console.error('[Auth] Logout failed', error);
       toast({
         title: 'Error',
         description: 'Failed to log out',
@@ -2308,6 +2256,7 @@ export default function Terminal() {
         open={loginModalOpen}
         onOpenChange={setLoginModalOpen}
         triggerRef={queryInputRef}
+        onAuthComplete={refreshAuthState}
       />
     </div>
   );
