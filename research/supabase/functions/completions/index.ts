@@ -10,7 +10,7 @@ const corsHeaders = {
 const MODEL_POOLS = {
   'rose-1-fast': [
     'openai/gpt-oss-120b',
-    'qwen/qwen-3-235b-a22b-thinking-2507',
+    'qwen/qwen3-235b-a22b-thinking-2507',
     'moonshotai/kimi-k2-0905',
     'meta-llama/llama-4-maverick',
     'deepseek/deepseek-v3.2-exp',
@@ -18,7 +18,6 @@ const MODEL_POOLS = {
     'openai/gpt-5.1',
     'mistralai/mistral-medium-3.1',
     'google/gemini-2.5-flash',
-    'x-ai/grok-code-fast-1',
     'nousresearch/hermes-4-405b',
     'minimax/minimax-m2',
     'x-ai/grok-4-fast'
@@ -92,8 +91,8 @@ function isCerebrasPool(poolName: string): boolean {
   return poolName === 'rose-hyper';
 }
 
-// Randomly select a model from the pool
-function selectModel(requestedModel: string): { model: string; isCerebras: boolean; poolName: string } {
+// Select a model from the pool (random or by seed index)
+function selectModel(requestedModel: string, modelSeed?: number): { model: string; isCerebras: boolean; poolName: string; poolSize: number } {
   let normalized = requestedModel.toLowerCase();
   if (normalized.startsWith('rose-labs/')) {
     normalized = normalized.replace('rose-labs/', '');
@@ -105,10 +104,21 @@ function selectModel(requestedModel: string): { model: string; isCerebras: boole
     throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast', 'rose-labs/rose-1-ultra', or 'rose-labs/rose-hyper'`);
   }
   
+  // If model_seed is provided, use it to select a specific model
+  if (modelSeed !== undefined) {
+    if (modelSeed < 0 || modelSeed >= pool.length) {
+      throw new Error(`model_seed ${modelSeed} out of range. Pool '${normalized}' has ${pool.length} models (valid range: 0-${pool.length - 1})`);
+    }
+    const selectedModel = pool[modelSeed];
+    const isCerebras = isCerebrasPool(normalized);
+    console.log(`🎯 Model selection (seed=${modelSeed}): ${requestedModel} → ${selectedModel} (Cerebras: ${isCerebras})`);
+    return { model: selectedModel, isCerebras, poolName: normalized, poolSize: pool.length };
+  }
+  
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
   const isCerebras = isCerebrasPool(normalized);
   console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel} (Cerebras: ${isCerebras})`);
-  return { model: selectedModel, isCerebras, poolName: normalized };
+  return { model: selectedModel, isCerebras, poolName: normalized, poolSize: pool.length };
 }
 
 // Validate API key and return user info
@@ -269,10 +279,9 @@ async function handleStreaming(
               
               try {
                 const parsed = JSON.parse(data);
-                // Mask the model name
-                if (parsed.model) {
-                  parsed.model = requestedModel;
-                }
+                // Include actual model for debugging (unmasked)
+                parsed.requested_model = requestedModel;
+                parsed.actual_model = actualModel;
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
               } catch (e) {
                 console.error('Error parsing streaming data:', e);
@@ -339,6 +348,7 @@ serve(async (req) => {
       tool_choice,
       cot_steps,
       response_format,
+      model_seed,  // Optional: index into model pool for testing
       ...otherParams
     } = await req.json();
     
@@ -360,9 +370,9 @@ serve(async (req) => {
     }
 
     // Select actual model from pool
-    let selection: { model: string; isCerebras: boolean; poolName: string };
+    let selection: { model: string; isCerebras: boolean; poolName: string; poolSize: number };
     try {
-      selection = selectModel(model);
+      selection = selectModel(model, model_seed);
     } catch (error) {
       return new Response(JSON.stringify({ 
         error: error instanceof Error ? error.message : 'Invalid model' 
@@ -599,10 +609,12 @@ serve(async (req) => {
       totalCompletionTokens += finalResponse.usage?.completion_tokens || 0;
     }
 
-    // Mask the actual model in the response
-    if (finalResponse.model) {
-      finalResponse.model = model;
-    }
+    // Include actual selected model for debugging (unmasked)
+    // The requested model alias is preserved in a separate field
+    finalResponse.requested_model = model;
+    finalResponse.actual_model = actualModel;
+    finalResponse.pool_name = selection.poolName;
+    finalResponse.pool_size = selection.poolSize;
 
     // Calculate cost
     const costCents = calculateCost(totalPromptTokens, totalCompletionTokens, actualModel);

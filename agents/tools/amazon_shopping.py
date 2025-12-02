@@ -378,12 +378,13 @@ async def fetch_user_settings_activity(user_id: str) -> Dict[str, Any]:
     try:
         activity.heartbeat(f"Fetching user settings for: {user_id}")
         
-        backend_url = os.getenv("BACKEND_URL", "http://localhost:3001")
-        api_key = os.getenv("INTERNAL_API_KEY")
+        config = load_config()
+        backend_url = config.backend.api_url.rstrip("/")
+        api_key = config.backend.api_key
         
         headers = {}
         if api_key:
-            headers["x-api-key"] = api_key
+            headers["X-API-Key"] = api_key
         
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(

@@ -15,6 +15,7 @@
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "cleanup:all": "tsx scripts/cleanup-all-agents.ts",
+    "cleanup:integrations": "tsx scripts/cleanup-integrations.ts",
     "clear:blueprints": "tsx scripts/clear-blueprints.ts",
     "getmessages:all": "tsx scripts/get-messages-all.ts",
     "backfill:pricing": "tsx scripts/backfill-agent-pricing.ts",

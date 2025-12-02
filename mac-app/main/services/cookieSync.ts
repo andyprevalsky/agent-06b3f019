@@ -14,7 +14,7 @@ export class CookieSync {
   private static intervalId: NodeJS.Timeout | null = null;
 
   static async sync(): Promise<void> {
-    const session = AuthService.getSession();
+    const session = await AuthService.getSession();
     if (!session) {
       console.log('[CookieSync] Skipping sync - not authenticated');
       return;

@@ -9,15 +9,13 @@ const corsHeaders = {
 const MODEL_POOLS = {
   'rose-1-fast': [
     'openai/gpt-oss-120b',
-    'qwen/qwen-3-235b-a22b-thinking-2507',
+    'qwen/qwen3-235b-a22b-thinking-2507',
     'moonshotai/kimi-k2-0905',
     'meta-llama/llama-4-maverick',
     'deepseek/deepseek-v3.2-exp',
-    'z-ai/glm-4.6',
     'openai/gpt-5.1',
     'mistralai/mistral-medium-3.1',
     'google/gemini-2.5-flash',
-    'x-ai/grok-code-fast-1',
     'nousresearch/hermes-4-405b',
     'minimax/minimax-m2',
     'x-ai/grok-4-fast'

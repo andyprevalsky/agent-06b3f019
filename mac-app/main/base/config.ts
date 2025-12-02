@@ -19,7 +19,7 @@ if (fs.existsSync(envPath)) {
 }
 
 export const config = {
-  apiUrl: process.env.VITE_BACKEND_API_URL || process.env.VITE_BACKEND_URL || 'http://localhost:3001',
+  apiUrl: process.env.VITE_BACKEND_API_URL || 'http://localhost:3001',
   supabase: {
     url: process.env.VITE_SUPABASE_URL!,
     anonKey: process.env.VITE_SUPABASE_ANON_KEY!,

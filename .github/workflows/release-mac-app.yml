@@ -36,7 +36,6 @@ jobs:
           cat <<'EOF' | sed 's/^ *//' > .env.production
             VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}
             VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}
-            VITE_BACKEND_URL=${{ secrets.VITE_BACKEND_API_URL }}
             VITE_BACKEND_API_URL=${{ secrets.VITE_BACKEND_API_URL }}
             ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}
             GH_UPDATE_TOKEN=${{ secrets.GH_UPDATE_TOKEN }}

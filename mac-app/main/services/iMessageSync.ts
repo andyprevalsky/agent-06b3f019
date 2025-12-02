@@ -7,6 +7,7 @@ const SYNC_INTERVAL_MS = (5 * 60 * 1000); // 5 minutes
 
 interface Integration {
   name: string;
+  status: string;
   config?: {
     lastFrontendAccessAt?: string;
   };
@@ -16,7 +17,7 @@ export class IMessageSync {
   private static intervalId: NodeJS.Timeout | null = null;
 
   static async sync(): Promise<void> {
-    const session = AuthService.getSession();
+    const session = await AuthService.getSession();
     if (!session) {
       console.log('[IMessageSync] Skipping sync - not authenticated');
       return;
@@ -44,6 +45,12 @@ export class IMessageSync {
       const integrations = data.integrations;
       const imessageIntegration = integrations?.find(i => i.name === 'imessage');
       
+      // Only sync if already connected (user has previously synced)
+      if (!imessageIntegration || imessageIntegration.status !== 'CONNECTED') {
+        console.log('[IMessageSync] Skipping sync - integration not connected');
+        return;
+      }
+
       const lastAccessedAt = imessageIntegration?.config?.lastFrontendAccessAt;
       
       // Read messages (filtered by timestamp if available)

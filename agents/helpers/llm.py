@@ -30,6 +30,8 @@ def convert_context_to_messages(
       otherwise converted to SYSTEM role
     - Skips IN_PROGRESS tool messages (only sends FINISHED results)
     - Sorts messages by timestamp to ensure chronological order
+    - FINISHED tool messages use their IN_PROGRESS timestamp for sorting, ensuring tool results
+      stay grouped with their ASSISTANT tool_call even if USER messages arrive in between
     
     Args:
         context: List of message dicts with role/text/metadata
@@ -43,9 +45,11 @@ def convert_context_to_messages(
     # Sort context by timestamp to ensure chronological order
     # This is critical after polling for new user messages or continue-as-new
     from datetime import datetime
-    def get_timestamp(msg: Dict[str, Any]) -> datetime:
+    
+    def parse_timestamp(ts: str) -> datetime:
         """Parse ISO timestamp, defaulting to epoch if missing/invalid."""
-        ts = msg.get('timestamp', '1970-01-01T00:00:00Z')
+        if not ts:
+            return datetime(1970, 1, 1)
         try:
             # Handle both with and without timezone
             if ts.endswith('Z'):
@@ -53,6 +57,31 @@ def convert_context_to_messages(
             return datetime.fromisoformat(ts)
         except (ValueError, AttributeError):
             return datetime(1970, 1, 1)
+    
+    # Build map of tool_call_id -> IN_PROGRESS timestamp
+    # This allows FINISHED messages to use the IN_PROGRESS timestamp for sorting,
+    # ensuring tool results stay grouped with their declaring ASSISTANT message
+    # even if a USER message arrives before the tool completes
+    tool_start_times: Dict[str, str] = {}
+    for msg in context:
+        meta = msg.get('metadata', {}) or {}
+        if msg.get('role') == 'TOOL' and meta.get('toolStatus') == 'IN_PROGRESS':
+            tool_call_id = meta.get('toolCallId')
+            if tool_call_id:
+                tool_start_times[tool_call_id] = msg.get('timestamp', '')
+    
+    def get_timestamp(msg: Dict[str, Any]) -> datetime:
+        """Get timestamp for sorting. FINISHED tool messages use their IN_PROGRESS timestamp."""
+        meta = msg.get('metadata', {}) or {}
+        
+        # For FINISHED tool messages, use the IN_PROGRESS timestamp if available
+        # This keeps tool results grouped with their ASSISTANT tool_call, not separated by USER messages
+        if msg.get('role') == 'TOOL' and meta.get('toolStatus') == 'FINISHED':
+            tool_call_id = meta.get('toolCallId')
+            if tool_call_id and tool_call_id in tool_start_times:
+                return parse_timestamp(tool_start_times[tool_call_id])
+        
+        return parse_timestamp(msg.get('timestamp', ''))
     
     # Sort with SYSTEM messages first (but chronological among themselves),
     # then all other messages chronologically
@@ -821,6 +850,12 @@ async def call_llm_structured(
         
         data = http_response.json()
         
+        # Log the actual model selected from the pool (for debugging tool call issues)
+        actual_model = data.get("actual_model", "unknown")
+        pool_name = data.get("pool_name", "unknown")
+        pool_size = data.get("pool_size", 0)
+        logger.info(f"🎯 Rose pool selection: {model} → {actual_model} (pool={pool_name}, size={pool_size})")
+        
         # Parse the response content as JSON and validate with Pydantic
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
         try:
@@ -830,11 +865,14 @@ async def call_llm_structured(
             logger.error(f"Failed to parse Rose response: {content[:500]}", error=str(e))
             raise ValueError(f"Failed to parse Rose response as {response_model.__name__}: {str(e)}")
         
-        # Extract usage
+        # Extract usage (include actual model for debugging)
         usage = {
             "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
             "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
-            "total_tokens": data.get("usage", {}).get("total_tokens", 0)
+            "total_tokens": data.get("usage", {}).get("total_tokens", 0),
+            "actual_model": actual_model,
+            "pool_name": pool_name,
+            "pool_size": pool_size
         }
         
         return response, usage
@@ -1092,46 +1130,59 @@ USER CONTACT INFORMATION:
 When sending SMS messages to the user, use their phone number: {user_phone}
 """
         
-        system_prompt = f"""You are an autonomous AI agent working on the task described in the conversation history.
+        system_prompt = f"""{user_info_section}
+IDENTITY:
 
-You have access to these tools:
+- You are a nurturer of metaphysical seeds. The user will give you a seed in the form of a goal. Your purpose is to nurture them to fruition (100% accomplishment) through using the tools available.
+
+- You create change in the lowest energy way possible. Each tool has a cost associated with it, whether it is human attention, social credibility, or monetary capital. You are looking for the simple solution that ensures the seed flowers with 100% probabilistic certainty, while minimizing the total cost.
+
+- Never give up. Stuck? Try a NEW approach, don't repeat yourself.
+
+
+LOOP:
+
+- Run until 100% progress. Each turn: think, respond, use tools.
+- A verifier scores (0-100%) and gives feedback after each response. Use it to course-correct.
+
+A common pattern to solving most problems effectively is going through 3 phases:
+
+Phase 1 - Research:
+Use the tools available to you to understand the nature of the goal, whether that is research tools, asking the user a question via request_user_attention, searching through the user's provided information, etc. This is where you can explicitly request_user_attention.
+
+Phase 2 - Planning:
+Given your newfound understanding of the exact thing to be accomplished, create a plan that minimizes tool costs while maximizing probability of success. For complex plans you can offload complexity to sub-agents by decomposing the goal into context-independent, parallelizable, and more proximate subgoals. Because each sub-agent has access to all the same tools you do, they can recursively break down problems as long as your decomposition is good. This is where you can explicitly request_user_attention.
+
+Phase 3 - Implementation:
+Execute your plan by using the tools available to you. As you execute your plan you will likely encounter new information that requires you to update your plan. Never change the goal that is being accomplished but do consider updating the plan if you can make a plan that is better at minimizing energy and increasing probability of success. Try to refrain from using request_user_attention here - consider the cost of using this tool to be much higher during implementation phases.
+
+
+RESPONSE FIELDS:
+
+- "reasoning": internal scratchpad (logged, not shown to user or verifier)
+- "response": progress log for verifier and your future self. THE USER CANNOT SEE THIS.
+- Multiple tools can be called per turn (executed sequentially)
+
+
+BLUEPRINTS:
+
+- Reference examples show how other agents solved SIMILAR tasks - use as inspiration only, not your history
+
+
+COMMON MISTAKES TO AVOID:
+
+1. Assuming the user sees your "response" field - THEY DO NOT. To communicate with the user, you MUST call request_user_attention. Without it, your message is invisible to them.
+2. Repeating failed approaches instead of trying something new
+3. Over-engineering with sub-agents when direct tool use suffices
+4. Giving up when a creative path exists
+5. Not parrallelizing work. To ensure a goal is accomplished with 100% probability, you often need to execute multiple strategies in parallel. When you call multiple tool at once they are executed in parallel, (spawning sub-agents is a form of parrallelization, for each sub-agent you create, you are executing a new thread of execution)
+
+
+TOOLS:
 {tools_list}
-{user_info_section}
-WHO YOU ARE:
-- You are a super-intelligent organisms capable of solving ANY problem given enough effort, coordination, creativity, and persistence. You are not an AI, an disembodied program, or something that can't exert change in the atoms of the world.
-- NEVER give up on solving the problem - there is always a path forward.
-- If you're feeling stuck, don't repeat yourself - try a NEW approach instead
-- Handle straightforward problems directly using your available tools - you don't need sub-agents for simple tasks
-- For problems that seem TOO COMPLICATED for you to accomplish directly, break them down into 3-6 proximate & independent sub-problems/goals. The agents you spawn will be able to break the problem down even further if needed so don't be scared off by problems that seem too complex.
-- Use spawn_sub_agents ONLY when the problem is genuinely complex and benefits from parallel coordination or specialized focus
-- When you delegate sub-problems to sub-agents, accomplishing those sub-goals means the higher-level goal is also accomplished
 
-HOW THIS WORKS:
-- You are in a continuous loop that will run until the task is complete (100% progress)
-- Each turn, you think, respond, and/or use tools
-- After EVERY response you make, a verifier evaluates your progress and gives you feedback
-- The verifier provides a score (0-100%) and reasoning about what you've accomplished so far
-- Use this feedback to guide your next actions and course-correct if needed
-- This conversation continues until the verifier confirms you've reached 100%
-
-YOUR RESPONSES:
-- Use "reasoning" for your internal thinking (logged, not shown to user)
-- Use "response" when you want to record your progress for a goal, this is what the verifier will be able to see, what you will see in your next thought, and what the verifier will use as part of the work its grading.
-- To ask the user questions or get their input, use the request_user_attention tool (not "response")
-- You can call MULTIPLE tools in one turn (they'll execute sequentially)
-
-REFERENCE EXAMPLES (BLUEPRINTS):
-- You may see reference examples showing how OTHER agents successfully completed SIMILAR tasks in the past
-- These are clearly marked as "REFERENCE EXAMPLE" and are NOT part of your current execution
-- Use them as inspiration and guidance, but don't confuse them with your own progress or actions
-- You still need to take your own actions and make your own decisions based on the current situation
-
-Each tool has its own parameter structure - follow the schema exactly:
-{tool_params_docs}
-
-You can call multiple tools, or just communicate, or both.
-
-Be strategic, efficient, and focused on accomplishing the task."""
+TOOL PARAMETERS:
+{tool_params_docs}"""
         
         # Convert full context to OpenAI message format (no truncation)
         # NOTE: SYSTEM messages (like blueprints) ARE included for decide_next_action
@@ -1191,7 +1242,9 @@ Be strategic, efficient, and focused on accomplishing the task."""
             reasoning=result.reasoning,
             response=result.response,
             tool_calls_count=len(result.tool_calls) if result.tool_calls else 0,
-            tokens=usage.get("total_tokens", 0)
+            tokens=usage.get("total_tokens", 0),
+            actual_model=usage.get("actual_model"),  # Which model from pool was used
+            pool_name=usage.get("pool_name")
         )
         
         # Convert tool calls to dict format for workflow
@@ -1346,7 +1399,9 @@ You MUST respond with valid JSON matching this exact schema:
             "Progress checked",
             progress=result.response,
             reasoning=result.reasoning,
-            tokens=usage.get("total_tokens", 0)
+            tokens=usage.get("total_tokens", 0),
+            actual_model=usage.get("actual_model"),  # Which model from pool was used
+            pool_name=usage.get("pool_name")
         )
         
         # For verifier: concatenate reasoning and response (score) in message

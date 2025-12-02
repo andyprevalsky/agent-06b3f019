@@ -37,7 +37,7 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
       }
 
       const response = await fetch(
-        `${import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001'}/api/credits/usage`,
+        `${import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'}/api/credits/usage`,
         {
           headers: {
             'Authorization': `Bearer ${session.access_token}`,

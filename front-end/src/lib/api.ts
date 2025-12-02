@@ -1,4 +1,4 @@
-import { supabase, getStoredSession } from './supabase';
+import { supabase } from './supabase';
 
 // API Configuration
 // Default to localhost for development, can be overridden with VITE_BACKEND_API_URL
@@ -7,7 +7,8 @@ const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API
 
 // Helper function to get auth headers
 async function getAuthHeaders() {
-  const session = getStoredSession();
+  // Use supabase.auth.getSession() to trigger auto-refresh if token is expired
+  const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token;
   
   if (!token) {

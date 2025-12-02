@@ -32,7 +32,7 @@ A Mac-only Electron application for securely uploading iMessage and Chrome Cooki
    ```env
    VITE_SUPABASE_URL=your-supabase-url
    VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
-   VITE_BACKEND_URL=http://localhost:3001
+   VITE_BACKEND_API_URL=http://localhost:3001
    ENCRYPTION_KEY=your-secure-encryption-key
    ```
 

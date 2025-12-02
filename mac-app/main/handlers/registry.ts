@@ -10,8 +10,8 @@ import { CookieSync } from '../services/cookieSync';
 
 export function registerHandlers() {
   // Auth handlers
-  ipcMain.handle('auth:check', () => {
-    const session = AuthService.getSession();
+  ipcMain.handle('auth:check', async () => {
+    const session = await AuthService.getSession();
     console.log('[IPC Auth] check() called, has session:', !!session);
     return session;
   });
@@ -51,7 +51,7 @@ export function registerHandlers() {
     }
     
     // Check auth
-    const session = AuthService.getSession();
+    const session = await AuthService.getSession();
     if (!session) {
       console.error('[IPC] ❌ Not authenticated');
       return { success: false, message: 'Not authenticated' };
@@ -122,7 +122,7 @@ export function registerHandlers() {
   });
   
   ipcMain.handle('cookies:upload', async (event, data) => {
-    const session = AuthService.getSession();
+    const session = await AuthService.getSession();
     if (!session) {
       return { success: false, message: 'Not authenticated' };
     }

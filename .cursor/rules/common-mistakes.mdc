@@ -10,7 +10,7 @@ description: >
   6. Using wrong database connection: Use Session Pooler (port 5432) not Direct (IPv6 incompatible)
   7. Not normalizing base URLs: Always strip trailing slashes to prevent double-slash bugs
   8. Not using prisma db push to sync database state.
-  9. Not using prisma cli to access the database.
+  9. Not using prisma cli when trying access the database.
   10. Asking the user for information that you already have access too (through your tools) instead of grabbing the information yourself.
   11. Not outputting test results in markdown for readability.
   12. Planning to do research
