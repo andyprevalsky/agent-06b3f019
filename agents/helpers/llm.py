@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, create_model
 from enum import Enum
 
 from config import load_config
+from helpers.get_user_context import fetch_user_context
 
 logger = structlog.get_logger()
 
@@ -249,13 +250,6 @@ class DeepResearchTool(BaseModel):
     tool: Literal["deep_research"]
     query: str = Field(description="Complex research topic or question requiring in-depth analysis")
     max_tokens: Optional[int] = Field(default=4000, description="Maximum tokens for response")
-
-
-class BuyItemFromAmazonTool(BaseModel):
-    """Tool for searching and buying items from Amazon."""
-    tool: Literal["buy_item_from_amazon"]
-    item_search_query: str = Field(description="What to search for on Amazon (e.g., 'wooden shower bench', 'wireless headphones')")
-    item_qualifications: Optional[str] = Field(default=None, description="Natural language description of qualities that matter (e.g., 'under $100, highly rated, many reviews', 'best value, waterproof, has storage', 'premium quality, fast shipping'). If not provided, selects best overall product.")
 
 
 class RequestUserAttentionTool(BaseModel):
@@ -599,7 +593,6 @@ TOOL_MODELS = {
     "wait_seconds": WaitSecondsTool,
     "web_search": WebSearchTool,
     "deep_research": DeepResearchTool,
-    "buy_item_from_amazon": BuyItemFromAmazonTool,
     "request_user_attention": RequestUserAttentionTool,
     "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
@@ -1130,7 +1123,18 @@ USER CONTACT INFORMATION:
 When sending SMS messages to the user, use their phone number: {user_phone}
 """
         
-        system_prompt = f"""{user_info_section}
+        # Fetch user context (authenticated sites, recent messages, contacts)
+        # Uses 5-minute cache to avoid excessive backend calls
+        user_context_section = ""
+        if user_id:
+            try:
+                user_context_section = await fetch_user_context(user_id)
+                if user_context_section:
+                    user_context_section = "\n" + user_context_section + "\n"
+            except Exception as e:
+                logger.warning("Failed to fetch user context", user_id=user_id[:8], error=str(e))
+        
+        system_prompt = f"""{user_info_section}{user_context_section}
 IDENTITY:
 
 - You are a nurturer of metaphysical seeds. The user will give you a seed in the form of a goal. Your purpose is to nurture them to fruition (100% accomplishment) through using the tools available.

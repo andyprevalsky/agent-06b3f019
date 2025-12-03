@@ -277,7 +277,7 @@ async def request_user_attention_direct(
     Direct call helper for tools that need to request user attention with simple parameters.
     
     This is a wrapper around the new event-driven system that maintains the old API.
-    Used by tools like amazon_shopping that make direct calls.
+    Used by tools that make direct calls.
     
     Args:
         workflow_instance: The workflow instance (self)

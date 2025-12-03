@@ -5,7 +5,7 @@ Comprehensive test suite for all agent tools, including user-configurable tools,
 ## Overview
 
 This test suite validates:
-- **User Tools:** `web_search`, `deep_research`, `amazon_shopping`
+- **User Tools:** `web_search`, `deep_research`
 - **System Tools:** `wait_seconds`, `spawn_sub_agents`, `request_user_attention`
 - **Activities:** `knowledge_base` (blueprints)
 
@@ -53,7 +53,6 @@ python tests/run_all_tests.py
 cd agents/tests
 python test_web_search.py
 python test_deep_research.py
-python test_amazon_shopping.py
 python test_request_user_attention.py
 python test_wait_seconds.py
 python test_spawn_sub_agents.py
@@ -87,10 +86,6 @@ git commit --no-verify
 - ✅ Pre/post message formatters
 - ⏳ Note: Takes 30-120 seconds
 
-### amazon_shopping
-- ✅ Pre/post message formatters (success, no results, error cases)
-- ℹ️  Actual API calls skipped (requires MCP server setup)
-
 ### request_user_attention
 - ✅ Pre/post message formatters
 - ℹ️  Actual workflow calls skipped (requires Temporal context)
@@ -110,7 +105,7 @@ git commit --no-verify
 
 ## Test Execution Time
 
-- **Fast tests** (~5 seconds): wait_seconds, spawn_sub_agents, request_user_attention, amazon_shopping, knowledge_base
+- **Fast tests** (~5 seconds): wait_seconds, spawn_sub_agents, request_user_attention, knowledge_base
 - **Medium tests** (~10 seconds): web_search
 - **Slow tests** (~30-120 seconds): deep_research
 

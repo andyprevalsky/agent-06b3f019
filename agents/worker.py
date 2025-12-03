@@ -32,7 +32,6 @@ from tools.spawn_browser_agent import spawn_browser_agent_activity
 from tools.deep_research import deep_research_activity
 from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
 from tools.web_search import web_search_activity
-from tools.amazon_shopping import search_amazon_activity, fetch_user_settings_activity, rank_amazon_products_activity
 from tools.find_all import (
     find_all_ingest_activity,
     find_all_create_run_activity,
@@ -142,9 +141,6 @@ async def main():
         ],
         activities=[
             spawn_sub_agents_activity,
-            search_amazon_activity,
-            fetch_user_settings_activity,
-            rank_amazon_products_activity,
             create_attention_request_activity,
             send_sms_activity,
             spawn_browser_agent_activity,

@@ -97,7 +97,7 @@ class SpawnBrowserAgentManager(ToolManager):
                                session_id=session_id, 
                                iteration=iteration)
 
-                    # Use request_user_attention_direct (like amazon_shopping)
+                    # Use request_user_attention_direct
                     from tools.request_user_attention import request_user_attention_direct
 
                     logger.info("🔴 About to call request_user_attention_direct")
@@ -606,8 +606,43 @@ async def spawn_browser_agent_activity(
         genai_client = google_cua_client.genai_client
 
         # === INITIALIZE CONVERSATION ===
-        # Build initial message with system prompt (screenshot already captured above)
-        system_prompt = "Your browser is in full screen mode. There is no search bar, or navigation bar, or shortcut to control it. You can use browser actions to complete tasks. Browser cookies have been injected - assume the user is logged in until proven otherwise. Use request_user_attention if you need human help (login, CAPTCHA, payments). Use mark_task_completed when the task is done."
+        # Fetch user profile for shipping info
+        user_profile = {}
+        try:
+            config = load_config()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{config.backend.api_url}/api/user-settings",
+                    headers={"X-API-Key": config.backend.api_key, "x-user-id": user_id}
+                )
+                if resp.status_code == 200:
+                    user_profile = resp.json()
+        except Exception as e:
+            logger.warning("Failed to fetch user profile", error=str(e))
+
+        # Build shipping section if address available
+        shipping_section = ""
+        if user_profile.get("addressLine1"):
+            addr_lines = [
+                user_profile.get("name", ""),
+                user_profile["addressLine1"],
+                user_profile.get("addressLine2", ""),
+                f"{user_profile.get('city', '')}, {user_profile.get('state', '')} {user_profile.get('postalCode', '')}",
+                user_profile.get("country", "United States")
+            ]
+            shipping_address = "\n".join(line for line in addr_lines if line)
+            shipping_section = f"""
+
+USER SHIPPING ADDRESS:
+{shipping_address}
+
+IMPORTANT: During any checkout process, verify that the shipping address shown matches the address above. If it does not match, update the shipping address to match before completing the purchase."""
+
+        system_prompt = """Your browser is in full screen mode. There is no search bar, navigation bar, or shortcut to control it. You can use browser actions to complete tasks.
+
+Browser cookies have been injected - assume the user is logged in until proven otherwise.""" + shipping_section + """
+
+Use request_user_attention if you need human help (login, CAPTCHA, payments). Use mark_task_completed when the task is done."""
 
         # Use Stagehand's formatting for initial message
         google_cua_client._format_initial_messages(
@@ -872,13 +907,36 @@ async def spawn_browser_agent_activity(
                     continue  # Go to next iteration
                 
                 # ===== USE STAGEHAND TO TRANSFORM RESPONSE =====
-                (
-                    agent_actions,           # List[AgentAction] - properly transformed with ALL Gemini fields
-                    reasoning_text,          # Optional[str] - agent's reasoning
-                    task_completed,          # bool - did agent finish?
-                    final_model_message,     # Optional[str] - completion message
-                    invoked_function_info    # List[tuple[str, dict]] - [(name, args)] for each action
-                ) = google_cua_client._process_provider_response(response)
+                try:
+                    (
+                        agent_actions,           # List[AgentAction] - properly transformed with ALL Gemini fields
+                        reasoning_text,          # Optional[str] - agent's reasoning
+                        task_completed,          # bool - did agent finish?
+                        final_model_message,     # Optional[str] - completion message
+                        invoked_function_info    # List[tuple[str, dict]] - [(name, args)] for each action
+                    ) = google_cua_client._process_provider_response(response)
+                except Exception as parse_error:
+                    # Gemini returned an invalid/malformed action - log and retry
+                    error_msg = str(parse_error)
+                    # Truncate long validation errors for display
+                    if len(error_msg) > 200:
+                        error_msg = error_msg[:200] + "..."
+                    
+                    logger.warning(f"Invalid action from model, retrying: {error_msg}")
+                    
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        tool_call_id=tool_call_id,
+                        title="Invalid Action (retrying)",
+                        message=f"Model returned malformed action: {error_msg}",
+                        status=MessageStatus.ERROR,
+                        task_id=task_id,
+                        browser_url=browser_url,
+                        action_type="error"
+                    )
+                    
+                    # Continue to next iteration - will get fresh screenshot and retry
+                    continue
                 
                 # === TRACK REASONING (OUR CUSTOM FEATURE) ===
                 if reasoning_text:

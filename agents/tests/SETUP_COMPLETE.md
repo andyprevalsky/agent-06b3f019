@@ -11,7 +11,6 @@ A comprehensive test suite has been created for all agent tools, modeled after t
 1. **Individual Test Files:**
    - `test_web_search.py` - Tests web search tool and formatters
    - `test_deep_research.py` - Tests deep research tool and formatters
-   - `test_amazon_shopping.py` - Tests Amazon shopping tool formatters
    - `test_request_user_attention.py` - Tests user attention tool formatters
    - `test_wait_seconds.py` - Tests wait seconds formatters
    - `test_spawn_sub_agents.py` - Tests sub-agent spawning formatters
@@ -34,7 +33,6 @@ A comprehensive test suite has been created for all agent tools, modeled after t
 - **All formatters** - Pre/post message formatting for all tools
 
 ### ⚠️ Partially Tested (Formatters Only)
-- **amazon_shopping** - Formatters only (MCP server required for full tests)
 - **request_user_attention** - Formatters only (Temporal context required)
 - **spawn_sub_agents** - Formatters only (Temporal/backend required)
 - **knowledge_base** - Formatters only (Backend API required)
@@ -123,7 +121,7 @@ See `.cursorrules/agents/testing` for complete requirements.
 
 ## Test Execution Time
 
-- **Fast tests** (~5s): wait_seconds, spawn_sub_agents, request_user_attention, amazon_shopping, knowledge_base
+- **Fast tests** (~5s): wait_seconds, spawn_sub_agents, request_user_attention, knowledge_base
 - **Medium tests** (~10s): web_search
 - **Slow tests** (~30-120s): deep_research
 
@@ -137,7 +135,7 @@ See `.cursorrules/agents/testing` for complete requirements.
 ======================================================================
 
 This test suite validates all agent tools including:
-  • User tools: web_search, deep_research, amazon_shopping
+  • User tools: web_search, deep_research
   • System tools: wait_seconds, spawn_sub_agents, request_user_attention
   • Activities: knowledge_base (blueprints)
 
@@ -151,7 +149,6 @@ This test suite validates all agent tools including:
 
   web_search                ✅ PASSED
   deep_research             ✅ PASSED
-  amazon_shopping           ✅ PASSED
   request_user_attention    ✅ PASSED
   wait_seconds              ✅ PASSED
   spawn_sub_agents          ✅ PASSED
@@ -198,6 +195,6 @@ See `agents/tests/README.md` for:
 ---
 
 **Created:** October 15, 2025
-**Tools Tested:** 7 (web_search, deep_research, amazon_shopping, request_user_attention, wait_seconds, spawn_sub_agents, knowledge_base)
-**Test Files:** 8 (7 individual + 1 runner)
+**Tools Tested:** 6 (web_search, deep_research, request_user_attention, wait_seconds, spawn_sub_agents, knowledge_base)
+**Test Files:** 7 (6 individual + 1 runner)
 

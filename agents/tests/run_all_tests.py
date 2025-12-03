@@ -16,7 +16,6 @@ from typing import Dict, Callable, Awaitable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from test_web_search import run_all_tests as test_web_search
-from test_amazon_shopping import run_all_tests as test_amazon_shopping
 from test_request_user_attention import run_all_tests as test_request_user_attention
 from test_wait_seconds import run_all_tests as test_wait_seconds
 from test_spawn_sub_agents import run_all_tests as test_spawn_sub_agents
@@ -75,7 +74,6 @@ async def main():
     # Create test tasks (all async, run in parallel)
     test_tasks = [
         run_test_silent("Web Search", test_web_search),
-        run_test_silent("Amazon Shopping", test_amazon_shopping),
         run_test_silent("Knowledge Base", test_knowledge_base),
         run_test_silent("Send SMS", test_send_sms),
         run_test_silent("Send SMS As User", test_send_sms_as_user),

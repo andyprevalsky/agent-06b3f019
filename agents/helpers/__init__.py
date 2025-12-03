@@ -10,6 +10,7 @@ from .model_info import get_model_context_window
 from .finished import mark_finished
 from .fetch_config import fetch_agent_config
 from .check_usage import check_user_usage
+from .get_user_context import get_user_context
 
 __all__ = [
     "fetch_agent_tools",
@@ -25,4 +26,5 @@ __all__ = [
     "mark_finished",
     "fetch_agent_config",
     "check_user_usage",
+    "get_user_context",
 ]

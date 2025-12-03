@@ -19,7 +19,15 @@ const updateUserSchema = z.object({
 // GET /api/user-settings - Get user data
 router.get('/', authenticate, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user!.id;
+    // For internal calls (API key auth), get user_id from X-User-Id header
+    // For user calls (JWT auth), get from req.user
+    const userId = req.isInternal 
+      ? (req.headers['x-user-id'] as string) 
+      : req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
 
     const user = await prisma.user.findUnique({
       where: { userId },

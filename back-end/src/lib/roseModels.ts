@@ -1,7 +1,7 @@
 export const ROSE_MODEL_POOLS = {
   'rose-1-fast': [
     'openai/gpt-oss-120b',
-    'qwen/qwen3-235b-a22b-thinking-2507',
+    // 'qwen/qwen3-235b-a22b-thinking-2507', // Disabled - produces garbage tool calls disconnected from reasoning
     'moonshotai/kimi-k2-0905',
     'meta-llama/llama-4-maverick',
     'deepseek/deepseek-v3.2-exp',

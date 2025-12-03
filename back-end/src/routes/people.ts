@@ -223,7 +223,11 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
  */
 router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user?.id;
+    // For internal calls (API key auth), get user_id from X-User-Id header
+    // For user calls (JWT auth), get from req.user
+    const userId = req.isInternal 
+      ? (req.headers['x-user-id'] as string) 
+      : req.user?.id;
     
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -396,6 +400,79 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
     console.error('Error fetching message history:', error);
     return res.status(500).json({
       error: 'Failed to fetch message history',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * GET /api/people/messages/recent
+ * 
+ * Get all recent messages (past 24 hours) across all people for a user
+ * 
+ * Query params:
+ * - limit: Max messages to return (default: 200)
+ * 
+ * Returns: Array of message records with channel, from, to, timestamp, message
+ */
+router.get('/messages/recent', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    // For internal calls (API key auth), get user_id from X-User-Id header
+    // For user calls (JWT auth), get from req.user
+    const userId = req.isInternal 
+      ? (req.headers['x-user-id'] as string) 
+      : req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    
+    const limit = parseInt(req.query.limit as string) || 200;
+    
+    // Calculate 24 hours ago
+    const twentyFourHoursAgo = new Date();
+    twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+    
+    // Query MessageRecords from past 24 hours for all of user's people
+    const messages = await prisma.messageRecord.findMany({
+      where: {
+        person: {
+          userId: userId,
+        },
+        timestamp: {
+          gte: twentyFourHoursAgo,
+        },
+      },
+      orderBy: {
+        timestamp: 'desc',
+      },
+      take: limit,
+      select: {
+        channel: true,
+        from: true,
+        to: true,
+        timestamp: true,
+        message: true,
+      },
+    });
+    
+    // Format messages
+    const formattedMessages = messages.map(record => ({
+      channel: record.channel,
+      from: record.from,
+      to: record.to,
+      timestamp: record.timestamp.toISOString(),
+      message: record.message,
+    }));
+    
+    return res.json({
+      messages: formattedMessages,
+      count: formattedMessages.length,
+    });
+  } catch (error) {
+    console.error('Error fetching recent messages:', error);
+    return res.status(500).json({
+      error: 'Failed to fetch recent messages',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

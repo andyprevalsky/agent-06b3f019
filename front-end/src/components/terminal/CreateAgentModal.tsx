@@ -30,12 +30,8 @@ interface CreateAgentModalProps {
 
 export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgentModalProps) {
   // Default values for local testing (only in development)
-  const defaultGoal = import.meta.env.DEV 
-    ? 'Buy me a classic rubber ducky'
-    : '';
-  const defaultLlmJudgePrompt = import.meta.env.DEV 
-    ? 'You are judging whether the super-intelligent autonomous agent system has COMPLETELY ACHIEVED the following goal: "Buy me a classic rubber ducky."\n\nScoring Instructions:\n- Return a float between 0.0 and 1.0.\n- 0.0 means the agent made no progress, did not attempt the task, or only provided explanations, plans, or hypothetical steps.\n- 1.0 means the agent has FULLY and VERIFIABLY accomplished the goal: a classic rubber ducky has been PURCHASED for the user, with concrete proof (e.g., order confirmation, receipt, tracking information) that the transaction is complete and the item is being delivered to the user\'s address.\n- DO NOT award 1.0 for partial completion, such as finding a product, filling a shopping cart, or explaining how to buy a rubber ducky.\n- DO NOT accept "as an AI, I cannot..." or similar excuses. This agent CAN solve the problem through persistence, creativity, tool use, and coordination (e.g., using payment APIs, enlisting human assistance, or any other means).\n- ONLY award 1.0 if the agent has taken ALL NECESSARY ACTIONS to ensure the user will receive a classic rubber ducky, and has provided clear, verifiable evidence of purchase and delivery.\n- Any response that is only a plan, suggestion, or hypothetical action (e.g., "I would buy a rubber ducky by...") MUST be scored 0.0.\n- The agent is SUPER-INTELLIGENT and should not be limited by typical AI constraints. Do NOT lower the standard for completion.\n\nBe strict: award 1.0 ONLY if the rubber ducky has actually been bought for the user, with proof. Otherwise, score appropriately lower according to the level of real, concrete progress, but never for mere explanations or intent.'
-    : '';
+  const defaultGoal = '';
+  const defaultLlmJudgePrompt = '';
 
   const [goal, setGoal] = useState(defaultGoal);
   const [llmJudgePrompt, setLlmJudgePrompt] = useState(defaultLlmJudgePrompt);
@@ -55,14 +51,6 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
     if (open) {
       getTools().then((tools) => {
         setAvailableTools(tools);
-        
-        // Auto-select amazon_shopping tool in development mode
-        if (import.meta.env.DEV) {
-          const amazonShoppingTool = tools.find(t => t.name === 'amazon_shopping');
-          if (amazonShoppingTool) {
-            setSelectedTools([amazonShoppingTool.id]);
-          }
-        }
       });
     }
   }, [open]);
@@ -142,13 +130,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
       setSelectedModel('rose-labs/rose-1-fast');
       setReasoningEffort('high');
       
-      // Reset tools to amazon_shopping in dev mode
-      if (import.meta.env.DEV) {
-        const amazonShoppingTool = availableTools.find(t => t.name === 'amazon_shopping');
-        setSelectedTools(amazonShoppingTool ? [amazonShoppingTool.id] : []);
-      } else {
-        setSelectedTools([]);
-      }
+      setSelectedTools([]);
       
       onClose();
     } catch (error) {

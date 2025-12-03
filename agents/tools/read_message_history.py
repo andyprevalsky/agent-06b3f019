@@ -54,7 +54,7 @@ class ReadMessageHistoryManager(ToolManager):
         if not has_phone and not has_email and not has_name:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Missing identifier",
+                title="Read message history failed: Missing identifier",
                 message="At least one identifier is required: phone, email, or first_name + last_name.",
                 status=MessageStatus.ERROR
             )
