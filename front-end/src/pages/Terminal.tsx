@@ -390,7 +390,7 @@ export default function Terminal() {
   // Message input state
   const [messageInput, setMessageInput] = useState(
     import.meta.env.DEV 
-      ? `Go to render.com and start a new instance`
+      ? `Get me a black beanie < 35$ and well-made`
       : ''
   );
   const [isSendingMessage, setIsSendingMessage] = useState(false);
@@ -431,26 +431,26 @@ export default function Terminal() {
   
   // Popular goals carousel
   const popularGoals = [
-    "Cure cancer",
-    "Make me a master painter",
-    "Mitigate the impending climate crisis",
+    "Maximize my luck surface area",
+    "Save children in Gaza",
+    "Raise me 1 million dollars",
     "Get me socks",
-    "Make sure my birthday is amazing",
+    "Mitigate the impending climate crisis",
+    "Make sure I accomplish my body goals",
+    "Ensure my friends are well supported",
     "Get me 5 new friends",
     "End world hunger",
-    "Make sure I accomplish my body goals",
-    "Get me into Stanford",
     "Optimize my nutrition",
     "Get me a girlfriend",
-    "Raise me 1 million dollars",
+    "Make me a master painter",
+    "Get me into Stanford",
+    "Make sure my birthday is amazing",
     "Find me my first 10 customers",
-    "Save children in Gaza",
     "Make sure my startup succeeds",
     "Make me happy",
     "Get me a boyfriend",
+    "Cure cancer",
     "Make sure my parents are taken care of",
-    "Ensure my friends are well supported",
-    "Maximize my luck surface area",
   ];
   const [tickerOffset, setTickerOffset] = useState(0);
   const tickerRef = useRef<HTMLDivElement>(null);

@@ -9,11 +9,11 @@ const corsHeaders = {
 // Model pools for Rose variants - sync with backend/src/routes/rose.ts
 const MODEL_POOLS = {
   'rose-1-fast': [
-    'openai/gpt-oss-120b',
+    // 'openai/gpt-oss-120b', // Disabled - produces 120+ garbage tool calls disconnected from reasoning
     // 'qwen/qwen3-235b-a22b-thinking-2507', // Disabled - produces garbage tool calls disconnected from reasoning
     'moonshotai/kimi-k2-0905',
     'meta-llama/llama-4-maverick',
-    'deepseek/deepseek-v3.2-exp',
+    // 'deepseek/deepseek-v3.2-exp', // Disabled - produces garbage tool calls disconnected from reasoning
     // 'z-ai/glm-4.6', // Disabled - causes tool call confusion (calls wrong tools)
     'openai/gpt-5.1',
     'mistralai/mistral-medium-3.1',
