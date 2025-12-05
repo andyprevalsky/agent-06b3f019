@@ -156,22 +156,23 @@ model ToolUsage {
 }
 
 model User {
-  id             String        @id @default(uuid())
-  userId         String        @unique
-  name           String?
-  addressLine1   String?
-  addressLine2   String?
-  city           String?
-  state          String?
-  postalCode     String?
-  country        String?       @default("United States")
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  inviteCode     Int?          @unique
-  inviteCodeUses Int           @default(0)
-  usedInviteCode Int?
-  credits        Credit[]
-  subscriptions  Subscription?
+  id                          String        @id @default(uuid())
+  userId                      String        @unique
+  name                        String?
+  addressLine1                String?
+  addressLine2                String?
+  city                        String?
+  state                       String?
+  postalCode                  String?
+  country                     String?       @default("United States")
+  encryptedPaymentInformation String?
+  createdAt                   DateTime      @default(now())
+  updatedAt                   DateTime      @updatedAt
+  inviteCode                  Int?          @unique
+  inviteCodeUses              Int           @default(0)
+  usedInviteCode              Int?
+  credits                     Credit[]
+  subscriptions               Subscription?
 
   @@index([userId])
   @@index([inviteCode])

@@ -1348,26 +1348,43 @@ CRITICAL CONTEXT - What you're evaluating:
 
 BE EXTREMELY STRICT in your evaluation:
 - 0.0 = No progress or just starting
-- 0.5 = Meaningful progress but far from complete
+- 0.5 = Meaningful progress but far from complete  
 - 1.0 = Goal is COMPLETELY ACHIEVED with VERIFIABLE, CONCRETE results
+
+CRITICAL: INTENT IS NOT COMPLETION
+- The agent SAYING it will do something is NOT the same as DOING it
+- "Completing purchase now" / "Proceeding to checkout" = NOT COMPLETE (score ~0.4-0.6)
+- "Order confirmed, confirmation #12345" = purchase complete but NOT delivered
+- Only award 1.0 when the USER has the FINAL OUTCOME in hand
+
+FOR PHYSICAL/REAL-WORLD TASKS:
+- "Get me X" = User must RECEIVE X (not just order it)
+- "Buy X" = Purchase must be CONFIRMED with order number/receipt
+- "Send X to Y" = Must have CONFIRMATION of delivery/receipt
+- Adding to cart, clicking checkout, saying "purchasing now" are INTERMEDIATE steps, not completion
 
 DO NOT award high scores for:
 - Mere explanations or plans ("here's how I would do it")
 - Partial completions or "good enough for an AI" attempts
 - Giving up due to perceived AI limitations
 - Research without action, or planning without execution
+- ANNOUNCING INTENT without showing the completed action ("doing X now", "proceeding to X")
+- Being mid-action without confirmation of completion
 
 ONLY award 1.0 when:
 - The goal is FULLY and COMPLETELY accomplished
-- CONCRETE, VERIFIABLE results have been produced
+- CONCRETE, VERIFIABLE results have been produced (confirmation numbers, screenshots of success, delivery confirmation)
+- The USER would agree the task is done if asked
 - Nothing significant remains to be done
+
+ASK YOURSELF: If the user checked right now, would they have what they asked for? If not, it's not 1.0.
 
 Remember: This system is super-intelligent and can solve the goal if given enough effort. Do not make excuses for it.
 
 Evaluation criteria:
 {verifier_prompt}
 
-Based on the agent's ACTUAL ACTIONS and CONCRETE RESULTS (not just planning), provide a progress score from 0.0 to 1.0.
+Based on the agent's ACTUAL ACTIONS and CONCRETE RESULTS (not just planning or stated intent), provide a progress score from 0.0 to 1.0.
 
 You MUST respond with valid JSON matching this exact schema:
 {{

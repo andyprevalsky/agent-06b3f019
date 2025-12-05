@@ -102,6 +102,13 @@ class RoseConfig:
 
 
 @dataclass
+class PaymentConfig:
+    """Payment decryption configuration for agent autopay."""
+    
+    decryption_key: str = ""  # Base64-encoded RSA private key for decrypting payment info
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
     
@@ -114,6 +121,7 @@ class AppConfig:
     browserbase: BrowserbaseConfig
     parallel: ParallelConfig
     rose: RoseConfig
+    payment: PaymentConfig
     
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -187,6 +195,10 @@ def load_config() -> AppConfig:
         supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", ""),
     )
     
+    payment = PaymentConfig(
+        decryption_key=os.getenv("PAYMENT_DECRYPTION_KEY", ""),
+    )
+    
     return AppConfig(
         temporal=temporal,
         backend=backend,
@@ -197,6 +209,7 @@ def load_config() -> AppConfig:
         browserbase=browserbase,
         parallel=parallel,
         rose=rose,
+        payment=payment,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

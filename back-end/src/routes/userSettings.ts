@@ -14,6 +14,7 @@ const updateUserSchema = z.object({
   state: z.string().optional(),
   postalCode: z.string().optional(),
   country: z.string().optional(),
+  encryptedPaymentInformation: z.string().optional().nullable(),
 });
 
 // GET /api/user-settings - Get user data
@@ -43,6 +44,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         state: null,
         postalCode: null,
         country: 'United States',
+        encryptedPaymentInformation: null,
       });
     }
 
@@ -54,6 +56,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
       state: user.state,
       postalCode: user.postalCode,
       country: user.country,
+      encryptedPaymentInformation: user.encryptedPaymentInformation,
     });
   } catch (error) {
     console.error('Failed to fetch user data:', error);
@@ -77,6 +80,7 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
         state: body.state,
         postalCode: body.postalCode,
         country: body.country,
+        encryptedPaymentInformation: body.encryptedPaymentInformation,
       },
       create: {
         userId,
@@ -87,6 +91,7 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
         state: body.state,
         postalCode: body.postalCode,
         country: body.country,
+        encryptedPaymentInformation: body.encryptedPaymentInformation,
       },
     });
 
@@ -98,6 +103,7 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
       state: user.state,
       postalCode: user.postalCode,
       country: user.country,
+      encryptedPaymentInformation: user.encryptedPaymentInformation,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -131,6 +137,7 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
           state: body.state,
           postalCode: body.postalCode,
           country: body.country,
+          encryptedPaymentInformation: body.encryptedPaymentInformation,
         },
       });
 
@@ -142,6 +149,7 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
         state: user.state,
         postalCode: user.postalCode,
         country: user.country,
+        encryptedPaymentInformation: user.encryptedPaymentInformation,
       });
     }
 
@@ -154,6 +162,7 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
     if (body.state !== undefined) updateData.state = body.state;
     if (body.postalCode !== undefined) updateData.postalCode = body.postalCode;
     if (body.country !== undefined) updateData.country = body.country;
+    if (body.encryptedPaymentInformation !== undefined) updateData.encryptedPaymentInformation = body.encryptedPaymentInformation;
 
     const user = await prisma.user.update({
       where: { userId },
@@ -168,6 +177,7 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
       state: user.state,
       postalCode: user.postalCode,
       country: user.country,
+      encryptedPaymentInformation: user.encryptedPaymentInformation,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

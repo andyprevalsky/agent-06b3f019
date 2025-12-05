@@ -8,7 +8,12 @@ import structlog
 import httpx
 import time
 import asyncio
+import base64
+import json
 from google.genai import types
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
 
@@ -16,6 +21,123 @@ with workflow.unsafe.imports_passed_through():
     from config import load_config
 
 logger = structlog.get_logger()
+
+
+# ========================================
+# PAYMENT DECRYPTION UTILITIES
+# ========================================
+
+def decrypt_payment_info(encrypted_data: str, decryption_key_b64: str) -> Optional[Dict[str, Any]]:
+    """
+    Decrypt payment information using hybrid RSA+AES decryption.
+    
+    Args:
+        encrypted_data: Base64-encoded encrypted payment envelope
+        decryption_key_b64: Base64-encoded RSA private key (PEM format)
+        
+    Returns:
+        Decrypted payment data dict, or None if decryption fails
+    """
+    try:
+        # 1. Decode the envelope
+        envelope_json = base64.b64decode(encrypted_data).decode('utf-8')
+        envelope = json.loads(envelope_json)
+        
+        if envelope.get("version") != 1:
+            logger.warning("Unknown payment envelope version", version=envelope.get("version"))
+            return None
+        
+        # 2. Decode the RSA private key
+        private_key_pem = base64.b64decode(decryption_key_b64)
+        private_key = serialization.load_pem_private_key(private_key_pem, password=None)
+        
+        # 3. Decrypt the AES key using RSA-OAEP
+        encrypted_aes_key = base64.b64decode(envelope["encrypted_aes_key"])
+        aes_key = private_key.decrypt(
+            encrypted_aes_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        
+        # 4. Decrypt the payment data using AES-256-GCM
+        iv = base64.b64decode(envelope["iv"])
+        ciphertext = base64.b64decode(envelope["ciphertext"])
+        
+        # AES-GCM: last 16 bytes are the auth tag
+        auth_tag = ciphertext[-16:]
+        actual_ciphertext = ciphertext[:-16]
+        
+        cipher = Cipher(algorithms.AES(aes_key), modes.GCM(iv, auth_tag))
+        decryptor = cipher.decryptor()
+        plaintext = decryptor.update(actual_ciphertext) + decryptor.finalize()
+        
+        # 5. Parse JSON payment data
+        payment_data = json.loads(plaintext.decode('utf-8'))
+        
+        logger.info("Successfully decrypted payment info", 
+                   card_last_four=payment_data.get("card_number", "")[-4:] if payment_data.get("card_number") else "N/A")
+        
+        return payment_data
+        
+    except Exception as e:
+        logger.error("Failed to decrypt payment info", error=str(e))
+        return None
+
+
+def build_autopay_prompt_section(payment_data: Dict[str, Any]) -> str:
+    """
+    Build the autopay section for the browser agent system prompt.
+    
+    Args:
+        payment_data: Decrypted payment data dict
+        
+    Returns:
+        Formatted autopay instructions string for the system prompt
+    """
+    autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
+    autopay_limit_dollars = autopay_limit_cents / 100
+    
+    # Format card number with spaces
+    card_number = payment_data.get("card_number", "")
+    card_number_formatted = " ".join([card_number[i:i+4] for i in range(0, len(card_number), 4)])
+    
+    # Build billing address
+    billing_lines = [
+        payment_data.get("billing_street_address", ""),
+        payment_data.get("billing_address_line2", ""),
+        f"{payment_data.get('billing_city', '')}, {payment_data.get('billing_state', '')} {payment_data.get('billing_zipcode', '')}",
+        payment_data.get("billing_country", "")
+    ]
+    billing_address = "\n".join(line for line in billing_lines if line.strip())
+    
+    # Build contact info if available
+    contact_info = ""
+    if payment_data.get("billing_phone"):
+        contact_info += f"\nPhone: {payment_data['billing_phone']}"
+    if payment_data.get("billing_email"):
+        contact_info += f"\nEmail: {payment_data['billing_email']}"
+    
+    return f"""
+
+AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}):
+When you reach a checkout/payment page, use this card information:
+
+Card Number: {card_number_formatted}
+Cardholder Name: {payment_data.get('cardholder_name', '')}
+Expiry: {payment_data.get('card_expiry', '')}
+CVV: {payment_data.get('card_cvv', '')}
+
+Billing Address:
+{billing_address}{contact_info}
+
+PAYMENT RULES:
+- If order total <= ${autopay_limit_dollars:.2f}: Complete payment using card above
+- If order total > ${autopay_limit_dollars:.2f}: Use request_user_attention to request approval before paying
+- Always verify the total before entering card details
+- Double-check the billing address matches before submitting"""
 
 
 class SpawnBrowserAgentManager(ToolManager):
@@ -376,7 +498,6 @@ async def spawn_browser_agent_activity(
             # Browser ready message (now we have task_id!)
             await save_browser_action_message(
                 agent_id=agent_id,
-                tool_call_id=tool_call_id,
                 title="Browser Ready",
                 task_id=task_id,
                 message="Browser session active",
@@ -388,7 +509,6 @@ async def spawn_browser_agent_activity(
             # Task started message
             await save_browser_action_message(
                 agent_id=agent_id,
-                tool_call_id=tool_call_id,
                 title="Task Started",
                 task_id=task_id,
                 message=goal,
@@ -606,7 +726,7 @@ async def spawn_browser_agent_activity(
         genai_client = google_cua_client.genai_client
 
         # === INITIALIZE CONVERSATION ===
-        # Fetch user profile for shipping info
+        # Fetch user profile for shipping info and payment info
         user_profile = {}
         try:
             config = load_config()
@@ -638,11 +758,31 @@ USER SHIPPING ADDRESS:
 
 IMPORTANT: During any checkout process, verify that the shipping address shown matches the address above. If it does not match, update the shipping address to match before completing the purchase."""
 
+        # Build autopay section if payment info is available
+        autopay_section = ""
+        encrypted_payment = user_profile.get("encryptedPaymentInformation")
+        if encrypted_payment and config.payment.decryption_key:
+            payment_data = decrypt_payment_info(encrypted_payment, config.payment.decryption_key)
+            if payment_data:
+                autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
+                if autopay_limit_cents > 0:
+                    # Autopay enabled with a limit
+                    autopay_section = build_autopay_prompt_section(payment_data)
+                else:
+                    # Autopay limit is $0 - all payments require approval
+                    autopay_section = """
+
+PAYMENT AUTHORIZATION:
+You have the user's payment method on file, but autopay is DISABLED (limit set to $0).
+For ALL purchases, you MUST use request_user_attention to get explicit approval before entering any payment details."""
+            else:
+                logger.warning("Failed to decrypt payment info - payment features disabled for this session")
+
         system_prompt = """Your browser is in full screen mode. There is no search bar, navigation bar, or shortcut to control it. You can use browser actions to complete tasks.
 
-Browser cookies have been injected - assume the user is logged in until proven otherwise.""" + shipping_section + """
+Browser cookies have been injected - assume the user is logged in until proven otherwise.""" + shipping_section + autopay_section + """
 
-Use request_user_attention if you need human help (login, CAPTCHA, payments). Use mark_task_completed when the task is done."""
+Use request_user_attention if you need human help (login, CAPTCHA, or payments over your autopay limit). Use mark_task_completed when the task is done."""
 
         # Use Stagehand's formatting for initial message
         google_cua_client._format_initial_messages(
@@ -720,7 +860,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                                 # Save task failed message
                                 await save_browser_action_message(
                                     agent_id=agent_id,
-                                    tool_call_id=tool_call_id,
                                     title="Task Failed",
                                     message="Model returned no response after multiple retries",
                                     status=MessageStatus.ERROR,
@@ -810,7 +949,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                             # Save pause message for frontend
                             await save_browser_action_message(
                                 agent_id=agent_id,
-                                tool_call_id=tool_call_id,
                                 title="Browser Session Paused",
                                 message=attention_message,
                                 status=MessageStatus.FINISHED,
@@ -872,14 +1010,12 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                         # Save completion message for frontend
                         await save_browser_action_message(
                             agent_id=agent_id,
-                            tool_call_id=tool_call_id,
                             title="Task Complete" if close_success else "Task Failed",
                             message=close_reasoning,
                             status=MessageStatus.FINISHED if close_success else MessageStatus.ERROR,
                             task_id=task_id,
                             browser_url=browser_url,
-                            action_type="task_complete",
-                            reuse_tool_call_id=True
+                            action_type="task_complete"
                         )
                         break
                 
@@ -926,7 +1062,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                     
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        tool_call_id=tool_call_id,
                         title="Invalid Action (retrying)",
                         message=f"Model returned malformed action: {error_msg}",
                         status=MessageStatus.ERROR,
@@ -947,7 +1082,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                     # Log to browser panel
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        tool_call_id=tool_call_id,
                         title="Thinking",
                         message=reasoning_text,
                         status=MessageStatus.FINISHED,
@@ -965,7 +1099,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                     # Save completion message to browser panel
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        tool_call_id=tool_call_id,
                         title="Task Complete",
                         message=close_reasoning,
                         status=MessageStatus.FINISHED,
@@ -980,7 +1113,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                     logger.warning("No actions from model, ending task")
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        tool_call_id=tool_call_id,
                         title="Task Failed",
                         message="Model provided no further actions",
                         status=MessageStatus.ERROR,
@@ -1031,7 +1163,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                     # === LOG ACTION START ===
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        tool_call_id=tool_call_id,
                         title=action_title,
                         message="",
                         status=MessageStatus.FINISHED,
@@ -1123,14 +1254,12 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                     if not action_result["success"]:
                         await save_browser_action_message(
                             agent_id=agent_id,
-                            tool_call_id=tool_call_id,
                             title=action_title,
                             message=action_result.get("error", "Action failed"),
                             status=MessageStatus.ERROR,
                             task_id=task_id,
                             browser_url=browser_url,
-                            action_type=frontend_action_type,
-                            reuse_tool_call_id=True
+                            action_type=frontend_action_type
                         )
                     
                     # === TRACK ACTION SUMMARY (OUR CUSTOM FEATURE) ===
@@ -1153,7 +1282,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                     # Retry with backoff
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        tool_call_id=tool_call_id,
                         title="Model Overloaded - Retrying",
                         message=f"Gemini API overloaded. Waiting 10s before retry.",
                         status=MessageStatus.IN_PROGRESS,
@@ -1167,7 +1295,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
                     # Fatal error
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        tool_call_id=tool_call_id,
                         title="Error",
                         message=f"Task failed: {error_str}",
                         status=MessageStatus.ERROR,
@@ -1290,7 +1417,6 @@ Use request_user_attention if you need human help (login, CAPTCHA, payments). Us
             try:
                 await save_browser_action_message(
                     agent_id=agent_id,
-                    tool_call_id=tool_call_id,
                     title="Task Failed",
                     message=error_message,
                     status=MessageStatus.ERROR,
@@ -1388,7 +1514,6 @@ def build_context_summary(
 
 async def save_browser_action_message(
     agent_id: str,
-    tool_call_id: str,
     title: str,
     message: str,
     status: MessageStatus,
@@ -1396,7 +1521,6 @@ async def save_browser_action_message(
     browser_url: str = "",  # Current debug URL (may change on resume)
     action_type: str = "default",
     auxiliary: dict = None,
-    reuse_tool_call_id: bool = False  # If True, use provided tool_call_id instead of generating new UUID
 ):
     """
     Save browser sub-action message directly to DB for real-time display.
@@ -1417,11 +1541,8 @@ async def save_browser_action_message(
     try:
         config = load_config()
         
-        # Generate UUID only if not reusing existing tool_call_id
-        if reuse_tool_call_id:
-            unique_tool_call_id = tool_call_id
-        else:
-            unique_tool_call_id = str(uuid.uuid4())
+        # Each browser action gets a unique ID (important for frontend deduplication)
+        unique_tool_call_id = str(uuid.uuid4())
         
         metadata = {
             "toolCallId": unique_tool_call_id,
