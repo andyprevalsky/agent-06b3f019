@@ -205,28 +205,52 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 console.log('[Supabase] ✅ Supabase client created');
 console.log('[Supabase] 📋 supabase.auth:', !!supabase.auth);
 
-// Phone Auth helpers
+// API Configuration for auth endpoints
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+
+// Phone Auth helpers - now routed through backend for user initialization
 export const sendOTP = async (phone: string) => {
-  const { data, error } = await supabase.auth.signInWithOtp({
-    phone,
-    options: {
-      shouldCreateUser: true,
+  const response = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
     },
+    body: JSON.stringify({ phone }),
   });
-  
-  if (error) throw error;
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to send OTP');
+  }
+
   return data;
 };
 
 export const verifyOTP = async (phone: string, token: string) => {
-  const { data, error } = await supabase.auth.verifyOtp({
-    phone,
-    token,
-    type: 'sms',
+  const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ phone, token }),
   });
-  
-  if (error) throw error;
-  return data;
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error || 'Invalid OTP');
+  }
+
+  // Set the session in Supabase client so other parts of the app work
+  if (data.session?.access_token) {
+    await supabase.auth.setSession({
+      access_token: data.session.access_token,
+      refresh_token: data.session.refresh_token,
+    });
+  }
+
+  return { user: data.user, session: data.session };
 };
 
 export const signOut = async () => {

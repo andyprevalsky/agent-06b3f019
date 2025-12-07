@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import { createInitialCredit } from '../lib/credits';
 
 const router = Router();
 
@@ -180,6 +181,7 @@ router.post('/use', authenticate, async (req: AuthRequest, res: Response) => {
 /**
  * GET /api/invite-codes/check
  * Check if the current user needs to enter an invite code
+ * Also creates user record and initializes $5 credit on first call (OTP verification)
  */
 router.get('/check', authenticate, async (req: AuthRequest, res: Response) => {
   try {
@@ -189,13 +191,25 @@ router.get('/check', authenticate, async (req: AuthRequest, res: Response) => {
 
     const userId = req.user.id;
 
-    const user = await prisma.user.findUnique({
+    let user = await prisma.user.findUnique({
       where: { userId },
       select: { usedInviteCode: true }
     });
 
+    // If user doesn't exist, create them and give initial $5 credit
+    if (!user) {
+      user = await prisma.user.create({
+        data: { userId },
+        select: { usedInviteCode: true }
+      });
+      console.log(`✅ Created user record for ${userId}`);
+      
+      // Initialize $5 credit for new user
+      await createInitialCredit(userId);
+    }
+
     res.json({
-      needsInviteCode: !user || user.usedInviteCode === null
+      needsInviteCode: user.usedInviteCode === null
     });
   } catch (error) {
     console.error('Error checking invite code:', error);

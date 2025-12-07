@@ -18,6 +18,7 @@ import sendSmsRouter from './routes/sendSms';
 import browserSessionRouter from './routes/browserSession';
 import peopleRouter from './routes/people';
 import integrationsRouter from './routes/integrations';
+import authRouter from './routes/auth';
 import { prisma } from './lib/prisma';
 import cron from 'node-cron';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
@@ -91,6 +92,7 @@ app.get('/health', (req, res) => {
 });
 
 // Public routes (no auth required)
+app.use('/api/auth', authRouter);  // OTP send/verify (creates user + $5 credit)
 app.use('/api/waitlist', waitlistRouter);
 app.use('/api/models', modelsRouter);  // Models list is public
 app.use('/api/tools', toolsRouter);  // Tools list is public read
