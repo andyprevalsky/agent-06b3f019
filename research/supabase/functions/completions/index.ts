@@ -28,12 +28,16 @@ const MODEL_POOLS = {
     'moonshotai/kimi-k2-thinking',
     'google/gemini-2.5-pro',
     'x-ai/grok-4-fast'
-  ],
-  // Cerebras-powered hyper model - direct API calls for ultra-fast inference
-  'rose-hyper': [
-    'gpt-oss-120b',                    // $0.35 input, $0.75 output per 1M tokens
-    'qwen-3-235b-a22b-instruct-2507',  // $0.60 input, $1.20 output per 1M tokens
   ]
+};
+
+// Model preferences - hardcoded mappings for SMART/FAST/CHEAP
+// FAST uses Cerebras for ultra-low latency inference
+type ModelPreference = 'SMART' | 'FAST' | 'CHEAP';
+const MODEL_PREFERENCES: Record<ModelPreference, { model: string; isCerebras: boolean }> = {
+  'SMART': { model: 'openai/gpt-5.1', isCerebras: false },
+  'FAST': { model: 'qwen-3-235b-a22b-instruct-2507', isCerebras: true },
+  'CHEAP': { model: 'google/gemini-2.5-flash', isCerebras: false }
 };
 
 // Cerebras API base URL (OpenAI-compatible)
@@ -86,13 +90,13 @@ function transformSchemaForCerebras(schema: any): any {
   return transformed;
 }
 
-// Check if a model pool uses Cerebras
-function isCerebrasPool(poolName: string): boolean {
-  return poolName === 'rose-hyper';
-}
-
-// Select a model from the pool (random or by seed index)
-function selectModel(requestedModel: string, modelSeed?: number): { model: string; isCerebras: boolean; poolName: string; poolSize: number } {
+// Select a model from the pool (by preference, seed index, or random)
+// Priority: modelPreference > modelSeed > random
+function selectModel(
+  requestedModel: string, 
+  modelSeed?: number,
+  modelPreference?: ModelPreference
+): { model: string; isCerebras: boolean; poolName: string; poolSize: number } {
   let normalized = requestedModel.toLowerCase();
   if (normalized.startsWith('rose-labs/')) {
     normalized = normalized.replace('rose-labs/', '');
@@ -101,7 +105,17 @@ function selectModel(requestedModel: string, modelSeed?: number): { model: strin
   const pool = MODEL_POOLS[normalized as keyof typeof MODEL_POOLS];
   
   if (!pool) {
-    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast', 'rose-labs/rose-1-ultra', or 'rose-labs/rose-hyper'`);
+    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast' or 'rose-labs/rose-1-ultra'`);
+  }
+  
+  // If model_preference is provided, use hardcoded mapping (highest priority)
+  if (modelPreference) {
+    const preference = MODEL_PREFERENCES[modelPreference];
+    if (!preference) {
+      throw new Error(`Invalid model_preference: ${modelPreference}. Use 'SMART', 'FAST', or 'CHEAP'`);
+    }
+    console.log(`⚡ Model selection (preference=${modelPreference}): ${requestedModel} → ${preference.model} (Cerebras: ${preference.isCerebras})`);
+    return { model: preference.model, isCerebras: preference.isCerebras, poolName: normalized, poolSize: pool.length };
   }
   
   // If model_seed is provided, use it to select a specific model
@@ -110,15 +124,14 @@ function selectModel(requestedModel: string, modelSeed?: number): { model: strin
       throw new Error(`model_seed ${modelSeed} out of range. Pool '${normalized}' has ${pool.length} models (valid range: 0-${pool.length - 1})`);
     }
     const selectedModel = pool[modelSeed];
-    const isCerebras = isCerebrasPool(normalized);
-    console.log(`🎯 Model selection (seed=${modelSeed}): ${requestedModel} → ${selectedModel} (Cerebras: ${isCerebras})`);
-    return { model: selectedModel, isCerebras, poolName: normalized, poolSize: pool.length };
+    console.log(`🎯 Model selection (seed=${modelSeed}): ${requestedModel} → ${selectedModel} (Cerebras: false)`);
+    return { model: selectedModel, isCerebras: false, poolName: normalized, poolSize: pool.length };
   }
   
+  // Random selection from pool
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
-  const isCerebras = isCerebrasPool(normalized);
-  console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel} (Cerebras: ${isCerebras})`);
-  return { model: selectedModel, isCerebras, poolName: normalized, poolSize: pool.length };
+  console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel} (Cerebras: false)`);
+  return { model: selectedModel, isCerebras: false, poolName: normalized, poolSize: pool.length };
 }
 
 // Validate API key and return user info
@@ -349,6 +362,7 @@ serve(async (req) => {
       cot_steps,
       response_format,
       model_seed,  // Optional: index into model pool for testing
+      model_preference,  // Optional: 'SMART' | 'FAST' | 'CHEAP' for hardcoded model selection
       ...otherParams
     } = await req.json();
     
@@ -372,7 +386,7 @@ serve(async (req) => {
     // Select actual model from pool
     let selection: { model: string; isCerebras: boolean; poolName: string; poolSize: number };
     try {
-      selection = selectModel(model, model_seed);
+      selection = selectModel(model, model_seed, model_preference as ModelPreference | undefined);
     } catch (error) {
       return new Response(JSON.stringify({ 
         error: error instanceof Error ? error.message : 'Invalid model' 
