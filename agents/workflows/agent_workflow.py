@@ -30,7 +30,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.base import ToolEvent, EventType, MessageStatus
     from tools.deep_research import deep_research
     from tools.wait_seconds import wait_seconds
-    from tools.request_user_attention import request_user_attention
+    from tools.request_user_attention import request_user_attention, request_user_attention_direct
     from tools.knowledge_base import query_blueprints, save_blueprint
     from tools.web_search import web_search
     from tools.spawn_sub_agents import spawn_sub_agents
@@ -42,7 +42,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.monitor import monitor
     from tools.check_monitor_events import check_monitor_events
     from tools.read_message_history import read_message_history_with_person
-    from tools.message_person import message_person
+    from tools.message_person import message_person, get_manager as get_message_person_manager
 
 logger = structlog.get_logger()
 
@@ -74,6 +74,12 @@ EVENT_DRIVEN_TOOLS = {
 # Tool formatter registry (maps tool names to their formatters)
 # NOTE: All tools migrated to EVENT_DRIVEN_TOOLS (v2 architecture)
 TOOL_FORMATTERS = {}
+
+# Registry of tool managers for approval checking
+# Maps tool names to their get_manager() functions
+TOOL_MANAGERS = {
+    "message_person": get_message_person_manager,
+}
 
 # NOTE: query_blueprints and save_blueprint migrated to knowledge_base (event-driven)
 
@@ -724,6 +730,19 @@ class AgentWorkflow:
                     try:
                         if tool_name not in EVENT_DRIVEN_TOOLS:
                             raise ValueError(f"Unknown tool: {tool_name}")
+                        
+                        # Check if tool requires user approval before execution
+                        if tool_name in TOOL_MANAGERS:
+                            manager = TOOL_MANAGERS[tool_name]()
+                            if manager.requires_approval:
+                                workflow.logger.info(f"🔐 Tool {tool_name} requires approval, requesting...")
+                                approval_question = manager.get_approval_question(tool_call)
+                                await request_user_attention_direct(
+                                    self,
+                                    question=approval_question,
+                                    metadata={"toolApproval": True, "toolName": tool_name}
+                                )
+                                workflow.logger.info(f"✅ User approved {tool_name}, proceeding with execution")
                         
                         workflow.logger.info(f"✨ Executing tool: {tool_name}")
                         v2_helper = EVENT_DRIVEN_TOOLS[tool_name]

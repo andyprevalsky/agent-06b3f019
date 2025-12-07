@@ -393,7 +393,14 @@ class ToolManager(ABC):
     3. Implement execute_tool() as an async generator that yields ToolEvent objects
     
     Tools should NOT return values - all communication happens via events.
+    
+    For tools that require user approval before execution:
+    1. Set requires_approval = True
+    2. Override get_approval_question() to return a human-readable approval prompt
     """
+    
+    # Set to True in subclass if tool requires user approval before execution
+    requires_approval: bool = False
     
     @property
     @abstractmethod
@@ -403,6 +410,23 @@ class ToolManager(ABC):
         Must match the tool name used in the LLM tool definitions.
         """
         pass
+    
+    def get_approval_question(self, tool_call: Dict[str, Any]) -> str:
+        """
+        Return the approval question to show the user before executing this tool.
+        
+        Override this method in subclasses where requires_approval = True.
+        The question should clearly describe what action the tool will take.
+        
+        Args:
+            tool_call: Dict with tool parameters (from LLM)
+            
+        Returns:
+            Human-readable question string for the approval prompt
+        """
+        raise NotImplementedError(
+            f"Tool '{self.tool_name}' has requires_approval=True but does not implement get_approval_question()"
+        )
     
     @abstractmethod
     async def execute_tool(

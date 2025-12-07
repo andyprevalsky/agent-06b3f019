@@ -87,6 +87,41 @@ class MessagePersonManager(ToolManager):
     """Manager for sending messages to a person via SMS or email."""
 
     tool_name = "message_person"
+    requires_approval = True
+
+    def get_approval_question(self, tool_call: Dict[str, Any]) -> str:
+        """Build approval question showing recipient and message preview."""
+        channel = tool_call.get("channel", "message").upper()
+        phone = tool_call.get("phone")
+        email = tool_call.get("email")
+        message = tool_call.get("message", "")
+        subject = tool_call.get("subject")
+        
+        # Determine recipient
+        recipient = phone or email or "unknown recipient"
+        
+        # Truncate message for preview
+        message_preview = message if len(message) <= 200 else message[:197] + "..."
+        
+        if channel == "EMAIL" and subject:
+            return f"""Rose wants to send an **email**
+
+**To:** {recipient}
+**Subject:** {subject}
+
+**Message:**
+{message_preview}
+
+Reply to approve, or say "no" to cancel."""
+        else:
+            return f"""Rose wants to send a **{channel}**
+
+**To:** {recipient}
+
+**Message:**
+{message_preview}
+
+Reply to approve, or say "no" to cancel."""
 
     async def execute_tool(
         self,
