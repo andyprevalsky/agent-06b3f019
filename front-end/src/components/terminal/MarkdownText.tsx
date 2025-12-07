@@ -20,8 +20,7 @@ interface WordItem {
   href?: string;
   isCode?: boolean;
   blockType?: 'p' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'li' | 'blockquote' | 'pre';
-  blockStart?: boolean; // First word in a block
-  blockEnd?: boolean; // Last word in a block
+  blockIndex?: number; // Unique index for each block element instance
   listType?: 'ul' | 'ol'; // Parent list type for li elements
 }
 
@@ -49,6 +48,7 @@ function FadeInMarkdown({
     if (!tempRef.current) return;
 
     const wordArray: WordItem[] = [];
+    let blockIndexCounter = 0;
 
     // Walk the DOM and extract text with formatting info
     const extractWords = (node: Node, formatting: Partial<WordItem> = {}): void => {
@@ -59,8 +59,6 @@ function FadeInMarkdown({
           wordArray.push({ 
             word: text, 
             isWord: false,
-            blockStart: false,
-            blockEnd: false,
             ...formatting 
           });
           return;
@@ -68,14 +66,12 @@ function FadeInMarkdown({
 
         // Split into words and whitespace
         const parts = text.split(/(\s+)/);
-        parts.forEach((part, idx) => {
+        parts.forEach((part) => {
           if (part.trim().length > 0) {
             // It's a word
             wordArray.push({
               word: part,
               isWord: true,
-              blockStart: idx === 0 && parts.length > 1,
-              blockEnd: idx === parts.length - 1 && parts.length > 1,
               ...formatting
             });
           } else if (part.length > 0) {
@@ -83,8 +79,6 @@ function FadeInMarkdown({
             wordArray.push({ 
               word: part, 
               isWord: false,
-              blockStart: false,
-              blockEnd: false,
               ...formatting 
             });
           }
@@ -112,11 +106,14 @@ function FadeInMarkdown({
         }
         
         // Block-level elements - blockquote and pre take priority over p
+        // Each block element gets a unique blockIndex
         if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote', 'pre'].includes(tagName)) {
           newFormatting.blockType = tagName as any;
+          newFormatting.blockIndex = blockIndexCounter++;
         } else if (tagName === 'p' && !formatting.blockType) {
           // Only set p if we don't already have a blockType (e.g., from blockquote)
           newFormatting.blockType = 'p';
+          newFormatting.blockIndex = blockIndexCounter++;
         }
         
         // Track parent list type for li elements
@@ -179,6 +176,7 @@ function FadeInMarkdown({
     const elements: React.ReactNode[] = [];
     let currentBlock: React.ReactNode[] = [];
     let currentBlockType: string | undefined = undefined;
+    let currentBlockIndex: number | undefined = undefined;
     let listItems: React.ReactNode[] = [];
     let currentListType: 'ul' | 'ol' | undefined = undefined;
     let currentBlockFirstWordIndex = 0; // Track first word index for block animation
@@ -325,10 +323,10 @@ function FadeInMarkdown({
       }
       
       // Check if we need to start a new block
+      // Use blockIndex to detect new block elements (each li, p, etc. gets a unique index)
       const isListItem = item.blockType === 'li';
       const shouldStartNewBlock = item.blockType && 
-        (item.blockType !== currentBlockType || 
-         (isListItem && item.blockStart)) &&
+        (item.blockIndex !== currentBlockIndex) &&
         currentBlock.length > 0;
         
       if (shouldStartNewBlock) {
@@ -447,6 +445,7 @@ function FadeInMarkdown({
       }
       
       currentBlockType = item.blockType;
+      currentBlockIndex = item.blockIndex;
       
       // Track first word index when starting a new block
       if (currentBlock.length === 0) {
@@ -718,6 +717,27 @@ function FadeInMarkdown({
 }
 
 /**
+ * Normalize text by converting escape sequences to their actual characters.
+ * This handles cases where the LLM or backend sends escaped characters as string literals.
+ */
+function normalizeMarkdownText(text: string): string {
+  return text
+    // Convert literal \n to actual newlines
+    .replace(/\\n/g, '\n')
+    // Convert literal \t to actual tabs
+    .replace(/\\t/g, '\t')
+    // Unescape markdown syntax characters that may have been double-escaped
+    .replace(/\\\*/g, '*')   // \* → *
+    .replace(/\\_/g, '_')    // \_ → _
+    .replace(/\\`/g, '`')    // \` → `
+    .replace(/\\#/g, '#')    // \# → #
+    .replace(/\\\[/g, '[')   // \[ → [
+    .replace(/\\\]/g, ']')   // \] → ]
+    .replace(/\\\(/g, '(')   // \( → (
+    .replace(/\\\)/g, ')');  // \) → )
+}
+
+/**
  * MarkdownText - Component that renders markdown with optional animation
  */
 export const MarkdownText = memo(function MarkdownText({ 
@@ -727,10 +747,13 @@ export const MarkdownText = memo(function MarkdownText({
   className 
 }: MarkdownTextProps) {
   
+  // Normalize text to handle escape sequences from LLM/backend
+  const normalizedText = normalizeMarkdownText(text);
+  
   // Always use FadeInMarkdown for consistent styling
   return (
     <FadeInMarkdown
-      markdown={text}
+      markdown={normalizedText}
       onComplete={onComplete}
       className={className}
       shouldAnimate={shouldAnimate}
