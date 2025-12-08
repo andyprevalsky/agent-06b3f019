@@ -408,10 +408,11 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
 /**
  * GET /api/people/messages/recent
  * 
- * Get all recent messages (past 24 hours) across all people for a user
+ * Get all recent messages across all people for a user
  * 
  * Query params:
  * - limit: Max messages to return (default: 200)
+ * - days: Number of days to look back (default: 1, max: 30)
  * 
  * Returns: Array of message records with channel, from, to, timestamp, message
  */
@@ -428,19 +429,21 @@ router.get('/messages/recent', authenticate, async (req: AuthRequest, res: Respo
     }
     
     const limit = parseInt(req.query.limit as string) || 200;
+    // Support days parameter for extended lookback (used by user simulation)
+    const days = Math.min(Math.max(parseInt(req.query.days as string) || 1, 1), 30);
     
-    // Calculate 24 hours ago
-    const twentyFourHoursAgo = new Date();
-    twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+    // Calculate cutoff time based on days parameter
+    const cutoffTime = new Date();
+    cutoffTime.setDate(cutoffTime.getDate() - days);
     
-    // Query MessageRecords from past 24 hours for all of user's people
+    // Query MessageRecords from past N days for all of user's people
     const messages = await prisma.messageRecord.findMany({
       where: {
         person: {
           userId: userId,
         },
         timestamp: {
-          gte: twentyFourHoursAgo,
+          gte: cutoffTime,
         },
       },
       orderBy: {
@@ -468,6 +471,7 @@ router.get('/messages/recent', authenticate, async (req: AuthRequest, res: Respo
     return res.json({
       messages: formattedMessages,
       count: formattedMessages.length,
+      days: days,
     });
   } catch (error) {
     console.error('Error fetching recent messages:', error);

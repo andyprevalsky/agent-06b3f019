@@ -1267,10 +1267,15 @@ TOOL PARAMETERS:
                     logger.error(f"Failed to serialize tool call {i}: {str(e)}, tc_type={type(tc)}")
                     raise ValueError(f"Failed to serialize tool call {i}: {str(e)}")
         
-        # Append question to response if using request_user_attention tool
+        # Handle request_user_attention tool calls:
+        # 1. Inject simulate_user_response=True for auto-simulation after 60s timeout
+        # 2. Append question to response for visibility
         response_text = result.response if result.response is not None else ""
         for tool_call in tool_calls_dict:
             if tool_call.get("tool") == "request_user_attention":
+                # Mark this as a direct LLM call - will auto-simulate after 60s timeout
+                tool_call["simulate_user_response"] = True
+                
                 question = tool_call.get("question", "")
                 if question and response_text:
                     response_text += f"\n\n### Question\n{question}"

@@ -24,6 +24,10 @@ interface ToolMessageData {
   error?: boolean;
   progressComplete?: number; // 0-100 or 0-1, optional - if present shows progress bar
   actionMetadata?: Record<string, any> | null;
+  // Auto-simulation countdown
+  timeout?: number; // Duration in seconds (e.g., 60)
+  startTime?: string; // ISO timestamp when timer started
+  simulated?: boolean; // True if response was auto-generated
 }
 
 // Extract emoji from start of text and return {emoji, text}
@@ -84,8 +88,42 @@ const ToolMessage = memo(function ToolMessage({
   const [isExpanded, setIsExpanded] = useState(false);
   const [hasAnimated, setHasAnimated] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null);
   const { toast } = useToast();
   const actionMetadata = data.actionMetadata;
+  
+  // Countdown timer effect for auto-simulation
+  useEffect(() => {
+    // Only show countdown for IN_PROGRESS attention requests with timeout
+    if (data.status !== 'IN_PROGRESS' || !data.timeout || !data.startTime) {
+      setCountdownSeconds(null);
+      return;
+    }
+    
+    const calculateRemaining = () => {
+      const startTime = new Date(data.startTime!).getTime();
+      const now = Date.now();
+      const elapsed = (now - startTime) / 1000;
+      const remaining = Math.max(0, data.timeout! - elapsed);
+      return Math.ceil(remaining);
+    };
+    
+    // Initial calculation
+    setCountdownSeconds(calculateRemaining());
+    
+    // Update every second
+    const interval = setInterval(() => {
+      const remaining = calculateRemaining();
+      setCountdownSeconds(remaining);
+      
+      // Stop interval when timer reaches 0
+      if (remaining <= 0) {
+        clearInterval(interval);
+      }
+    }, 1000);
+    
+    return () => clearInterval(interval);
+  }, [data.status, data.timeout, data.startTime]);
   
   // Get tool icon based on toolName
   const ToolIcon = data.toolName ? getToolIcon(data.toolName) : Wrench;
@@ -232,6 +270,20 @@ const ToolMessage = memo(function ToolMessage({
         </div>
       )}
 
+      {/* Countdown timer for auto-simulation */}
+      {countdownSeconds !== null && countdownSeconds > 0 && data.status === 'IN_PROGRESS' && (
+        <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">
+          Auto-answering in {countdownSeconds}s
+        </span>
+      )}
+
+      {/* Simulated response indicator */}
+      {data.simulated && data.status === 'FINISHED' && (
+        <span className="text-xs text-amber-600 dark:text-amber-400">
+          (Auto-answered)
+        </span>
+      )}
+
       {actionMetadata?.onSuccess === 'sendSmsThroughIMessage' && (
         <div className="rounded-md border border-dashed border-primary/40 bg-primary/5 p-3 space-y-2">
           <p className="text-xs text-muted-foreground">
@@ -290,6 +342,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   const toolData = useMemo(() => {
     if (!isTool || !message.metadata) return null;
     
+    // Extract requestUserAttention sub-metadata if present
+    const attentionMeta = message.metadata.requestUserAttention || {};
+    
     return {
       toolCallId: message.metadata.toolCallId || '',
       toolName: message.metadata.toolName || '',
@@ -299,6 +354,10 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       error: message.metadata.error || false,
       progressComplete: message.metadata.progressComplete,
       actionMetadata: message.metadata.requestUserAttention,
+      // Auto-simulation countdown fields - these are on the root metadata, not inside requestUserAttention
+      timeout: message.metadata.timeout || attentionMeta.timeout,
+      startTime: message.metadata.startTime || attentionMeta.startTime,
+      simulated: message.metadata.simulated || attentionMeta.simulated,
     } as ToolMessageData;
   }, [isTool, message.metadata, message.text]);
 

@@ -1,9 +1,14 @@
-"""Activity for polling new messages from the database."""
+"""Activity for polling new messages from the database.
+
+Uses _fetch_agent_data_impl from fetch_config.py (single source for GET /api/agents/{agent_id}).
+"""
 
 from temporalio import activity
 from typing import List, Dict, Any
 from datetime import datetime
 import structlog
+
+from helpers.fetch_config import _fetch_agent_data_impl
 
 logger = structlog.get_logger()
 
@@ -27,40 +32,24 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
             f"Polling for new messages: agent_id={agent_id}, last_checked={last_checked.isoformat()}"
         )
         
-        import httpx
-        from config import load_config
+        # Use the single fetch_agent_data implementation
+        data = await _fetch_agent_data_impl(agent_id)
+        messages = data.get('messages', [])
         
-        config = load_config()
+        # Filter for USER messages after last_checked
+        new_messages = [
+            msg for msg in messages
+            if msg['role'] == 'USER' and 
+            datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00')) > last_checked
+        ]
         
-        async with httpx.AsyncClient() as client:
-            # Get agent with messages
-            response = await client.get(
-                f"{config.backend.api_url}/api/agents/{agent_id}",
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json"
-                },
-                timeout=30.0
+        if new_messages:
+            logger.info(
+                f"New messages found: agent_id={agent_id}, count={len(new_messages)}"
             )
-            response.raise_for_status()
-            
-            data = response.json()
-            messages = data.get('messages', [])
-            
-            # Filter for USER messages after last_checked
-            new_messages = [
-                msg for msg in messages
-                if msg['role'] == 'USER' and 
-                datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00')) > last_checked
-            ]
-            
-            if new_messages:
-                logger.info(
-                    f"New messages found: agent_id={agent_id}, count={len(new_messages)}"
-                )
-            
-            return new_messages
-            
+        
+        return new_messages
+        
     except Exception as e:
         logger.error(
             f"Failed to poll messages: agent_id={agent_id}, error={str(e)}"

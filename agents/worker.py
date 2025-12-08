@@ -24,7 +24,7 @@ from config import load_config
 from workflows import AgentWorkflow
 # User-configurable tools
 from tools.spawn_sub_agents import spawn_sub_agents_activity
-from tools.request_user_attention import create_attention_request_activity
+from tools.request_user_attention import create_attention_request_activity, simulate_user_response_activity
 from tools.send_sms import send_sms_activity
 from tools.send_email import send_email_activity
 from tools.spawn_browser_agent import spawn_browser_agent_activity
@@ -142,6 +142,7 @@ async def main():
         activities=[
             spawn_sub_agents_activity,
             create_attention_request_activity,
+            simulate_user_response_activity,
             send_sms_activity,
             spawn_browser_agent_activity,
             send_email_activity,

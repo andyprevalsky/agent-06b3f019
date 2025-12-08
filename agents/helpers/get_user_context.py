@@ -277,6 +277,41 @@ async def _fetch_frequent_contacts(client: httpx.AsyncClient, config, user_id: s
         return []
 
 
+async def _fetch_messages_for_simulation(client: httpx.AsyncClient, config, user_id: str, days: int = 7) -> List[dict]:
+    """
+    Fetch user's messages from the past N days for user simulation.
+    
+    This fetches a larger sample of messages to understand the user's
+    communication style, vocabulary, and response patterns.
+    
+    Args:
+        client: HTTP client
+        config: App config
+        user_id: User ID
+        days: Number of days to look back (default 7)
+        
+    Returns:
+        List of message dicts with channel, from, to, message, timestamp
+    """
+    try:
+        # Fetch messages with days parameter for extended history
+        response = await client.get(
+            f"{config.backend.api_url}/api/people/messages/recent",
+            params={"limit": 500, "days": days},  # Request 7 days of messages
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            timeout=30.0
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get('messages', [])
+    except Exception as e:
+        logger.warning("Failed to fetch messages for simulation", user_id=user_id, days=days, error=str(e))
+        return []
+
+
 # ============================================================================
 # Formatting Functions
 # ============================================================================
@@ -498,6 +533,131 @@ async def fetch_user_context(user_id: str) -> str:
         )
         # Return empty string on error - don't break the agent
         return ""
+
+
+# ============================================================================
+# Fetch Messages for User Simulation
+# ============================================================================
+
+# Cache for simulation messages: { user_id: { "messages": list, "fetched_at": datetime } }
+_simulation_messages_cache: Dict[str, Dict[str, Any]] = {}
+SIMULATION_CACHE_TTL_MINUTES = 10
+
+
+async def fetch_frequent_contact_messages(user_id: str) -> List[dict]:
+    """
+    Fetch user's messages from the past 7 days for user simulation.
+    
+    This provides a deep sample of the user's communication style for 
+    creating an authentic simulated response.
+    
+    Uses a 10-minute TTL cache to avoid excessive backend calls.
+    
+    Args:
+        user_id: The user's ID
+        
+    Returns:
+        List of message dicts with channel, from, to, message, timestamp
+    """
+    global _simulation_messages_cache
+    
+    try:
+        # Check cache
+        now = datetime.utcnow()
+        if user_id in _simulation_messages_cache:
+            cached = _simulation_messages_cache[user_id]
+            fetched_at = cached.get('fetched_at')
+            if fetched_at and (now - fetched_at) < timedelta(minutes=SIMULATION_CACHE_TTL_MINUTES):
+                logger.info(
+                    "Simulation messages cache hit",
+                    user_id=user_id[:8],
+                    age_seconds=(now - fetched_at).total_seconds(),
+                    message_count=len(cached.get('messages', []))
+                )
+                return cached.get('messages', [])
+        
+        # Cache miss - fetch fresh data
+        logger.info("Simulation messages cache miss, fetching 7 days of messages", user_id=user_id[:8])
+        
+        config = load_config()
+        
+        async with httpx.AsyncClient() as client:
+            messages = await _fetch_messages_for_simulation(client, config, user_id, days=7)
+        
+        # Update cache
+        _simulation_messages_cache[user_id] = {
+            'messages': messages,
+            'fetched_at': now
+        }
+        
+        logger.info(
+            "Simulation messages fetched and cached",
+            user_id=user_id[:8],
+            message_count=len(messages)
+        )
+        
+        return messages
+        
+    except Exception as e:
+        logger.error(
+            "Failed to fetch simulation messages",
+            user_id=user_id[:8] if user_id else "unknown",
+            error=str(e)
+        )
+        return []
+
+
+def format_messages_for_simulation(messages: List[dict], user_name: str = "User") -> str:
+    """
+    Format messages into a string showing the user's communication style.
+    
+    This creates example conversations that demonstrate how the user writes,
+    to help the LLM simulate authentic responses.
+    
+    Args:
+        messages: List of message dicts
+        user_name: The user's name for labeling
+        
+    Returns:
+        Formatted string of message examples
+    """
+    if not messages:
+        return ""
+    
+    formatted_lines = []
+    
+    for msg in messages[:100]:  # Limit to 100 messages for context size
+        channel = msg.get('channel', 'UNKNOWN')
+        timestamp = msg.get('timestamp', '')
+        from_addr = msg.get('from', '')
+        to_addr = msg.get('to', '')
+        message_text = msg.get('message', '')
+        
+        # Skip empty messages
+        if not message_text.strip():
+            continue
+        
+        # Parse timestamp
+        try:
+            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            time_str = dt.strftime('%m/%d %H:%M')
+        except:
+            time_str = ""
+        
+        # Truncate long messages
+        if len(message_text) > 500:
+            message_text = message_text[:500] + "..."
+        
+        # Determine if user sent or received
+        # The user's messages show their writing style
+        direction = "SENT" if from_addr else "RECEIVED"
+        other_party = to_addr if from_addr else from_addr
+        
+        formatted_lines.append(
+            f"[{channel}] {time_str} {direction} to/from {other_party}:\n{message_text}"
+        )
+    
+    return "\n\n".join(formatted_lines)
 
 
 # ============================================================================

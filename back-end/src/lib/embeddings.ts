@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { Prisma } from '@prisma/client';
 import { prisma } from './prisma';
 
 const openai = new OpenAI({
@@ -225,9 +226,9 @@ export async function searchPeopleBySignals(
   const allPeople = await prisma.person.findMany({
     where: {
       userId,
-      // Select all "person" rows where embedding is not null (Prisma needs 'not: undefined' for JSON fields)
+      // Filter out people without embeddings (use Prisma.DbNull for JSON fields)
       embedding: {
-        not: undefined,
+        not: Prisma.DbNull,
       },
     },
   });

@@ -4,10 +4,9 @@ from typing import Dict, List
 from datetime import datetime
 from temporalio import activity
 import structlog
-import httpx
 
-from config import load_config
 from helpers.utils import extract_goal_from_context
+from helpers.update_status import update_agent_status
 
 logger = structlog.get_logger()
 
@@ -47,32 +46,21 @@ async def mark_finished(
         # Extract goal from first USER message
         goal = extract_goal_from_context(steps_taken)
         
-        config = load_config()
+        # Use the single update_agent_status helper (no activity wrapper - call directly)
+        from helpers.update_status import _update_agent_status_impl
+        await _update_agent_status_impl(
+            agent_id=agent_id,
+            status="COMPLETED",
+            progress=1.0,
+            status_message=f"Successfully completed: {goal}",
+            token_count=token_count,
+            context_size=context_size,
+            message_count=message_count,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out
+        )
         
-        # Update agent status to COMPLETED
-        async with httpx.AsyncClient() as client:
-            # Update status
-            response = await client.patch(
-                f"{config.backend.api_url}/api/agents/{agent_id}/status",
-                json={
-                    "status": "COMPLETED",
-                    "statusMessage": f"Successfully completed: {goal}",
-                    "progress": 1.0,
-                    "tokenCount": token_count,
-                    "tokensIn": tokens_in,
-                    "tokensOut": tokens_out,
-                    "contextSize": context_size,
-                    "messageCount": message_count
-                },
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json"
-                },
-                timeout=30.0
-            )
-            response.raise_for_status()
-            
-            logger.info("Agent status updated to COMPLETED", agent_id=agent_id)
+        logger.info("Agent status updated to COMPLETED", agent_id=agent_id)
         
         result = {
             "agent_id": agent_id,
