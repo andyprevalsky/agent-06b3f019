@@ -13,6 +13,7 @@ import About from "./pages/About";
 import Terminal from "./pages/Terminal";
 import Research from "./pages/Research";
 import Download from "./pages/Download";
+import OnePager from "./pages/OnePager";
 
 const queryClient = new QueryClient();
 
@@ -32,6 +33,7 @@ const App = () => (
               <Route path="/terminal" element={<Index />} />
               <Route path="/research" element={<Research />} />
               <Route path="/download" element={<Download />} />
+              <Route path="/onepager" element={<OnePager />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
               <Route path="*" element={<NotFound />} />
             </Routes>
