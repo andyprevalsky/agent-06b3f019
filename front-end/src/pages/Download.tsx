@@ -1,17 +1,20 @@
-import { useEffect } from "react";
+// import { useEffect } from "react";
 
 // Always downloads the latest release (filename is version-agnostic)
-const DOWNLOAD_URL = "https://github.com/andyprevalsky/navi-whisper-lux/releases/latest/download/Rose-mac.dmg";
+// const DOWNLOAD_URL = "https://github.com/andyprevalsky/navi-whisper-lux/releases/latest/download/Rose-mac.dmg";
 
 export default function Download() {
-  useEffect(() => {
-    // Trigger download immediately
-    window.location.href = DOWNLOAD_URL;
-  }, []);
+  // useEffect(() => {
+  //   // Trigger download immediately
+  //   window.location.href = DOWNLOAD_URL;
+  // }, []);
 
   return (
     <div className="min-h-screen bg-black text-white flex items-center justify-center">
-      <p className="text-neutral-400">Starting download...</p>
+      <div className="text-center">
+        <h1 className="text-2xl font-semibold mb-2">Mac App Coming Soon</h1>
+        <p className="text-neutral-400">Check back soon!</p>
+      </div>
     </div>
   );
 }

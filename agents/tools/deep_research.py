@@ -18,6 +18,7 @@ class DeepResearchManager(ToolManager):
     """Manager for deep research operations using Perplexity."""
     
     tool_name = "deep_research"
+    read_only = True  # Research phase tool
     
     def __init__(self):
         # Don't initialize OpenAI client here - it uses threading.local which breaks Temporal

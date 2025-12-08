@@ -21,6 +21,7 @@ class CheckMonitorEventsManager(ToolManager):
     """Manager for checking Monitor events using Parallel AI's Monitor API."""
     
     tool_name = "check_monitor_events"
+    read_only = True  # Research phase tool
     
     async def execute_tool(
         self,

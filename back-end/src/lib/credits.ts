@@ -20,16 +20,16 @@ export async function createInitialCredit(userId: string) {
     return existingCredits;
   }
 
-  // Create $5 non-expiring credit (500 cents)
+  // Create $1 non-expiring credit (100 cents) - PUBLIC BETA
   const credit = await prisma.credit.create({
     data: {
       userId,
-      amountCents: 500, // $5.00
+      amountCents: 100, // $1.00 (PUBLIC BETA - was 500)
       expirationDate: null, // Never expires
     }
   });
 
-  console.log(`✅ Created initial $5 credit for user ${userId}`);
+  console.log(`✅ Created initial $1 credit for user ${userId}`);
   return credit;
 }
 

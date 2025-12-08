@@ -70,8 +70,17 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   };
 
   // Fetch immediately on mount (before websocket connects)
+  // Also poll every 10 seconds as fallback since backend doesn't send broadcasts
   useEffect(() => {
     fetchRequests();
+    
+    // Poll every 10 seconds to catch new attention requests
+    // This is a fallback since the backend doesn't broadcast to Supabase
+    const pollInterval = setInterval(() => {
+      fetchRequests();
+    }, 10000);
+    
+    return () => clearInterval(pollInterval);
   }, []);
 
   // Set up real-time subscription for attention requests

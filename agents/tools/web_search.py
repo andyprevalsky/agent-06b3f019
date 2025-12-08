@@ -21,6 +21,7 @@ class WebSearchManager(ToolManager):
     """Manager for web search operations using OpenAI's web search capability."""
     
     tool_name = "web_search"
+    read_only = True  # Research phase tool
     
     async def execute_tool(
         self,

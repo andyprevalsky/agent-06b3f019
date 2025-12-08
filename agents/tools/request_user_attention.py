@@ -27,6 +27,7 @@ class RequestUserAttentionManager(ToolManager):
     """Manager for user attention requests."""
     
     tool_name = "request_user_attention"
+    read_only = True  # Research phase tool - gets user input
     
     async def execute_tool(
         self,

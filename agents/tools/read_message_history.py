@@ -21,6 +21,7 @@ class ReadMessageHistoryManager(ToolManager):
     """Manager for reading message history with a person."""
 
     tool_name = "read_message_history_with_person"
+    read_only = True  # Research phase tool
 
     async def execute_tool(
         self,

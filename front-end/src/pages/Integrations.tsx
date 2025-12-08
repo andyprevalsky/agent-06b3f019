@@ -396,7 +396,7 @@ export default function Integrations() {
                       variant="outline"
                       asChild
                     >
-                      <a href="https://roselabs.ai/download" target="_blank" rel="noopener noreferrer">
+                      <a href="/download">
                         Download for Mac
                       </a>
                     </Button>

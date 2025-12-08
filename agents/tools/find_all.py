@@ -22,6 +22,7 @@ class FindAllManager(ToolManager):
     """Manager for Find All operations using Parallel AI's Find All API."""
     
     tool_name = "find_all"
+    read_only = True  # Research phase tool
     
     async def execute_tool(
         self,
@@ -151,7 +152,7 @@ class FindAllManager(ToolManager):
             prev_generated_count = 0
             prev_matched_count = 0
             poll_start_time = time.time()
-            max_poll_time = 600  # 10 minutes max
+            max_poll_time = 1200  # 20 minutes max
             poll_interval = 2.0  # Start with 2 seconds
             
             final_status = None

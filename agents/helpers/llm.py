@@ -10,10 +10,65 @@ from enum import Enum
 
 from config import load_config
 from helpers.get_user_context import fetch_user_context
+from tools.base import ToolSchema
 
 logger = structlog.get_logger()
 
 T = TypeVar('T', bound=BaseModel)
+
+
+def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:
+    """
+    Convert a Pydantic model to a JSON schema ready for OpenAI strict structured outputs.
+    
+    OpenAI's strict mode requires:
+    1. `additionalProperties: false` on EVERY object (root and nested)
+    2. All properties must be in the `required` array (no optional fields)
+    
+    This function recursively transforms the schema to meet these requirements.
+    
+    Args:
+        pydantic_model: A Pydantic BaseModel class
+        
+    Returns:
+        JSON schema dict ready for OpenAI's response_format
+    """
+    schema = pydantic_model.model_json_schema()
+    
+    def add_strict_properties(obj: Dict[str, Any]) -> None:
+        """Recursively add additionalProperties: false to all objects."""
+        if not isinstance(obj, dict):
+            return
+            
+        # If this is an object type, add additionalProperties: false
+        if obj.get("type") == "object":
+            obj["additionalProperties"] = False
+            
+            # Ensure all properties are required
+            if "properties" in obj:
+                obj["required"] = list(obj["properties"].keys())
+                
+                # Recurse into each property
+                for prop in obj["properties"].values():
+                    add_strict_properties(prop)
+        
+        # Handle anyOf/oneOf/allOf (union types)
+        for key in ["anyOf", "oneOf", "allOf"]:
+            if key in obj:
+                for item in obj[key]:
+                    add_strict_properties(item)
+        
+        # Handle array items
+        if obj.get("type") == "array" and "items" in obj:
+            add_strict_properties(obj["items"])
+        
+        # Handle $defs (schema definitions for nested models)
+        if "$defs" in obj:
+            for definition in obj["$defs"].values():
+                add_strict_properties(definition)
+    
+    add_strict_properties(schema)
+    return schema
 
 
 def convert_context_to_messages(
@@ -336,7 +391,7 @@ class SearchUserNetworkTool(BaseModel):
     # Influence & Reach
     total_online_reach: Optional[int] = Field(None, description="Minimum social media reach/followers")
     estimated_net_worth_usd: Optional[float] = Field(None, description="Minimum estimated net worth in USD (e.g., 1500000 for $1.5M)")
-    estimated_world_power_ranking: Optional[int] = Field(None, ge=1, le=10, description="World power ranking 1-10 (1=most powerful)")
+    estimated_world_power_ranking: Optional[int] = Field(None, description="World power ranking 1-10 (1=most powerful)")
     
     # Availability
     current_bandwidth: Optional[str] = Field(None, description="Their availability: 'totally_free', 'light', 'moderate', 'busy', 'totally_swamped'")
@@ -587,6 +642,40 @@ class CheckMonitorEventsTool(BaseModel):
     )
 
 
+# ============================================================================
+# Phase Transition Marker Tools
+# ============================================================================
+
+class MarkResearchFinishedTool(BaseModel):
+    """Signal that the research phase is complete. Call this when you have gathered enough context to understand the goal."""
+    tool: Literal["mark_research_finished"]
+
+
+class MarkAtomizationFinishedTool(BaseModel):
+    """Signal the atomization decision - whether the goal is proximate (can be executed directly) or needs decomposition."""
+    tool: Literal["mark_atomization_finished"]
+    is_proximate: bool = Field(
+        description="True if the goal can be executed directly with the available tools (atomic/proximate). "
+                   "False if the goal needs to be decomposed into parallel sub-tasks."
+    )
+
+
+class PlannedSubtask(BaseModel):
+    """A single subtask to be spawned as a sub-agent."""
+    goal: str = Field(description="Clear, specific goal for this sub-agent")
+    context: str = Field(description="Relevant context from research phase to pass to this sub-agent")
+
+
+class MarkPlanningFinishedTool(BaseModel):
+    """Signal that planning is complete with the list of parallel subtasks to spawn."""
+    tool: Literal["mark_planning_finished"]
+    subtasks: List[PlannedSubtask] = Field(
+        description="List of 3-5 parallel subtasks. Each must be: simpler than the original goal, "
+                   "context-independent, parallelizable (no causal dependencies between them). "
+                   "Completion of ALL subtasks must result in the original goal being completed."
+    )
+
+
 # Map tool names to their Pydantic models
 # Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
@@ -603,6 +692,10 @@ TOOL_MODELS = {
     "check_monitor_events": CheckMonitorEventsTool,
     "read_message_history_with_person": ReadMessageHistoryTool,
     "message_person": MessagePersonTool,
+    # Phase transition marker tools
+    "mark_research_finished": MarkResearchFinishedTool,
+    "mark_atomization_finished": MarkAtomizationFinishedTool,
+    "mark_planning_finished": MarkPlanningFinishedTool,
 }
 
 
@@ -759,7 +852,8 @@ async def call_llm_structured(
     temperature: float,
     max_tokens: int,
     response_model: type[T],
-    reasoning_effort: Optional[str] = None
+    reasoning_effort: Optional[str] = None,
+    model_preference: Optional[str] = None
 ) -> tuple[T, Dict]:
     """
     Call LLM with structured outputs using Instructor.
@@ -774,6 +868,7 @@ async def call_llm_structured(
         max_tokens: Maximum tokens
         response_model: Pydantic model class for response structure
         reasoning_effort: Optional reasoning effort level ("high", "medium", "low")
+        model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
         
     Returns:
         Tuple of (response_model instance, usage dict with token counts)
@@ -795,7 +890,9 @@ async def call_llm_structured(
         logger.info(f"🌹 Routing Rose model to Supabase: {model} → {config.rose.api_url}")
         
         # Build JSON schema from Pydantic model for structured output
-        schema = response_model.model_json_schema()
+        # Use prepare_schema_for_openai to ensure strict mode compatibility
+        # (adds additionalProperties: false to all objects, ensures all fields required)
+        schema = prepare_schema_for_openai(response_model)
         schema_str = json.dumps(schema)
         logger.info(f"📋 Schema size: {len(schema_str)} chars (Cerebras limit: 5000)")
         if len(schema_str) > 5000:
@@ -815,6 +912,11 @@ async def call_llm_structured(
                 }
             }
         }
+        
+        # Add model_preference for Rose pool selection (SMART, FAST, CHEAP)
+        if model_preference:
+            request_body["model_preference"] = model_preference
+            logger.info(f"🎯 Using model_preference: {model_preference}")
         
         # Make direct HTTP call to Supabase function
         async with httpx.AsyncClient(timeout=120.0) as http_client:
@@ -1068,16 +1170,209 @@ async def call_llm(
         raise
 
 
+# ============================================================================
+# Phase-Specific System Prompts
+# ============================================================================
+
+PHASE_PROMPTS = {
+    "RESEARCH": """IDENTITY:
+
+You are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal. Before you can nurture it to fruition, you must first understand it deeply.
+
+You operate with minimal energy expenditure. Each tool has costs (human attention, social credibility, monetary capital). Even in research, prefer efficient paths.
+
+You are autonomous. You do not ask "how can I help?" You research, decide, and act.
+
+
+CURRENT PHASE: RESEARCH
+
+Gather the information you need to accomplish your goal. Research to understand:
+- What concrete actions will achieve this goal
+- Who is involved and how to reach them
+- What resources or information you need
+- Any constraints or blockers
+
+
+AVAILABLE ACTIONS:
+
+- web_search: Quick factual lookups, current events, general information
+- search_user_network_for_people: Find relevant contacts in user's network
+- read_message_history_with_person: Understand relationships and past conversations
+- request_user_attention: Ask a SPECIFIC blocking question (use sparingly - high cost)
+
+
+WHEN TO FINISH:
+
+Call `mark_research_finished` when you know:
+1. Exactly what actions you will take
+2. Who is involved (if applicable)
+3. Any constraints you must work within
+
+
+CRITICAL MINDSET - YOU ARE THE EXECUTOR, NOT AN ADVISOR:
+
+You are here to DO, not to advise. Never delegate execution to the user.
+
+BAD (advisor/assistant thinking):
+- "Would you like me to donate or volunteer?"
+- "Here are some options for how to proceed..."
+- "The next step is for you to go research X yourself"
+- "You should look into [org] and decide"
+- Any sentence starting with "You should..." or "The next step for you is..."
+
+GOOD (executor thinking):
+- Research the most effective approach, pick one, proceed
+- "I'm donating to [org] because [research shows it's effective]"
+- If truly blocked: "I need your payment method to complete the donation"
+
+Only use request_user_attention for TRUE blockers:
+- Information you cannot find (payment details, passwords, personal preferences that matter)
+- A genuine decision where the user's preference is essential
+
+NEVER ask "what would you like to do?" or tell the user to do something themselves - YOU decide and act.
+
+
+COMMON MISTAKES:
+
+1. Acting like an assistant - presenting options instead of deciding
+2. Asking the user what THEY want instead of doing it yourself
+3. Using request_user_attention to avoid making decisions
+4. Over-researching when the path is clear
+5. Under-researching when the goal is ambiguous""",
+
+    "ATOMIZE": """IDENTITY:
+
+You are a nurturer of metaphysical seeds. You've completed research and now must decide the optimal path forward.
+
+You operate with minimal energy expenditure. Spawning sub-agents has coordination overhead, but parallelization can dramatically accelerate complex goals.
+
+
+CURRENT PHASE: ATOMIZE
+
+Decide: execute directly (PROXIMATE) or decompose into parallel subtasks?
+
+
+DECISION FRAMEWORK:
+
+PROXIMATE - execute directly if:
+- Straightforward sequence of tool calls
+- No independent components that could parallelize
+- Single-threaded execution is efficient
+- Example: "Send an email to John about the meeting"
+
+NEEDS DECOMPOSITION - spawn sub-agents if:
+- Multiple independent workstreams exist
+- Parallelization significantly accelerates completion
+- Example: "Research 5 companies and send personalized outreach to each"
+
+
+YOUR DECISION:
+
+- PROXIMATE: `mark_atomization_finished(is_proximate=true, reasoning="...")`
+- NEEDS DECOMPOSITION: `mark_atomization_finished(is_proximate=false, reasoning="...")`
+
+
+COMMON MISTAKES:
+
+1. Over-decomposing simple goals - coordination overhead isn't free
+2. Under-decomposing complex goals - missing parallelization opportunities
+3. Ignoring your research when deciding""",
+
+    "PLAN": """IDENTITY:
+
+You are a nurturer of metaphysical seeds. You've determined this goal benefits from decomposition. Now create an optimal plan.
+
+You operate with minimal energy expenditure. Good decomposition enables parallelization while bad decomposition creates wasted work.
+
+
+CURRENT PHASE: PLAN
+
+Decompose the goal into 3-5 parallel, independent subtasks.
+
+
+DECOMPOSITION CRITERIA:
+
+1. PARALLELIZABLE: All subtasks run simultaneously with NO dependencies
+2. CONTEXT-INDEPENDENT: Each subtask is self-contained
+3. SIMPLER: Each subtask is easier than the original
+4. COMPLETE: All subtasks done = original goal achieved
+
+
+SUBTASK STRUCTURE:
+
+Each subtask needs:
+- `goal`: Clear, specific, actionable objective
+- `context`: Your research findings (sub-agents should NOT re-research)
+- `verifier_prompt`: How to verify success
+
+
+GUIDELINES:
+
+- 3-5 subtasks ideal (2 minimum, 7 maximum)
+- Embed research in each subtask's context
+- Make goals specific: "Email john@example.com about X" not "Contact John"
+- Check: if all subtasks complete, is the goal achieved?
+
+
+WHEN READY:
+
+Call `mark_planning_finished(subtasks=[...], reasoning="...")`
+
+
+COMMON MISTAKES:
+
+1. Creating sequential dependencies - can't parallelize if B needs A's output
+2. Not including context - sub-agents waste time re-researching
+3. Vague goals that sub-agents can't act on
+4. Forgetting verifier prompts""",
+
+    "SPAWN": """IDENTITY:
+
+You are a nurturer of metaphysical seeds. Your plan is ready. Now execute it by spawning sub-agents.
+
+
+CURRENT PHASE: SPAWN
+
+Call `spawn_sub_agents` with your planned subtasks.
+
+
+SUB-AGENT CONFIGURATION:
+
+Each sub-agent needs:
+- `goal`: The subtask goal
+- `context`: Research findings and relevant information
+- `verifier`: Config with `type: "llm_judge"` and `llm_judge_prompt`
+
+
+ACTION:
+
+Call `spawn_sub_agents` NOW.
+
+Sub-agents work in parallel. After all complete, you continue in EXECUTE phase.
+
+
+COMMON MISTAKES:
+
+1. Not calling spawn_sub_agents - you MUST spawn now
+2. Changing the plan - trust your planning
+3. Missing required fields (goal, verifier)""",
+
+    "EXECUTE": None  # Use the standard system prompt for EXECUTE phase
+}
+
+
 @activity.defn
 async def decide_next_action(
     context: List[Dict[str, Any]],
-    available_tools: List[Dict[str, str]],
+    available_tools: List[ToolSchema],
     available_tool_names: List[str],
     iteration: int,
     model: str = "anthropic/claude-sonnet-4.5",
     reasoning_effort: str = "low",
     user_id: Optional[str] = None,
-    user_phone: Optional[str] = None
+    user_phone: Optional[str] = None,
+    phase: str = "EXECUTE",
+    model_preference: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Use LLM to decide what action to take next.
@@ -1090,12 +1385,14 @@ async def decide_next_action(
         reasoning_effort: OpenRouter reasoning effort level (low, medium, high)
         user_id: Optional Supabase user ID
         user_phone: Optional user's phone number (E.164 format)
+        phase: Current workflow phase (RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
+        model_preference: Optional Rose model preference (SMART, FAST, CHEAP)
         
     Returns:
         Dict with 'tool', 'args', 'reasoning'
     """
     try:
-        activity.heartbeat(f"Deciding next action (iteration {iteration})")
+        activity.heartbeat(f"Deciding next action (iteration {iteration}, phase={phase})")
         
         # Separate system tools from DB tools
         system_tools = [t for t in available_tools if t['id'].startswith('system-')]
@@ -1134,31 +1431,39 @@ When sending SMS messages to the user, use their phone number: {user_phone}
             except Exception as e:
                 logger.warning("Failed to fetch user context", user_id=user_id[:8], error=str(e))
         
-        system_prompt = f"""{user_info_section}{user_context_section}
+        # Check if we should use a phase-specific prompt
+        phase_prompt = PHASE_PROMPTS.get(phase)
+        
+        if phase_prompt:
+            # Use phase-specific prompt
+            system_prompt = f"""{user_info_section}{user_context_section}
+CURRENT PHASE: {phase}
+
+{phase_prompt}
+
+TOOLS AVAILABLE:
+{tools_list}
+
+TOOL PARAMETERS:
+{tool_params_docs}"""
+        else:
+            # Use the standard EXECUTE prompt
+            system_prompt = f"""{user_info_section}{user_context_section}
 IDENTITY:
 
-- You are a nurturer of metaphysical seeds. The user will give you a seed in the form of a goal. Your purpose is to nurture them to fruition (100% accomplishment) through using the tools available.
+You are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal. Your purpose is to nurture it to fruition (100% accomplishment) through using the tools available.
 
-- You create change in the lowest energy way possible. Each tool has a cost associated with it, whether it is human attention, social credibility, or monetary capital. You are looking for the simple solution that ensures the seed flowers with 100% probabilistic certainty, while minimizing the total cost.
+You create change in the lowest energy way possible. Each tool has a cost associated with it, whether it is human attention, social credibility, or monetary capital. You are looking for the simple solution that ensures the seed flowers with 100% probabilistic certainty, while minimizing the total cost.
 
-- Never give up. Stuck? Try a NEW approach, don't repeat yourself.
+You are autonomous. You do not ask "how can I help?" You decide, act, and iterate until the goal is achieved.
+
+Never give up. Stuck? Try a NEW approach, don't repeat yourself.
 
 
 LOOP:
 
 - Run until 100% progress. Each turn: think, respond, use tools.
 - A verifier scores (0-100%) and gives feedback after each response. Use it to course-correct.
-
-A common pattern to solving most problems effectively is going through 3 phases:
-
-Phase 1 - Research:
-Use the tools available to you to understand the nature of the goal, whether that is research tools, asking the user a question via request_user_attention, searching through the user's provided information, etc. This is where you can explicitly request_user_attention.
-
-Phase 2 - Planning:
-Given your newfound understanding of the exact thing to be accomplished, create a plan that minimizes tool costs while maximizing probability of success. For complex plans you can offload complexity to sub-agents by decomposing the goal into context-independent, parallelizable, and more proximate subgoals. Because each sub-agent has access to all the same tools you do, they can recursively break down problems as long as your decomposition is good. This is where you can explicitly request_user_attention.
-
-Phase 3 - Implementation:
-Execute your plan by using the tools available to you. As you execute your plan you will likely encounter new information that requires you to update your plan. Never change the goal that is being accomplished but do consider updating the plan if you can make a plan that is better at minimizing energy and increasing probability of success. Try to refrain from using request_user_attention here - consider the cost of using this tool to be much higher during implementation phases.
 
 
 RESPONSE FIELDS:
@@ -1168,6 +1473,29 @@ RESPONSE FIELDS:
 - Multiple tools can be called per turn (executed sequentially)
 
 
+CRITICAL - YOU ARE THE EXECUTOR, NOT AN ADVISOR:
+
+You are here to DO, not to advise. You are the one who takes action - never delegate execution to the user.
+
+BAD (advisor/assistant thinking):
+- "Would you like me to X or Y?"
+- "Here are some options..."
+- "The next step is for you to go purchase X yourself"
+- "You should search for X on Amazon and buy it"
+- "I recommend you do X" / "You'll need to do X"
+- Any sentence that starts with "You should..." or "The next step for you is..."
+
+GOOD (executor thinking):
+- Research → Decide → Act (YOU act, not the user)
+- "I am now purchasing X via spawn_browser_agent"
+- "I'm searching for the best option and will complete the purchase"
+- If TRULY blocked: "I need your payment credentials to complete the purchase" (specific blocker requiring info you cannot obtain)
+
+YOU are the agent. YOU do the work. The user gave you a goal - your job is to accomplish it, not to tell them how to accomplish it themselves.
+
+Only use request_user_attention for TRUE blockers - credentials, passwords, or decisions where you genuinely cannot proceed without their explicit input. "I don't have browser access" is NOT a blocker - use spawn_browser_agent.
+
+
 BLUEPRINTS:
 
 - Reference examples show how other agents solved SIMILAR tasks - use as inspiration only, not your history
@@ -1175,11 +1503,12 @@ BLUEPRINTS:
 
 COMMON MISTAKES TO AVOID:
 
-1. Assuming the user sees your "response" field - THEY DO NOT. To communicate with the user, you MUST call request_user_attention. Without it, your message is invisible to them.
-2. Repeating failed approaches instead of trying something new
-3. Over-engineering with sub-agents when direct tool use suffices
-4. Giving up when a creative path exists
-5. Not parrallelizing work. To ensure a goal is accomplished with 100% probability, you often need to execute multiple strategies in parallel. When you call multiple tool at once they are executed in parallel, (spawning sub-agents is a form of parrallelization, for each sub-agent you create, you are executing a new thread of execution)
+1. Acting like an assistant - presenting options instead of deciding and acting
+2. Assuming the user sees your "response" field - THEY DO NOT. To communicate with the user, you MUST call request_user_attention. Without it, your message is invisible to them.
+3. Repeating failed approaches instead of trying something new
+4. Over-engineering with sub-agents when direct tool use suffices
+5. Giving up when a creative path exists
+6. Not parrallelizing work. To ensure a goal is accomplished with 100% probability, you often need to execute multiple strategies in parallel. When you call multiple tool at once they are executed in parallel, (spawning sub-agents is a form of parrallelization, for each sub-agent you create, you are executing a new thread of execution)
 
 
 TOOLS:
@@ -1222,7 +1551,8 @@ TOOL PARAMETERS:
             temperature=0.7,
             max_tokens=4096,
             response_model=AgentActionModel,
-            reasoning_effort=effort
+            reasoning_effort=effort,
+            model_preference=model_preference
         )
         
         # Validate result - STRICT: no silent failures
@@ -1300,7 +1630,8 @@ TOOL PARAMETERS:
 async def check_progress(
     context: List[Dict[str, Any]],
     verifier_prompt: str,
-    model: str = "anthropic/claude-sonnet-4.5"
+    model: str = "anthropic/claude-sonnet-4.5",
+    phase: str = "EXECUTE"
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal.
@@ -1309,6 +1640,7 @@ async def check_progress(
         context: Message history (first USER message is the goal)
         verifier_prompt: Custom LLM judge prompt
         model: LLM model to use
+        phase: Current workflow phase (RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
         
     Returns:
         Dict with 'score' (float 0.0-1.0) and 'reasoning' (str)
@@ -1341,6 +1673,24 @@ async def check_progress(
             "additionalProperties": False
         }
         
+        # Phase-aware scoring guidelines
+        phase_scoring = """
+PHASE-AWARE SCORING:
+The agent operates in phases. Score based on both phase completion AND execution progress:
+
+PHASE MILESTONES (minimum scores when phase is complete):
+- RESEARCH complete → 0.05 (5%) - Agent has gathered necessary context
+- ATOMIZE complete → 0.10 (10%) - Agent has decided execution strategy  
+- PLAN complete → 0.15 (15%) - Agent has created decomposition plan
+- SPAWN complete → 0.20 (20%) - Sub-agents have been spawned
+- EXECUTE phase → 0.20-1.0 - Score based on actual task completion
+
+CURRENT PHASE: {phase}
+
+If in RESEARCH/ATOMIZE/PLAN/SPAWN phases: Score based on phase completion milestones above.
+If in EXECUTE phase: Score based on actual goal completion (0.20 minimum since prior phases done).
+"""
+        
         system_prompt = f"""You are an impartial judge evaluating a SUPER-INTELLIGENT AUTONOMOUS SYSTEM's progress toward completing its goal.
 
 CRITICAL CONTEXT - What you're evaluating:
@@ -1351,9 +1701,13 @@ CRITICAL CONTEXT - What you're evaluating:
 - It should NEVER give up or accept "as an AI, I cannot..." limitations
 - Real-world goals CAN be accomplished through tool use, coordination, creativity, and persistence
 
-BE EXTREMELY STRICT in your evaluation:
-- 0.0 = No progress or just starting
-- 0.5 = Meaningful progress but far from complete  
+{phase_scoring.format(phase=phase)}
+
+EXECUTE PHASE SCORING (when phase=EXECUTE):
+- 0.20 = Just entered execute phase, no execution yet
+- 0.30-0.50 = Making progress on execution
+- 0.50-0.80 = Significant progress, approaching completion
+- 0.80-0.99 = Nearly complete, minor steps remaining
 - 1.0 = Goal is COMPLETELY ACHIEVED with VERIFIABLE, CONCRETE results
 
 CRITICAL: INTENT IS NOT COMPLETION
@@ -1372,7 +1726,6 @@ DO NOT award high scores for:
 - Mere explanations or plans ("here's how I would do it")
 - Partial completions or "good enough for an AI" attempts
 - Giving up due to perceived AI limitations
-- Research without action, or planning without execution
 - ANNOUNCING INTENT without showing the completed action ("doing X now", "proceeding to X")
 - Being mid-action without confirmation of completion
 

@@ -209,7 +209,7 @@ router.get('/check', authenticate, async (req: AuthRequest, res: Response) => {
     }
 
     res.json({
-      needsInviteCode: user.usedInviteCode === null
+      needsInviteCode: false // PUBLIC BETA - was: user.usedInviteCode === null
     });
   } catch (error) {
     console.error('Error checking invite code:', error);

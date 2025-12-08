@@ -43,6 +43,10 @@ with workflow.unsafe.imports_passed_through():
     from tools.check_monitor_events import check_monitor_events
     from tools.read_message_history import read_message_history_with_person
     from tools.message_person import message_person, get_manager as get_message_person_manager
+    # Phase transition marker tools
+    from tools.mark_research_finished import mark_research_finished
+    from tools.mark_atomization_finished import mark_atomization_finished
+    from tools.mark_planning_finished import mark_planning_finished
 
 logger = structlog.get_logger()
 
@@ -69,6 +73,21 @@ EVENT_DRIVEN_TOOLS = {
     "check_monitor_events": check_monitor_events,
     "read_message_history_with_person": read_message_history_with_person,
     "message_person": message_person,
+    # Phase transition marker tools
+    "mark_research_finished": mark_research_finished,
+    "mark_atomization_finished": mark_atomization_finished,
+    "mark_planning_finished": mark_planning_finished,
+}
+
+# Read-only tools available during RESEARCH phase
+READ_ONLY_TOOL_NAMES = {
+    "web_search",
+    "deep_research",
+    "search_user_network_for_people",
+    "read_message_history_with_person",
+    "find_all",
+    "check_monitor_events",
+    "request_user_attention",
 }
 
 # Tool formatter registry (maps tool names to their formatters)
@@ -84,6 +103,7 @@ TOOL_MANAGERS = {
 # NOTE: query_blueprints and save_blueprint migrated to knowledge_base (event-driven)
 
 # System tools that are always available (don't need to be in DB)
+# Tools with read_only=True are available during RESEARCH phase
 SYSTEM_TOOLS = [
     {
         "id": "system-wait-seconds",
@@ -98,12 +118,14 @@ SYSTEM_TOOLS = [
     {
         "id": "system-request-user-attention",
         "name": "request_user_attention",
-        "description": "Ask the User a direct question when you need clarification, preferences, decisions, or information that only they can provide. Do NOT use this for factual information that can be found via web_search or other tools - only use when the User's personal input is required."
+        "description": "Ask the User a direct question when you need clarification, preferences, decisions, or information that only they can provide. Do NOT use this for factual information that can be found via web_search or other tools - only use when the User's personal input is required.",
+        "read_only": True  # Available during research to ask clarifying questions
     },
     {
         "id": "system-find-all",
         "name": "find_all",
-        "description": "Discover all entities matching specific criteria using natural language queries. Returns matched candidates with names, details, reasoning, and citations. Generators: 'preview' (cheapest, ~10 candidates for testing), 'base' (broad queries, many matches), 'core' (specific queries, moderate matches), 'pro' (highly specific/rare matches). Pricing: Fixed cost + per-match fee. Core generator: $2.00 fixed + $0.15/match. Use 'preview' first to test queries before scaling to other generators."
+        "description": "Discover all entities matching specific criteria using natural language queries. Returns matched candidates with names, details, reasoning, and citations. Generators: 'preview' (cheapest, ~10 candidates for testing), 'base' (broad queries, many matches), 'core' (specific queries, moderate matches), 'pro' (highly specific/rare matches). Pricing: Fixed cost + per-match fee. Core generator: $2.00 fixed + $0.15/match. Use 'preview' first to test queries before scaling to other generators.",
+        "read_only": True
     },
     {
         "id": "system-enrich",
@@ -118,17 +140,20 @@ SYSTEM_TOOLS = [
     {
         "id": "system-check-monitor-events",
         "name": "check_monitor_events",
-        "description": "Check for new events detected by a previously created monitor. Returns list of events with details about what changed on the web. Requires monitor_id from a previous monitor call. Use this periodically to retrieve updates - monitors run on their schedule but you must check for events to see results."
+        "description": "Check for new events detected by a previously created monitor. Returns list of events with details about what changed on the web. Requires monitor_id from a previous monitor call. Use this periodically to retrieve updates - monitors run on their schedule but you must check for events to see results.",
+        "read_only": True
     },
     {
         "id": "system-search-user-network",
         "name": "search_user_network_for_people",
-        "description": "Search the user's personal network for people matching specific criteria. Performs semantic search across contacts, finding people by name, profession, company, skills, relationship type, location, or any combination. Use this to find connections who can help with specific tasks or goals. All fields are optional - search by whatever criteria you have."
+        "description": "Search the user's personal network for people matching specific criteria. Performs semantic search across contacts, finding people by name, profession, company, skills, relationship type, location, or any combination. Use this to find connections who can help with specific tasks or goals. All fields are optional - search by whatever criteria you have.",
+        "read_only": True
     },
     {
         "id": "system-read-message-history",
         "name": "read_message_history_with_person",
-        "description": "Read message history with a person. Retrieves past conversations across all channels (iMessage, WhatsApp, email, etc.). Provide at least one identifier: phone number, email address, or first+last name. You MUST call this tool before using message_person to send any message - it ensures you have context about previous conversations."
+        "description": "Read message history with a person. Retrieves past conversations across all channels (iMessage, WhatsApp, email, etc.). Provide at least one identifier: phone number, email address, or first+last name. You MUST call this tool before using message_person to send any message - it ensures you have context about previous conversations.",
+        "read_only": True
     },
     {
         "id": "system-message-person",
@@ -143,14 +168,35 @@ SYSTEM_TOOLS = [
     {
         "id": "system-web-search",
         "name": "web_search",
-        "description": "Search the web for information using Perplexity AI. Returns comprehensive answers with citations. Use for factual questions, current events, research, and any information gathering that doesn't require browsing interactively."
+        "description": "Search the web for information using Perplexity AI. Returns comprehensive answers with citations. Use for factual questions, current events, research, and any information gathering that doesn't require browsing interactively.",
+        "read_only": True
     },
     {
         "id": "system-deep-research",
         "name": "deep_research",
-        "description": "Conduct deep, comprehensive research on a topic using multiple sources and extended reasoning. More thorough than web_search but takes longer and costs more. Use for complex research questions requiring synthesis of multiple sources."
+        "description": "Conduct deep, comprehensive research on a topic using multiple sources and extended reasoning. More thorough than web_search but takes longer and costs more. Use for complex research questions requiring synthesis of multiple sources.",
+        "read_only": True
     },
 ]
+
+# Phase transition marker tool definitions (only available during specific phases)
+PHASE_MARKER_TOOLS = {
+    "mark_research_finished": {
+        "id": "phase-mark-research-finished",
+        "name": "mark_research_finished",
+        "description": "Signal that research phase is complete. Call this when you have gathered enough context to understand the goal."
+    },
+    "mark_atomization_finished": {
+        "id": "phase-mark-atomization-finished",
+        "name": "mark_atomization_finished",
+        "description": "Signal the atomization decision. Set is_proximate=true if the goal can be executed directly, or is_proximate=false if it needs decomposition into parallel subtasks."
+    },
+    "mark_planning_finished": {
+        "id": "phase-mark-planning-finished",
+        "name": "mark_planning_finished",
+        "description": "Signal that planning is complete with the list of parallel subtasks. Each subtask needs: goal (specific objective) and context (relevant info from research)."
+    },
+}
 
 
 def estimate_token_count(text: str) -> int:
@@ -159,6 +205,83 @@ def estimate_token_count(text: str) -> int:
     This is conservative and works across most tokenizers.
     """
     return len(text) // 4
+
+
+def get_phase_tools_and_config(
+    phase: str,
+    all_tools: List[Dict],
+    is_first_call: bool,
+    planned_subtasks: List[Dict]
+) -> Dict[str, Any]:
+    """
+    Get tools, tool names, and model preference for the current phase.
+    
+    Args:
+        phase: Current phase (RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
+        all_tools: Full list of available tools
+        is_first_call: True if this is the first call of a parent agent
+        planned_subtasks: Subtasks from planning phase (for SPAWN phase)
+        
+    Returns:
+        Dict with 'tools', 'tool_names', 'model_preference'
+    """
+    if phase == "RESEARCH":
+        # Filter to read-only tools + mark_research_finished marker
+        read_only_tools = [t for t in all_tools if t.get("read_only")]
+        marker_tool = PHASE_MARKER_TOOLS["mark_research_finished"]
+        
+        if is_first_call:
+            # First call uses FAST (Cerebras) which has strict limits:
+            # - Max 5 anyOf options (tools)
+            # - No minimum/maximum on integers
+            # - Max 5000 char schema
+            # Limit to essential research tools for speed
+            FAST_RESEARCH_TOOLS = {"web_search", "request_user_attention", "mark_research_finished"}
+            tools = [t for t in read_only_tools if t["name"] in FAST_RESEARCH_TOOLS] + [marker_tool]
+            model_pref = "FAST"
+        else:
+            # Subsequent calls - full read_only toolset, no forced model preference
+            tools = read_only_tools + [marker_tool]
+            model_pref = None
+        
+        tool_names = [t["name"] for t in tools]
+        
+    elif phase == "ATOMIZE":
+        # Only atomization marker tool, but include all tool schemas for reference
+        marker_tool = PHASE_MARKER_TOOLS["mark_atomization_finished"]
+        tools = [marker_tool]
+        tool_names = ["mark_atomization_finished"]
+        model_pref = None
+        
+    elif phase == "PLAN":
+        # Only planning marker tool
+        marker_tool = PHASE_MARKER_TOOLS["mark_planning_finished"]
+        tools = [marker_tool]
+        tool_names = ["mark_planning_finished"]
+        model_pref = None
+        
+    elif phase == "SPAWN":
+        # Only spawn_sub_agents tool
+        spawn_tool = next((t for t in all_tools if t["name"] == "spawn_sub_agents"), None)
+        if spawn_tool:
+            tools = [spawn_tool]
+            tool_names = ["spawn_sub_agents"]
+        else:
+            tools = []
+            tool_names = []
+        model_pref = None
+        
+    else:  # EXECUTE
+        # All tools
+        tools = all_tools
+        tool_names = [t["name"] for t in tools]
+        model_pref = None  # Use default model settings
+    
+    return {
+        "tools": tools,
+        "tool_names": tool_names,
+        "model_preference": model_pref
+    }
 
 
 @workflow.defn
@@ -201,6 +324,11 @@ class AgentWorkflow:
         self.child_tool_ids: Dict[str, str] = {}  # Map child_agent_id -> tool_call_id
         self.child_last_tokens: Dict[str, Dict[str, int]] = {}  # Track last token counts from each child
         self.depth: int = 0  # Agent nesting depth (0 = top-level, 1 = sub-agent, etc.)
+        
+        # Phase tracking for RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE flow
+        self.phase: str = "RESEARCH"  # Current phase
+        self.is_first_call: bool = False  # True only for parent's first call (uses FAST)
+        self.planned_subtasks: List[Dict] = []  # Subtasks from PLAN phase
         
         # Lock for thread-safe token counter updates during parallel execution
         self._state_lock = asyncio.Lock()
@@ -402,6 +530,11 @@ class AgentWorkflow:
         self.parent_workflow_id = parent_workflow_id  # Store parent ID for signaling
         self.depth = depth  # Store nesting depth
         self.context = context or []
+        
+        # Initialize phase tracking
+        # Only parent agents (depth == 0) use FAST for first call
+        self.is_first_call = (depth == 0)
+        # Phase defaults to RESEARCH from __init__
         
         # Initialize last message check time to 1 hour ago so we fetch the goal message
         # (must use workflow.now() for determinism)
@@ -767,6 +900,43 @@ class AgentWorkflow:
                 if tool_calls:
                     await asyncio.gather(*[execute_one_tool(tc) for tc in tool_calls])
                 
+                # 5.5. Check for phase transitions based on tool calls
+                tool_names_called = [tc.get("tool") for tc in tool_calls]
+                
+                if "mark_research_finished" in tool_names_called:
+                    workflow.logger.info("📋 Phase transition: RESEARCH → ATOMIZE")
+                    self.phase = "ATOMIZE"
+                    
+                elif "mark_atomization_finished" in tool_names_called:
+                    # Extract is_proximate from the tool call
+                    for tc in tool_calls:
+                        if tc.get("tool") == "mark_atomization_finished":
+                            is_proximate = tc.get("is_proximate", False)
+                            if is_proximate:
+                                workflow.logger.info("📋 Phase transition: ATOMIZE → EXECUTE (proximate)")
+                                self.phase = "EXECUTE"
+                            else:
+                                workflow.logger.info("📋 Phase transition: ATOMIZE → PLAN (needs decomposition)")
+                                self.phase = "PLAN"
+                            break
+                            
+                elif "mark_planning_finished" in tool_names_called:
+                    # Extract subtasks from the tool call
+                    for tc in tool_calls:
+                        if tc.get("tool") == "mark_planning_finished":
+                            subtasks = tc.get("subtasks", [])
+                            self.planned_subtasks = subtasks
+                            workflow.logger.info(f"📋 Phase transition: PLAN → SPAWN ({len(subtasks)} subtasks)")
+                            self.phase = "SPAWN"
+                            break
+                            
+                elif "spawn_sub_agents" in tool_names_called and self.phase == "SPAWN":
+                    # After spawning sub-agents, wait for them to complete
+                    # The spawn_sub_agents tool handles waiting via workflow signals
+                    # Transition to EXECUTE after spawning
+                    workflow.logger.info("📋 Phase transition: SPAWN → EXECUTE (sub-agents spawned)")
+                    self.phase = "EXECUTE"
+                
                 # 6. Check progress with verifier and update DB
                 # Generate a unique ID for this verifier call
                 verifier_call_id = workflow.uuid4()
@@ -1068,16 +1238,36 @@ class AgentWorkflow:
     
     async def _decide_next_action(self) -> Dict:
         """
-        Decide next action based on goal and context using LLM.
+        Decide next action based on goal, context, and current phase using LLM.
+        
+        Uses phase-specific prompts and tool filtering for:
+        - RESEARCH: Read-only tools + mark_research_finished
+        - ATOMIZE: mark_atomization_finished (+ tool schemas for reference)
+        - PLAN: mark_planning_finished
+        - SPAWN: spawn_sub_agents
+        - EXECUTE: All tools (current behavior)
         
         Returns:
             Dict with 'tool', 'args', 'reasoning'
         """
-        workflow.logger.info("Deciding next action")
+        workflow.logger.info(f"Deciding next action (phase={self.phase}, is_first_call={self.is_first_call})")
         
         try:
-            # Extract tool names from tools list
-            tool_names = [tool["name"] for tool in self.tools]
+            # Get phase-specific tools, tool names, and model preference
+            phase_config = get_phase_tools_and_config(
+                phase=self.phase,
+                all_tools=self.tools,
+                is_first_call=self.is_first_call,
+                planned_subtasks=self.planned_subtasks
+            )
+            
+            phase_tools = phase_config["tools"]
+            phase_tool_names = phase_config["tool_names"]
+            model_preference = phase_config["model_preference"]
+            
+            # Clear is_first_call after first use
+            if self.is_first_call:
+                self.is_first_call = False
             
             # Filter browser sub-actions from LLM context
             # Browser sub-actions have browser_url metadata and should not be seen by LLM
@@ -1086,9 +1276,24 @@ class AgentWorkflow:
                 if not (msg.get("metadata") and msg["metadata"].get("browser_url"))
             ]
             
+            workflow.logger.info(
+                f"Phase routing: phase={self.phase}, tools={len(phase_tools)}, model_pref={model_preference}"
+            )
+            
             action = await workflow.execute_activity(
                 decide_next_action,
-                args=[filtered_context, self.tools, tool_names, self.iteration_count, self.model, self.reasoning_effort, self.user_id, self.user_phone],
+                args=[
+                    filtered_context,
+                    phase_tools,
+                    phase_tool_names,
+                    self.iteration_count,
+                    self.model,
+                    self.reasoning_effort,
+                    self.user_id,
+                    self.user_phone,
+                    self.phase,
+                    model_preference
+                ],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
@@ -1120,7 +1325,7 @@ class AgentWorkflow:
         Returns:
             Dict with 'score' (float 0.0-1.0) and 'reasoning' (str)
         """
-        workflow.logger.info(f"🔍 Calling check_progress: context_type={type(self.context).__name__}, context_len={len(self.context)}, verifier_prompt={self.verifier['llmJudgePrompt'][:50]}, model={self.model}")
+        workflow.logger.info(f"🔍 Calling check_progress: phase={self.phase}, context_len={len(self.context)}, verifier_prompt={self.verifier['llmJudgePrompt'][:50]}, model={self.model}")
         
         try:
             # Filter browser sub-actions from context (same as decide_next_action)
@@ -1131,7 +1336,7 @@ class AgentWorkflow:
             
             result = await workflow.execute_activity(
                 check_progress,
-                args=[filtered_context, self.verifier["llmJudgePrompt"], self.model],
+                args=[filtered_context, self.verifier["llmJudgePrompt"], self.model, self.phase],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,

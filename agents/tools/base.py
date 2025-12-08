@@ -6,7 +6,7 @@ All tools should inherit from ToolManager and emit ToolEvent objects.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
-from typing import Literal, Optional, Dict, Any, List, AsyncGenerator
+from typing import Literal, Optional, Dict, Any, List, AsyncGenerator, TypedDict
 from enum import Enum
 import json
 from temporalio.exceptions import ActivityError, ApplicationError
@@ -19,11 +19,34 @@ __all__ = [
     "UsageItem",
     "ToolEvent",
     "ToolManager",
+    "ToolSchema",
     "format_tool_message",
     "format_error_message",
     "format_time_elapsed",
     "extract_root_error",
 ]
+
+
+# ========================================
+# TYPED DICT FOR TOOL SCHEMA
+# ========================================
+
+class ToolSchema(TypedDict, total=False):
+    """
+    Schema for tool definitions passed to the LLM.
+    
+    Required fields:
+        id: Unique tool identifier
+        name: Tool name (matches ToolManager.tool_name)
+        description: Description for LLM to understand when to use tool
+        
+    Optional fields:
+        read_only: True if tool only reads data (no side effects)
+    """
+    id: str
+    name: str
+    description: str
+    read_only: bool  # Optional - defaults to False
 
 
 # ========================================
@@ -401,6 +424,9 @@ class ToolManager(ABC):
     
     # Set to True in subclass if tool requires user approval before execution
     requires_approval: bool = False
+    
+    # Set to True in subclass for read-only tools (used in RESEARCH phase)
+    read_only: bool = False
     
     @property
     @abstractmethod

@@ -21,6 +21,7 @@ class SearchUserNetworkManager(ToolManager):
     """Manager for search_user_network_for_people tool."""
     
     tool_name = "search_user_network_for_people"
+    read_only = True  # Research phase tool
     
     async def execute_tool(
         self,

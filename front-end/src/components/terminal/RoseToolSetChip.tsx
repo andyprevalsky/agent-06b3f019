@@ -150,7 +150,7 @@ export default function RoseToolSetChip() {
                   </div>
                   {tool.desktopOnly && (
                     <a
-                      href="https://roselabs.ai/download"
+                      href="/download"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-primary/10 hover:bg-primary/20 text-primary font-medium transition-colors"
