@@ -88,7 +88,7 @@ export default function OnePager() {
             Today’s AI systems resemble unicellular organisms. They are large, monolithic, indivisible blocks of compute that cannot parallelize well. Scaling increases parameter count but not organizational intelligence.
           </p>
           <p className="text-lg text-[#3d3a36] mb-6">
-            Mass Agent Networks are a massive leap in the seemingly obvious direction these systems are headed, the transition from unicellular -> multicellular.
+            Mass Agent Networks are a massive leap in the seemingly obvious direction these systems are headed, the transition from unicellular → multicellular.
           </p>
           <p className="text-lg text-[#3d3a36] mb-4">
             Instead of one large model doing everything, MANs are societies of specialized agents that:
@@ -259,6 +259,37 @@ export default function OnePager() {
               <span className="text-[#c9c5be] select-none">-</span>
               <span>
                 Mentored for six years by Michael Seibel
+              </span>
+            </li>
+          </ul>
+        </section>
+
+        {/* Raise */}
+        <section className="mb-14">
+          <h2
+            className="text-2xl font-medium mb-6 text-[#1a1a18]"
+            style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.01em' }}
+          >
+            Raise
+          </h2>
+          <ul className="space-y-4 text-lg text-[#3d3a36]">
+            <li className="flex gap-3">
+              <span className="text-[#c9c5be] select-none">•</span>
+              <span>$3M</span>
+            </li>
+            <li className="flex gap-3">
+              <span className="text-[#c9c5be] select-none">•</span>
+              <span>Hire engineers, acquire GPUs.</span>
+            </li>
+            <li className="flex gap-3">
+              <span className="text-[#c9c5be] select-none">•</span>
+              <span>
+                We want investors that:
+                <ul className="mt-2 ml-6 space-y-2">
+                  <li>- Will connect us with customers.</li>
+                  <li>- Help us hire top talent.</li>
+                  <li>- Have deep expertise in AI, infra, and/or security.</li>
+                </ul>
               </span>
             </li>
           </ul>
