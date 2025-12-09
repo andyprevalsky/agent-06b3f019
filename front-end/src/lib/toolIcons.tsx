@@ -28,6 +28,7 @@ import {
   Mail,
   Phone,
   Code,
+  Zap,
   type LucideIcon
 } from 'lucide-react';
 
@@ -55,6 +56,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'monitor': Radio,
   'check_monitor_events': ListChecks,
   'claude_code': Code,
+  'x402': Zap,
   
   // Browser action sub-types (for spawn_browser_agent internal actions)
   'Agent Reasoning': Lightbulb,

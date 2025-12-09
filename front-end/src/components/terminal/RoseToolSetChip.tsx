@@ -6,6 +6,8 @@ import {
 } from '@/components/ui/popover';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 import { useState } from 'react';
+import x402Icon from '@/assets/x402-brand-kit/icon/x402-icon-black.png';
+import ClaudeIcon from '@/assets/claude-color.svg';
 
 // Define Rose system tools with descriptions
 interface RoseTool {
@@ -13,6 +15,7 @@ interface RoseTool {
   displayName: string;
   description: string;
   desktopOnly?: boolean;
+  link?: string;
 }
 
 const ROSE_SYSTEM_TOOLS: RoseTool[] = [
@@ -20,6 +23,12 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
     name: 'spawn_sub_agents',
     displayName: 'Spawn Sub-Agents',
     description: 'Recursively break down arbitrarily complex goals into proximate, context-independent & parallelizable sub goals. Rose can spawn up to 10,000 agents for any single goal.',
+  },
+  {
+    name: 'x402',
+    displayName: 'x402',
+    description: 'Rose agents can search and use any service in the x402 Bazaar to execute a myriad of complex tasks.',
+    link: 'https://www.x402.org/ecosystem?category=services-endpoints',
   },
   {
     name: 'claude_code',
@@ -132,7 +141,13 @@ export default function RoseToolSetChip() {
                 className="flex gap-2 p-2 rounded-md hover:bg-muted/50 transition-colors"
               >
                 <div className="flex-shrink-0 mt-0.5">
-                  <Icon className="h-4 w-4 text-muted-foreground" />
+                  {tool.name === 'x402' ? (
+                    <img src={x402Icon} alt="x402" className="h-4 w-4 opacity-50 dark:invert dark:opacity-60" />
+                  ) : tool.name === 'claude_code' ? (
+                    <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />
+                  ) : (
+                    <Icon className="h-4 w-4 text-muted-foreground" />
+                  )}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
@@ -157,6 +172,17 @@ export default function RoseToolSetChip() {
                       onClick={(e) => e.stopPropagation()}
                     >
                       Download for Mac
+                    </a>
+                  )}
+                  {tool.link && (
+                    <a
+                      href={tool.link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-gradient-to-r from-[#FE7503]/10 via-[#E062CC]/10 to-[#7A6BEC]/10 hover:from-[#FE7503]/20 hover:via-[#E062CC]/20 hover:to-[#7A6BEC]/20 text-foreground font-medium transition-colors"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      View x402 Ecosystem →
                     </a>
                   )}
                 </div>
