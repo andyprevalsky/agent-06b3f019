@@ -93,13 +93,11 @@ async def test_spawn_sub_agents_success():
                             {
                                 "goal": "Research topic A",
                                 "model": "gpt-4",
-                                "tool_ids": [],
                                 "verifier": {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "Evaluate results"}
                             },
                             {
                                 "goal": "Research topic B",
                                 "model": "gpt-4",
-                                "tool_ids": [],
                                 "verifier": {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "Evaluate results"}
                             }
                         ]
@@ -183,9 +181,9 @@ async def test_spawn_sub_agents_partial_failure():
                     
                     tool_call = {
                         "sub_agents": [
-                            {"goal": "Task 1", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}},
-                            {"goal": "Task 2", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}},
-                            {"goal": "Task 3", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}}
+                            {"goal": "Task 1", "verifier": {"type": "FLOAT_LLM_JUDGE"}},
+                            {"goal": "Task 2", "verifier": {"type": "FLOAT_LLM_JUDGE"}},
+                            {"goal": "Task 3", "verifier": {"type": "FLOAT_LLM_JUDGE"}}
                         ]
                     }
                     tool_call_id = "test-456"
@@ -252,7 +250,7 @@ async def test_spawn_sub_agents_activity_exception():
             
             tool_call = {
                 "sub_agents": [
-                    {"goal": "Task 1", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}}
+                    {"goal": "Task 1", "verifier": {"type": "FLOAT_LLM_JUDGE"}}
                 ]
             }
             tool_call_id = "test-error"
@@ -306,8 +304,8 @@ async def test_spawn_agents_activity_http_success():
                 user_id="test-user",
                 user_phone="+19729777432",
                 sub_agents=[
-                    {"goal": "Research AI", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}},
-                    {"goal": "Research ML", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}}
+                    {"goal": "Research AI", "verifier": {"type": "FLOAT_LLM_JUDGE"}},
+                    {"goal": "Research ML", "verifier": {"type": "FLOAT_LLM_JUDGE"}}
                 ],
                 parent_agent_id="parent-123",
                 parent_workflow_id="workflow-456",
@@ -364,8 +362,8 @@ async def test_spawn_agents_activity_http_partial_failure():
                     user_id="test-user",
                     user_phone="+19729777432",
                     sub_agents=[
-                        {"goal": "Task 1", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}},
-                        {"goal": "Task 2", "tool_ids": [], "verifier": {"type": "FLOAT_LLM_JUDGE"}}
+                        {"goal": "Task 1", "verifier": {"type": "FLOAT_LLM_JUDGE"}},
+                        {"goal": "Task 2", "verifier": {"type": "FLOAT_LLM_JUDGE"}}
                     ],
                     parent_agent_id="parent-123",
                     parent_workflow_id="workflow-456",

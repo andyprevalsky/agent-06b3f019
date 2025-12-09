@@ -241,48 +241,23 @@ def create_sub_agent_config_model(
     available_db_tools: List[Dict[str, str]]
 ) -> Type[BaseModel]:
     """
-    Dynamically create SubAgentConfig with description based on available tools.
+    Dynamically create SubAgentConfig model.
     
-    This ensures the tool_ids description is always up-to-date with:
-    - System tools that sub-agents have by default
-    - DB tools that the parent agent can pass to sub-agents
+    Note: tool_ids is intentionally NOT included - sub-agents get their tools
+    automatically via the backend's tool selection logic based on their goal.
     
     Args:
-        system_tool_names: Names of system tools available to sub-agents (e.g., ['wait_seconds', 'request_user_attention'])
-        available_db_tools: List of DB tools parent has access to (with id, name, description)
+        system_tool_names: Names of system tools (unused, kept for API compatibility)
+        available_db_tools: List of DB tools (unused, kept for API compatibility)
         
     Returns:
         Dynamically generated SubAgentConfig class
     """
-    # Format system tools list
-    system_tools_str = ", ".join(system_tool_names) if system_tool_names else "none"
-    
-    # Build description of DB tools available to pass
-    if available_db_tools:
-        db_tools_list = "\n".join([
-            f'{{\n'
-            f'  "tool_name": "{tool["name"]}",\n'
-            f'  "tool_id": "{tool["id"]}",\n'
-            f'  "tool_description": "{tool["description"]}"\n'
-            f'}}'
-            for tool in available_db_tools
-        ])
-        tool_ids_desc = (
-            f"Optional list of tool IDs to give this sub-agent additional capabilities. "
-            f"By default, sub-agents ONLY have these base system tools: {system_tools_str}. "
-            f"To enable advanced capabilities, you MUST pass the relevant tool IDs from your available tools:\n{db_tools_list}"
-        )
-    else:
-        tool_ids_desc = (
-            f"Optional list of tool IDs. Note: You only have system tools ({system_tools_str}), so sub-agents will be limited to those base capabilities unless you pass additional tool IDs."
-        )
-    
     class DynamicSubAgentConfig(BaseModel):
         """Configuration for a single sub-agent."""
         goal: str = Field(description="The goal/task for this sub-agent")
         model: Optional[str] = Field(None, description="LLM model to use (inherits from parent if not specified)")
         reasoning_effort: Optional[str] = Field(None, description="Reasoning effort: 'off', 'low', 'medium', 'high'")
-        tool_ids: Optional[List[str]] = Field(default_factory=list, description=tool_ids_desc)
         verifier: VerifierConfig = Field(description="Verifier config with type='FLOAT_LLM_JUDGE' and llm_judge_prompt")
     
     return DynamicSubAgentConfig

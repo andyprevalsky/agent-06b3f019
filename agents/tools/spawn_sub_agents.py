@@ -196,7 +196,6 @@ async def spawn_sub_agents_activity(
             - goal (str): The subtask goal
             - model (str, optional): LLM model to use
             - reasoning_effort (str, optional): "off", "low", "medium", "high"
-            - tool_ids (list, optional): Tool UUIDs the sub-agent can use
             - verifier (dict): {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "..."}
         parent_agent_id: Parent agent ID (for hierarchy)
         parent_workflow_id: Parent workflow ID (for signaling)
@@ -221,12 +220,11 @@ async def spawn_sub_agents_activity(
             # Spawn all agents concurrently using internal API key
             tasks = []
             for agent in sub_agents:
-                # Build payload, filtering out None values
+                # Build payload - tool_ids intentionally omitted, backend selects tools automatically
                 payload = {
                     "user_id": user_id,  # For internal auth
                     "user_phone": user_phone,  # For SMS notifications
                     "goal": agent["goal"],
-                    "tool_ids": agent.get("tool_ids", []),
                     "verifier": agent["verifier"],
                     "parent_agent_id": parent_agent_id,
                     "parent_workflow_id": parent_workflow_id,

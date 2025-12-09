@@ -113,7 +113,7 @@ SYSTEM_TOOLS = [
     {
         "id": "system-spawn-sub-agents",
         "name": "spawn_sub_agents",
-        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Each sub-agent runs independently with its own goal, model, tools, and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_effort (optional), tool_ids (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
+        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Each sub-agent runs independently with its own goal and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_effort (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
     },
     {
         "id": "system-request-user-attention",
