@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { AuthRequest, authenticate } from '../middleware/auth';
 import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
-import { startAgentWorkflow } from '../lib/temporal';
+import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
 import { chooseTools } from '../lib/chooseTools';
 import { getX402Endpoints } from '../lib/x402Endpoints';
@@ -229,6 +229,8 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         data: {
           userId,
           parentAgentId: body.parent_agent_id || null,
+          parentWorkflowId: body.parent_workflow_id || null,
+          depth: body.depth || 0,
           goal: body.goal,
           model: body.model,
           reasoningEffort: body.reasoning_effort,
@@ -1008,6 +1010,92 @@ router.patch('/:id', authenticate, async (req: AuthRequest, res) => {
     }
     console.error('Update agent error:', error);
     res.status(500).json({ error: 'Failed to update agent' });
+  }
+});
+
+// POST /api/agents/:id/restart - Restart an agent's workflow
+// Terminates existing workflow and starts a fresh one with same agent data
+router.post('/:id/restart', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const agentId = req.params.id;
+
+    // Fetch agent with all required relations
+    // For internal API key calls, don't filter by userId
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        ...(req.isInternal ? {} : { userId: req.user!.id }),
+        deletedAt: null,
+      },
+      include: {
+        verifier: true,
+        tools: true,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    if (!agent.verifier) {
+      res.status(400).json({ error: 'Agent has no verifier configured' });
+      return;
+    }
+
+    // 1. Terminate existing workflow if running
+    const client = await getTemporalClient();
+    try {
+      const handle = client.workflow.getHandle(agentId);
+      await handle.terminate('Restarting with new worker code');
+      console.log(`✅ Terminated workflow ${agentId}`);
+    } catch (e: any) {
+      // Workflow might already be completed/terminated - that's fine
+      console.log(`⚠️ Could not terminate workflow ${agentId}: ${e.message}`);
+    }
+
+    // Small delay to ensure termination is processed
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // 2. Reset agent status to ACTIVE
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { status: 'ACTIVE', statusMessage: null },
+    });
+
+    // 3. Start fresh workflow with same agent params
+    const workflowId = await startAgentWorkflow({
+      agentId: agent.id,
+      userId: agent.userId,
+      goal: agent.goal,
+      model: agent.model,
+      reasoningEffort: agent.reasoningEffort,
+      toolIds: agent.tools.map(t => t.toolId),
+      verifier: {
+        type: agent.verifier.type,
+        llmJudgePrompt: agent.verifier.llmJudgePrompt,
+      },
+      ...(agent.parentWorkflowId ? { parentWorkflowId: agent.parentWorkflowId } : {}),
+      depth: agent.depth,
+    });
+
+    // 4. Update agent with new workflow ID (should be same as agentId, but just in case)
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { temporalWorkflowId: workflowId },
+    });
+
+    console.log(`✅ Restarted agent ${agentId}, workflow: ${workflowId}`);
+
+    res.json({
+      success: true,
+      agent_id: agentId,
+      workflow_id: workflowId,
+      message: 'Workflow restarted - will continue from existing context',
+    });
+  } catch (error) {
+    console.error('Restart agent error:', error);
+    res.status(500).json({ error: 'Failed to restart agent' });
   }
 });
 

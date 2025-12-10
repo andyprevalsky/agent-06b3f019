@@ -752,17 +752,35 @@ export default function Terminal() {
 
   // Subscribe to realtime updates when agent is selected
   useEffect(() => {
-    if (!selectedAgentId || !user) return;
+    // Cleanup function - always defined, always returned to React
+    const cleanup = () => {
+      console.log('🧹 useEffect cleanup running');
+      isReconnectingRef.current = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (channelRef.current) {
+        unsubscribe(channelRef.current);
+        channelRef.current = null;
+      }
+    };
+
+    // Early return but STILL return cleanup function
+    if (!selectedAgentId || !user) {
+      cleanup(); // Clean up any existing connection when going to null
+      return cleanup; // Return cleanup for React to call on unmount
+    }
 
     // Prevent concurrent reconnection attempts
     if (isReconnectingRef.current) {
       console.log('⏳ Reconnection already in progress, skipping...');
-      return;
+      return cleanup;
     }
 
     isReconnectingRef.current = true;
 
-    // Clean up previous channel
+    // Clean up previous channel before setting up new one
     if (channelRef.current) {
       console.log('🧹 Unsubscribing from previous channel');
       channelRef.current.unsubscribe();
@@ -774,6 +792,28 @@ export default function Terminal() {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
+
+    // Helper function to schedule reconnection with exponential backoff
+    const scheduleReconnect = () => {
+      // Don't reconnect if we've switched agents or logged out
+      if (!selectedAgentId || !user) return;
+
+      // Clear any existing timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+
+      // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+      const attempt = reconnectAttemptRef.current;
+      const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+      
+      reconnectAttemptRef.current += 1;
+
+      reconnectTimeoutRef.current = window.setTimeout(() => {
+        // Trigger re-subscription by updating the force counter
+        setForceResubscribe(prev => prev + 1);
+      }, delay);
+    };
 
     // Async setup for realtime with auth
     const setupRealtime = async () => {
@@ -842,42 +882,13 @@ export default function Terminal() {
         isReconnectingRef.current = false;
         scheduleReconnect();
       }
-
-      // Helper function to schedule reconnection with exponential backoff
-      function scheduleReconnect() {
-        // Don't reconnect if we've switched agents or logged out
-        if (!selectedAgentId || !user) return;
-
-        // Clear any existing timeout
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-        }
-
-        // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-        const attempt = reconnectAttemptRef.current;
-        const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
-        
-        reconnectAttemptRef.current += 1;
-
-        reconnectTimeoutRef.current = window.setTimeout(() => {
-          // Trigger re-subscription by updating the force counter
-          setForceResubscribe(prev => prev + 1);
-        }, delay);
-      }
-
-      return () => {
-        isReconnectingRef.current = false;
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = null;
-        }
-        unsubscribe(channelRef.current);
-        channelRef.current = null;
-      };
     };
 
     // Call the async setup function
     setupRealtime();
+
+    // Return cleanup function to React
+    return cleanup;
   }, [selectedAgentId, user, forceResubscribe]);
 
   // Handle tab visibility changes - reconnect when tab becomes visible
@@ -1144,6 +1155,46 @@ export default function Terminal() {
     }
   };
 
+  // Cleanup agent-specific state and websocket
+  const cleanupAgentState = useCallback(() => {
+    // Websocket cleanup
+    if (channelRef.current) {
+      console.log('🧹 Cleaning up agent websocket channel');
+      unsubscribe(channelRef.current);
+      channelRef.current = null;
+    }
+    isReconnectingRef.current = false;
+    reconnectAttemptRef.current = 0;
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    
+    // Agent state
+    setSelectedAgentId(null);
+    setAgentDetail(null);
+    setMessages([]);
+    setMessageBuffer([]);
+    setIsAnimating(false);
+    setCurrentAnimatingId(null);
+    isInitialLoadRef.current = false;
+    setIsLoadingAgent(false);
+    setIsSendingMessage(false);
+    setMessageInput('');
+  }, []);
+
+  // Reset landing page animation state
+  const resetAnimationState = useCallback(() => {
+    setCurrentFrame(0);
+    setAnimationComplete(false);
+    setAnimationResetKey(prev => prev + 1);
+    setCurrentMessageIndex(0);
+    setAnimationPhase('revealing');
+    setRevealProgress(0);
+    setIsTypingComplete(false);
+    setIsLoadingNetwork(false);
+  }, []);
+
   const handleSelectAgent = (agentId: string) => {
     setCurrentView('agents');
     setSelectedAgentId(agentId);
@@ -1314,24 +1365,10 @@ export default function Terminal() {
   };
 
   const handleCreateNewAgent = () => {
+    cleanupAgentState();
+    resetAnimationState();
     setCurrentView('agents');
-    setSelectedAgentId(null);
-    setAgentDetail(null); // Clear agent detail to reset completed status
-    setMessages([]);
-    setMessageInput('');
     setIsSidebarOpen(false);
-    
-    // Reset animation state to replay like on page load
-    setCurrentFrame(0);
-    setAnimationComplete(false);
-    setAnimationResetKey(prev => prev + 1); // Force SmallTileAnimationCanvas to remount and clear everColoredTiles
-    
-    // Reset opening messages animation
-    setCurrentMessageIndex(0);
-    setAnimationPhase('revealing');
-    setRevealProgress(0);
-    setIsTypingComplete(false);
-    setIsLoadingNetwork(false);
   };
 
   // Handle quick query from launcher (Electron app)
@@ -1777,9 +1814,9 @@ export default function Terminal() {
           agent={agentDetail} 
           onUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)}
           onDelete={() => {
+            cleanupAgentState();
+            resetAnimationState();
             setCurrentView('agents');
-            setSelectedAgentId(null);
-            setMessages([]);
             loadAgents();
           }}
         />

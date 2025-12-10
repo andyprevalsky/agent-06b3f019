@@ -28,6 +28,8 @@ model Agent {
   tokensIn                  Int             @default(0)
   tokensOut                 Int             @default(0)
   parentAgentId             String?
+  parentWorkflowId          String?
+  depth                     Int             @default(0)
   tokenInPriceMicrodollars  Int?
   tokenOutPriceMicrodollars Int?
   parent                    Agent?          @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
