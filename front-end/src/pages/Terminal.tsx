@@ -4,6 +4,7 @@ import * as amplitude from '@amplitude/analytics-browser';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift, Copy, Check, Plug, Network } from 'lucide-react';
+import AppSidebar from '@/components/terminal/AppSidebar';
 import { supabase, signOut, initializeRealtime, clearStoredSession } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
 import { subscribeToAgent, unsubscribe } from '@/lib/realtime';
@@ -28,7 +29,6 @@ import MessageBubble from '@/components/terminal/MessageBubble';
 import BrowserViewPanel from '@/components/terminal/BrowserViewPanel';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
-import AgentSettingsDialog from '@/components/terminal/AgentSettingsDialog';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
 import Settings from '@/pages/Settings';
 import Integrations from '@/pages/Integrations';
@@ -365,8 +365,6 @@ export default function Terminal() {
   // View state - which pane to show
   const [currentView, setCurrentView] = useState<'agents' | 'integrations' | 'settings' | 'usage' | 'network'>('agents');
   
-  // Sidebar state
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   // Browser fullscreen state - shared across all browser panels
   const [anyBrowserFullscreen, setAnyBrowserFullscreen] = useState(false);
@@ -1195,11 +1193,18 @@ export default function Terminal() {
     setIsLoadingNetwork(false);
   }, []);
 
-  const handleSelectAgent = (agentId: string) => {
-    setCurrentView('agents');
-    setSelectedAgentId(agentId);
-    loadAgentDetail(agentId);
-    setIsSidebarOpen(false);
+  const handleSelectAgent = (agentId: string | null) => {
+    // Only switch to agents view if selecting an actual agent
+    if (agentId) {
+      setCurrentView('agents');
+      setSelectedAgentId(agentId);
+      loadAgentDetail(agentId);
+    } else {
+      // Just clear the selection without changing view
+      setSelectedAgentId(null);
+      setAgentDetail(null);
+      setMessages([]);
+    }
   };
 
   const handleCreateAgent = async (data: CreateAgentPayload) => {
@@ -1344,7 +1349,6 @@ export default function Terminal() {
       setMessages([]);
       setMessageInput('');
       setCurrentView('agents');
-      setIsSidebarOpen(false);
       
       // Reset Amplitude user identity on logout
       amplitude.reset();
@@ -1361,14 +1365,12 @@ export default function Terminal() {
 
   const handleLoginClick = () => {
     setLoginModalOpen(true);
-    setIsSidebarOpen(false);
   };
 
   const handleCreateNewAgent = () => {
     cleanupAgentState();
     resetAnimationState();
     setCurrentView('agents');
-    setIsSidebarOpen(false);
   };
 
   // Handle quick query from launcher (Electron app)
@@ -1376,9 +1378,8 @@ export default function Terminal() {
     const trimmed = payload.query?.trim();
     if (!trimmed) return;
 
-    // Switch to agents view and close sidebar
+    // Switch to agents view
     setCurrentView('agents');
-    setIsSidebarOpen(false);
     
     // Set the input temporarily (for display purposes)
     setMessageInput(trimmed);
@@ -1692,42 +1693,6 @@ export default function Terminal() {
         <AttentionInbox onSelectAgent={setSelectedAgentId} />
       </header>
 
-      {/* Hamburger Menu Button - Top Left - Sibling to Header */}
-      <div 
-        className="absolute top-4 z-50"
-        style={{
-          left: 'calc(50% - 448px - 38px - 16px)', // QueryBox is 896px wide (448px from center), button is 38px, gap is 16px
-        }}
-      >
-        <button
-          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          className="w-[38px] h-[38px] flex items-center justify-center rounded-lg border border-border/50 dark:border-navi-light-black/50 shadow-sm hover:bg-white/10 transition-colors overflow-hidden relative"
-          style={{
-            backdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
-            WebkitBackdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
-            backgroundColor: backgroundColors > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity})` : undefined,
-            borderColor: borderColor > 0 ? dripStyles.borderRgb : undefined,
-            boxShadow: shadowIntensity > 0 
-              ? `0 4px 16px rgba(0, 0, 0, ${dripStyles.shadowIntensity}), 0 0 ${dripStyles.glow}px rgba(126, 87, 194, ${dripStyles.glowOpacity})`
-              : undefined,
-          }}
-          aria-label="Toggle menu"
-        >
-          {/* Marble gradient background - soft white with pastel hints */}
-          {backgroundColors > 0 && (
-            <div 
-              className="absolute inset-0 pointer-events-none"
-              style={{
-                background: `radial-gradient(circle at 30% 30%, rgba(255, 250, 252, ${0.6 * dripStyles.backgroundColorsScalar}) 0%, transparent 70%), 
-                             radial-gradient(circle at 70% 70%, rgba(248, 245, 255, ${0.5 * dripStyles.backgroundColorsScalar}) 0%, transparent 70%)`,
-                opacity: 0.3 + dripStyles.backgroundColorsScalar * 0.5,
-                zIndex: -1,
-              }}
-            />
-          )}
-          {isSidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-        </button>
-      </div>
 
       {/* Gift Button - To the left of Agent Settings - Sibling to Header */}
       <div 
@@ -1803,176 +1768,31 @@ export default function Terminal() {
         </>
       )}
 
-      {/* Agent Settings Button - Top Right - Sibling to Header */}
-      <div 
-        className="absolute top-4 z-50"
-        style={{
-          left: 'calc(50% + 448px + 16px + 38px + 12px)', // QueryBox right edge + gap + gift button + gap
-        }}
-      >
-        <AgentSettingsDialog 
-          agent={agentDetail} 
-          onUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)}
-          onDelete={() => {
-            cleanupAgentState();
-            resetAnimationState();
-            setCurrentView('agents');
-            loadAgents();
-          }}
+      <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
+        {/* Left Sidebar - Always visible */}
+        <AppSidebar
+          currentView={currentView}
+          onViewChange={setCurrentView}
+          agents={agents}
+          isLoadingAgents={isLoadingAgents}
+          selectedAgentId={selectedAgentId}
+          onSelectAgent={handleSelectAgent}
+          onCreateAgent={handleCreateNewAgent}
+          onResumeAgent={handleResumeAgent}
+          resumingAgentId={resumingAgentId}
+          user={user}
+          onLogout={handleLogout}
+          onLoginClick={handleLoginClick}
+          dripStyles={dripStyles}
+          blur={blur}
+          backgroundColors={backgroundColors}
+          borderColor={borderColor}
+          shadowIntensity={shadowIntensity}
         />
-      </div>
-
-      <div className="h-screen flex items-center justify-center z-[4]" style={{ height: '100dvh' }}>
-        {/* Overlay */}
-        {isSidebarOpen && (
-          <div 
-            className="absolute inset-0 bg-black/20 z-[55] transition-opacity duration-300"
-            onClick={() => setIsSidebarOpen(false)}
-          />
-        )}
-        
-        {/* Left Sidebar - Positioned Absolute */}
-        <aside 
-          className={cn(
-            "absolute top-0 left-0 h-full w-64 border-r border-border/50 dark:border-navi-light-black/50 flex flex-col z-[60] shadow-2xl transition-transform duration-300 ease-in-out bg-white/80 dark:bg-navi-black/80",
-            isSidebarOpen ? "translate-x-0" : "-translate-x-full"
-          )}
-          style={{
-            backdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
-            WebkitBackdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
-            backgroundColor: backgroundColors > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity * 0.95})` : undefined,
-            borderColor: borderColor > 0 ? dripStyles.borderRgb : undefined,
-            boxShadow: shadowIntensity > 0 
-              ? `inset 0 1px 1px rgba(255,255,255,${dripStyles.bgOpacity * 0.5})`
-              : undefined,
-          }}
-        >
-          {/* Create Agent Button */}
-          <div className="p-3">
-              <Button
-              onClick={handleCreateNewAgent}
-              className="w-full"
-              size="lg"
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              Create Agent
-            </Button>
-          </div>
-
-          {/* Agent List */}
-          <ScrollArea className="flex-1">
-            <div className="px-3 py-2 space-y-1">
-              {isLoadingAgents && agents.length === 0 ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                </div>
-              ) : sortedAgents.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground text-sm">
-                  No agents yet
-                </div>
-              ) : (
-                sortedAgents.map((agent) => (
-                  <AgentListItem
-                    key={agent.agent_id}
-                    agent={agent}
-                    isSelected={selectedAgentId === agent.agent_id}
-                    onClick={() => handleSelectAgent(agent.agent_id)}
-                    onResume={handleResumeAgent}
-                    isResuming={resumingAgentId === agent.agent_id}
-                  />
-                ))
-              )}
-            </div>
-          </ScrollArea>
-
-          {/* Usage Visualization */}
-          <div className="px-4 py-3">
-            <UsageDisplay />
-          </div>
-
-          {/* Bottom Actions - with border top */}
-          <div className="border-t border-border dark:border-navi-light-black">
-            <div className="p-3 space-y-1">
-              {/* Integrations Button */}
-              <button
-                onClick={() => {
-                  setCurrentView('integrations');
-                  setSelectedAgentId(null);
-                  setIsSidebarOpen(false);
-                }}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
-              >
-                <Plug className="h-4 w-4" />
-                <span>Integrations</span>
-              </button>
-
-              {/* Network Button */}
-              <button
-                onClick={() => {
-                  setCurrentView('network');
-                  setSelectedAgentId(null);
-                  setIsSidebarOpen(false);
-                }}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
-              >
-                <Network className="h-4 w-4" />
-                <span>Network</span>
-              </button>
-
-              {/* Settings Button */}
-              <button
-                onClick={() => {
-                  setCurrentView('settings');
-                  setSelectedAgentId(null);
-                  setIsSidebarOpen(false);
-                }}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
-              >
-                <SettingsIcon className="h-4 w-4" />
-                <span>Settings</span>
-              </button>
-
-              {/* Usage Button */}
-              <button
-                onClick={() => {
-                  setCurrentView('usage');
-                  setSelectedAgentId(null);
-                  setIsSidebarOpen(false);
-                }}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
-              >
-                <BarChart3 className="h-4 w-4" />
-                <span>Usage</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Login/Logout - Separate border */}
-          <div className="border-t border-border dark:border-navi-light-black">
-            <div className="p-3">
-              {user ? (
-                <button
-                  onClick={handleLogout}
-                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
-                >
-                  <LogOut className="h-4 w-4" />
-                  <span>Logout</span>
-                </button>
-              ) : (
-                <button
-                  onClick={handleLoginClick}
-                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black"
-                >
-                  <LogOut className="h-4 w-4 rotate-180" />
-                  <span>Login</span>
-                </button>
-              )}
-            </div>
-          </div>
-        </aside>
 
         {/* Main Content - Centered */}
-        <main className="flex flex-col relative max-w-5xl w-full h-screen" style={{ height: '100dvh' }}>
+        <main className="flex-1 flex justify-center h-screen overflow-hidden" style={{ height: '100dvh' }}>
+          <div className="flex flex-col relative max-w-5xl w-full px-6 h-full overflow-hidden">
           {/* Breadcrumb for sub-agents - Below Header */}
           {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
             <div className="absolute top-20 left-0 right-0 z-40 px-6">
@@ -2020,13 +1840,29 @@ export default function Terminal() {
 
           {/* Main Content Area */}
           {currentView === 'settings' ? (
-            <Settings />
+            <ScrollArea className="flex-1 h-full">
+              <div className="pt-24 pb-8">
+                <Settings />
+              </div>
+            </ScrollArea>
           ) : currentView === 'integrations' ? (
-            <Integrations />
+            <ScrollArea className="flex-1 h-full">
+              <div className="pt-24 pb-8">
+                <Integrations />
+              </div>
+            </ScrollArea>
           ) : currentView === 'usage' ? (
-            <Usage />
+            <ScrollArea className="flex-1 h-full">
+              <div className="pt-24 pb-8">
+                <Usage />
+              </div>
+            </ScrollArea>
           ) : currentView === 'network' ? (
-            <NetworkView />
+            <ScrollArea className="flex-1 h-full">
+              <div className="pt-24 pb-8">
+                <NetworkView />
+              </div>
+            </ScrollArea>
           ) : (
             <>
             <ScrollArea 
@@ -2293,11 +2129,20 @@ export default function Terminal() {
               onCreateNewAgent={handleCreateNewAgent}
               dripStyles={dripStyles}
               drippiness={blur}
+              agentDetail={agentDetail}
+              onAgentUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)}
+              onAgentDelete={() => {
+                cleanupAgentState();
+                resetAnimationState();
+                setCurrentView('agents');
+                loadAgents();
+              }}
             />
             </div>
           </div>
           </>
           )}
+          </div>
         </main>
       </div>
 

@@ -1,6 +1,6 @@
 import { Agent } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Play, Loader2, CreditCard } from 'lucide-react';
+import { Play, Loader2, CreditCard, Bot } from 'lucide-react';
 
 interface AgentListItemProps {
   agent: Agent;
@@ -8,9 +8,10 @@ interface AgentListItemProps {
   onClick: () => void;
   onResume?: (agentId: string) => void;
   isResuming?: boolean;
+  isCompact?: boolean;
 }
 
-export default function AgentListItem({ agent, isSelected, onClick, onResume, isResuming = false }: AgentListItemProps) {
+export default function AgentListItem({ agent, isSelected, onClick, onResume, isResuming = false, isCompact = false }: AgentListItemProps) {
   // Calculate the progress arc for the circular progress wheel
   const radius = 8;
   const circumference = 2 * Math.PI * radius;
@@ -22,6 +23,43 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
       onResume(agent.agent_id);
     }
   };
+
+  // Compact mode - just show an icon with status indicator
+  if (isCompact) {
+    const isActive = agent.status === 'ACTIVE' || agent.status === 'STARTING_UP';
+    const isPaused = agent.status === 'PAUSED';
+    const isOutOfCredits = agent.status === 'OUT_OF_CREDITS';
+    const isComplete = agent.status === 'COMPLETED';
+    const isFailed = agent.status === 'FAILED';
+    
+    return (
+      <div
+        onClick={onClick}
+        className={cn(
+          'w-full flex items-center justify-center p-2 rounded-lg transition-all cursor-pointer',
+          isSelected
+            ? 'bg-gray-200 dark:bg-zinc-700'
+            : 'hover:bg-gray-100 dark:hover:bg-zinc-800'
+        )}
+      >
+        <div className="relative">
+          <Bot className={cn(
+            "h-5 w-5",
+            isSelected ? "text-gray-800 dark:text-gray-200" : "text-gray-500 dark:text-gray-400"
+          )} />
+          {/* Status indicator dot */}
+          <div className={cn(
+            "absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-white dark:border-zinc-900",
+            isActive && "bg-green-500",
+            isPaused && "bg-yellow-500",
+            isOutOfCredits && "bg-red-500",
+            isComplete && "bg-blue-500",
+            isFailed && "bg-red-600"
+          )} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full space-y-1.5">

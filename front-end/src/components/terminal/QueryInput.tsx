@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Command as CommandIcon, Loader2, ChevronDown } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 import * as amplitude from '@amplitude/analytics-browser';
 import { cn } from '@/lib/utils';
 import {
@@ -18,7 +18,9 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Model } from '@/hooks/useAppData';
+import { AgentDetail } from '@/lib/api';
 import RoseToolSetChip from './RoseToolSetChip';
+import AgentSettingsDialog from './AgentSettingsDialog';
 
 interface DripStyles {
   blur: number;
@@ -52,6 +54,10 @@ interface QueryInputProps {
   onCreateNewAgent?: () => void; // Callback to create a new agent
   dripStyles?: DripStyles; // Drippiness styling
   drippiness?: number; // Drippiness value (0-100)
+  // Agent settings props
+  agentDetail?: AgentDetail | null;
+  onAgentUpdate?: () => void;
+  onAgentDelete?: () => void;
 }
 
 export default function QueryInput({
@@ -84,6 +90,9 @@ export default function QueryInput({
     borderRgb: 'rgba(255, 255, 255, 0.5)',
   },
   drippiness = 0,
+  agentDetail = null,
+  onAgentUpdate,
+  onAgentDelete,
 }: QueryInputProps) {
   // Tool picker removed - LLM automatically selects tools based on goal
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -192,43 +201,52 @@ export default function QueryInput({
               {/* Tool picker removed - LLM automatically selects tools based on goal */}
             </div>
 
-            {/* Context Meter */}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div>
-                  <Badge variant="outline" className="flex items-center gap-2 text-muted-foreground text-xs font-mono px-2 py-1">
-                    <span>
-                      {contextPercentage.toFixed(0)}%
-                    </span>
-                    <svg className="transform -rotate-90" viewBox="0 0 20 20" width="16" height="16">
-                      <circle
-                        className="fill-none stroke-muted-foreground/30 opacity-70"
-                        cx="10"
-                        cy="10"
-                        r="8"
-                        strokeWidth="3"
-                      />
-                      <circle
-                        className="fill-none stroke-muted-foreground transition-all duration-200"
-                        cx="10"
-                        cy="10"
-                        r="8"
-                        strokeWidth="3"
-                        strokeLinecap="round"
-                        strokeDasharray="50.265"
-                        strokeDashoffset={50.265 - (50.265 * contextPercentage / 100)}
-                        style={{ transition: 'stroke-dashoffset 200ms ease' }}
-                      />
-                    </svg>
-                  </Badge>
-                </div>
-              </TooltipTrigger>
-              <TooltipContent className="z-[100]">
-                <p className="text-xs font-mono">
-                  {contextSize.toLocaleString()} / {restartThreshold.toLocaleString()} context used
-                </p>
-              </TooltipContent>
-            </Tooltip>
+            {/* Context Meter and Settings */}
+            <div className="flex items-center gap-2">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div>
+                    <Badge variant="outline" className="flex items-center gap-2 text-muted-foreground text-xs font-mono px-2 py-1">
+                      <span>
+                        {contextPercentage.toFixed(0)}%
+                      </span>
+                      <svg className="transform -rotate-90" viewBox="0 0 20 20" width="16" height="16">
+                        <circle
+                          className="fill-none stroke-muted-foreground/30 opacity-70"
+                          cx="10"
+                          cy="10"
+                          r="8"
+                          strokeWidth="3"
+                        />
+                        <circle
+                          className="fill-none stroke-muted-foreground transition-all duration-200"
+                          cx="10"
+                          cy="10"
+                          r="8"
+                          strokeWidth="3"
+                          strokeLinecap="round"
+                          strokeDasharray="50.265"
+                          strokeDashoffset={50.265 - (50.265 * contextPercentage / 100)}
+                          style={{ transition: 'stroke-dashoffset 200ms ease' }}
+                        />
+                      </svg>
+                    </Badge>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent className="z-[100]">
+                  <p className="text-xs font-mono">
+                    {contextSize.toLocaleString()} / {restartThreshold.toLocaleString()} context used
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+              
+              {/* Agent Settings Button */}
+              <AgentSettingsDialog
+                agent={agentDetail}
+                onUpdate={onAgentUpdate}
+                onDelete={onAgentDelete}
+              />
+            </div>
           </div>
 
           {/* Textarea Input or Create New Agent Button */}
