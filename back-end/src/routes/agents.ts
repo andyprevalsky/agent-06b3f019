@@ -2,30 +2,46 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { AuthRequest, authenticate } from '../middleware/auth';
+import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
 import { startAgentWorkflow } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
 import { chooseTools } from '../lib/chooseTools';
+import { getX402Endpoints } from '../lib/x402Endpoints';
 
 const router = Router();
+
+/**
+ * Auto-generate verifier prompt from goal
+ */
+function generateVerifierPrompt(goal: string): string {
+  return `You are judging whether the agent has achieved the following goal: "${goal}"
+
+Scoring Instructions:
+- Return a float between 0.0 and 1.0.
+- 0.0 means no progress or only explanations/plans.
+- 1.0 means the goal is FULLY accomplished with verifiable proof.
+- Do not award 1.0 for partial completion.
+- The agent has access to tools and can solve problems through persistence and creativity.`;
+}
 
 // Validation schemas
 const createAgentSchema = z.object({
   goal: z.string().min(1),
-  model: z.string().optional().default('google/gemini-2.5-flash'),
+  model: z.string().optional().default('rose-labs/rose-1-fast'),
   reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional().default('low'),
   tool_ids: z.array(z.string().uuid()).nullable().optional().default([]).transform(val => val ?? []),
   source: z.enum(['WEB', 'MAC_APP']).optional().default('WEB'),
   task_queue: z.string().optional(), // Optional: for test isolation
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
-  user_phone: z.string().optional(), // Optional: for internal auth (sub-agent creation)
   parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)
   parent_workflow_id: z.string().optional(), // Optional: for sub-agents to signal parent
   depth: z.number().int().min(0).max(1).optional().default(0), // Nesting depth
   pause_state: z.boolean().optional().default(false), // Optional: inherit parent's pause state
+  // Verifier is now optional - auto-generated from goal if not provided
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
     llm_judge_prompt: z.string().min(1),
-  }),
+  }).optional(),
 });
 
 const postMessageSchema = z.object({
@@ -112,17 +128,28 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
 });
 
 // POST /api/agents - Create a new agent
-router.post('/', authenticate, async (req: AuthRequest, res) => {
+// Supports: JWT auth, internal API key, or x402 payment
+router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     const body = createAgentSchema.parse(req.body);
-    // For internal calls (API key), accept user_id from body
-    // For user calls (JWT), extract from token
-    const userId = req.isInternal ? body.user_id : req.user!.id;
+    
+    // Get userId from hybrid auth middleware
+    // - JWT: req.userId from token
+    // - Internal: req.userId from body.user_id or X-User-Id header
+    // - x402: req.userId from wallet address (credits already added by middleware)
+    const userId = req.userId || body.user_id;
     
     if (!userId) {
-      res.status(401).json({ error: 'Unauthorized: user_id required for internal auth' });
+      res.status(401).json({ error: 'Unauthorized: user_id required' });
       return;
     }
+    
+    // Auto-generate verifier if not provided
+    const verifierPrompt = body.verifier?.llm_judge_prompt || generateVerifierPrompt(body.goal);
+    const verifier = {
+      type: 'FLOAT_LLM_JUDGE' as const,
+      llm_judge_prompt: verifierPrompt,
+    };
 
     // 🤖 LLM-based tool selection
     // Get all available tools for LLM to choose from
@@ -215,12 +242,12 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
         },
       });
 
-      // Create verifier
+      // Create verifier (auto-generated or from request)
       await tx.verifier.create({
         data: {
           agentId: newAgent.id,
-          type: body.verifier.type,
-          llmJudgePrompt: body.verifier.llm_judge_prompt,
+          type: verifier.type,
+          llmJudgePrompt: verifier.llm_judge_prompt,
         },
       });
 
@@ -248,16 +275,6 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
     // Start Temporal workflow with initial context containing goal message
     let workflowId: string | null = null;
     try {
-      // Get user's phone number from JWT (user auth) or request body (internal API key auth)
-      const userPhone = req.isInternal ? body.user_phone : req.user?.phone;
-      if (!userPhone) {
-        return res.status(400).json({
-          error: req.isInternal 
-            ? 'user_phone is required in request body for internal API calls'
-            : 'User phone number not found in authentication token',
-        });
-      }
-      
       workflowId = await startAgentWorkflow({
         agentId: agent.agent.id,
         userId,
@@ -266,10 +283,10 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
         reasoningEffort: body.reasoning_effort,
         toolIds: mergedToolIds, // Use merged tool IDs
         verifier: {
-          type: body.verifier.type,
-          llmJudgePrompt: body.verifier.llm_judge_prompt,
+          type: verifier.type,
+          llmJudgePrompt: verifier.llm_judge_prompt,
         },
-        userPhone, // Always required
+        // userPhone removed - fetched dynamically from user context in workflow
         ...(body.task_queue ? { taskQueue: body.task_queue } : {}),
         ...(body.parent_workflow_id ? { parentWorkflowId: body.parent_workflow_id } : {}),
         ...(body.depth !== undefined ? { depth: body.depth } : {}),
@@ -304,7 +321,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       throw error;
     }
 
-    // Return agent with updated workflow ID
+    // Return agent with updated workflow ID and available endpoints for discoverability
     res.status(201).json({
       agent_id: agent.agent.id,
       progress: agent.agent.progress,
@@ -317,6 +334,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       temporal_workflow_id: workflowId, // Use the workflow ID we just got
       created_at: agent.agent.createdAt,
       updated_at: agent.agent.updatedAt,
+      available_endpoints: getX402Endpoints(agent.agent.id),
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

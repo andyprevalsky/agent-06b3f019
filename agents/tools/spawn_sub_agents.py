@@ -70,7 +70,7 @@ class SpawnSubAgentsManager(ToolManager):
             # Get workflow info
             info = workflow.info()
             user_id = workflow_instance.user_id
-            user_phone = workflow_instance.user_phone
+            # user_phone removed - fetched from user context in workflow
             parent_agent_id = workflow_instance.agent_id
             parent_workflow_id = info.workflow_id
             depth = getattr(workflow_instance, 'depth', 0) + 1
@@ -90,7 +90,7 @@ class SpawnSubAgentsManager(ToolManager):
             # 2. Execute spawn activity
             result = await workflow.execute_activity(
                 spawn_sub_agents_activity,
-                args=[user_id, user_phone, sub_agents, parent_agent_id, parent_workflow_id, depth, parent_is_paused],
+                args=[user_id, sub_agents, parent_agent_id, parent_workflow_id, depth, parent_is_paused],
                 start_to_close_timeout=timedelta(seconds=60),
             )
             
@@ -179,7 +179,6 @@ def get_manager() -> SpawnSubAgentsManager:
 @activity.defn
 async def spawn_sub_agents_activity(
     user_id: str,
-    user_phone: str,
     sub_agents: List[Dict[str, Any]],
     parent_agent_id: str,
     parent_workflow_id: str,
@@ -191,7 +190,6 @@ async def spawn_sub_agents_activity(
     
     Args:
         user_id: User ID (agents will be created for this user)
-        user_phone: User's phone number (E.164 format, for SMS notifications)
         sub_agents: List of agent configs, each with:
             - goal (str): The subtask goal
             - model (str, optional): LLM model to use
@@ -221,9 +219,9 @@ async def spawn_sub_agents_activity(
             tasks = []
             for agent in sub_agents:
                 # Build payload - tool_ids intentionally omitted, backend selects tools automatically
+                # user_phone removed - fetched from user context in workflow
                 payload = {
                     "user_id": user_id,  # For internal auth
-                    "user_phone": user_phone,  # For SMS notifications
                     "goal": agent["goal"],
                     "verifier": agent["verifier"],
                     "parent_agent_id": parent_agent_id,

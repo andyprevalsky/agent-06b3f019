@@ -56,7 +56,7 @@ export async function startAgentWorkflow(params: {
   taskQueue?: string; // Optional: override task queue (for testing isolation)
   parentWorkflowId?: string; // Optional: parent workflow ID for sub-agents
   depth?: number; // Optional: nesting depth
-  userPhone?: string; // Optional: user's phone number (E.164 format)
+  // userPhone removed - now fetched from user context in workflow
 }): Promise<string> {
   const client = await getTemporalClient();
   // Use provided task queue or default to environment-specific queue
@@ -85,7 +85,7 @@ export async function startAgentWorkflow(params: {
       [], // Start with empty context, workflow will poll for goal message
       params.parentWorkflowId || null, // Parent workflow ID for signaling
       params.depth || 0, // Nesting depth
-      params.userPhone || null, // User's phone number
+      // userPhone removed - now fetched from user context in workflow
     ],
   });
 

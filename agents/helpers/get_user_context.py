@@ -343,6 +343,11 @@ def _format_user_context(
     if user_settings.get('name'):
         profile_parts.append(f"Name: {user_settings['name']}")
     
+    # Include user's phone number (for SMS communication)
+    if user_settings.get('phone'):
+        profile_parts.append(f"Phone: {user_settings['phone']}")
+        profile_parts.append(f"When sending SMS messages to the user, use: {user_settings['phone']}")
+    
     location_parts = []
     if user_settings.get('city'):
         location_parts.append(user_settings['city'])

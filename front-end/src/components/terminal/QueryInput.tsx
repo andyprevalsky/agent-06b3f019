@@ -17,7 +17,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useAppData, Model } from '@/hooks/useAppData';
+import { Model } from '@/hooks/useAppData';
 import RoseToolSetChip from './RoseToolSetChip';
 
 interface DripStyles {
@@ -85,18 +85,13 @@ export default function QueryInput({
   },
   drippiness = 0,
 }: QueryInputProps) {
-  const [selectedTools, setSelectedTools] = useState<string[]>([]);
-  const [showToolPicker, setShowToolPicker] = useState(false);
+  // Tool picker removed - LLM automatically selects tools based on goal
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showTooltip, setShowTooltip] = useState(false);
   const [cursorPosition, setCursorPosition] = useState(0);
   const [hasTrackedFocus, setHasTrackedFocus] = useState(false);
   const [hasTrackedTyping, setHasTrackedTyping] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { tools, toolsLoading } = useAppData();
-  
-  // Ensure tools is always an array
-  const availableTools = Array.isArray(tools) ? tools : [];
 
   // Close tooltip when clicking outside on mobile
   useEffect(() => {
@@ -114,12 +109,6 @@ export default function QueryInput({
   }, [showTooltip]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Check for @ symbol to show tool picker
-    if (e.key === '@') {
-      e.preventDefault(); // Prevent @ from being typed
-      setShowToolPicker(true);
-    }
-
     // CMD/Ctrl + Enter to submit
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
@@ -152,22 +141,7 @@ export default function QueryInput({
     }
   };
 
-  const handleToolSelect = (toolId: string) => {
-    if (selectedTools.includes(toolId)) {
-      setSelectedTools(selectedTools.filter((id) => id !== toolId));
-    } else {
-      setSelectedTools([...selectedTools, toolId]);
-    }
-    // Close modal and refocus textarea
-    setShowToolPicker(false);
-    setTimeout(() => {
-      textareaRef.current?.focus();
-    }, 100);
-  };
-
-  const handleToolRemove = (toolId: string) => {
-    setSelectedTools(selectedTools.filter((id) => id !== toolId));
-  };
+  // Tool picker removed - LLM automatically selects tools based on goal
 
   // Separate featured (first 6) from rest
   const featuredModels = availableModels.slice(0, 6);
@@ -215,69 +189,7 @@ export default function QueryInput({
             <div className="flex items-center gap-2">
               {/* Rose-ToolSet Chip */}
               <RoseToolSetChip />
-              
-              {/* @ Add Tool Chip */}
-              <Popover open={showToolPicker} onOpenChange={setShowToolPicker}>
-                <PopoverTrigger asChild>
-                  <button
-                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-xs hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors shadow-sm"
-                    title="Add tools"
-                  >
-                    <span className="font-bold">@</span>
-                    <span>add tool</span>
-                  </button>
-                </PopoverTrigger>
-                <PopoverContent className="w-[300px] p-0 z-50" align="start">
-                  <Command className="bg-white">
-                    <CommandInput placeholder="Search tools..." />
-                    <CommandList>
-                      <CommandEmpty>No tools found.</CommandEmpty>
-                      <CommandGroup heading="Available Tools">
-                        {availableTools.map((tool) => (
-                          <CommandItem
-                            key={tool.id}
-                            onSelect={() => {
-                              handleToolSelect(tool.id);
-                            }}
-                          >
-                            <div className="flex items-center justify-between w-full">
-                              <div>
-                                <div className="font-medium">{tool.name}</div>
-                                {tool.description && (
-                                  <div className="text-xs text-muted-foreground">
-                                    {tool.description}
-                                  </div>
-                                )}
-                              </div>
-                              {selectedTools.includes(tool.id) && (
-                                <span className="text-primary">✓</span>
-                              )}
-                            </div>
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    </CommandList>
-                  </Command>
-                </PopoverContent>
-              </Popover>
-
-              {/* Selected Tools Chips */}
-              <div className="flex items-center gap-1 flex-wrap">
-                {selectedTools.map((toolId) => {
-                  const tool = availableTools.find((t) => t.id === toolId);
-                  if (!tool) return null;
-                  return (
-                    <Badge
-                      key={toolId}
-                      variant="secondary"
-                      className="text-xs px-2 py-0.5 bg-foreground/10 border border-foreground/20 text-foreground hover:bg-foreground/20 cursor-pointer shadow-sm"
-                      onClick={() => handleToolRemove(toolId)}
-                    >
-                      {tool.name} ×
-                    </Badge>
-                  );
-                })}
-              </div>
+              {/* Tool picker removed - LLM automatically selects tools based on goal */}
             </div>
 
             {/* Context Meter */}

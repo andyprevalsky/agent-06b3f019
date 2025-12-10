@@ -38,6 +38,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
     if (!user) {
       return res.json({
         name: null,
+        phone: null,
         addressLine1: null,
         addressLine2: null,
         city: null,
@@ -50,6 +51,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
 
     res.json({
       name: user.name,
+      phone: user.phone, // Include phone for agent context
       addressLine1: user.addressLine1,
       addressLine2: user.addressLine2,
       city: user.city,

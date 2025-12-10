@@ -28,9 +28,19 @@ import {
   Mail,
   Phone,
   Code,
-  Zap,
   type LucideIcon
 } from 'lucide-react';
+
+// x402 brand icon for bazaar tools
+import x402Icon from '@/assets/x402-brand-kit/icon/x402-icon-black.png';
+
+// Tools that use the x402 brand icon instead of Lucide
+export const X402_TOOLS = ['search_x402_bazaar', 'pay_for_x402_bazaar_service', 'x402'];
+export const x402IconSrc = x402Icon;
+
+export function isX402Tool(toolName: string): boolean {
+  return X402_TOOLS.includes(toolName);
+}
 
 /**
  * Comprehensive mapping of tool names to Lucide React icons.
@@ -56,7 +66,6 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'monitor': Radio,
   'check_monitor_events': ListChecks,
   'claude_code': Code,
-  'x402': Zap,
   
   // Browser action sub-types (for spawn_browser_agent internal actions)
   'Agent Reasoning': Lightbulb,

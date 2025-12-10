@@ -109,6 +109,14 @@ class PaymentConfig:
 
 
 @dataclass
+class X402Config:
+    """x402 protocol configuration for paid API services."""
+    
+    receiving_wallet: str = ""  # Wallet address for receiving x402 payments (also used as buyer)
+    wallet_secret: str = ""  # CDP wallet secret (PKCS#8 DER format, base64-encoded)
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
     
@@ -122,6 +130,7 @@ class AppConfig:
     parallel: ParallelConfig
     rose: RoseConfig
     payment: PaymentConfig
+    x402: X402Config
     
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -199,6 +208,11 @@ def load_config() -> AppConfig:
         decryption_key=os.getenv("PAYMENT_DECRYPTION_KEY", ""),
     )
     
+    x402 = X402Config(
+        receiving_wallet=os.getenv("X402_RECEIVING_WALLET", ""),
+        wallet_secret=os.getenv("CDP_WALLET_SECRET", ""),
+    )
+    
     return AppConfig(
         temporal=temporal,
         backend=backend,
@@ -210,6 +224,7 @@ def load_config() -> AppConfig:
         parallel=parallel,
         rose=rose,
         payment=payment,
+        x402=x402,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

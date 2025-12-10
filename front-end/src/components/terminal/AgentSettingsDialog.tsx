@@ -114,7 +114,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
     console.log('Pause/Resume clicked, current status:', agent.status);
     setIsUpdating(true);
     try {
-      if (agent.status === 'PAUSED') {
+      if (agent.status === 'PAUSED' || agent.status === 'OUT_OF_CREDITS') {
         console.log('Resuming agent:', agent.agent_id);
         await resumeAgent(agent.agent_id);
         toast({ title: 'Agent resuming', description: 'The agent will resume shortly' });
@@ -280,18 +280,18 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
             <div className="space-y-2">
             <Button
               onClick={handlePauseResume}
-              disabled={isUpdating || !['ACTIVE', 'PAUSED'].includes(agent.status)}
+              disabled={isUpdating || !['ACTIVE', 'PAUSED', 'OUT_OF_CREDITS'].includes(agent.status)}
               className="w-full"
-              variant={agent.status === 'PAUSED' ? 'default' : 'outline'}
+              variant={['PAUSED', 'OUT_OF_CREDITS'].includes(agent.status) ? 'default' : 'outline'}
             >
               {isUpdating ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : agent.status === 'PAUSED' ? (
+              ) : ['PAUSED', 'OUT_OF_CREDITS'].includes(agent.status) ? (
                 <Play className="h-4 w-4 mr-2" />
               ) : (
                 <Pause className="h-4 w-4 mr-2" />
               )}
-              {agent.status === 'PAUSED' ? 'Resume' : 'Pause'}
+              {['PAUSED', 'OUT_OF_CREDITS'].includes(agent.status) ? 'Resume' : 'Pause'}
             </Button>
           </div>
 

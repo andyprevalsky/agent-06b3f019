@@ -4,9 +4,8 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover';
-import { TOOL_ICONS } from '@/lib/toolIcons';
+import { TOOL_ICONS, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 import { useState } from 'react';
-import x402Icon from '@/assets/x402-brand-kit/icon/x402-icon-black.png';
 import ClaudeIcon from '@/assets/claude-color.svg';
 
 // Define Rose system tools with descriptions
@@ -27,7 +26,7 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
   {
     name: 'x402',
     displayName: 'x402',
-    description: 'Rose agents can search and use any service in the x402 Bazaar to execute a myriad of complex tasks.',
+    description: 'Rose agents can search for and use any service in the x402 Bazaar to execute a myriad of complex tasks.',
     link: 'https://www.x402.org/ecosystem?category=services-endpoints',
   },
   {
@@ -141,8 +140,8 @@ export default function RoseToolSetChip() {
                 className="flex gap-2 p-2 rounded-md hover:bg-muted/50 transition-colors"
               >
                 <div className="flex-shrink-0 mt-0.5">
-                  {tool.name === 'x402' ? (
-                    <img src={x402Icon} alt="x402" className="h-4 w-4 opacity-50 dark:invert dark:opacity-60" />
+                  {isX402Tool(tool.name) ? (
+                    <img src={x402IconSrc} alt="x402" className="h-4 w-4 opacity-50 dark:invert dark:opacity-60" />
                   ) : tool.name === 'claude_code' ? (
                     <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />
                   ) : (

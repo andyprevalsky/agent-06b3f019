@@ -47,6 +47,8 @@ with workflow.unsafe.imports_passed_through():
     from tools.mark_research_finished import mark_research_finished
     from tools.mark_atomization_finished import mark_atomization_finished
     from tools.mark_planning_finished import mark_planning_finished
+    # x402 Bazaar tools
+    from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
 
 logger = structlog.get_logger()
 
@@ -77,6 +79,9 @@ EVENT_DRIVEN_TOOLS = {
     "mark_research_finished": mark_research_finished,
     "mark_atomization_finished": mark_atomization_finished,
     "mark_planning_finished": mark_planning_finished,
+    # x402 Bazaar tools
+    "search_x402_bazaar": search_x402_bazaar,
+    "pay_for_x402_bazaar_service": pay_for_x402_bazaar_service,
 }
 
 # Read-only tools available during RESEARCH phase
@@ -88,6 +93,7 @@ READ_ONLY_TOOL_NAMES = {
     "find_all",
     "check_monitor_events",
     "request_user_attention",
+    "search_x402_bazaar",
 }
 
 # Tool formatter registry (maps tool names to their formatters)
@@ -177,6 +183,17 @@ SYSTEM_TOOLS = [
         "description": "Conduct deep, comprehensive research on a topic using multiple sources and extended reasoning. More thorough than web_search but takes longer and costs more. Use for complex research questions requiring synthesis of multiple sources.",
         "read_only": True
     },
+    {
+        "id": "system-search-x402-bazaar",
+        "name": "search_x402_bazaar",
+        "description": "Search the x402 Bazaar for available paid API services. The Bazaar is a discovery layer for APIs that accept cryptocurrency payments via the x402 protocol. Returns a list of services with pricing, capabilities, and schemas. Use this to find specialized APIs that can help accomplish tasks, then use pay_for_x402_bazaar_service to call them. Our own services are automatically filtered out.",
+        "read_only": True
+    },
+    {
+        "id": "system-pay-x402-service",
+        "name": "pay_for_x402_bazaar_service",
+        "description": "Execute a paid API call to an x402 service discovered from search_x402_bazaar. Handles the x402 payment protocol automatically. Requires: resource_url (from search results), method (GET/POST), params (request parameters), and max_amount_cents (safety limit on payment). The call will fail if the service requires more than the max_amount_cents limit."
+    },
 ]
 
 # Phase transition marker tool definitions (only available during specific phases)
@@ -236,7 +253,7 @@ def get_phase_tools_and_config(
             # - No minimum/maximum on integers
             # - Max 5000 char schema
             # Limit to essential research tools for speed
-            FAST_RESEARCH_TOOLS = {"web_search", "request_user_attention", "mark_research_finished"}
+            FAST_RESEARCH_TOOLS = {"web_search", "search_x402_bazaar", "mark_research_finished"}
             tools = [t for t in read_only_tools if t["name"] in FAST_RESEARCH_TOOLS] + [marker_tool]
             model_pref = "FAST"
         else:
@@ -301,7 +318,7 @@ class AgentWorkflow:
     def __init__(self):
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
-        self.user_phone: Optional[str] = None  # User's phone number (E.164 format)
+        # user_phone removed - now fetched from user context via get_user_context
         self.goal: Optional[str] = None
         self.model: str = "anthropic/claude-sonnet-4.5"
         self.reasoning_effort: str = "low"  # OpenRouter reasoning effort
@@ -502,7 +519,7 @@ class AgentWorkflow:
         context: Optional[List[Dict]] = None,
         parent_workflow_id: Optional[str] = None,  # Parent workflow ID for signaling
         depth: int = 0,  # Nesting depth (0 = top-level, 1 = sub-agent, 2 = max)
-        user_phone: Optional[str] = None,  # User's phone number (E.164 format)
+        # user_phone removed - now fetched from user context via get_user_context
     ) -> Dict:
         """
         Execute an autonomous agent task.
@@ -521,7 +538,7 @@ class AgentWorkflow:
         """
         self.agent_id = agent_id
         self.user_id = user_id
-        self.user_phone = user_phone
+        # user_phone removed - now fetched from user context
         self.goal = goal
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -626,7 +643,8 @@ class AgentWorkflow:
         try:
             # Main agent loop
             while True:
-                # Poll config at start of each iteration (syncs pause state, model, tools)
+                # Poll config at start of each iteration
+                manually_paused = False
                 try:
                     config = await workflow.execute_activity(
                         fetch_agent_config,
@@ -634,11 +652,7 @@ class AgentWorkflow:
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=3)
                     )
-                    was_paused = self.is_paused
-                    self.is_paused = (config['status'] == 'PAUSED')
-                    
-                    if was_paused != self.is_paused:
-                        workflow.logger.info(f"⏸️  Pause state changed from DB: {was_paused} -> {self.is_paused}")
+                    manually_paused = config['status'] == 'PAUSED'
                     
                     # Update model and reasoning effort
                     if config['model'] != self.model:
@@ -695,6 +709,7 @@ class AgentWorkflow:
                     workflow.logger.warning(f"Failed to fetch config: {str(e)}")
                 
                 # Check user's credit usage - pause if depleted
+                has_credits = True  # Default to true if check fails
                 try:
                     usage_result = await workflow.execute_activity(
                         check_user_usage,
@@ -708,26 +723,28 @@ class AgentWorkflow:
                         )
                     )
                     
-                    # If None, activity failed - preserve cached value
+                    # If None, activity failed - assume has credits to avoid blocking
                     if usage_result is None:
                         workflow.logger.warning(
-                            "⚠️  Failed to check usage after retries - using cached value"
+                            "⚠️  Failed to check usage after retries - assuming has credits"
                         )
                     else:
-                        # Update cache with new value
-                        if not usage_result.get("has_credits", True):
+                        has_credits = usage_result.get("has_credits", True)
+                        remaining = usage_result.get("remaining", 0)
+                        
+                        if not has_credits:
                             workflow.logger.warning(
-                                f"💳 User has no credits remaining (${usage_result.get('remaining', 0):.2f}), pausing agent"
+                                f"💳 User has no credits remaining (${remaining:.2f})"
                             )
-                            # Update agent status to PAUSED
+                            # Update agent status to OUT_OF_CREDITS
                             try:
                                 await workflow.execute_activity(
                                     update_agent_status,
                                     args=[
                                         self.agent_id,
-                                        "PAUSED",
+                                        "OUT_OF_CREDITS",
                                         0.0,  # progress
-                                        "Out of credits",
+                                        "Out of credits - add more to continue",
                                         self.token_count,
                                         self.context_tokens,
                                         len(self.context),
@@ -738,38 +755,27 @@ class AgentWorkflow:
                                     retry_policy=RetryPolicy(maximum_attempts=2)
                                 )
                             except Exception as e:
-                                workflow.logger.error(f"Failed to update status to PAUSED: {str(e)}")
-                            
-                            # Set is_paused flag to trigger pause logic
-                            self.is_paused = True
-                        else:
-                            remaining = usage_result.get("remaining", 0)
-                            if remaining < 1.0:  # Warn when below $1
-                                workflow.logger.warning(
-                                    f"⚠️  Low credits: ${remaining:.2f} remaining"
-                                )
+                                workflow.logger.error(f"Failed to update status to OUT_OF_CREDITS: {str(e)}")
+                        elif remaining < 1.0:  # Warn when below $1
+                            workflow.logger.warning(
+                                f"⚠️  Low credits: ${remaining:.2f} remaining"
+                            )
                 
                 except Exception as e:
                     workflow.logger.warning(f"Failed to check usage: {str(e)} - continuing anyway")
                 
-                # Green-light check: wait if paused (with timeout to re-check DB)
-                if self.is_paused:
-                    workflow.logger.info("⏸️  Agent is PAUSED, waiting for resume...")
+                # Paused if manually paused OR out of credits
+                self.is_paused = manually_paused or (not has_credits)
                 
-                try:
-                    await workflow.wait_condition(
-                        lambda: not self.is_paused,
-                        timeout=timedelta(seconds=30)
-                    )
-                    
-                    if self.is_paused:
-                        # Still paused after timeout, will loop back
-                        workflow.logger.info("⏸️  Still paused after 30s, re-checking config...")
-                    else:
-                        workflow.logger.info("▶️  Agent resumed, continuing execution")
-                except (asyncio.TimeoutError, TemporalTimeoutError):
-                    # Timeout = still paused, loop back to re-poll config
-                    workflow.logger.info("⏸️  Timeout while paused, re-checking config...")
+                # If paused, wait with timeout then reloop to re-check
+                if self.is_paused:
+                    try:
+                        await workflow.wait_condition(
+                            lambda: not self.is_paused,
+                            timeout=timedelta(seconds=30)
+                        )
+                    except (asyncio.TimeoutError, TemporalTimeoutError):
+                        pass
                     continue
                 
                 # 1. Poll for new user messages (already in DB, just add to context)
@@ -1087,7 +1093,7 @@ class AgentWorkflow:
                         context=compressed_context,
                         parent_workflow_id=self.parent_workflow_id,  # Preserve parent relationship
                         depth=self.depth,  # Preserve depth to prevent sub-agents from spawning
-                        user_phone=self.user_phone  # Preserve user phone number
+                        # user_phone removed - fetched from user context
                     )
                 
                 # No sleep between iterations - let the agent work as fast as possible
@@ -1290,7 +1296,7 @@ class AgentWorkflow:
                     self.model,
                     self.reasoning_effort,
                     self.user_id,
-                    self.user_phone,
+                    # user_phone removed - fetched from user context in decide_next_action
                     self.phase,
                     model_preference
                 ],

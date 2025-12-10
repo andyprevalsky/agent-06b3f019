@@ -285,6 +285,47 @@ def format_result(result: Dict[str, Any]) -> str:
         if messages_text:
             lines.append(f"\n**Messages:**\n\n{messages_text}")
     
+    # Handle x402 bazaar search results
+    if "services" in result and "service_count" in result:
+        services = result.get("services", [])
+        if services:
+            for i, svc in enumerate(services[:10], 1):
+                resource = svc.get("resource", "Unknown URL")
+                price_display = svc.get("price_display", f"${svc.get('price_cents', 0)/100:.4f}")
+                method = svc.get("method", "GET")
+                network = svc.get("network", "base")
+                
+                lines.append(f"\n**{i}. {resource}**")
+                lines.append(f"   - Price: {price_display} | Method: {method} | Network: {network}")
+                
+                # Show input schema params if available (with more detail for LLM)
+                input_schema = svc.get("input_schema", {})
+                if input_schema:
+                    query_params = input_schema.get("queryParams", {})
+                    if query_params:
+                        param_details = []
+                        for name, info in list(query_params.items())[:5]:
+                            required = info.get("required", False)
+                            desc = info.get("description", "")[:50] if info.get("description") else ""
+                            if required:
+                                param_details.append(f"{name} (required)")
+                            else:
+                                param_details.append(name)
+                        lines.append(f"   - Params: {', '.join(param_details)}")
+                
+                # Show metadata description if available
+                metadata = svc.get("metadata", {})
+                if metadata.get("description"):
+                    desc = metadata["description"]
+                    if len(desc) > 100:
+                        desc = desc[:97] + "..."
+                    lines.append(f"   - Description: {desc}")
+            
+            if result["service_count"] > 10:
+                lines.append(f"\n...and {result['service_count'] - 10} more services")
+        else:
+            lines.append("No services found matching your criteria.")
+    
     # If no specific formatting, show summary
     if not lines:
         result_str = json.dumps(result, indent=2)

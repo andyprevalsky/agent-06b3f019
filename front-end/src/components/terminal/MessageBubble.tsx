@@ -5,7 +5,7 @@ import { useState, useEffect, useMemo, memo } from 'react';
 import { Button } from '@/components/ui/button';
 import SubAgentToolBubble from './SubAgentToolBubble';
 import { MarkdownText } from './MarkdownText';
-import { getToolIcon } from '@/lib/toolIcons';
+import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 import { useToast } from '@/hooks/use-toast';
 
 interface MessageBubbleProps {
@@ -232,12 +232,20 @@ const ToolMessage = memo(function ToolMessage({
         onClick={hasMessage && isExpandable ? () => setIsExpanded(!isExpanded) : undefined}
       >
         {/* Tool Icon */}
-        <ToolIcon className={cn(
-          "h-4 w-4 flex-shrink-0",
-          data.error && "text-red-600 dark:text-red-400",
-          !data.error && data.status === 'IN_PROGRESS' && "text-muted-foreground",
-          !data.error && data.status === 'FINISHED' && "text-muted-foreground"
-        )} />
+        {data.toolName && isX402Tool(data.toolName) ? (
+          <img 
+            src={x402IconSrc} 
+            alt="x402" 
+            className="h-4 w-4 flex-shrink-0 opacity-60 dark:invert dark:opacity-70" 
+          />
+        ) : (
+          <ToolIcon className={cn(
+            "h-4 w-4 flex-shrink-0",
+            data.error && "text-red-600 dark:text-red-400",
+            !data.error && data.status === 'IN_PROGRESS' && "text-muted-foreground",
+            !data.error && data.status === 'FINISHED' && "text-muted-foreground"
+          )} />
+        )}
         
         {/* Text with shimmer animation */}
         <span 

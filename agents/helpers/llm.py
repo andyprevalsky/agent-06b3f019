@@ -651,6 +651,88 @@ class MarkPlanningFinishedTool(BaseModel):
     )
 
 
+# ============================================================================
+# x402 Bazaar Tools
+# ============================================================================
+
+class SearchX402BazaarTool(BaseModel):
+    """
+    Search the x402 Bazaar for available paid API services.
+    
+    The x402 Bazaar is a discovery layer for paid APIs using the x402 protocol.
+    Returns a list of available services with their pricing, capabilities, and schemas.
+    Use this to find services that can help accomplish tasks, then use pay_for_x402_bazaar_service to call them.
+    
+    NOTE: Our own services are automatically filtered out to prevent self-calls.
+    """
+    tool: Literal["search_x402_bazaar"]
+    
+    max_price_cents: Optional[int] = Field(
+        default=None,
+        description=(
+            "Maximum price in cents willing to pay per API call. "
+            "Services costing more than this will be filtered out. "
+            "Example: 100 = $1.00, 50 = $0.50, 10 = $0.10"
+        )
+    )
+    
+    keyword: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional keyword to filter services by description or resource URL. "
+            "Examples: 'weather', 'price', 'news', 'data'"
+        )
+    )
+
+
+class PayForX402BazaarServiceTool(BaseModel):
+    """
+    Execute a paid API call to an x402 service discovered from search_x402_bazaar.
+    
+    This tool handles the x402 payment protocol automatically:
+    1. Makes initial request to get payment requirements
+    2. Signs and submits payment authorization
+    3. Returns the service response
+    
+    IMPORTANT: Always include required params from the service's input_schema!
+    The search results show required params like "Params: url, includeResponseBody".
+    You MUST pass these in the params field.
+    """
+    tool: Literal["pay_for_x402_bazaar_service"]
+    
+    resource_url: str = Field(
+        description=(
+            "The x402 service URL from search_x402_bazaar results. "
+            "Example: 'https://minifetch.com/api/v1/x402/extract/url-metadata'"
+        )
+    )
+    
+    method: Literal["GET", "POST"] = Field(
+        default="GET",
+        description="HTTP method for the request (shown in search results). Default: GET"
+    )
+    
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "REQUIRED: Request parameters from the service's input_schema. "
+            "Look at the 'Params:' line in search results for required fields. "
+            "For GET requests: these become query parameters. "
+            "For POST requests: this becomes the JSON body. "
+            "Example for url-metadata service: {\"url\": \"https://example.com\", \"includeResponseBody\": true}"
+        )
+    )
+    
+    max_amount_cents: int = Field(
+        description=(
+            "Maximum amount in cents willing to pay for this call (safety limit). "
+            "The call will fail if the service requires more than this amount. "
+            "Set this to at least the price shown in search results. "
+            "Example: 100 = $1.00, 10 = $0.10, 1 = $0.01"
+        )
+    )
+
+
 # Map tool names to their Pydantic models
 # Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
@@ -671,6 +753,9 @@ TOOL_MODELS = {
     "mark_research_finished": MarkResearchFinishedTool,
     "mark_atomization_finished": MarkAtomizationFinishedTool,
     "mark_planning_finished": MarkPlanningFinishedTool,
+    # x402 Bazaar tools
+    "search_x402_bazaar": SearchX402BazaarTool,
+    "pay_for_x402_bazaar_service": PayForX402BazaarServiceTool,
 }
 
 
@@ -1171,6 +1256,7 @@ Gather the information you need to accomplish your goal. Research to understand:
 AVAILABLE ACTIONS:
 
 - web_search: Quick factual lookups, current events, general information
+- search_x402_bazaar: Discover paid API services in the x402 Bazaar (crypto-payment APIs)
 - search_user_network_for_people: Find relevant contacts in user's network
 - read_message_history_with_person: Understand relationships and past conversations
 - request_user_attention: Ask a SPECIFIC blocking question (use sparingly - high cost)
@@ -1345,7 +1431,7 @@ async def decide_next_action(
     model: str = "anthropic/claude-sonnet-4.5",
     reasoning_effort: str = "low",
     user_id: Optional[str] = None,
-    user_phone: Optional[str] = None,
+    # user_phone removed - now included in user context from get_user_context
     phase: str = "EXECUTE",
     model_preference: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -1359,7 +1445,6 @@ async def decide_next_action(
         model: LLM model to use
         reasoning_effort: OpenRouter reasoning effort level (low, medium, high)
         user_id: Optional Supabase user ID
-        user_phone: Optional user's phone number (E.164 format)
         phase: Current workflow phase (RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
         model_preference: Optional Rose model preference (SMART, FAST, CHEAP)
         
@@ -1384,19 +1469,9 @@ async def decide_next_action(
         # Generate parameter documentation dynamically from Pydantic models
         tool_params_docs = generate_tool_parameter_docs(available_tool_names)
         
-        # Build user contact info section if available
-        user_info_section = ""
-        if user_id and user_phone:
-            user_info_section = f"""
-USER CONTACT INFORMATION:
-- User ID: {user_id}
-- Phone Number: {user_phone}
-
-When sending SMS messages to the user, use their phone number: {user_phone}
-"""
-        
-        # Fetch user context (authenticated sites, recent messages, contacts)
+        # Fetch user context (authenticated sites, recent messages, contacts, phone)
         # Uses 5-minute cache to avoid excessive backend calls
+        # Phone number is now included in user context from /api/user-settings
         user_context_section = ""
         if user_id:
             try:
@@ -1411,7 +1486,7 @@ When sending SMS messages to the user, use their phone number: {user_phone}
         
         if phase_prompt:
             # Use phase-specific prompt
-            system_prompt = f"""{user_info_section}{user_context_section}
+            system_prompt = f"""{user_context_section}
 CURRENT PHASE: {phase}
 
 {phase_prompt}
@@ -1423,7 +1498,7 @@ TOOL PARAMETERS:
 {tool_params_docs}"""
         else:
             # Use the standard EXECUTE prompt
-            system_prompt = f"""{user_info_section}{user_context_section}
+            system_prompt = f"""{user_context_section}
 IDENTITY:
 
 You are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal. Your purpose is to nurture it to fruition (100% accomplishment) through using the tools available.

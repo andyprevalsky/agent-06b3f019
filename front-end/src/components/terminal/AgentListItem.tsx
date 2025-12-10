@@ -1,6 +1,6 @@
 import { Agent } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Play, Loader2 } from 'lucide-react';
+import { Play, Loader2, CreditCard } from 'lucide-react';
 
 interface AgentListItemProps {
   agent: Agent;
@@ -38,8 +38,15 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
           <div className="flex items-center justify-between gap-2">
             <h3 className="font-medium text-sm line-clamp-2 flex-1">{agent.goal}</h3>
             
-            {/* Show play button if paused (or spinner if resuming), otherwise show progress */}
-            {agent.status === 'PAUSED' ? (
+            {/* Show play button if paused, credit icon if out of credits, otherwise show progress */}
+            {agent.status === 'OUT_OF_CREDITS' ? (
+              <div 
+                className="flex-shrink-0 p-1.5 rounded-full border-2 border-red-400 dark:border-red-500"
+                title="Agent ran out of credits - add more to continue"
+              >
+                <CreditCard className="w-3.5 h-3.5 text-red-500" />
+              </div>
+            ) : agent.status === 'PAUSED' ? (
               <button
                 onClick={handlePlayClick}
                 disabled={isResuming}

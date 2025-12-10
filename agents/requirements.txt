@@ -24,6 +24,9 @@ python-dateutil>=2.9.0
 # Encryption for payment data
 cryptography>=42.0.0
 
+# x402 payment signing
+eth-account>=0.11.0
+
 # Logging and monitoring
 structlog>=24.1.0
 

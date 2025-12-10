@@ -592,6 +592,108 @@ async function testInvalidToken() {
   }
 }
 
+// ==================== x402 PAYMENT ENDPOINTS ====================
+
+async function testX402SpawnAgentRequiresPayment() {
+  // Unified /api/agents endpoint returns 402 when no auth (JWT/API key) is provided
+  // This allows x402 payments to create agents via the same endpoint
+  const response = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    body: JSON.stringify({
+      goal: 'Test agent from x402',
+    }),
+  });
+  
+  if (response.status !== 402) {
+    throw new Error(`Expected 402 Payment Required, got ${response.status}`);
+  }
+}
+
+async function testX402TopupRequiresPayment() {
+  const response = await request(`${BASE_URL}/api/x402/topup`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  
+  if (response.status !== 402) {
+    throw new Error(`Expected 402 Payment Required, got ${response.status}`);
+  }
+}
+
+async function testX402StatusEndpointNotFound() {
+  // Status endpoint should return 404 for non-existent agent
+  const fakeAgentId = '00000000-0000-0000-0000-000000000000';
+  const response = await request(`${BASE_URL}/api/x402/agents/${fakeAgentId}/status`);
+  
+  if (response.status !== 404) {
+    throw new Error(`Expected 404 for non-existent agent, got ${response.status}`);
+  }
+}
+
+async function testX402StatusEndpointValidAgent() {
+  // If we have an agent from previous tests, check status endpoint works
+  if (!context.agentId) {
+    // Create a test agent first
+    if (!context.accessToken) {
+      throw new Error('No access token to create test agent');
+    }
+    
+    const createResponse = await request(`${BASE_URL}/api/agents`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${context.accessToken}`,
+      },
+      body: JSON.stringify({
+        goal: 'Test agent for x402 status check',
+        model: 'google/gemini-2.5-flash',
+        task_queue: 'navi-agent-tasks-test',
+        verifier: {
+          type: 'FLOAT_LLM_JUDGE',
+          llm_judge_prompt: 'Evaluate if the goal is achieved',
+        },
+      }),
+    });
+    
+    if (createResponse.status !== 201) {
+      throw new Error(`Failed to create test agent: ${createResponse.status}`);
+    }
+    
+    context.agentId = createResponse.data.agent_id;
+  }
+  
+  // Now test the x402 status endpoint (public, no auth required)
+  const response = await request(`${BASE_URL}/api/x402/agents/${context.agentId}/status`);
+  
+  if (response.status !== 200) {
+    throw new Error(`Expected 200 for valid agent, got ${response.status}`);
+  }
+  
+  if (!response.data.agent_id || !response.data.status) {
+    throw new Error('Status response missing required fields');
+  }
+}
+
+async function testX402EndpointExists() {
+  // Verify the x402 endpoints are mounted (even if they return 402)
+  // Note: Agent creation is now unified at /api/agents (returns 402 without auth/payment)
+  const endpoints = [
+    { method: 'POST', path: '/api/agents', expectedStatus: 402 },  // Unified endpoint
+    { method: 'POST', path: '/api/x402/topup', expectedStatus: 402 },
+  ];
+  
+  for (const endpoint of endpoints) {
+    const response = await request(`${BASE_URL}${endpoint.path}`, {
+      method: endpoint.method,
+      body: JSON.stringify({}),
+    });
+    
+    // Should get 402 (payment required), not 404 (not found)
+    if (response.status === 404) {
+      throw new Error(`x402 endpoint ${endpoint.path} not found (404)`);
+    }
+  }
+}
+
 // ==================== URL VALIDATION TESTS ====================
 
 async function testNoDoubleSlashesInURLs() {
@@ -651,6 +753,10 @@ async function runAllTests() {
     { name: 'Waitlist Validation', fn: testWaitlistValidation, group: 'public' },
     { name: 'Waitlist Duplicate', fn: testWaitlistDuplicate, group: 'public' },
     { name: 'URL Double Slash Check', fn: testNoDoubleSlashesInURLs, group: 'public' },
+    { name: 'x402 Endpoint Exists', fn: testX402EndpointExists, group: 'public' },
+    { name: 'x402 Spawn Requires Payment', fn: testX402SpawnAgentRequiresPayment, group: 'public' },
+    { name: 'x402 Topup Requires Payment', fn: testX402TopupRequiresPayment, group: 'public' },
+    { name: 'x402 Status Not Found', fn: testX402StatusEndpointNotFound, group: 'public' },
   ];
 
   // Parallel tests - Auth required (must run after agent creation)
@@ -660,6 +766,7 @@ async function runAllTests() {
     { name: 'Blueprints List', fn: testBlueprintsListEndpoint, group: 'auth' },
     { name: 'Unauthorized Access', fn: testUnauthorizedAccess, group: 'auth' },
     { name: 'Invalid Token', fn: testInvalidToken, group: 'auth' },
+    { name: 'x402 Status Valid Agent', fn: testX402StatusEndpointValidAgent, group: 'auth' },
   ];
 
   // Agent workflow tests (must run sequentially)

@@ -20,6 +20,8 @@
     "getmessages:all": "tsx scripts/get-messages-all.ts",
     "backfill:pricing": "tsx scripts/backfill-agent-pricing.ts",
     "test:api": "tsx src/tests/api-test-suite.ts",
+    "test:x402": "tsx src/tests/x402-e2e-test.ts",
+    "test:all": "npm run test:api && npm run test:x402",
     "workers:check": "tsx scripts/query-temporal-workers.ts",
     "harbor:install": "echo 'Harbor installation: Install uv first (https://docs.astral.sh/uv/), then run: uv tool install harbor'",
     "harbor:check": "harbor --version || python3 -m harbor --version",
@@ -30,6 +32,8 @@
   "license": "ISC",
   "dependencies": {
     "@browserbasehq/sdk": "^2.6.0",
+    "@coinbase/cdp-sdk": "^1.40.0",
+    "@coinbase/x402": "^0.7.3",
     "@prisma/client": "^5.20.0",
     "@supabase/supabase-js": "^2.76.1",
     "@temporalio/client": "^1.13.1",
@@ -53,12 +57,14 @@
     "prisma": "^5.20.0",
     "stripe": "^17.3.1",
     "typescript": "^5.6.2",
+    "x402-express": "^0.7.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.7",
     "@types/node-cron": "^3.0.11",
-    "tsx": "^4.19.1"
+    "tsx": "^4.19.1",
+    "x402": "^0.7.3"
   },
   "engines": {
     "node": ">=18.0.0"

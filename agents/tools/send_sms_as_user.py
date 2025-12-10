@@ -42,6 +42,16 @@ class SendSmsAsUserManager(ToolManager):
         tool_call: Dict[str, Any],
         tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
+        # Tool is currently disabled - requires Mac app integration
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="📵 send_sms_as_user disabled",
+            message="This tool is currently disabled. It requires the Rose Mac app to send messages through the user's iMessage. Use 'message_person' tool instead to send messages via SMS or email.",
+            status=MessageStatus.FINISHED,
+        )
+        return
+        
+        # Original implementation below (disabled)
         phone_number = tool_call.get("phone_number")
         message = tool_call.get("message")
 

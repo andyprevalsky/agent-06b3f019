@@ -25,7 +25,14 @@ Comprehensive test suite for all backend endpoints. Catches issues like double s
 ### Run Tests Manually
 
 ```bash
+# Run API tests (fast, ~30s)
 npm run test:api
+
+# Run x402 E2E tests (creates wallets, funds them, tests full flow)
+npm run test:x402
+
+# Run all tests
+npm run test:all
 ```
 
 ### Pre-commit Hook
@@ -69,6 +76,30 @@ git commit --no-verify
 ### URL Validation
 - ✅ No double slashes in URL construction
 - ✅ Works with trailing slashes on base URL
+
+### x402 Payment Endpoints (API Tests)
+- ✅ `POST /api/x402/spawn-agent` - Returns 402 without payment
+- ✅ `POST /api/x402/topup` - Returns 402 without payment
+- ✅ `GET /api/x402/agents/:id/status` - Public status endpoint
+- ✅ x402 endpoints are properly mounted
+
+### x402 E2E Tests (`npm run test:x402`)
+Full end-to-end payment flow tests:
+- ✅ Create test buyer wallet (CDP SDK)
+- ✅ Fund wallet with testnet ETH + USDC
+- ✅ Verify 402 payment requirements response
+- ✅ Spawn agent (simulated payment)
+- ✅ Monitor agent status via public endpoint
+- ✅ Verify topup requires payment
+- ✅ Cleanup test data
+
+**Required env vars for x402 tests:**
+```bash
+CDP_API_KEY_ID=...
+CDP_API_KEY_SECRET=...
+CDP_WALLET_SECRET=...
+X402_RECEIVING_WALLET=...
+```
 
 ## Test Execution
 

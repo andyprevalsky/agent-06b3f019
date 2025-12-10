@@ -28,6 +28,7 @@ from test_enrich import run_all_tests as test_enrich
 from test_monitor import run_all_tests as test_monitor
 from test_read_message_history import run_all_tests as test_read_message_history
 from test_message_person import run_all_tests as test_message_person
+from test_x402_bazaar import run_all_tests as test_x402_bazaar
 
 
 async def run_test_silent(name: str, test_func: Callable[[], Awaitable[bool]]) -> tuple[str, bool, float]:
@@ -83,6 +84,7 @@ async def main():
         run_test_silent("Monitor", test_monitor),
         run_test_silent("Read Message History", test_read_message_history),
         run_test_silent("Message Person", test_message_person),
+        run_test_silent("x402 Bazaar", test_x402_bazaar),
     ]
     
     # Run sync tests (these are fast, run them sequentially, silently)

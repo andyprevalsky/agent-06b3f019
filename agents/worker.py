@@ -47,6 +47,7 @@ from tools.monitor import monitor_activity
 from tools.check_monitor_events import check_monitor_events_activity
 from tools.search_user_network import search_user_network_activity
 from tools.read_message_history import read_message_history_activity
+from tools.x402_bazaar import search_x402_bazaar_activity, pay_for_x402_service_activity
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     poll_new_messages,
@@ -163,6 +164,9 @@ async def main():
             save_tool_usage,
             search_user_network_activity,
             read_message_history_activity,
+            # x402 Bazaar activities
+            search_x402_bazaar_activity,
+            pay_for_x402_service_activity,
             # Helper activities
             poll_new_messages,
             post_agent_message,

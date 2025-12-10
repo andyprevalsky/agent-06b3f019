@@ -19,7 +19,7 @@ model Agent {
   createdAt                 DateTime        @default(now())
   updatedAt                 DateTime        @updatedAt
   temporalWorkflowId        String?
-  model                     String          @default("google/gemini-2.5-flash")
+  model                     String          @default("rose-labs/rose-1-fast")
   source                    AgentSource     @default(WEB)
   contextSize               Int             @default(0)
   messageCount              Int             @default(0)
@@ -159,6 +159,7 @@ model User {
   id                          String        @id @default(uuid())
   userId                      String        @unique
   name                        String?
+  phone                       String?       // User's phone number (E.164 format)
   addressLine1                String?
   addressLine2                String?
   city                        String?
@@ -393,6 +394,7 @@ enum AgentStatus {
   STARTING_UP
   ACTIVE
   PAUSED
+  OUT_OF_CREDITS
   COMPLETED
   FAILED
 }

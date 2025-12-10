@@ -128,6 +128,7 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     // OTP verified successfully - now create user record and initialize credit
     if (data.user?.id) {
       const userId = data.user.id;
+      const userPhone = phone; // Phone from request (E.164 format)
 
       // Check if user already exists in our database
       const existingUser = await prisma.user.findUnique({
@@ -135,17 +136,28 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       });
 
       if (!existingUser) {
-        // Create user record
+        // Create user record with phone
         await prisma.user.create({
-          data: { userId },
+          data: { 
+            userId,
+            phone: userPhone, // Store phone number
+          },
         });
-        console.log(`✅ Created user record for ${userId}`);
+        console.log(`✅ Created user record for ${userId} with phone ${userPhone}`);
 
         // Initialize $5 credit for new user
         await createInitialCredit(userId);
         console.log(`✅ Initialized $5 credit for new user ${userId}`);
       } else {
-        console.log(`User ${userId} already exists, skipping initialization`);
+        // Update phone if not set (for existing users who may not have phone stored)
+        if (!existingUser.phone && userPhone) {
+          await prisma.user.update({
+            where: { userId },
+            data: { phone: userPhone },
+          });
+          console.log(`✅ Updated phone for existing user ${userId}`);
+        }
+        console.log(`User ${userId} already exists`);
       }
     }
 
