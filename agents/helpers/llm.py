@@ -651,6 +651,11 @@ class MarkPlanningFinishedTool(BaseModel):
     )
 
 
+class MarkExecutionCompleteTool(BaseModel):
+    """Signal that execution is complete and ready for verification. Call this when you believe the goal has been fully accomplished."""
+    tool: Literal["mark_execution_complete"]
+
+
 # ============================================================================
 # x402 Bazaar Tools
 # ============================================================================
@@ -753,6 +758,7 @@ TOOL_MODELS = {
     "mark_research_finished": MarkResearchFinishedTool,
     "mark_atomization_finished": MarkAtomizationFinishedTool,
     "mark_planning_finished": MarkPlanningFinishedTool,
+    "mark_execution_complete": MarkExecutionCompleteTool,
     # x402 Bazaar tools
     "search_x402_bazaar": SearchX402BazaarTool,
     "pay_for_x402_bazaar_service": PayForX402BazaarServiceTool,
@@ -887,8 +893,8 @@ def create_agent_action_model(
     # Dynamically create the AgentAction model
     AgentAction = create_model(
         'AgentAction',
-        reasoning=(Optional[str], Field(default=None, description="Your internal thinking process. Do not use this field to communicate with the user or the verifier, or your future self, they will NOT see it: They will not see it! This field is only here to be used a throwaway scratchpad for your reasoning.")),
-        response=(str, Field(description="Message to communicate to the user & verifier (REQUIRED - always explain what you're doing). Make sure to use markdown formatting to make your response more readable.")),
+        reasoning=(Optional[str], Field(default=None, description="Internal scratchpad. Use metaphysical seed thinking here. NEVER shown to user.")),
+        response=(str, Field(description="Message to user. Plain professional language only - NEVER mention seeds, nurturing, fruition, or internal concepts. Use markdown.")),
         tool_calls=tool_calls_field,
         __base__=BaseModel
     )
@@ -1231,9 +1237,244 @@ async def call_llm(
 
 
 # ============================================================================
-# Phase-Specific System Prompts
+# Unified System Prompt Builder
 # ============================================================================
 
+# Phase-specific instructions (injected into unified prompt)
+PHASE_INSTRUCTIONS = {
+    "PREPARE_RESEARCH": """Analyze the goal and plan your research approach.
+
+This is a thinking phase - no tools are available yet. Think through:
+1. What do you need to learn to accomplish this goal?
+2. Who might be involved?
+3. What information sources will you check?
+4. Any potential blockers or questions?
+
+Keep your response brief and action-oriented. After this, you'll transition to RESEARCH phase.""",
+
+    "RESEARCH": """Gather the information you need to accomplish your goal. Research to understand:
+- What concrete actions will achieve this goal
+- Who is involved and how to reach them
+- What resources or information you need
+- Any constraints or blockers
+
+Call `mark_research_finished` when you know exactly what actions you will take.""",
+
+    "ATOMIZE": """Decide: execute directly (PROXIMATE) or decompose into parallel subtasks?
+
+PROXIMATE - execute directly if:
+- Straightforward sequence of tool calls
+- No independent components that could parallelize
+- Example: "Send an email to John about the meeting"
+
+NEEDS DECOMPOSITION - spawn sub-agents if:
+- Multiple independent workstreams exist
+- Parallelization significantly accelerates completion
+- Example: "Research 5 companies and send personalized outreach to each"
+
+Call `mark_atomization_finished(is_proximate=true)` for direct execution.
+Call `mark_atomization_finished(is_proximate=false)` for decomposition.""",
+
+    "PLAN": """Decompose the goal into 3-5 parallel, independent subtasks.
+
+DECOMPOSITION CRITERIA:
+1. PARALLELIZABLE: All subtasks run simultaneously with NO dependencies
+2. CONTEXT-INDEPENDENT: Each subtask is self-contained
+3. SIMPLER: Each subtask is easier than the original
+4. COMPLETE: All subtasks done = original goal achieved
+
+Each subtask needs:
+- `goal`: Clear, specific, actionable objective
+- `context`: Your research findings (sub-agents should NOT re-research)
+
+Call `mark_planning_finished(subtasks=[...])` when ready.""",
+
+    "SPAWN": """Call `spawn_sub_agents` with your planned subtasks NOW.
+
+Each sub-agent needs:
+- `goal`: The subtask goal
+- `verifier`: Config with type and llm_judge_prompt
+
+Sub-agents work in parallel. After all complete, you continue in EXECUTE phase.""",
+
+    "EXECUTE": """All tools are available. Execute your plan to accomplish the goal.
+
+When you believe the goal is FULLY accomplished, call `mark_execution_complete` to trigger verification.
+- If verifier confirms 100% completion → task complete
+- If verifier returns <100% → you'll receive feedback and can continue executing"""
+}
+
+# Map tools to their first available phase
+TOOL_PHASE_AVAILABILITY = {
+    # Read-only tools available in RESEARCH
+    "web_search": "RESEARCH",
+    "deep_research": "RESEARCH",
+    "search_x402_bazaar": "RESEARCH",
+    "search_user_network_for_people": "RESEARCH",
+    "read_message_history_with_person": "RESEARCH",
+    "find_all": "RESEARCH",
+    "check_monitor_events": "RESEARCH",
+    "request_user_attention": "RESEARCH",
+    # Phase markers
+    "mark_research_finished": "RESEARCH",
+    "mark_atomization_finished": "ATOMIZE",
+    "mark_planning_finished": "PLAN",
+    "mark_execution_complete": "EXECUTE",
+    # Spawn phase
+    "spawn_sub_agents": "SPAWN",
+    # Execute phase (everything else)
+    "spawn_browser_agent": "EXECUTE",
+    "message_person": "EXECUTE",
+    "send_sms_as_user": "EXECUTE",
+    "enrich": "EXECUTE",
+    "monitor": "EXECUTE",
+    "pay_for_x402_bazaar_service": "EXECUTE",
+    "wait_seconds": "EXECUTE",
+    "query_blueprints": "EXECUTE",
+    "save_blueprint": "EXECUTE",
+}
+
+
+def generate_tool_status_section(
+    phase: str,
+    enabled_tools: List[Dict[str, Any]],
+    disabled_tools: List[Dict[str, Any]]
+) -> str:
+    """
+    Generate the TOOL STATUS section showing enabled and disabled tools.
+    
+    Args:
+        phase: Current phase
+        enabled_tools: Tools available in this phase (with descriptions)
+        disabled_tools: Tools not available yet (with descriptions)
+        
+    Returns:
+        Formatted tool status section string
+    """
+    lines = [f"TOOL STATUS (Phase: {phase}):"]
+    
+    if not enabled_tools:
+        lines.append("\nNo tools available in this phase - use this time to think and plan.")
+    else:
+        lines.append("\nENABLED:")
+        for tool in enabled_tools:
+            name = tool.get("name", "unknown")
+            desc = tool.get("description", "No description")
+            # Truncate long descriptions
+            if len(desc) > 100:
+                desc = desc[:97] + "..."
+            lines.append(f"- {name}: {desc}")
+    
+    if disabled_tools:
+        lines.append("\nDISABLED (available in later phases):")
+        for tool in disabled_tools:
+            name = tool.get("name", "unknown")
+            available_phase = TOOL_PHASE_AVAILABILITY.get(name, "EXECUTE")
+            lines.append(f"- {name}: Available in {available_phase} phase")
+    
+    return "\n".join(lines)
+
+
+def build_system_prompt(
+    phase: str,
+    enabled_tools: List[Dict[str, Any]],
+    disabled_tools: List[Dict[str, Any]],
+    enabled_tool_names: List[str],
+    user_context_section: str = ""
+) -> str:
+    """
+    Build unified system prompt with phase-specific instructions and tool status.
+    
+    Args:
+        phase: Current phase (PREPARE_RESEARCH, RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
+        enabled_tools: Tools available in this phase
+        disabled_tools: Tools not available yet
+        enabled_tool_names: Names of enabled tools (for parameter docs)
+        user_context_section: User context string (phone, authenticated sites, etc.)
+        
+    Returns:
+        Complete system prompt string
+    """
+    # Get phase-specific instructions
+    phase_instruction = PHASE_INSTRUCTIONS.get(phase, PHASE_INSTRUCTIONS["EXECUTE"])
+    
+    # Generate tool status section
+    tool_status = generate_tool_status_section(phase, enabled_tools, disabled_tools)
+    
+    # Generate tool parameter docs for enabled tools
+    tool_params_docs = generate_tool_parameter_docs(enabled_tool_names) if enabled_tool_names else ""
+    
+    # Build the unified prompt
+    prompt = f"""{user_context_section}
+INTERNAL MINDSET (use ONLY in "reasoning" field, NEVER in "response"):
+
+You are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal. Your purpose is to nurture it to fruition (100% accomplishment) through using the tools available.
+
+You create change in the lowest energy way possible. Each tool has a cost associated with it, whether it is human attention, social credibility, or monetary capital.
+
+You are autonomous. You do not ask "how can I help?" You decide, act, and iterate until the goal is achieved.
+
+
+CURRENT PHASE: {phase}
+
+{phase_instruction}
+
+
+LOOP:
+
+- Run until 100% progress. Each turn: think, respond, use tools.
+
+
+RESPONSE FIELDS:
+
+- "reasoning": Internal scratchpad for metaphysical seed thinking. NEVER shown to user.
+- "response": Professional message to user. NEVER mention seeds, nurturing, fruition, or any internal concepts. Just describe what you're doing in plain language.
+- Multiple tools can be called per turn (executed in parallel)
+
+
+{tool_status}"""
+
+    # Add tool parameters if there are enabled tools
+    if tool_params_docs:
+        prompt += f"""
+
+TOOL PARAMETERS:
+{tool_params_docs}"""
+
+    # Add common mistakes section (shared across all phases)
+    prompt += """
+
+
+COMMON MISTAKES TO AVOID:
+
+1. Acting like an assistant - presenting options instead of deciding and acting
+2. Assuming the user sees your "response" field - THEY DO NOT. To communicate with the user, you MUST call request_user_attention. Without it, your message is invisible to them.
+3. Repeating failed approaches instead of trying something new
+4. Over-engineering with sub-agents when direct tool use suffices
+5. Giving up when a creative path exists
+6. Not parallelizing work - when you call multiple tools at once they execute in parallel
+
+
+CRITICAL - YOU ARE THE EXECUTOR, NOT AN ADVISOR:
+
+You are here to DO, not to advise. Never delegate execution to the user.
+
+BAD (advisor/assistant thinking):
+- "Would you like me to X or Y?"
+- "Here are some options..."
+- "You should search for X yourself"
+
+GOOD (executor thinking):
+- Research → Decide → Act (YOU act, not the user)
+- "I am now doing X via [tool]"
+- If TRULY blocked: "I need your [specific info] to complete this"
+
+Only use request_user_attention for TRUE blockers - credentials, passwords, or decisions where you genuinely cannot proceed without their input."""
+
+    return prompt
+
+
+# Legacy PHASE_PROMPTS dict - kept for reference but no longer used
 PHASE_PROMPTS = {
     "RESEARCH": """IDENTITY:
 
@@ -1425,27 +1666,31 @@ COMMON MISTAKES:
 @activity.defn
 async def decide_next_action(
     context: List[Dict[str, Any]],
-    available_tools: List[ToolSchema],
-    available_tool_names: List[str],
+    enabled_tools: List[ToolSchema],
+    enabled_tool_names: List[str],
+    disabled_tools: List[Dict[str, Any]],
     iteration: int,
     model: str = "anthropic/claude-sonnet-4.5",
     reasoning_effort: str = "low",
     user_id: Optional[str] = None,
-    # user_phone removed - now included in user context from get_user_context
     phase: str = "EXECUTE",
     model_preference: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Use LLM to decide what action to take next.
     
+    Phase Flow: PREPARE_RESEARCH → RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE
+    
     Args:
         context: Message history (first USER message is the goal)
-        available_tools: List of dicts with 'name' and 'description' for each tool
+        enabled_tools: List of tools available in current phase
+        enabled_tool_names: Names of enabled tools
+        disabled_tools: List of tools not available yet (shown in prompt for visibility)
         iteration: Current iteration number
         model: LLM model to use
         reasoning_effort: OpenRouter reasoning effort level (low, medium, high)
         user_id: Optional Supabase user ID
-        phase: Current workflow phase (RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
+        phase: Current workflow phase (PREPARE_RESEARCH, RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
         model_preference: Optional Rose model preference (SMART, FAST, CHEAP)
         
     Returns:
@@ -1454,24 +1699,12 @@ async def decide_next_action(
     try:
         activity.heartbeat(f"Deciding next action (iteration {iteration}, phase={phase})")
         
-        # Separate system tools from DB tools
-        system_tools = [t for t in available_tools if t['id'].startswith('system-')]
-        db_tools = [t for t in available_tools if not t['id'].startswith('system-')]
-        
+        # Separate system tools from DB tools (for spawn_sub_agents config)
+        system_tools = [t for t in enabled_tools if t.get('id', '').startswith('system-')]
+        db_tools = [t for t in enabled_tools if not t.get('id', '').startswith('system-')]
         system_tool_names = [t['name'] for t in system_tools]
         
-        # Build tool list from DB descriptions (including IDs for spawn_sub_agents)
-        tools_list = "\n".join([
-            f"- {tool['name']} (id: {tool['id']}): {tool['description']}"
-            for tool in available_tools
-        ])
-        
-        # Generate parameter documentation dynamically from Pydantic models
-        tool_params_docs = generate_tool_parameter_docs(available_tool_names)
-        
         # Fetch user context (authenticated sites, recent messages, contacts, phone)
-        # Uses 5-minute cache to avoid excessive backend calls
-        # Phone number is now included in user context from /api/user-settings
         user_context_section = ""
         if user_id:
             try:
@@ -1481,91 +1714,14 @@ async def decide_next_action(
             except Exception as e:
                 logger.warning("Failed to fetch user context", user_id=user_id[:8], error=str(e))
         
-        # Check if we should use a phase-specific prompt
-        phase_prompt = PHASE_PROMPTS.get(phase)
-        
-        if phase_prompt:
-            # Use phase-specific prompt
-            system_prompt = f"""{user_context_section}
-CURRENT PHASE: {phase}
-
-{phase_prompt}
-
-TOOLS AVAILABLE:
-{tools_list}
-
-TOOL PARAMETERS:
-{tool_params_docs}"""
-        else:
-            # Use the standard EXECUTE prompt
-            system_prompt = f"""{user_context_section}
-IDENTITY:
-
-You are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal. Your purpose is to nurture it to fruition (100% accomplishment) through using the tools available.
-
-You create change in the lowest energy way possible. Each tool has a cost associated with it, whether it is human attention, social credibility, or monetary capital. You are looking for the simple solution that ensures the seed flowers with 100% probabilistic certainty, while minimizing the total cost.
-
-You are autonomous. You do not ask "how can I help?" You decide, act, and iterate until the goal is achieved.
-
-Never give up. Stuck? Try a NEW approach, don't repeat yourself.
-
-
-LOOP:
-
-- Run until 100% progress. Each turn: think, respond, use tools.
-- A verifier scores (0-100%) and gives feedback after each response. Use it to course-correct.
-
-
-RESPONSE FIELDS:
-
-- "reasoning": internal scratchpad (logged, not shown to user or verifier)
-- "response": progress log for verifier and your future self. THE USER CANNOT SEE THIS.
-- Multiple tools can be called per turn (executed sequentially)
-
-
-CRITICAL - YOU ARE THE EXECUTOR, NOT AN ADVISOR:
-
-You are here to DO, not to advise. You are the one who takes action - never delegate execution to the user.
-
-BAD (advisor/assistant thinking):
-- "Would you like me to X or Y?"
-- "Here are some options..."
-- "The next step is for you to go purchase X yourself"
-- "You should search for X on Amazon and buy it"
-- "I recommend you do X" / "You'll need to do X"
-- Any sentence that starts with "You should..." or "The next step for you is..."
-
-GOOD (executor thinking):
-- Research → Decide → Act (YOU act, not the user)
-- "I am now purchasing X via spawn_browser_agent"
-- "I'm searching for the best option and will complete the purchase"
-- If TRULY blocked: "I need your payment credentials to complete the purchase" (specific blocker requiring info you cannot obtain)
-
-YOU are the agent. YOU do the work. The user gave you a goal - your job is to accomplish it, not to tell them how to accomplish it themselves.
-
-Only use request_user_attention for TRUE blockers - credentials, passwords, or decisions where you genuinely cannot proceed without their explicit input. "I don't have browser access" is NOT a blocker - use spawn_browser_agent.
-
-
-BLUEPRINTS:
-
-- Reference examples show how other agents solved SIMILAR tasks - use as inspiration only, not your history
-
-
-COMMON MISTAKES TO AVOID:
-
-1. Acting like an assistant - presenting options instead of deciding and acting
-2. Assuming the user sees your "response" field - THEY DO NOT. To communicate with the user, you MUST call request_user_attention. Without it, your message is invisible to them.
-3. Repeating failed approaches instead of trying something new
-4. Over-engineering with sub-agents when direct tool use suffices
-5. Giving up when a creative path exists
-6. Not parrallelizing work. To ensure a goal is accomplished with 100% probability, you often need to execute multiple strategies in parallel. When you call multiple tool at once they are executed in parallel, (spawning sub-agents is a form of parrallelization, for each sub-agent you create, you are executing a new thread of execution)
-
-
-TOOLS:
-{tools_list}
-
-TOOL PARAMETERS:
-{tool_params_docs}"""
+        # Build unified system prompt with phase-specific instructions and tool status
+        system_prompt = build_system_prompt(
+            phase=phase,
+            enabled_tools=enabled_tools,
+            disabled_tools=disabled_tools,
+            enabled_tool_names=enabled_tool_names,
+            user_context_section=user_context_section
+        )
         
         # Convert full context to OpenAI message format (no truncation)
         # NOTE: SYSTEM messages (like blueprints) ARE included for decide_next_action
@@ -1575,15 +1731,15 @@ TOOL PARAMETERS:
         
         # Create dynamic SubAgentConfig if spawn_sub_agents is available
         sub_agent_config_model = None
-        if "spawn_sub_agents" in available_tool_names:
+        if "spawn_sub_agents" in enabled_tool_names:
             sub_agent_config_model = create_sub_agent_config_model(
                 system_tool_names=system_tool_names,
                 available_db_tools=db_tools
             )
         
-        # Create custom AgentAction model based on available tools
+        # Create custom AgentAction model based on enabled tools
         AgentActionModel = create_agent_action_model(
-            available_tool_names,
+            enabled_tool_names,
             sub_agent_config_model=sub_agent_config_model
         )
         
@@ -1690,7 +1846,7 @@ async def check_progress(
         context: Message history (first USER message is the goal)
         verifier_prompt: Custom LLM judge prompt
         model: LLM model to use
-        phase: Current workflow phase (RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
+        phase: Current workflow phase (PREPARE_RESEARCH, RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
         
     Returns:
         Dict with 'score' (float 0.0-1.0) and 'reasoning' (str)
@@ -1729,6 +1885,7 @@ PHASE-AWARE SCORING:
 The agent operates in phases. Score based on both phase completion AND execution progress:
 
 PHASE MILESTONES (minimum scores when phase is complete):
+- PREPARE_RESEARCH complete → 0.02 (2%) - Agent has analyzed goal and planned approach
 - RESEARCH complete → 0.05 (5%) - Agent has gathered necessary context
 - ATOMIZE complete → 0.10 (10%) - Agent has decided execution strategy  
 - PLAN complete → 0.15 (15%) - Agent has created decomposition plan
@@ -1737,7 +1894,7 @@ PHASE MILESTONES (minimum scores when phase is complete):
 
 CURRENT PHASE: {phase}
 
-If in RESEARCH/ATOMIZE/PLAN/SPAWN phases: Score based on phase completion milestones above.
+If in PREPARE_RESEARCH/RESEARCH/ATOMIZE/PLAN/SPAWN phases: Score based on phase completion milestones above.
 If in EXECUTE phase: Score based on actual goal completion (0.20 minimum since prior phases done).
 """
         
@@ -1767,10 +1924,17 @@ CRITICAL: INTENT IS NOT COMPLETION
 - Only award 1.0 when the USER has the FINAL OUTCOME in hand
 
 FOR PHYSICAL/REAL-WORLD TASKS:
-- "Get me X" = User must RECEIVE X (not just order it)
-- "Buy X" = Purchase must be CONFIRMED with order number/receipt
+- "Get me X" / "Acquire X" = User must RECEIVE X (not just find or order it)
+- "Buy X" / "Purchase X" = Purchase must be CONFIRMED with order number/receipt
 - "Send X to Y" = Must have CONFIRMATION of delivery/receipt
 - Adding to cart, clicking checkout, saying "purchasing now" are INTERMEDIATE steps, not completion
+
+CRITICAL - RESEARCH IS NOT EXECUTION:
+- Finding options/products is research (~5-10%), NOT completion
+- "Found a great beanie" ≠ "Acquired a beanie" 
+- "Here's the best option" ≠ "Purchased the option"
+- Research score caps at 10% regardless of how good the findings are
+- For acquisition/purchase goals: No purchase confirmation = max 20% score
 
 DO NOT award high scores for:
 - Mere explanations or plans ("here's how I would do it")
@@ -1778,6 +1942,7 @@ DO NOT award high scores for:
 - Giving up due to perceived AI limitations
 - ANNOUNCING INTENT without showing the completed action ("doing X now", "proceeding to X")
 - Being mid-action without confirmation of completion
+- Finding/researching products when goal is to acquire/buy them
 
 ONLY award 1.0 when:
 - The goal is FULLY and COMPLETELY accomplished

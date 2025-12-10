@@ -16,10 +16,10 @@ const MODEL_POOLS = {
     // 'deepseek/deepseek-v3.2-exp', // Disabled - produces garbage tool calls disconnected from reasoning
     // 'z-ai/glm-4.6', // Disabled - causes tool call confusion (calls wrong tools)
     'openai/gpt-5.1',
-    'mistralai/mistral-medium-3.1',
+    // 'mistralai/mistral-medium-3.1', // Disabled
     'google/gemini-2.5-flash',
-    'nousresearch/hermes-4-405b',
-    'minimax/minimax-m2',
+    // 'nousresearch/hermes-4-405b', // Disabled
+    // 'minimax/minimax-m2', // Disabled
     'x-ai/grok-4-fast'
   ],
   'rose-1-ultra': [

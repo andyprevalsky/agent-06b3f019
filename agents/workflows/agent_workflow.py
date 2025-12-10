@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.mark_research_finished import mark_research_finished
     from tools.mark_atomization_finished import mark_atomization_finished
     from tools.mark_planning_finished import mark_planning_finished
+    from tools.mark_execution_complete import mark_execution_complete
     # x402 Bazaar tools
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
 
@@ -79,6 +80,7 @@ EVENT_DRIVEN_TOOLS = {
     "mark_research_finished": mark_research_finished,
     "mark_atomization_finished": mark_atomization_finished,
     "mark_planning_finished": mark_planning_finished,
+    "mark_execution_complete": mark_execution_complete,
     # x402 Bazaar tools
     "search_x402_bazaar": search_x402_bazaar,
     "pay_for_x402_bazaar_service": pay_for_x402_bazaar_service,
@@ -213,6 +215,11 @@ PHASE_MARKER_TOOLS = {
         "name": "mark_planning_finished",
         "description": "Signal that planning is complete with the list of parallel subtasks. Each subtask needs: goal (specific objective) and context (relevant info from research)."
     },
+    "mark_execution_complete": {
+        "id": "phase-mark-execution-complete",
+        "name": "mark_execution_complete",
+        "description": "Signal that execution is complete and ready for verification. Call this when you believe the goal has been fully accomplished."
+    },
 }
 
 
@@ -227,76 +234,70 @@ def estimate_token_count(text: str) -> int:
 def get_phase_tools_and_config(
     phase: str,
     all_tools: List[Dict],
-    is_first_call: bool,
-    planned_subtasks: List[Dict]
 ) -> Dict[str, Any]:
     """
     Get tools, tool names, and model preference for the current phase.
     
+    Phase Flow: PREPARE_RESEARCH → RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE
+    
     Args:
-        phase: Current phase (RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
+        phase: Current phase (PREPARE_RESEARCH, RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
         all_tools: Full list of available tools
-        is_first_call: True if this is the first call of a parent agent
-        planned_subtasks: Subtasks from planning phase (for SPAWN phase)
         
     Returns:
-        Dict with 'tools', 'tool_names', 'model_preference'
+        Dict with 'enabled_tools', 'enabled_tool_names', 'disabled_tools', 'model_preference'
     """
-    if phase == "RESEARCH":
+    enabled_tools = []
+    model_pref = None
+    
+    if phase == "PREPARE_RESEARCH":
+        # No tools - pure thinking phase, uses FAST model
+        # Auto-transitions to RESEARCH after response
+        enabled_tools = []
+        model_pref = "FAST"
+        
+    elif phase == "RESEARCH":
         # Filter to read-only tools + mark_research_finished marker
-        read_only_tools = [t for t in all_tools if t.get("read_only")]
+        enabled_tools = [t for t in all_tools if t.get("read_only")]
         marker_tool = PHASE_MARKER_TOOLS["mark_research_finished"]
-        
-        if is_first_call:
-            # First call uses FAST (Cerebras) which has strict limits:
-            # - Max 5 anyOf options (tools)
-            # - No minimum/maximum on integers
-            # - Max 5000 char schema
-            # Limit to essential research tools for speed
-            FAST_RESEARCH_TOOLS = {"web_search", "search_x402_bazaar", "mark_research_finished"}
-            tools = [t for t in read_only_tools if t["name"] in FAST_RESEARCH_TOOLS] + [marker_tool]
-            model_pref = "FAST"
-        else:
-            # Subsequent calls - full read_only toolset, no forced model preference
-            tools = read_only_tools + [marker_tool]
-            model_pref = None
-        
-        tool_names = [t["name"] for t in tools]
+        # Avoid duplicates if marker is already in read_only tools
+        if marker_tool not in enabled_tools:
+            enabled_tools.append(marker_tool)
         
     elif phase == "ATOMIZE":
-        # Only atomization marker tool, but include all tool schemas for reference
-        marker_tool = PHASE_MARKER_TOOLS["mark_atomization_finished"]
-        tools = [marker_tool]
-        tool_names = ["mark_atomization_finished"]
-        model_pref = None
+        # Only atomization marker tool
+        enabled_tools = [PHASE_MARKER_TOOLS["mark_atomization_finished"]]
         
     elif phase == "PLAN":
         # Only planning marker tool
-        marker_tool = PHASE_MARKER_TOOLS["mark_planning_finished"]
-        tools = [marker_tool]
-        tool_names = ["mark_planning_finished"]
-        model_pref = None
+        enabled_tools = [PHASE_MARKER_TOOLS["mark_planning_finished"]]
         
     elif phase == "SPAWN":
         # Only spawn_sub_agents tool
         spawn_tool = next((t for t in all_tools if t["name"] == "spawn_sub_agents"), None)
         if spawn_tool:
-            tools = [spawn_tool]
-            tool_names = ["spawn_sub_agents"]
-        else:
-            tools = []
-            tool_names = []
-        model_pref = None
+            enabled_tools = [spawn_tool]
         
     else:  # EXECUTE
-        # All tools
-        tools = all_tools
-        tool_names = [t["name"] for t in tools]
-        model_pref = None  # Use default model settings
+        # All tools + mark_execution_complete marker
+        enabled_tools = list(all_tools)  # Copy to avoid mutating original
+        marker_tool = PHASE_MARKER_TOOLS["mark_execution_complete"]
+        if marker_tool not in enabled_tools:
+            enabled_tools.append(marker_tool)
+    
+    # Calculate disabled tools (tools not in enabled set)
+    enabled_names = {t["name"] for t in enabled_tools}
+    disabled_tools = [t for t in all_tools if t["name"] not in enabled_names]
+    
+    # Also add phase marker tools to disabled if not enabled
+    for marker_name, marker_tool in PHASE_MARKER_TOOLS.items():
+        if marker_name not in enabled_names and marker_tool not in disabled_tools:
+            disabled_tools.append(marker_tool)
     
     return {
-        "tools": tools,
-        "tool_names": tool_names,
+        "enabled_tools": enabled_tools,
+        "enabled_tool_names": [t["name"] for t in enabled_tools],
+        "disabled_tools": disabled_tools,
         "model_preference": model_pref
     }
 
@@ -342,9 +343,8 @@ class AgentWorkflow:
         self.child_last_tokens: Dict[str, Dict[str, int]] = {}  # Track last token counts from each child
         self.depth: int = 0  # Agent nesting depth (0 = top-level, 1 = sub-agent, etc.)
         
-        # Phase tracking for RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE flow
-        self.phase: str = "RESEARCH"  # Current phase
-        self.is_first_call: bool = False  # True only for parent's first call (uses FAST)
+        # Phase tracking for PREPARE_RESEARCH → RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE flow
+        self.phase: str = "PREPARE_RESEARCH"  # Current phase (starts with thinking phase)
         self.planned_subtasks: List[Dict] = []  # Subtasks from PLAN phase
         
         # Lock for thread-safe token counter updates during parallel execution
@@ -548,10 +548,8 @@ class AgentWorkflow:
         self.depth = depth  # Store nesting depth
         self.context = context or []
         
-        # Initialize phase tracking
-        # Only parent agents (depth == 0) use FAST for first call
-        self.is_first_call = (depth == 0)
-        # Phase defaults to RESEARCH from __init__
+        # Phase defaults to PREPARE_RESEARCH from __init__
+        # All agents start with the thinking phase (uses FAST model, no tools)
         
         # Initialize last message check time to 1 hour ago so we fetch the goal message
         # (must use workflow.now() for determinism)
@@ -906,7 +904,13 @@ class AgentWorkflow:
                 if tool_calls:
                     await asyncio.gather(*[execute_one_tool(tc) for tc in tool_calls])
                 
-                # 5.5. Check for phase transitions based on tool calls
+                # 5.5. Check for phase transitions
+                # PREPARE_RESEARCH auto-transitions to RESEARCH after first response (no tools needed)
+                if self.phase == "PREPARE_RESEARCH":
+                    workflow.logger.info("📋 Phase transition: PREPARE_RESEARCH → RESEARCH (auto)")
+                    self.phase = "RESEARCH"
+                
+                # Check for tool-based phase transitions
                 tool_names_called = [tc.get("tool") for tc in tool_calls]
                 
                 if "mark_research_finished" in tool_names_called:
@@ -943,102 +947,106 @@ class AgentWorkflow:
                     workflow.logger.info("📋 Phase transition: SPAWN → EXECUTE (sub-agents spawned)")
                     self.phase = "EXECUTE"
                 
-                # 6. Check progress with verifier and update DB
-                # Generate a unique ID for this verifier call
-                verifier_call_id = workflow.uuid4()
-                
-                # Post IN_PROGRESS message
-                await self._post_message(
-                    "",
-                    "TOOL",
-                    metadata={
-                        "toolCallId": verifier_call_id,
-                        "toolName": "check_progress",
-                        "toolStatus": "IN_PROGRESS",
-                        "title": "⚖️ Calculating progress towards Goal",
-                        "verifierMessage": True
-                    }
-                )
-                
-                progress_result = await self._check_progress()
-                # Track tokens from verifier LLM call (usage is always present)
-                verifier_usage = progress_result["usage"]
-                
-                async with self._state_lock:
-                    self.tokens_in += verifier_usage.get("prompt_tokens", 0)
-                    self.tokens_out += verifier_usage.get("completion_tokens", 0)
-                    self.token_count += verifier_usage.get("total_tokens", 0)
-                
-                progress_score = progress_result.get("score", 0.0)
-                progress_reasoning = progress_result.get("reasoning", "No reasoning provided")
-                
-                # Post FINISHED message with verifier's reasoning
-                await self._post_message(
-                    progress_reasoning,
-                    "TOOL",
-                    metadata={
-                        "toolCallId": verifier_call_id,
-                        "toolName": "check_progress",
-                        "toolStatus": "FINISHED",
-                        "title": f"⚖️ Goal progress is {progress_score*100:.0f}%",
-                        "verifierMessage": True
-                    }
-                )
-                
-                # If this is a sub-agent, signal parent with progress update AND token usage
-                if self.parent_workflow_id:
-                    try:
-                        parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                        await parent_handle.signal("child_progress", {
-                            "child_agent_id": self.agent_id,
-                            "progress": progress_score,
-                            "tokens_in": self.tokens_in,
-                            "tokens_out": self.tokens_out,
-                            "token_count": self.token_count,
-                            "goal": self.goal
-                        })
-                        workflow.logger.info(
-                            f"📊 Sent progress update to parent: {progress_score*100:.1f}%, "
-                            f"tokens: {self.token_count}"
-                        )
-                    except Exception as signal_error:
-                        workflow.logger.warning(f"Failed to signal parent progress: {signal_error}")
-                
-                # Calculate context metrics before updating
-                context_text = "\n".join([msg.get('text', '') for msg in self.context])
-                self.context_tokens = estimate_token_count(context_text)
-                
-                # Update agent progress in DB with metrics
-                # Use current pause state, not hardcoded status
-                current_status = "PAUSED" if self.is_paused else "ACTIVE"
-                await workflow.execute_activity(
-                    update_agent_status,
-                    args=[
-                        self.agent_id,
-                        current_status,
-                        progress_score,
-                        f"Iteration {self.iteration_count}: {progress_score*100:.1f}% complete",
-                        self.token_count,
-                        self.context_tokens,
-                        len(self.context),
-                        self.tokens_in,
-                        self.tokens_out
-                    ],
-                    start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=6,
-                        backoff_coefficient=4.0,
-                        initial_interval=timedelta(seconds=2),
-                        maximum_interval=timedelta(seconds=64)
+                # 6. Check progress ONLY if mark_execution_complete was called
+                if "mark_execution_complete" in tool_names_called:
+                    # Generate a unique ID for this verifier call
+                    verifier_call_id = workflow.uuid4()
+                    
+                    # Post IN_PROGRESS message
+                    await self._post_message(
+                        "",
+                        "TOOL",
+                        metadata={
+                            "toolCallId": verifier_call_id,
+                            "toolName": "check_progress",
+                            "toolStatus": "IN_PROGRESS",
+                            "title": "⚖️ Verifying goal completion",
+                            "verifierMessage": True
+                        }
                     )
-                )
-                
-                # 7. If complete, mark finished and exit
-                if progress_score >= 1.0:
-                    workflow.logger.info("🎯 Agent reached 100% completion, calling _mark_complete()")
-                    await self._mark_complete()
-                    workflow.logger.info("✅ _mark_complete() finished successfully")
-                    return {"status": "completed", "goal": self.goal}
+                    
+                    progress_result = await self._check_progress()
+                    # Track tokens from verifier LLM call (usage is always present)
+                    verifier_usage = progress_result["usage"]
+                    
+                    async with self._state_lock:
+                        self.tokens_in += verifier_usage.get("prompt_tokens", 0)
+                        self.tokens_out += verifier_usage.get("completion_tokens", 0)
+                        self.token_count += verifier_usage.get("total_tokens", 0)
+                    
+                    progress_score = progress_result.get("score", 0.0)
+                    progress_reasoning = progress_result.get("reasoning", "No reasoning provided")
+                    
+                    # Post FINISHED message with verifier's reasoning
+                    await self._post_message(
+                        progress_reasoning,
+                        "TOOL",
+                        metadata={
+                            "toolCallId": verifier_call_id,
+                            "toolName": "check_progress",
+                            "toolStatus": "FINISHED",
+                            "title": f"⚖️ Goal progress is {progress_score*100:.0f}%",
+                            "verifierMessage": True
+                        }
+                    )
+                    
+                    # If this is a sub-agent, signal parent with progress update AND token usage
+                    if self.parent_workflow_id:
+                        try:
+                            parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                            await parent_handle.signal("child_progress", {
+                                "child_agent_id": self.agent_id,
+                                "progress": progress_score,
+                                "tokens_in": self.tokens_in,
+                                "tokens_out": self.tokens_out,
+                                "token_count": self.token_count,
+                                "goal": self.goal
+                            })
+                            workflow.logger.info(
+                                f"📊 Sent progress update to parent: {progress_score*100:.1f}%, "
+                                f"tokens: {self.token_count}"
+                            )
+                        except Exception as signal_error:
+                            workflow.logger.warning(f"Failed to signal parent progress: {signal_error}")
+                    
+                    # Calculate context metrics before updating
+                    context_text = "\n".join([msg.get('text', '') for msg in self.context])
+                    self.context_tokens = estimate_token_count(context_text)
+                    
+                    # Update agent progress in DB with metrics
+                    current_status = "PAUSED" if self.is_paused else "ACTIVE"
+                    await workflow.execute_activity(
+                        update_agent_status,
+                        args=[
+                            self.agent_id,
+                            current_status,
+                            progress_score,
+                            f"Iteration {self.iteration_count}: {progress_score*100:.1f}% complete",
+                            self.token_count,
+                            self.context_tokens,
+                            len(self.context),
+                            self.tokens_in,
+                            self.tokens_out
+                        ],
+                        start_to_close_timeout=timedelta(seconds=15),
+                        retry_policy=RetryPolicy(
+                            maximum_attempts=6,
+                            backoff_coefficient=4.0,
+                            initial_interval=timedelta(seconds=2),
+                            maximum_interval=timedelta(seconds=64)
+                        )
+                    )
+                    
+                    # 7. If complete, mark finished and exit
+                    if progress_score >= 1.0:
+                        workflow.logger.info("🎯 Agent reached 100% completion, calling _mark_complete()")
+                        await self._mark_complete()
+                        workflow.logger.info("✅ _mark_complete() finished successfully")
+                        return {"status": "completed", "goal": self.goal}
+                    
+                    # If not complete, verifier feedback is already in context from the FINISHED message
+                    # Agent will continue executing with the feedback
+                    workflow.logger.info(f"📋 Verifier returned {progress_score*100:.0f}%, continuing execution")
                 
                 # 8. Update iteration count and token usage
                 self.iteration_count += 1
@@ -1246,34 +1254,32 @@ class AgentWorkflow:
         """
         Decide next action based on goal, context, and current phase using LLM.
         
-        Uses phase-specific prompts and tool filtering for:
+        Phase Flow: PREPARE_RESEARCH → RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE
+        
+        Uses phase-specific tool filtering:
+        - PREPARE_RESEARCH: No tools (pure thinking, FAST model)
         - RESEARCH: Read-only tools + mark_research_finished
-        - ATOMIZE: mark_atomization_finished (+ tool schemas for reference)
+        - ATOMIZE: mark_atomization_finished
         - PLAN: mark_planning_finished
         - SPAWN: spawn_sub_agents
-        - EXECUTE: All tools (current behavior)
+        - EXECUTE: All tools
         
         Returns:
             Dict with 'tool', 'args', 'reasoning'
         """
-        workflow.logger.info(f"Deciding next action (phase={self.phase}, is_first_call={self.is_first_call})")
+        workflow.logger.info(f"Deciding next action (phase={self.phase})")
         
         try:
-            # Get phase-specific tools, tool names, and model preference
+            # Get phase-specific tools and model preference
             phase_config = get_phase_tools_and_config(
                 phase=self.phase,
                 all_tools=self.tools,
-                is_first_call=self.is_first_call,
-                planned_subtasks=self.planned_subtasks
             )
             
-            phase_tools = phase_config["tools"]
-            phase_tool_names = phase_config["tool_names"]
+            enabled_tools = phase_config["enabled_tools"]
+            enabled_tool_names = phase_config["enabled_tool_names"]
+            disabled_tools = phase_config["disabled_tools"]
             model_preference = phase_config["model_preference"]
-            
-            # Clear is_first_call after first use
-            if self.is_first_call:
-                self.is_first_call = False
             
             # Filter browser sub-actions from LLM context
             # Browser sub-actions have browser_url metadata and should not be seen by LLM
@@ -1283,20 +1289,20 @@ class AgentWorkflow:
             ]
             
             workflow.logger.info(
-                f"Phase routing: phase={self.phase}, tools={len(phase_tools)}, model_pref={model_preference}"
+                f"Phase routing: phase={self.phase}, enabled={len(enabled_tools)}, disabled={len(disabled_tools)}, model_pref={model_preference}"
             )
             
             action = await workflow.execute_activity(
                 decide_next_action,
                 args=[
                     filtered_context,
-                    phase_tools,
-                    phase_tool_names,
+                    enabled_tools,
+                    enabled_tool_names,
+                    disabled_tools,
                     self.iteration_count,
                     self.model,
                     self.reasoning_effort,
                     self.user_id,
-                    # user_phone removed - fetched from user context in decide_next_action
                     self.phase,
                     model_preference
                 ],
