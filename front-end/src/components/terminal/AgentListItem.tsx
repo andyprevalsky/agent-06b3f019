@@ -24,14 +24,8 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
     }
   };
 
-  // Compact mode - just show an icon with status indicator
+  // Compact mode - just show an icon
   if (isCompact) {
-    const isActive = agent.status === 'ACTIVE' || agent.status === 'STARTING_UP';
-    const isPaused = agent.status === 'PAUSED';
-    const isOutOfCredits = agent.status === 'OUT_OF_CREDITS';
-    const isComplete = agent.status === 'COMPLETED';
-    const isFailed = agent.status === 'FAILED';
-    
     return (
       <div
         onClick={onClick}
@@ -42,21 +36,10 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
             : 'hover:bg-gray-100 dark:hover:bg-zinc-800'
         )}
       >
-        <div className="relative">
-          <Bot className={cn(
-            "h-5 w-5",
-            isSelected ? "text-gray-800 dark:text-gray-200" : "text-gray-500 dark:text-gray-400"
-          )} />
-          {/* Status indicator dot */}
-          <div className={cn(
-            "absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-white dark:border-zinc-900",
-            isActive && "bg-green-500",
-            isPaused && "bg-yellow-500",
-            isOutOfCredits && "bg-red-500",
-            isComplete && "bg-blue-500",
-            isFailed && "bg-red-600"
-          )} />
-        </div>
+        <Bot className={cn(
+          "h-5 w-5",
+          isSelected ? "text-gray-800 dark:text-gray-200" : "text-gray-500 dark:text-gray-400"
+        )} />
       </div>
     );
   }

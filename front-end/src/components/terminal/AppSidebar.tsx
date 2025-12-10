@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import AgentListItem from './AgentListItem';
 import { Agent } from '@/lib/api';
 import { getStoredSession } from '@/lib/supabase';
+import SubscriptionModal from '@/components/SubscriptionModal';
 
 // Sidebar dimensions
 const SIDEBAR_WIDTH_EXPANDED = 256; // 16rem = 256px
@@ -155,10 +156,24 @@ function NavButton({
   );
 }
 
+// Usage data interface for credits
+interface UsageData {
+  total: number;
+  used: number;
+  remaining: number;
+  tier: number | null;
+  upgradeOptions: Array<{
+    tier: number;
+    name: string;
+    url: string;
+  }>;
+}
+
 // Credit indicator component with ring
 function CreditIndicator({ isCollapsed }: { isCollapsed: boolean }) {
-  const [credits, setCredits] = useState<number>(0);
+  const [usage, setUsage] = useState<UsageData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
 
   useEffect(() => {
     const fetchCredits = async () => {
@@ -181,7 +196,7 @@ function CreditIndicator({ isCollapsed }: { isCollapsed: boolean }) {
 
         if (response.ok) {
           const data = await response.json();
-          setCredits(Math.floor(data.remaining || 0));
+          setUsage(data);
         }
       } catch (error) {
         console.error('Error fetching credits:', error);
@@ -194,6 +209,8 @@ function CreditIndicator({ isCollapsed }: { isCollapsed: boolean }) {
     const interval = setInterval(fetchCredits, 30000);
     return () => clearInterval(interval);
   }, []);
+
+  const credits = usage ? Math.floor(usage.remaining) : 0;
   
   // Calculate percentage: 10+ = 100%, 5 = 50%, 0 = 0%
   const percentage = loading ? 50 : Math.min(100, (credits / 10) * 100);
@@ -215,66 +232,79 @@ function CreditIndicator({ isCollapsed }: { isCollapsed: boolean }) {
   };
 
   return (
-    <SidebarTooltip label={`${credits} credits remaining`} isCollapsed={isCollapsed}>
-      <div className={cn(
-        "flex items-center gap-2 rounded-lg transition-all duration-200 cursor-pointer",
-        "hover:bg-gray-100 dark:hover:bg-zinc-800",
-        isCollapsed ? "justify-center p-2 mx-auto" : "px-3 py-2"
-      )}>
-        <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
-          {/* Background ring */}
-          <svg className="absolute" width={size} height={size}>
-            <circle
-              cx={size / 2}
-              cy={size / 2}
-              r={radius}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={strokeWidth}
-              className="text-gray-200 dark:text-zinc-700"
+    <>
+      <SidebarTooltip label={`${credits} credits remaining`} isCollapsed={isCollapsed}>
+        <div 
+          onClick={() => setShowSubscriptionModal(true)}
+          className={cn(
+            "flex items-center gap-2 rounded-lg transition-all duration-200 cursor-pointer",
+            "hover:bg-gray-100 dark:hover:bg-zinc-800",
+            isCollapsed ? "justify-center p-2 mx-auto" : "px-3 py-2"
+          )}
+        >
+          <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
+            {/* Background ring */}
+            <svg className="absolute" width={size} height={size}>
+              <circle
+                cx={size / 2}
+                cy={size / 2}
+                r={radius}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={strokeWidth}
+                className="text-gray-200 dark:text-zinc-700"
+              />
+            </svg>
+            {/* Progress ring */}
+            <svg 
+              className="absolute -rotate-90" 
+              width={size} 
+              height={size}
+            >
+              <circle
+                cx={size / 2}
+                cy={size / 2}
+                r={radius}
+                fill="none"
+                stroke={getColor()}
+                strokeWidth={strokeWidth}
+                strokeLinecap="round"
+                strokeDasharray={circumference}
+                strokeDashoffset={strokeDashoffset}
+                className="transition-all duration-500"
+              />
+            </svg>
+            {/* Credit card icon */}
+            <CreditCard 
+              className={cn(
+                "relative z-10",
+                isEmpty ? "text-red-500" : "text-gray-600 dark:text-gray-400"
+              )} 
+              style={{ width: size * 0.45, height: size * 0.45 }}
             />
-          </svg>
-          {/* Progress ring */}
-          <svg 
-            className="absolute -rotate-90" 
-            width={size} 
-            height={size}
-          >
-            <circle
-              cx={size / 2}
-              cy={size / 2}
-              r={radius}
-              fill="none"
-              stroke={getColor()}
-              strokeWidth={strokeWidth}
-              strokeLinecap="round"
-              strokeDasharray={circumference}
-              strokeDashoffset={strokeDashoffset}
-              className="transition-all duration-500"
-            />
-          </svg>
-          {/* Credit card icon */}
-          <CreditCard 
-            className={cn(
-              "relative z-10",
-              isEmpty ? "text-red-500" : "text-gray-600 dark:text-gray-400"
-            )} 
-            style={{ width: size * 0.45, height: size * 0.45 }}
-          />
-        </div>
-        {!isCollapsed && (
-          <div className="flex flex-col">
-            <span className={cn(
-              "text-sm font-medium",
-              isEmpty ? "text-red-500" : "text-gray-700 dark:text-gray-300"
-            )}>
-              {loading ? '...' : credits}
-            </span>
-            <span className="text-xs text-gray-500 dark:text-gray-500">credits</span>
           </div>
-        )}
-      </div>
-    </SidebarTooltip>
+          {!isCollapsed && (
+            <div className="flex flex-col">
+              <span className={cn(
+                "text-sm font-medium",
+                isEmpty ? "text-red-500" : "text-gray-700 dark:text-gray-300"
+              )}>
+                {loading ? '...' : credits}
+              </span>
+              <span className="text-xs text-gray-500 dark:text-gray-500">credits</span>
+            </div>
+          )}
+        </div>
+      </SidebarTooltip>
+
+      <SubscriptionModal
+        open={showSubscriptionModal}
+        onOpenChange={setShowSubscriptionModal}
+        currentTier={usage?.tier ?? null}
+        upgradeOptions={usage?.upgradeOptions ?? []}
+        remaining={usage?.remaining ?? 0}
+      />
+    </>
   );
 }
 
@@ -413,12 +443,11 @@ export default function AppSidebar({
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : sortedAgents.length === 0 ? (
-            <div className={cn(
-              "text-center py-8 text-muted-foreground text-sm",
-              isCollapsed && "text-xs"
-            )}>
-              {isCollapsed ? "—" : "No agents yet"}
-            </div>
+            !isCollapsed && (
+              <div className="text-center py-8 text-muted-foreground text-sm">
+                No agents yet
+              </div>
+            )
           ) : (
             sortedAgents.map((agent) => (
               <SidebarTooltip 
