@@ -34,7 +34,7 @@ export default function Usage() {
         return;
       }
 
-      const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
+      const backendUrl = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 
       // Fetch usage and stats in parallel
       const [usageResponse, statsResponse] = await Promise.all([

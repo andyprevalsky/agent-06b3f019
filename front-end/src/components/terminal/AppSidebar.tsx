@@ -185,7 +185,7 @@ function CreditIndicator({ isCollapsed }: { isCollapsed: boolean }) {
         }
 
         const response = await fetch(
-          `${import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'}/api/credits/usage`,
+          `${(import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '')}/api/credits/usage`,
           {
             headers: {
               'Authorization': `Bearer ${session.access_token}`,

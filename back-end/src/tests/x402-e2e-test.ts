@@ -43,11 +43,13 @@ interface TestContext {
     address: string;
     privateKey?: string;
   };
-  agentId?: string;
+  agentIds: string[];  // Track all spawned agents for cleanup
   statusUrl?: string;
 }
 
-const context: TestContext = {};
+const context: TestContext = {
+  agentIds: [],
+};
 
 /**
  * Utility: Make HTTP request
@@ -236,9 +238,10 @@ async function testSpawnAgentDirect() {
       return;
     }
     
-    context.agentId = createResponse.data.agent_id;
-    context.statusUrl = `${BASE_URL}/api/x402/agents/${context.agentId}/status`;
-    console.log(`   Created agent: ${context.agentId}`);
+    const agentId = createResponse.data.agent_id;
+    context.agentIds.push(agentId);  // Track for cleanup
+    context.statusUrl = `${BASE_URL}/api/x402/agents/${agentId}/status`;
+    console.log(`   Created agent: ${agentId}`);
     return;
   }
   
@@ -261,20 +264,22 @@ async function testSpawnAgentDirect() {
     throw new Error(`Failed to create agent: ${createResponse.status} ${JSON.stringify(createResponse.data)}`);
   }
   
-  context.agentId = createResponse.data.agent_id;
-  context.statusUrl = `${BASE_URL}/api/x402/agents/${context.agentId}/status`;
+  const agentId = createResponse.data.agent_id;
+  context.agentIds.push(agentId);  // Track for cleanup
+  context.statusUrl = `${BASE_URL}/api/x402/agents/${agentId}/status`;
   
-  console.log(`   Created agent: ${context.agentId}`);
+  console.log(`   Created agent: ${agentId}`);
 }
 
 async function testMonitorAgentStatus() {
-  if (!context.agentId) {
+  if (context.agentIds.length === 0) {
     throw new Error('No agent ID available');
   }
   
+  const agentId = context.agentIds[context.agentIds.length - 1];  // Use most recent
   console.log('   Checking agent status via x402 endpoint...');
   
-  const response = await request(`${BASE_URL}/api/x402/agents/${context.agentId}/status`);
+  const response = await request(`${BASE_URL}/api/x402/agents/${agentId}/status`);
   
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}: ${JSON.stringify(response.data)}`);
@@ -314,20 +319,50 @@ async function testTopupRequiresPayment() {
 }
 
 async function testCleanup() {
-  // Clean up test agent
-  if (context.agentId) {
-    console.log('   Cleaning up test agent...');
-    
-    const backendApiKey = process.env.BACKEND_API_KEY;
-    if (backendApiKey) {
-      await request(`${BASE_URL}/api/agents/${context.agentId}`, {
+  // Clean up ALL test agents
+  if (context.agentIds.length === 0) {
+    console.log('   No agents to clean up');
+    return;
+  }
+  
+  console.log(`   Cleaning up ${context.agentIds.length} test agent(s)...`);
+  
+  const backendApiKey = process.env.BACKEND_API_KEY;
+  if (!backendApiKey) {
+    console.log('   ⚠️  BACKEND_API_KEY not set, cannot delete agents');
+    return;
+  }
+  
+  for (const agentId of context.agentIds) {
+    try {
+      const response = await request(`${BASE_URL}/api/agents/${agentId}`, {
         method: 'DELETE',
         headers: {
           'X-API-Key': backendApiKey,
         },
       });
-      console.log('   Test agent deleted');
+      
+      if (response.status === 204 || response.status === 200) {
+        console.log(`   ✓ Deleted agent ${agentId}`);
+      } else {
+        console.log(`   ⚠️  Failed to delete agent ${agentId}: ${response.status}`);
+      }
+    } catch (error) {
+      console.log(`   ⚠️  Error deleting agent ${agentId}: ${error}`);
     }
+  }
+  
+  // Clear the list
+  context.agentIds = [];
+}
+
+/**
+ * Cleanup function that can be called independently
+ */
+async function cleanup() {
+  if (context.agentIds.length > 0) {
+    console.log('\n🧹 Running cleanup...');
+    await testCleanup();
   }
 }
 
@@ -364,6 +399,7 @@ async function runAllTests() {
     process.exit(1);
   }
   
+  // Tests to run (cleanup is handled separately in finally block)
   const tests = [
     { name: 'Setup Buyer Wallet', fn: testSetupBuyerWallet },
     { name: 'Fund Buyer Wallet', fn: testFundBuyerWallet },
@@ -371,23 +407,27 @@ async function runAllTests() {
     { name: 'Spawn Agent Direct', fn: testSpawnAgentDirect },
     { name: 'Monitor Agent Status', fn: testMonitorAgentStatus },
     { name: 'Topup Requires Payment', fn: testTopupRequiresPayment },
-    { name: 'Cleanup', fn: testCleanup },
   ];
   
   console.log('🔐 Running x402 E2E tests...\n');
   
   const results: TestResult[] = [];
   
-  for (const test of tests) {
-    const result = await runTest(test.name, test.fn);
-    printResult(result);
-    results.push(result);
-    
-    // Stop on critical failures
-    if (!result.passed && ['Setup Buyer Wallet', 'Fund Buyer Wallet'].includes(test.name)) {
-      console.error('\n❌ Critical setup failed, cannot continue');
-      break;
+  try {
+    for (const test of tests) {
+      const result = await runTest(test.name, test.fn);
+      printResult(result);
+      results.push(result);
+      
+      // Stop on critical failures
+      if (!result.passed && ['Setup Buyer Wallet', 'Fund Buyer Wallet'].includes(test.name)) {
+        console.error('\n❌ Critical setup failed, cannot continue');
+        break;
+      }
     }
+  } finally {
+    // ALWAYS run cleanup, even if tests fail or throw
+    await cleanup();
   }
   
   // Summary
@@ -411,13 +451,29 @@ async function runAllTests() {
   process.exit(0);
 }
 
+// Handle process termination signals to ensure cleanup
+let isCleaningUp = false;
+
+async function handleExit(signal: string) {
+  if (isCleaningUp) return;  // Prevent double cleanup
+  isCleaningUp = true;
+  
+  console.log(`\n\n⚠️  Received ${signal}, cleaning up spawned agents...`);
+  await cleanup();
+  process.exit(1);
+}
+
+process.on('SIGINT', () => handleExit('SIGINT'));
+process.on('SIGTERM', () => handleExit('SIGTERM'));
+
 // Run tests
 if (require.main === module) {
-  runAllTests().catch(error => {
+  runAllTests().catch(async (error) => {
     console.error('\n💥 Test suite crashed:', error);
+    await cleanup();  // Ensure cleanup even on crash
     process.exit(1);
   });
 }
 
-export { runAllTests };
+export { runAllTests, cleanup };
 

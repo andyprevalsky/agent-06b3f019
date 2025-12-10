@@ -337,27 +337,54 @@ async def search_x402_bazaar_activity(
                 raise Exception(f"x402 Bazaar API error: {response.status_code}")
 
             data = response.json()
+            
+            # Defensive check: ensure data is a dict
+            if not isinstance(data, dict):
+                raise Exception(f"x402 Bazaar API returned unexpected type: {type(data).__name__}")
+            
             items = data.get("items", [])
+            
+            # Defensive check: ensure items is a list
+            if not isinstance(items, list):
+                raise Exception(f"x402 Bazaar API 'items' is not a list: {type(items).__name__}")
 
             # Process and filter services
             services = []
             for item in items:
+                # Defensive check: skip non-dict items
+                if not isinstance(item, dict):
+                    logger.warning("Skipping non-dict item in x402 Bazaar response", item_type=type(item).__name__)
+                    continue
+                
                 # Extract service info from the nested structure
                 accepts = item.get("accepts", [])
-                if not accepts:
+                if not accepts or not isinstance(accepts, list):
                     continue
 
                 # Get first payment requirement (most services have one)
                 payment_req = accepts[0]
                 
+                # Defensive check: ensure payment_req is a dict
+                if not isinstance(payment_req, dict):
+                    logger.warning("Skipping non-dict payment_req", payment_req_type=type(payment_req).__name__)
+                    continue
+                
                 # Anti-cannibalization: Skip services owned by our wallet
-                pay_to = payment_req.get("payTo", "").lower()
+                pay_to = payment_req.get("payTo", "")
+                if not isinstance(pay_to, str):
+                    pay_to = str(pay_to) if pay_to else ""
+                pay_to = pay_to.lower()
+                
                 if our_wallet and pay_to == our_wallet:
                     logger.debug("Filtering out our own service", resource=item.get("resource"))
                     continue
 
                 # Extract price in cents (convert from atomic units - USDC has 6 decimals)
-                max_amount = int(payment_req.get("maxAmountRequired", "0"))
+                max_amount_str = payment_req.get("maxAmountRequired", "0")
+                try:
+                    max_amount = int(max_amount_str)
+                except (ValueError, TypeError):
+                    max_amount = 0
                 # USDC has 6 decimals, so divide by 10000 to get cents (6 decimals - 2 for cents = 4)
                 price_cents = max_amount // 10000
 
@@ -371,11 +398,22 @@ async def search_x402_bazaar_activity(
                 # Apply keyword filter
                 if keyword:
                     keyword_lower = keyword.lower()
-                    resource_lower = resource_url.lower()
+                    resource_lower = str(resource_url).lower()
                     metadata_str = str(item.get("metadata", {})).lower()
                     if keyword_lower not in resource_lower and keyword_lower not in metadata_str:
                         continue
 
+                # Safely extract nested schema values with defensive checks
+                output_schema = payment_req.get("outputSchema")
+                if not isinstance(output_schema, dict):
+                    output_schema = {}
+                
+                input_schema = output_schema.get("input")
+                if not isinstance(input_schema, dict):
+                    input_schema = {}
+                
+                method = input_schema.get("method", "GET") if isinstance(input_schema, dict) else "GET"
+                
                 # Build service info
                 service = {
                     "resource": resource_url,
@@ -384,10 +422,10 @@ async def search_x402_bazaar_activity(
                     "pay_to": payment_req.get("payTo"),
                     "asset": payment_req.get("asset"),
                     "network": payment_req.get("network", "base"),
-                    "method": payment_req.get("outputSchema", {}).get("input", {}).get("method", "GET"),
-                    "input_schema": payment_req.get("outputSchema", {}).get("input"),
-                    "output_schema": payment_req.get("outputSchema", {}).get("output"),
-                    "metadata": item.get("metadata", {}),
+                    "method": method,
+                    "input_schema": input_schema if input_schema else None,
+                    "output_schema": output_schema.get("output") if output_schema else None,
+                    "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
                     "last_updated": item.get("lastUpdated"),
                 }
                 services.append(service)
