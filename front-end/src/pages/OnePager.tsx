@@ -228,7 +228,7 @@ export default function OnePager() {
             <li className="flex gap-3 ml-6">
               <span className="text-[#c9c5be] select-none">-</span>
               <span>
-                Built Hotplate from zero to 5 million ARR with strong margins
+                Built Hotplate from zero to PMF, the company is now highly profitable and doing 5M ARR
               </span>
             </li>
             <li className="flex gap-3 ml-6">
