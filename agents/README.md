@@ -329,8 +329,6 @@ sub_agents = [
     {
         "goal": "Research latest AI developments and summarize",
         "model": "google/gemini-2.0-flash-exp",
-        "reasoning_effort": "low",
-        "tool_ids": ["<web_search_tool_id>"],
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
             "llm_judge_prompt": "Has the agent found and summarized recent AI news?"
@@ -339,7 +337,6 @@ sub_agents = [
     {
         "goal": "Research quantum computing breakthroughs",
         "model": "google/gemini-2.0-flash-exp",
-        "tool_ids": ["<web_search_tool_id>"],
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
             "llm_judge_prompt": "Has the agent found quantum computing news?"
@@ -348,7 +345,6 @@ sub_agents = [
     {
         "goal": "Research space exploration updates",
         "model": "google/gemini-2.0-flash-exp",
-        "tool_ids": ["<web_search_tool_id>"],
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
             "llm_judge_prompt": "Has the agent found space news?"

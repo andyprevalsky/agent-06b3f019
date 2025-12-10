@@ -257,7 +257,7 @@ def create_sub_agent_config_model(
         """Configuration for a single sub-agent."""
         goal: str = Field(description="The goal/task for this sub-agent")
         model: Optional[str] = Field(None, description="LLM model to use (inherits from parent if not specified)")
-        reasoning_effort: Optional[str] = Field(None, description="Reasoning effort: 'off', 'low', 'medium', 'high'")
+        # Note: reasoning_effort removed - sub-agents use backend default ('low')
         verifier: VerifierConfig = Field(description="Verifier config with type='FLOAT_LLM_JUDGE' and llm_judge_prompt")
     
     return DynamicSubAgentConfig

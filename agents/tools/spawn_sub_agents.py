@@ -192,8 +192,7 @@ async def spawn_sub_agents_activity(
         user_id: User ID (agents will be created for this user)
         sub_agents: List of agent configs, each with:
             - goal (str): The subtask goal
-            - model (str, optional): LLM model to use
-            - reasoning_effort (str, optional): "off", "low", "medium", "high"
+            - model (str, optional): LLM model to use (defaults to rose-1-fast)
             - verifier (dict): {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "..."}
         parent_agent_id: Parent agent ID (for hierarchy)
         parent_workflow_id: Parent workflow ID (for signaling)
@@ -233,10 +232,7 @@ async def spawn_sub_agents_activity(
                 # Default to rose-1-fast if no model specified
                 model = agent.get("model") or "rose-labs/rose-1-fast"
                 payload["model"] = model
-                
-                reasoning_effort = agent.get("reasoning_effort")
-                if reasoning_effort is not None:
-                    payload["reasoning_effort"] = reasoning_effort
+                # Note: reasoning_effort not passed - sub-agents use backend default ('low')
                 
                 logger.info("Spawning sub-agent", payload=payload)
                 tasks.append(
