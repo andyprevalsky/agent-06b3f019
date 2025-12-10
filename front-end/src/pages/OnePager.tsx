@@ -234,7 +234,7 @@ export default function OnePager() {
             <li className="flex gap-3 ml-6">
               <span className="text-[#c9c5be] select-none">-</span>
               <span>
-                Sole engineer for the first three years across full stack, infrastructure, growth, and distribution
+                Sole engineer at Hotplate for the first three years while also leading strategy & distribution.
               </span>
             </li>
             <li className="flex gap-3 ml-6">
