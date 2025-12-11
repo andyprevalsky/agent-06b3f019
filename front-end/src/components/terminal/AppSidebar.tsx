@@ -381,7 +381,7 @@ export default function AppSidebar({
   return (
     <aside 
       className={cn(
-        "group/sidebar fixed top-0 left-0 h-full flex flex-col border-r border-gray-200/60 dark:border-zinc-800/60 bg-white/95 dark:bg-zinc-900/95 z-[50]",
+        "group/sidebar fixed top-0 left-0 h-full hidden md:flex flex-col border-r border-gray-200/60 dark:border-zinc-800/60 bg-white/95 dark:bg-zinc-900/95 z-[50]",
         "transition-all duration-300 ease-out shadow-xl"
       )}
       style={{
