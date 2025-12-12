@@ -200,14 +200,27 @@ function BrowserStatusBarImpl({ taskId, browserUrl, actions }: BrowserStatusBarP
   // Minimized state
   if (!isExpanded) {
     return (
-      <div onClick={handleExpandClick} className="w-full max-w-4xl mx-auto mb-3 px-2 md:px-0 cursor-pointer">
-        <div className="flex items-center gap-3 p-2 pr-3 rounded-xl border border-border bg-card/50 backdrop-blur-sm hover:bg-card/80 transition-colors">
-          <div onClick={handleThumbnailClick}
-            className="w-16 h-10 rounded-md border border-border bg-white overflow-hidden flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all">
-            <iframe src={browserUrl} className="w-[400%] h-[400%] border-0 pointer-events-none"
-              style={{ transform: 'scale(0.25)', transformOrigin: 'top left' }} title="Preview" />
+      <div onClick={handleExpandClick} className="w-full max-w-4xl mx-auto mb-3 px-2 md:px-0 cursor-pointer relative z-30">
+        <div className="relative flex items-center gap-3 p-2 pr-3 pl-36 rounded-xl border border-border bg-card/50 backdrop-blur-sm hover:bg-card/80 transition-colors">
+          {/* Thumbnail - positioned absolutely to overflow container, 16:10 aspect ratio */}
+          <div
+            onClick={handleThumbnailClick}
+            className="absolute left-2 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden cursor-pointer shadow-lg hover:shadow-xl hover:ring-2 hover:ring-primary/50 transition-all z-40"
+            style={{ width: '128px', height: '80px', marginBottom: '8px' }}
+          >
+            <iframe src={browserUrl} className="border-0 pointer-events-none"
+              style={{ width: '1280px', height: '800px', transform: 'scale(0.1)', transformOrigin: 'top left' }} title="Preview" />
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-black/10 to-black/30 opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="pointer-events-none absolute bottom-1 right-1 flex items-center gap-1 rounded-md bg-black/70 text-white px-2 py-1 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
+              <Maximize2 className="h-3.5 w-3.5" />
+              <span>Expand</span>
+            </div>
+            {/* Tooltip above */}
+            <div className="pointer-events-none absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-foreground text-background px-2 py-1 text-xs opacity-0 group-hover:opacity-100 transition-opacity z-50">
+              See Agent Computer
+            </div>
           </div>
-          <div className="flex-1 flex items-center gap-2 min-w-0">
+          <div className="flex-1 flex items-center gap-2 min-w-0 ml-2">
             {LastActionIcon && <LastActionIcon className="h-4 w-4 flex-shrink-0 text-muted-foreground" />}
             <span className="text-sm truncate animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
               {lastAction?.title || "Browser session active"}
@@ -223,15 +236,28 @@ function BrowserStatusBarImpl({ taskId, browserUrl, actions }: BrowserStatusBarP
 
   // Expanded state
   return (
-    <div className="w-full max-w-4xl mx-auto mb-3 px-2 md:px-0">
-      <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm overflow-hidden">
-        <div className="flex items-center gap-3 p-3 border-b border-border">
-          <div onClick={handleThumbnailClick}
-            className="w-20 h-14 rounded-md border border-border bg-white overflow-hidden flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all">
-            <iframe src={browserUrl} className="w-[400%] h-[400%] border-0 pointer-events-none"
-              style={{ transform: 'scale(0.25)', transformOrigin: 'top left' }} title="Preview" />
+    <div className="w-full max-w-4xl mx-auto mb-3 px-2 md:px-0 relative z-30">
+      <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm overflow-visible">
+        <div className="relative flex items-center gap-3 p-3 pl-40 border-b border-border">
+          {/* Thumbnail - positioned absolutely to overflow container, 16:10 aspect ratio */}
+          <div
+            onClick={handleThumbnailClick}
+            className="absolute left-3 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden cursor-pointer shadow-lg hover:shadow-xl hover:ring-2 hover:ring-primary/50 transition-all z-40"
+            style={{ width: '144px', height: '90px', marginBottom: '8px' }}
+          >
+            <iframe src={browserUrl} className="border-0 pointer-events-none"
+              style={{ width: '1440px', height: '900px', transform: 'scale(0.1)', transformOrigin: 'top left' }} title="Preview" />
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-black/10 to-black/30 opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="pointer-events-none absolute bottom-1 right-1 flex items-center gap-1 rounded-md bg-black/70 text-white px-2 py-1 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
+              <Maximize2 className="h-3.5 w-3.5" />
+              <span>Expand</span>
+            </div>
+            {/* Tooltip above */}
+            <div className="pointer-events-none absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-foreground text-background px-2 py-1 text-xs opacity-0 group-hover:opacity-100 transition-opacity z-50">
+              See Agent Computer
+            </div>
           </div>
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 ml-2">
             <h3 className="text-sm font-medium truncate">Agent's Browser</h3>
             <div className="flex items-center gap-1.5 mt-0.5">
               <div className={cn("h-1.5 w-1.5 rounded-full", isDisconnected ? "bg-yellow-500" : "bg-green-500 animate-pulse")} />
