@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import * as amplitude from '@amplitude/analytics-browser';
 import { Button } from '@/components/ui/button';
@@ -26,7 +26,6 @@ import { getClientSource } from '@/lib/clientSource';
 import CreateAgentModal from '@/components/terminal/CreateAgentModal';
 import AgentListItem from '@/components/terminal/AgentListItem';
 import MessageBubble from '@/components/terminal/MessageBubble';
-import BrowserViewPanel from '@/components/terminal/BrowserViewPanel';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
 import QueryInput from '@/components/terminal/QueryInput';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
@@ -44,6 +43,8 @@ import { RealtimeChannel } from '@supabase/supabase-js';
 import { colorPalette, frameSequence, getTileColorsForFrame } from '@/lib/tileAnimation';
 import SmallTileAnimationCanvas from '@/components/terminal/SmallTileAnimationCanvas';
 import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
+
+const BrowserStatusBar = lazy(() => import('@/components/terminal/BrowserStatusBar'));
 
 function getModelContextWindow(model: string, models: Model[]): number {
   // Look up the actual context length from the models data
@@ -365,9 +366,6 @@ export default function Terminal() {
   // View state - which pane to show
   const [currentView, setCurrentView] = useState<'agents' | 'integrations' | 'settings' | 'usage' | 'network'>('agents');
   
-
-  // Browser fullscreen state - shared across all browser panels
-  const [anyBrowserFullscreen, setAnyBrowserFullscreen] = useState(false);
 
   // Agent list state
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -1488,11 +1486,71 @@ export default function Terminal() {
   });
 
   // Memoize deduplicated messages to prevent unnecessary re-renders
-  const { displayedMessages, browserPanels } = useMemo(() => {
+  const { displayedMessages, lastActiveBrowserPanel } = useMemo(() => {
     const deduplicated = deduplicateToolMessages(messages.filter((m) => m.role !== 'SYSTEM'));
     const grouped = groupBrowserMessages(deduplicated);
-    return { displayedMessages: grouped.messages, browserPanels: grouped.browserPanels };
+
+    let lastActivePanel: {
+      taskId: string;
+      browserUrl: string;
+      actions: {
+        id: string;
+        title: string;
+        message: string;
+        status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
+        timestamp: string;
+        action_type?: string;
+        auxiliary?: { current_step?: string; total_steps?: string };
+      }[];
+    } | null = null;
+
+    if (grouped.browserPanels.size > 0) {
+      const entries = Array.from(grouped.browserPanels.entries());
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const [taskId, panelData] = entries[i];
+        const lastAction = panelData.actions[panelData.actions.length - 1];
+        const isComplete =
+          lastAction?.metadata?.action_type === 'task_complete' ||
+          lastAction?.metadata?.action_type === 'error';
+        if (!isComplete) {
+          const mappedActions = panelData.actions.map((action) => ({
+            id: action.message_id,
+            title: action.metadata?.title || 'Browser action',
+            message: action.text,
+            status: (action.metadata?.toolStatus || 'FINISHED') as
+              | 'IN_PROGRESS'
+              | 'FINISHED'
+              | 'ERROR',
+            timestamp: action.timestamp,
+            action_type: action.metadata?.action_type,
+            auxiliary: action.metadata?.auxiliary,
+          }));
+          lastActivePanel = {
+            taskId,
+            browserUrl:
+              panelData.currentBrowserUrl || panelData.initMessage.metadata?.browser_url || '',
+            actions: mappedActions,
+          };
+          break;
+        }
+      }
+    }
+
+    return {
+      displayedMessages: grouped.messages,
+      lastActiveBrowserPanel: lastActivePanel,
+    };
   }, [messages]);
+
+  // Stable props for BrowserStatusBar to avoid unnecessary re-renders
+  const browserStatusProps = useMemo(() => {
+    if (!lastActiveBrowserPanel) return null;
+    return {
+      taskId: lastActiveBrowserPanel.taskId,
+      browserUrl: lastActiveBrowserPanel.browserUrl,
+      actions: lastActiveBrowserPanel.actions,
+    };
+  }, [lastActiveBrowserPanel]);
 
   // Get system messages
   const systemMessages = messages.filter((m) => m.role === 'SYSTEM');
@@ -1968,47 +2026,11 @@ export default function Terminal() {
                 }}
               >
                 {displayedMessages.map((message) => {
-                  // Check if this is a browser panel message
+                  // Skip browser panel marker messages - browser shows in fixed bar
                   if (message.metadata?._browserPanel) {
-                    const taskId = message.metadata._taskId as string;
-                    const panelData = browserPanels.get(taskId);
-                    
-                    if (!panelData) {
-                      return null;
-                    }
-
-                    const mappedActions = panelData.actions.map((action) => ({
-                      id: action.message_id,
-                      title: action.metadata?.title || 'Browser action',
-                      message: action.text,
-                      status: action.metadata?.toolStatus || 'FINISHED',
-                      timestamp: action.timestamp,
-                      action_type: action.metadata?.action_type,
-                      auxiliary: action.metadata?.auxiliary
-                    }));
-                    
-                    // The last action should ALWAYS animate (whenever panel re-renders with new action)
-                    // But ONLY if this is the message currently being processed from buffer
-                    const lastAction = panelData.actions[panelData.actions.length - 1];
-                    const isThisMessageAnimating = message.message_id === currentAnimatingId;
-                    const isLastActionAnimating = lastAction && lastAction.message_id === currentAnimatingId;
-                    const shouldAnimate = isLastActionAnimating || isThisMessageAnimating;
-                    
-                    return (
-                      <BrowserViewPanel
-                        key={message.message_id}
-                        taskId={taskId}  // Use stable task_id as ID
-                        browserUrl={panelData.currentBrowserUrl}  // Current browser URL (may change on resume)
-                        actions={mappedActions}
-                        shouldAnimate={shouldAnimate}
-                        onAnimationComplete={handleAnimationComplete}
-                        isAnyBrowserFullscreen={anyBrowserFullscreen}
-                        onFullscreenToggle={setAnyBrowserFullscreen}
-                      />
-                    );
+                    return null;
                   }
-                  
-                  // Regular message
+
                   return (
                     <MessageBubble 
                       key={message.message_id} 
@@ -2067,6 +2089,19 @@ export default function Terminal() {
                 <div ref={messagesEndRef} />
               </div>
           </ScrollArea>
+
+          {/* Browser Status Bar - fixed section above query input */}
+          {browserStatusProps && (
+            <Suspense fallback={null}>
+              <div className="px-2 md:px-0">
+                <BrowserStatusBar
+                  taskId={browserStatusProps.taskId}
+                  browserUrl={browserStatusProps.browserUrl}
+                  actions={browserStatusProps.actions}
+                />
+              </div>
+            </Suspense>
+          )}
 
           {/* Message Input - Always visible */}
           <div 
