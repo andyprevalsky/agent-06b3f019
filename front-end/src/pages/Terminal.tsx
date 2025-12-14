@@ -27,6 +27,7 @@ import CreateAgentModal from '@/components/terminal/CreateAgentModal';
 import AgentListItem from '@/components/terminal/AgentListItem';
 import MessageBubble from '@/components/terminal/MessageBubble';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
+import ThinkingAnimation from '@/components/ThinkingAnimation';
 import QueryInput from '@/components/terminal/QueryInput';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
 import Settings from '@/pages/Settings';
@@ -88,8 +89,12 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
       
       if (existing) {
         // Update with latest message but keep the first timestamp
+        const isAttention = !!message.metadata?.isUserAttentionMessage;
         toolMessageMap.set(toolCallId, {
-          message: message,
+          // For attention messages, keep the original message_id so animation ties to first arrival
+          message: isAttention
+            ? { ...message, message_id: existing.message.message_id }
+            : message,
           firstTimestamp: existing.firstTimestamp
         });
       } else {
@@ -1025,12 +1030,15 @@ export default function Terminal() {
       if (nextMessage.role === 'TOOL') {
         const isSubAgentTool = !!nextMessage.metadata?.subAgentId;
         const isBrowserAction = !!nextMessage.metadata?.browser_url;
+        const isAttention = !!nextMessage.metadata?.isUserAttentionMessage;
         const status = nextMessage.metadata?.toolStatus;
         const message = nextMessage.text || '';
         
-        // All tool messages (including browser actions) animate and block the buffer
-        // Include ERROR status so error messages are displayed
-        if (!isSubAgentTool && (status === 'FINISHED' || status === 'ERROR') && message.trim().length > 0) {
+        // Attention messages manage their own animation; don't block the queue here
+        if (isAttention) {
+          shouldAnimate = false;
+        } else if (!isSubAgentTool && (status === 'FINISHED' || status === 'ERROR') && message.trim().length > 0) {
+          // All other tool messages (including browser actions) animate and block the buffer
           shouldAnimate = true;
         }
       }
@@ -1487,7 +1495,9 @@ export default function Terminal() {
 
   // Memoize deduplicated messages to prevent unnecessary re-renders
   const { displayedMessages, lastActiveBrowserPanel } = useMemo(() => {
-    const deduplicated = deduplicateToolMessages(messages.filter((m) => m.role !== 'SYSTEM'));
+    // Filter out SYSTEM messages only
+    const filteredMessages = messages.filter((m) => m.role !== 'SYSTEM');
+    const deduplicated = deduplicateToolMessages(filteredMessages);
     const grouped = groupBrowserMessages(deduplicated);
 
     let lastActivePanel: {
@@ -2020,7 +2030,7 @@ export default function Terminal() {
               
               {/* Messages - Always rendered */}
               <div 
-                className="max-w-4xl mx-auto space-y-4 pb-32 relative z-20 transition-opacity duration-700 ease-in-out"
+                className="max-w-4xl mx-auto flex flex-col gap-1.5 pb-32 relative z-20 transition-opacity duration-700 ease-in-out"
                 style={{
                   opacity: displayedMessages.length > 0 ? 1 : 0,
                 }}
@@ -2078,11 +2088,22 @@ export default function Terminal() {
                   </div>
                 )}
                 
-                {/* Show small ASCII loader when agent is thinking */}
+                {/* Thinking placeholder should match streaming Thought rendering */}
                 {showThinkingLoader && (
                   <div className="flex gap-3">
                     <div className="flex-shrink-0 w-8" />
-                    <AsciiLoader showWarmingUp={false} size="icon" fitContainer />
+                    <div className="flex items-center gap-2">
+                      <ThinkingAnimation
+                        dataUrl="/thinking_animations.txt"
+                        autoplay
+                        loop
+                        className="w-4 h-4 flex-shrink-0"
+                        style={{ width: '16px', height: '16px' }}
+                      />
+                      <span className="text-sm font-medium animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
+                        Thinking
+                      </span>
+                    </div>
                   </div>
                 )}
                 
@@ -2179,6 +2200,7 @@ export default function Terminal() {
           )}
           </div>
         </main>
+
       </div>
 
       {/* Create Agent Modal */}

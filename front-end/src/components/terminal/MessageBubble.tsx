@@ -7,6 +7,7 @@ import SubAgentToolBubble from './SubAgentToolBubble';
 import { MarkdownText } from './MarkdownText';
 import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 import { useToast } from '@/hooks/use-toast';
+import ThinkingAnimation from '../ThinkingAnimation';
 
 interface MessageBubbleProps {
   message: Message;
@@ -19,7 +20,7 @@ interface ToolMessageData {
   toolCallId: string;
   toolName?: string;
   title: string;
-  status: 'IN_PROGRESS' | 'FINISHED';
+  status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
   message: string;
   error?: boolean;
   progressComplete?: number; // 0-100 or 0-1, optional - if present shows progress bar
@@ -127,6 +128,20 @@ const ToolMessage = memo(function ToolMessage({
   
   // Get tool icon based on toolName
   const ToolIcon = data.toolName ? getToolIcon(data.toolName) : Wrench;
+  const isThought = data.toolName === 'thought';
+  const [forceExpanded, setForceExpanded] = useState(
+    isThought && data.status === 'IN_PROGRESS'
+  );
+  useEffect(() => {
+    if (!isThought) return;
+    if (data.status === 'IN_PROGRESS') {
+      setForceExpanded(true);
+      setIsExpanded(true);
+    } else {
+      setForceExpanded(false);
+      setIsExpanded(false);
+    }
+  }, [isThought, data.status]);
   
   // Extract emoji from title (memoized) - keeping for backward compatibility
   const { emoji, text: titleText } = useMemo(() => extractEmoji(data.title), [data.title]);
@@ -134,18 +149,26 @@ const ToolMessage = memo(function ToolMessage({
   // Memoize computed values
   const hasMessage = useMemo(() => data.message.trim().length > 0, [data.message]);
   // FINISHED and ERROR statuses should both be expandable (not IN_PROGRESS)
-  const isExpandable = useMemo(() => data.status === 'FINISHED' || data.status === 'ERROR', [data.status]);
-  const showChevron = useMemo(() => hasMessage && isExpandable, [hasMessage, isExpandable]);
-  const shouldBeExpanded = useMemo(() => 
-    (shouldType && !hasAnimated) || isExpanded, 
-    [shouldType, hasAnimated, isExpanded]
+  const isExpandable = useMemo(
+    () => data.status === 'FINISHED' || data.status === 'ERROR',
+    [data.status]
+  );
+  const showChevron = useMemo(
+    () => hasMessage && isExpandable && !forceExpanded,
+    [hasMessage, isExpandable, forceExpanded]
+  );
+  const shouldBeExpanded = useMemo(
+    () => forceExpanded || (shouldType && !hasAnimated) || isExpanded,
+    [forceExpanded, shouldType, hasAnimated, isExpanded]
   );
 
   // Handle animation completion - collapse after animating
   const handleAnimationComplete = () => {
     console.log(`[${performance.now().toFixed(2)}] 🔽 COLLAPSE: Tool message collapsing`);
     setHasAnimated(true);
-    setIsExpanded(false); // Collapse after animation
+    if (!forceExpanded) {
+      setIsExpanded(false); // Collapse after animation (will reopen on click)
+    }
     
     // Use requestAnimationFrame to ensure DOM updates before unlocking queue
     if (onComplete) {
@@ -162,7 +185,8 @@ const ToolMessage = memo(function ToolMessage({
     return data.progressComplete <= 1 ? data.progressComplete * 100 : data.progressComplete;
   }, [data.progressComplete]);
 
-  const showProgressBar = progressPercent !== undefined && data.status === 'IN_PROGRESS';
+  const showProgressBar =
+    !isThought && progressPercent !== undefined && data.status === 'IN_PROGRESS';
 
   const handleAction = async () => {
     if (!actionMetadata) return;
@@ -222,7 +246,7 @@ const ToolMessage = memo(function ToolMessage({
   };
 
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-1">
       {/* Title row */}
       <div 
         className={cn(
@@ -232,7 +256,19 @@ const ToolMessage = memo(function ToolMessage({
         onClick={hasMessage && isExpandable ? () => setIsExpanded(!isExpanded) : undefined}
       >
         {/* Tool Icon */}
-        {data.toolName && isX402Tool(data.toolName) ? (
+        {isThought ? (
+          data.status === 'IN_PROGRESS' ? (
+            <ThinkingAnimation
+              dataUrl="/thinking_animations.txt"
+              autoplay
+              loop
+              className="w-4 h-4 flex-shrink-0"
+              style={{ width: '16px', height: '16px' }}
+            />
+          ) : (
+            <div className="h-4 w-4 flex-shrink-0" />
+          )
+        ) : data.toolName && isX402Tool(data.toolName) ? (
           <img 
             src={x402IconSrc} 
             alt="x402" 
@@ -247,17 +283,20 @@ const ToolMessage = memo(function ToolMessage({
           )} />
         )}
         
-        {/* Text with shimmer animation */}
+        {/* Text / status */}
         <span 
           className={cn(
             "text-sm font-medium",
-            data.error && "text-red-600 dark:text-red-400",
-            !data.error && data.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
-            !data.error && data.status === 'FINISHED' && "text-foreground"
+            isThought && data.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
+            isThought && data.status !== 'IN_PROGRESS' && "text-foreground",
+            !isThought && data.error && "text-red-600 dark:text-red-400",
+            !isThought && !data.error && data.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
+            !isThought && !data.error && data.status === 'FINISHED' && "text-foreground"
           )}
         >
-          {titleText}
+          {isThought ? (data.status === 'IN_PROGRESS' ? 'Thinking' : 'Thought') : titleText}
         </span>
+
         {showChevron && (
           <ChevronRight 
             className={cn(
@@ -320,17 +359,71 @@ const ToolMessage = memo(function ToolMessage({
 
       {/* Expandable message content */}
       {hasMessage && shouldBeExpanded && (
-        <div className="overflow-hidden">
-          <div className="pl-4 border-l-2 border-border">
+        <div className="overflow-hidden transition-all duration-200">
+          <div className="pr-2 pl-4 border-l-2 border-border">
             <MarkdownText
               text={data.message}
-              shouldAnimate={shouldType && !hasAnimated}
+              shouldAnimate={(shouldType && !hasAnimated) || forceExpanded}
               onComplete={handleAnimationComplete}
               className="text-sm text-muted-foreground"
             />
           </div>
         </div>
       )}
+    </div>
+  );
+});
+
+// AttentionMessage - renders send_message_to_user as raw text with animation tracking
+const AttentionMessage = memo(function AttentionMessage({
+  attentionMessage,
+  isWaiting,
+  shouldType = false,
+  onComplete,
+}: {
+  attentionMessage: string;
+  isWaiting: boolean;
+  shouldType?: boolean;
+  onComplete?: () => void;
+}) {
+  const [hasAnimated, setHasAnimated] = useState(false);
+  
+  const handleAnimationComplete = () => {
+    setHasAnimated(true);
+    if (onComplete) {
+      requestAnimationFrame(() => {
+        onComplete();
+      });
+    }
+  };
+  
+  return (
+    <div className="flex gap-3 animate-in fade-in duration-300">
+      <div className="flex-shrink-0 w-8" />
+      
+      <div className="flex-1 space-y-3">
+        {/* Render message as raw markdown text */}
+        <div className="text-sm">
+          <MarkdownText 
+            text={attentionMessage}
+            shouldAnimate={isWaiting && !hasAnimated}
+            onComplete={handleAnimationComplete}
+          />
+        </div>
+        
+        {/* Yellow dashed circle indicator - only show while waiting */}
+        {isWaiting && (
+          <div className="flex items-center gap-2 text-amber-500">
+            <div 
+              className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500" 
+              style={{ animation: 'spin 3s linear infinite' }} 
+            />
+            <span className="text-xs font-medium">
+              Your Rose agent will continue working after your reply
+            </span>
+          </div>
+        )}
+      </div>
     </div>
   );
 });
@@ -343,15 +436,29 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   const isAssistant = message.role === 'ASSISTANT';
   const isSystem = message.role === 'SYSTEM';
 
+  // Check if this is a send_message_to_user message (render as raw text, not tool card)
+  const isUserAttentionMessage = isTool && message.metadata?.isUserAttentionMessage;
+
   // Check if this is a sub-agent tool message (ones that link to an agent_id)
   const isSubAgentTool = !!message.metadata?.subAgentId;
 
   // Memoize tool data to prevent flickers on re-renders
   const toolData = useMemo(() => {
+    if (isAssistant) {
+      const assistantStatus: ToolMessageData['status'] = shouldType ? 'IN_PROGRESS' : 'FINISHED';
+      return {
+        toolCallId: message.message_id,
+        toolName: 'thought',
+        title: assistantStatus === 'IN_PROGRESS' ? 'Thinking' : 'Thought',
+        status: assistantStatus,
+        message: message.text,
+      } as ToolMessageData;
+    }
+
     if (!isTool || !message.metadata) return null;
     
-    // Extract requestUserAttention sub-metadata if present
-    const attentionMeta = message.metadata.requestUserAttention || {};
+    // Extract sendMessageToUser sub-metadata if present (fallback to legacy requestUserAttention)
+    const attentionMeta = message.metadata.sendMessageToUser || message.metadata.requestUserAttention || {};
     
     return {
       toolCallId: message.metadata.toolCallId || '',
@@ -361,13 +468,13 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       message: message.text,
       error: message.metadata.error || false,
       progressComplete: message.metadata.progressComplete,
-      actionMetadata: message.metadata.requestUserAttention,
+      actionMetadata: message.metadata.sendMessageToUser || message.metadata.requestUserAttention,
       // Auto-simulation countdown fields - these are on the root metadata, not inside requestUserAttention
       timeout: message.metadata.timeout || attentionMeta.timeout,
       startTime: message.metadata.startTime || attentionMeta.startTime,
       simulated: message.metadata.simulated || attentionMeta.simulated,
     } as ToolMessageData;
-  }, [isTool, message.metadata, message.text]);
+  }, [isAssistant, shouldType, isTool, message]);
 
   // Sub-agent tool messages: use special SubAgentToolBubble component
   const subAgentBubble = useMemo(() => {
@@ -399,55 +506,31 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   if (subAgentBubble) return subAgentBubble;
 
-  // Regular tool messages: all must have metadata
-  if (isTool) {
-    // All tool messages must have metadata
-    if (!message.metadata) {
-      console.error('Tool message missing metadata:', message);
-      // Render as plain text fallback
-      return (
-        <div className="flex gap-3 animate-in fade-in duration-300">
-          <div className="flex-shrink-0 w-8" />
-          <div className="flex-1">
-            <div className="text-sm text-muted-foreground">
-              [Invalid tool message: missing metadata]
-            </div>
-          </div>
-        </div>
-      );
-    }
+  // Request user attention: render as raw text with yellow indicator (swallow tool display)
+  if (isUserAttentionMessage) {
+    const attentionMessage = message.metadata?.attentionMessage || message.text;
+    const isWaiting = message.metadata?.toolStatus === 'IN_PROGRESS';
+    
+    return (
+      <AttentionMessage
+        attentionMessage={attentionMessage}
+        isWaiting={isWaiting}
+        shouldType={shouldType}
+        onComplete={onTypingComplete}
+      />
+    );
+  }
 
-    // Verifier messages: no indent (align with user messages)
-    const isVerifierMessage = message.metadata.verifierMessage === true;
-
+  if (toolData) {
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         <div className="flex-shrink-0 w-8" />
         
         <div className="flex-1">
           <ToolMessage 
-            data={toolData!} 
+            data={toolData} 
             shouldType={shouldType}
             onComplete={onTypingComplete}
-          />
-        </div>
-      </div>
-    );
-  }
-
-  // Assistant messages: markdown support, no bubble, no icon
-  if (isAssistant) {
-    return (
-      <div className="flex gap-3 animate-in fade-in duration-300">
-        {/* Empty space where icon would be to align with other content */}
-        <div className="flex-shrink-0 w-8" />
-        
-        <div className="flex-1">
-          <MarkdownText
-            text={message.text}
-            shouldAnimate={shouldType}
-            onComplete={onTypingComplete}
-            className="text-sm text-foreground"
           />
         </div>
       </div>

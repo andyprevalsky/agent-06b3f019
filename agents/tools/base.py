@@ -137,6 +137,9 @@ class ToolEvent:
     # For WAIT_FOR_SIGNAL events
     signal_key: Optional[str] = None
     
+    # For structured data (e.g., plan artifacts)
+    data: Optional[Dict[str, Any]] = None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for serialization."""
         result = {
@@ -149,6 +152,7 @@ class ToolEvent:
             "text": self.text,
             "metadata": self.metadata,
             "signal_key": self.signal_key,
+            "data": self.data,
         }
         
         # Convert usage_items to dicts

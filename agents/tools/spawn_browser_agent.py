@@ -135,7 +135,7 @@ Billing Address:
 
 PAYMENT RULES:
 - If order total <= ${autopay_limit_dollars:.2f}: Complete payment using card above
-- If order total > ${autopay_limit_dollars:.2f}: Use request_user_attention to request approval before paying
+- If order total > ${autopay_limit_dollars:.2f}: Use send_message_to_user with is_question=true to request approval before paying
 - Always verify the total before entering card details
 - Double-check the billing address matches before submitting"""
 
@@ -219,16 +219,16 @@ class SpawnBrowserAgentManager(ToolManager):
                                session_id=session_id, 
                                iteration=iteration)
 
-                    # Use request_user_attention_direct
-                    from tools.request_user_attention import request_user_attention_direct
+                    # Use request_user_approval_direct
+                    from tools.request_user_approval import request_user_approval_direct
 
-                    logger.info("🔴 About to call request_user_attention_direct")
-                    attention_result = await request_user_attention_direct(
+                    logger.info("🔴 About to call request_user_approval_direct")
+                    attention_result = await request_user_approval_direct(
                         workflow_instance,
                         question=f"🌐 **Browser Agent Needs Help**\n\n{agent_message}\n\n_Please complete the required action in the browser, then click Continue below._",
                         image_url=None
                     )
-                    logger.info("🟢 request_user_attention_direct returned", attention_result=attention_result)
+                    logger.info("🟢 request_user_approval_direct returned", attention_result=attention_result)
 
                     # Notify user that browser session is resuming
                     yield ToolEvent(
@@ -681,8 +681,8 @@ async def spawn_browser_agent_activity(
         custom_tools = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
-                    name="request_user_attention",
-                    description="Request user to complete an action that the agent cannot do (login, payment, CAPTCHA, etc.). Use this when you encounter something that requires human intervention.",
+                    name="send_message_to_user",
+                    description="Request the user to complete an action that the agent cannot do (login, payment, CAPTCHA, etc.). Always used for blocking clarifications—host will wait for the user's response.",
                     parameters=types.Schema(
                         type=types.Type.OBJECT,
                         properties={
@@ -774,7 +774,7 @@ IMPORTANT: During any checkout process, verify that the shipping address shown m
 
 PAYMENT AUTHORIZATION:
 You have the user's payment method on file, but autopay is DISABLED (limit set to $0).
-For ALL purchases, you MUST use request_user_attention to get explicit approval before entering any payment details."""
+For ALL purchases, you MUST use send_message_to_user with is_question=true to get explicit approval before entering any payment details."""
             else:
                 logger.warning("Failed to decrypt payment info - payment features disabled for this session")
 
@@ -782,7 +782,7 @@ For ALL purchases, you MUST use request_user_attention to get explicit approval 
 
 Browser cookies have been injected - assume the user is logged in until proven otherwise.""" + shipping_section + autopay_section + """
 
-Use request_user_attention if you need human help (login, CAPTCHA, or payments over your autopay limit). Use mark_task_completed when the task is done."""
+Use send_message_to_user when you need human help (login, CAPTCHA, or payments over your autopay limit). Use mark_task_completed when the task is done."""
 
         # Use Stagehand's formatting for initial message
         google_cua_client._format_initial_messages(
@@ -908,14 +908,14 @@ Use request_user_attention if you need human help (login, CAPTCHA, or payments o
                 
                 custom_tool_found = False
                 for fc in all_function_calls:
-                    # ===== CUSTOM TOOL: request_user_attention =====
-                    if fc.name == "request_user_attention":
+                    # ===== CUSTOM TOOL: send_message_to_user =====
+                    if fc.name == "send_message_to_user":
                         custom_tool_found = True
                         reason = fc.args.get("reason", "")
                         attention_message = fc.args.get("message", "")
                         
                         # Track action for context
-                        action_summary.append(f"request_user_attention: {reason or 'user help needed'}")
+                        action_summary.append(f"send_message_to_user: {reason or 'user help needed'}")
                         if len(action_summary) > 10:
                             action_summary = action_summary[-10:]
                         
@@ -1023,7 +1023,7 @@ Use request_user_attention if you need human help (login, CAPTCHA, or payments o
                 if custom_tool_found:
                     custom_responses = []
                     for fc in all_function_calls:
-                        if fc.name in ["request_user_attention", "mark_task_completed"]:
+                        if fc.name in ["send_message_to_user", "mark_task_completed"]:
                             custom_responses.append(
                                 types.Part(
                                     function_response=types.FunctionResponse(

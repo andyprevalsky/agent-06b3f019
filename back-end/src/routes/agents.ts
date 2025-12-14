@@ -608,6 +608,19 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
       },
     });
 
+    // If this is a USER message, signal the workflow to unblock any waiting attention request
+    if (role === 'USER') {
+      try {
+        const { getTemporalClient } = await import('../lib/temporal');
+        const client = await getTemporalClient();
+        const handle = client.workflow.getHandle(agentId);
+        await handle.signal('receive_user_response', body.message);
+      } catch (error) {
+        // Don't fail the request if signaling fails - workflow will eventually poll
+        console.error('Failed to signal workflow:', error);
+      }
+    }
+
     res.status(201).json({
       message_id: message.id,
       timestamp: message.timestamp,

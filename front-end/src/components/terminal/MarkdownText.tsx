@@ -671,9 +671,9 @@ function FadeInMarkdown({
           color: rgb(226 232 240);
         }
         
-        /* Paragraph spacing */
+        /* Paragraph spacing - compact for tool messages */
         .prose p {
-          margin: 1em 0;
+          margin: 0.25em 0;
         }
         .prose p:first-child {
           margin-top: 0;

@@ -69,7 +69,7 @@ RESPONSE FIELDS:
 
 TOOLS:
 - web_search: Search the web for information
-- request_user_attention: Ask the user a question
+- send_message_to_user: Ask the user a question or share a plan update
 - monitor: Set up ongoing monitoring for a topic
 
 Respond with valid JSON matching the schema.`;
@@ -87,12 +87,12 @@ const TEST_MESSAGES = [
       id: "tc_001",
       type: "function",
       function: {
-        name: "request_user_attention",
+        name: "send_message_to_user",
         arguments: JSON.stringify({ question: "What specific aspects of climate change are you most concerned about?" })
       }
     }]
   },
-  { role: "tool", tool_call_id: "tc_001", name: "request_user_attention", content: "🔔 Requesting user attention: Question sent to user" },
+  { role: "tool", tool_call_id: "tc_001", name: "send_message_to_user", content: "🔔 Messaging the user: Question sent to user" },
   { role: "user", content: "all of them do everything u can" },
   { role: "assistant", content: "⚖️ Goal progress is 0%: The agent has started by asking clarifying questions but has not taken concrete action." },
   {

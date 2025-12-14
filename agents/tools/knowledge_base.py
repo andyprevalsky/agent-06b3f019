@@ -152,7 +152,7 @@ class QueryBlueprintsManager(ToolManager):
         if count == 0:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="No similar goals found",
+                title="Searched for similar goals",
                 message="",
                 status=MessageStatus.FINISHED
             )

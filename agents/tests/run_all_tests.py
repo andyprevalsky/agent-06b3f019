@@ -16,7 +16,7 @@ from typing import Dict, Callable, Awaitable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from test_web_search import run_all_tests as test_web_search
-from test_request_user_attention import run_all_tests as test_request_user_attention
+from test_send_message_to_user import run_all_tests as test_send_message_to_user
 from test_wait_seconds import run_all_tests as test_wait_seconds
 from test_spawn_sub_agents import run_all_tests as test_spawn_sub_agents
 from test_knowledge_base import run_all_tests as test_knowledge_base
@@ -98,7 +98,7 @@ async def main():
     
     sync_start = time.time()
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        request_attention_result = test_request_user_attention()
+        request_attention_result = test_send_message_to_user()
     request_attention_duration = (time.time() - sync_start) * 1000
     
     # Wait for all async tests
@@ -116,7 +116,7 @@ async def main():
     results.append((spawn_result[0], spawn_result[1], int(spawn_result[2] * 1000)))
     
     results.append(("Wait Seconds", wait_seconds_result, int(wait_seconds_duration)))
-    results.append(("Request User Attention", request_attention_result, int(request_attention_duration)))
+    results.append(("Send Message To User", request_attention_result, int(request_attention_duration)))
     
     # Calculate summary
     total_duration = int((time.time() - start_time) * 1000)

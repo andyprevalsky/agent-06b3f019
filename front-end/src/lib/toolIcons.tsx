@@ -53,7 +53,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'send_sms_as_user': MessageSquare,
   'send_email': Mail,
   'call_phone_number': Phone,
-  'request_user_attention': AlertCircle,
+  'send_message_to_user': AlertCircle,
   'query_blueprints': BookOpen,
   'save_blueprint': Save,
   'web_search': Search,
@@ -66,6 +66,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'monitor': Radio,
   'check_monitor_events': ListChecks,
   'claude_code': Code,
+  'thought': Lightbulb,
   
   // Browser action sub-types (for spawn_browser_agent internal actions)
   'Agent Reasoning': Lightbulb,

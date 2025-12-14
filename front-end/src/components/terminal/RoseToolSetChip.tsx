@@ -87,9 +87,9 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
     description: 'Track the web for material changes relevant to a query on schedule.',
   },
   {
-    name: 'request_user_attention',
-    displayName: 'Request User Attention',
-    description: 'Request user input when clarification or decisions are needed.',
+    name: 'send_message_to_user',
+    displayName: 'Message User (PLAN)',
+    description: 'Share the plan or request clarifications directly from the user.',
   },
   {
     name: 'wait_seconds',

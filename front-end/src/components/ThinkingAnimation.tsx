@@ -37,6 +37,91 @@ export interface ThinkingAnimationHandle {
 const classNames = (...values: Array<string | undefined>) =>
   values.filter(Boolean).join(' ').trim();
 
+const ROSE_GRADIENT = ['#FE7503', '#FC585C', '#FD5776', '#E062CC', '#A76CED', '#7A6BEC'];
+const RGB_REGEX = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/g;
+
+const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
+
+const hexToRgb = (hex: string) => {
+  const normalized = hex.replace('#', '');
+  const intVal = parseInt(normalized, 16);
+  return {
+    r: (intVal >> 16) & 255,
+    g: (intVal >> 8) & 255,
+    b: intVal & 255,
+  };
+};
+
+const luminance = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+const interpolatePalette = (palette: string[], t: number) => {
+  if (palette.length === 1) return hexToRgb(palette[0]);
+  const clamped = clamp01(t);
+  const scaled = clamped * (palette.length - 1);
+  const idx = Math.floor(scaled);
+  const frac = scaled - idx;
+  const start = hexToRgb(palette[idx]);
+  const end = hexToRgb(palette[Math.min(idx + 1, palette.length - 1)]);
+  return {
+    r: lerp(start.r, end.r, frac),
+    g: lerp(start.g, end.g, frac),
+    b: lerp(start.b, end.b, frac),
+  };
+};
+
+const buildColorMapper = (colors: string[]) => {
+  const luminances = colors.map((c) => {
+    const match = c.match(/(\d+)/g);
+    if (!match) return 0;
+    const [r, g, b] = match.map(Number);
+    return luminance(r, g, b);
+  });
+
+  const minLum = Math.min(...luminances, 0);
+  const maxLum = Math.max(...luminances, 1);
+  const range = Math.max(1, maxLum - minLum);
+
+  return (rgb: string) => {
+    const match = rgb.match(/(\d+)/g);
+    if (!match) return rgb;
+    const [r, g, b] = match.map(Number);
+    const lum = luminance(r, g, b);
+    const t = clamp01((lum - minLum) / range);
+    const mapped = interpolatePalette(ROSE_GRADIENT, t);
+    return `rgb(${Math.round(mapped.r)},${Math.round(mapped.g)},${Math.round(mapped.b)})`;
+  };
+};
+
+const applyRoseGradient = (data: XmlFrameData | null): XmlFrameData | null => {
+  if (!data?.frames?.length) return data;
+
+  const allColors = new Set<string>();
+  data.frames.forEach((frame) => {
+    if (!frame.xml) return;
+    for (const match of frame.xml.matchAll(RGB_REGEX)) {
+      allColors.add(match[0]);
+    }
+  });
+
+  if (!allColors.size) return data;
+  const mapColor = buildColorMapper([...allColors]);
+
+  const remapXml = (xml: string) =>
+    xml.replace(RGB_REGEX, (_full, r: string, g: string, b: string) =>
+      mapColor(`rgb(${r},${g},${b})`),
+    );
+
+  return {
+    ...data,
+    frames: data.frames.map((frame) => ({
+      ...frame,
+      xml: frame.xml ? remapXml(frame.xml) : frame.xml,
+    })),
+  };
+};
+
 export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAnimationProps>(
   (
     {
@@ -51,13 +136,15 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
     },
     ref,
   ) => {
-    const [resolvedData, setResolvedData] = useState<XmlFrameData | null>(data ?? null);
+    const [resolvedData, setResolvedData] = useState<XmlFrameData | null>(
+      data ? applyRoseGradient(data) : null,
+    );
     const [isFetching, setIsFetching] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
 
     useEffect(() => {
       if (data) {
-        setResolvedData(data);
+        setResolvedData(applyRoseGradient(data));
         setFetchError(null);
         setIsFetching(false);
         return;
@@ -84,7 +171,7 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
         .then((text) => {
           if (cancelled) return;
           const parsed = JSON.parse(text) as XmlFrameData;
-          setResolvedData(parsed);
+          setResolvedData(applyRoseGradient(parsed));
           setFetchError(null);
         })
         .catch((error) => {
@@ -126,7 +213,6 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
     );
 
     const statusError = fetchError ?? replay.error;
-    const isLoading = !statusError && (isFetching || !replay.ready);
 
     const wrapperClass = classNames('thinking-animation-wrapper', className);
     const wrapperStyle: CSSProperties = {
@@ -142,7 +228,7 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
     return (
       <div className={wrapperClass} style={wrapperStyle}>
         <div ref={replay.containerRef} style={containerStyle} />
-        {(isLoading || statusError) && (
+        {statusError && (
           <div
             className="thinking-animation-status"
             aria-live="polite"
@@ -153,11 +239,11 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
               alignItems: 'center',
               justifyContent: 'center',
               fontSize: '0.875rem',
-              color: statusError ? '#ff7070' : '#888',
+              color: '#ff7070',
               pointerEvents: 'none',
             }}
           >
-            {statusError ?? 'Loading animation…'}
+            {statusError}
           </div>
         )}
       </div>

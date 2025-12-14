@@ -30,7 +30,8 @@ with workflow.unsafe.imports_passed_through():
     from tools.base import ToolEvent, EventType, MessageStatus
     from tools.deep_research import deep_research
     from tools.wait_seconds import wait_seconds
-    from tools.request_user_attention import request_user_attention, request_user_attention_direct
+    from tools.send_message_to_user import send_message_to_user
+    from tools.request_user_approval import request_user_approval_direct
     from tools.knowledge_base import query_blueprints, save_blueprint
     from tools.web_search import web_search
     from tools.spawn_sub_agents import spawn_sub_agents
@@ -43,10 +44,10 @@ with workflow.unsafe.imports_passed_through():
     from tools.check_monitor_events import check_monitor_events
     from tools.read_message_history import read_message_history_with_person
     from tools.message_person import message_person, get_manager as get_message_person_manager
-    # Phase transition marker tools
-    from tools.mark_research_finished import mark_research_finished
-    from tools.mark_atomization_finished import mark_atomization_finished
-    from tools.mark_planning_finished import mark_planning_finished
+    # Plan phase tools
+    from tools.set_plan import set_plan
+    from tools.progress_to_autonomous_execution_phase import progress_to_autonomous_execution_phase
+    # Legacy phase marker (kept for execute phase verification)
     from tools.mark_execution_complete import mark_execution_complete
     # x402 Bazaar tools
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
@@ -63,7 +64,7 @@ EVENT_DRIVEN_TOOLS = {
     "spawn_browser_agent": spawn_browser_agent,
     "deep_research": deep_research,
     "wait_seconds": wait_seconds,
-    "request_user_attention": request_user_attention,
+    "send_message_to_user": send_message_to_user,
     "query_blueprints": query_blueprints,
     "save_blueprint": save_blueprint,
     "web_search": web_search,
@@ -76,10 +77,10 @@ EVENT_DRIVEN_TOOLS = {
     "check_monitor_events": check_monitor_events,
     "read_message_history_with_person": read_message_history_with_person,
     "message_person": message_person,
-    # Phase transition marker tools
-    "mark_research_finished": mark_research_finished,
-    "mark_atomization_finished": mark_atomization_finished,
-    "mark_planning_finished": mark_planning_finished,
+    # Plan phase tools
+    "set_plan": set_plan,
+    "progress_to_autonomous_execution_phase": progress_to_autonomous_execution_phase,
+    # Execute phase verification
     "mark_execution_complete": mark_execution_complete,
     # x402 Bazaar tools
     "search_x402_bazaar": search_x402_bazaar,
@@ -94,7 +95,7 @@ READ_ONLY_TOOL_NAMES = {
     "read_message_history_with_person",
     "find_all",
     "check_monitor_events",
-    "request_user_attention",
+    "send_message_to_user",
     "search_x402_bazaar",
 }
 
@@ -121,12 +122,12 @@ SYSTEM_TOOLS = [
     {
         "id": "system-spawn-sub-agents",
         "name": "spawn_sub_agents",
-        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Each sub-agent runs independently with its own goal and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_effort (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
+        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Use sub-agents to parallelize work: evaluate multiple hypotheses at once, execute context-independent tasks in parallel, and/or decompose the current goal into context-independent subgoals for faster and more accurate completion. Each sub-agent runs independently with its own goal and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_effort (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
     },
     {
-        "id": "system-request-user-attention",
-        "name": "request_user_attention",
-        "description": "Ask the User a direct question when you need clarification, preferences, decisions, or information that only they can provide. Do NOT use this for factual information that can be found via web_search or other tools - only use when the User's personal input is required.",
+        "id": "system-send-message-to-user",
+        "name": "send_message_to_user",
+        "description": "Communicate directly with the user from the PLAN phase. Use is_question=true when you must block for their clarification/approval, and is_question=false to send FYIs (like the plan you intend to execute) without waiting for a reply.",
         "read_only": True  # Available during research to ask clarifying questions
     },
     {
@@ -198,28 +199,27 @@ SYSTEM_TOOLS = [
     },
 ]
 
-# Phase transition marker tool definitions (only available during specific phases)
-PHASE_MARKER_TOOLS = {
-    "mark_research_finished": {
-        "id": "phase-mark-research-finished",
-        "name": "mark_research_finished",
-        "description": "Signal that research phase is complete. Call this when you have gathered enough context to understand the goal."
+# Plan-only tools (available only in PLAN phase, disappear in EXECUTE phase)
+PLAN_ONLY_TOOLS = {
+    "set_plan": {
+        "id": "plan-set-plan",
+        "name": "set_plan",
+        "description": "Set or update the execution plan. Provide markdown_text (plan content), is_parallelizable (true if work can be parallelized, false if tasks are causally dependent), sub_tasks (steps list), and sub_goals (REQUIRED when is_parallelizable=true - list of goals with context for parallel sub-agents).",
+        "plan_only": True
     },
-    "mark_atomization_finished": {
-        "id": "phase-mark-atomization-finished",
-        "name": "mark_atomization_finished",
-        "description": "Signal the atomization decision. Set is_proximate=true if the goal can be executed directly, or is_proximate=false if it needs decomposition into parallel subtasks."
+    "progress_to_autonomous_execution_phase": {
+        "id": "plan-progress-to-execute",
+        "name": "progress_to_autonomous_execution_phase",
+        "description": "Request to transition to autonomous execution phase. This will prompt the user to approve the plan before execution begins.",
+        "plan_only": True
     },
-    "mark_planning_finished": {
-        "id": "phase-mark-planning-finished",
-        "name": "mark_planning_finished",
-        "description": "Signal that planning is complete with the list of parallel subtasks. Each subtask needs: goal (specific objective) and context (relevant info from research)."
-    },
-    "mark_execution_complete": {
-        "id": "phase-mark-execution-complete",
-        "name": "mark_execution_complete",
-        "description": "Signal that execution is complete and ready for verification. Call this when you believe the goal has been fully accomplished."
-    },
+}
+
+# Execute phase verification tool
+EXECUTE_MARKER_TOOL = {
+    "id": "phase-mark-execution-complete",
+    "name": "mark_execution_complete",
+    "description": "Signal that execution is complete and ready for verification. Call this when you believe the goal has been fully accomplished."
 }
 
 
@@ -231,68 +231,121 @@ def estimate_token_count(text: str) -> int:
     return len(text) // 4
 
 
+def detect_phase_from_context(context: List[Dict]) -> str:
+    """
+    Detect phase based on user messages and tool calls - stateless detection.
+    
+    Transitions to EXECUTE phase if:
+    1. Any USER message contains "start autonomous execution" (case-insensitive)
+    2. OR the progress_to_autonomous_execution_phase tool was called
+    
+    Otherwise, stays in PLAN phase.
+    
+    Args:
+        context: List of message dicts
+        
+    Returns:
+        "EXECUTE" or "PLAN"
+    """
+    for msg in context:
+        # Check user messages for trigger phrase
+        if msg.get('role') == 'USER':
+            text = msg.get('text', '').lower()
+            if 'start autonomous execution' in text:
+                return 'EXECUTE'
+        
+        # Check for progress_to_autonomous_execution_phase tool call
+        if msg.get('role') == 'TOOL':
+            metadata = msg.get('metadata', {})
+            tool_name = metadata.get('toolName', '')
+            if tool_name == 'progress_to_autonomous_execution_phase':
+                return 'EXECUTE'
+        
+        # Also check ASSISTANT messages for tool_calls metadata
+        if msg.get('role') == 'ASSISTANT':
+            metadata = msg.get('metadata', {})
+            tool_calls = metadata.get('tool_calls', [])
+            for tc in tool_calls:
+                if tc.get('tool') == 'progress_to_autonomous_execution_phase':
+                    return 'EXECUTE'
+    
+    return 'PLAN'
+
+
 def get_phase_tools_and_config(
     phase: str,
     all_tools: List[Dict],
+    is_first_call: bool = False,
 ) -> Dict[str, Any]:
     """
     Get tools, tool names, and model preference for the current phase.
     
-    Phase Flow: PREPARE_RESEARCH → RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE
+    Simplified 2-Phase Flow: PLAN → EXECUTE
     
     Args:
-        phase: Current phase (PREPARE_RESEARCH, RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
+        phase: Current phase (PLAN or EXECUTE)
         all_tools: Full list of available tools
+        is_first_call: True if this is the first LLM call (no tools, fast model)
         
     Returns:
         Dict with 'enabled_tools', 'enabled_tool_names', 'disabled_tools', 'model_preference'
     """
     enabled_tools = []
+    disabled_tools = []
     model_pref = None
     
-    if phase == "PREPARE_RESEARCH":
-        # No tools - pure thinking phase, uses FAST model
-        # Auto-transitions to RESEARCH after response
+    if is_first_call:
+        # First call: no tools, fast model (like old PREPARE_RESEARCH)
         enabled_tools = []
         model_pref = "FAST"
-        
-    elif phase == "RESEARCH":
-        # Filter to read-only tools + mark_research_finished marker
-        enabled_tools = [t for t in all_tools if t.get("read_only")]
-        marker_tool = PHASE_MARKER_TOOLS["mark_research_finished"]
-        # Avoid duplicates if marker is already in read_only tools
-        if marker_tool not in enabled_tools:
-            enabled_tools.append(marker_tool)
-        
-    elif phase == "ATOMIZE":
-        # Only atomization marker tool
-        enabled_tools = [PHASE_MARKER_TOOLS["mark_atomization_finished"]]
+        # All tools are disabled on first call
+        disabled_tools = list(all_tools)
+        # Add execute-only note for non-read-only tools
+        for tool in disabled_tools:
+            if not tool.get("read_only") and not tool.get("plan_only"):
+                tool["_disabled_note"] = "available in execute phase"
         
     elif phase == "PLAN":
-        # Only planning marker tool
-        enabled_tools = [PHASE_MARKER_TOOLS["mark_planning_finished"]]
+        # PLAN phase: read-only tools + plan-only tools
+        enabled_tools = [
+            t for t in all_tools 
+            if t.get("read_only")
+        ]
         
-    elif phase == "SPAWN":
-        # Only spawn_sub_agents tool
-        spawn_tool = next((t for t in all_tools if t["name"] == "spawn_sub_agents"), None)
-        if spawn_tool:
-            enabled_tools = [spawn_tool]
+        # Add plan-only tools
+        for tool_def in PLAN_ONLY_TOOLS.values():
+            if tool_def not in enabled_tools:
+                enabled_tools.append(tool_def)
+        
+        # Calculate disabled tools (execute-only tools)
+        enabled_names = {t["name"] for t in enabled_tools}
+        disabled_tools = [
+            t for t in all_tools 
+            if t["name"] not in enabled_names
+        ]
+        
+        # Mark disabled tools with note
+        for tool in disabled_tools:
+            tool["_disabled_note"] = "available in execute phase"
         
     else:  # EXECUTE
-        # All tools + mark_execution_complete marker
-        enabled_tools = list(all_tools)  # Copy to avoid mutating original
-        marker_tool = PHASE_MARKER_TOOLS["mark_execution_complete"]
-        if marker_tool not in enabled_tools:
-            enabled_tools.append(marker_tool)
-    
-    # Calculate disabled tools (tools not in enabled set)
-    enabled_names = {t["name"] for t in enabled_tools}
-    disabled_tools = [t for t in all_tools if t["name"] not in enabled_names]
-    
-    # Also add phase marker tools to disabled if not enabled
-    for marker_name, marker_tool in PHASE_MARKER_TOOLS.items():
-        if marker_name not in enabled_names and marker_tool not in disabled_tools:
-            disabled_tools.append(marker_tool)
+        # EXECUTE phase: all tools EXCEPT plan-only tools
+        # Plan-only tools completely disappear (not disabled)
+        plan_only_names = {t["name"] for t in PLAN_ONLY_TOOLS.values()}
+        enabled_tools = [
+            t for t in all_tools 
+            if t["name"] not in plan_only_names and t.get("name") != "send_message_to_user"
+        ]
+        
+        # Add mark_execution_complete marker
+        if EXECUTE_MARKER_TOOL not in enabled_tools:
+            enabled_tools.append(EXECUTE_MARKER_TOOL)
+        
+        # send_message_to_user is explicitly disabled during execute phase
+        disabled_tools = []
+        request_tool = next((t for t in all_tools if t.get("name") == "send_message_to_user"), None)
+        if request_tool:
+            disabled_tools.append(request_tool)
     
     return {
         "enabled_tools": enabled_tools,
@@ -343,9 +396,9 @@ class AgentWorkflow:
         self.child_last_tokens: Dict[str, Dict[str, int]] = {}  # Track last token counts from each child
         self.depth: int = 0  # Agent nesting depth (0 = top-level, 1 = sub-agent, etc.)
         
-        # Phase tracking for PREPARE_RESEARCH → RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE flow
-        self.phase: str = "PREPARE_RESEARCH"  # Current phase (starts with thinking phase)
-        self.planned_subtasks: List[Dict] = []  # Subtasks from PLAN phase
+        # Simplified 2-phase system: PLAN → EXECUTE
+        # Phase is detected statelessly from user messages containing "execute"
+        self.is_first_call: bool = True  # First call uses fast model, no tools
         
         # Lock for thread-safe token counter updates during parallel execution
         self._state_lock = asyncio.Lock()
@@ -366,20 +419,20 @@ class AgentWorkflow:
     async def receive_user_response(self, response: str):
         """
         Receive user response to an attention request.
-        Posts the response as a USER message which unblocks the workflow.
+        Adds the response to context (message is already in DB from the POST endpoint).
         
         Args:
             response: The user's response text
         """
         workflow.logger.info(f"💬 Received user response (length={len(response)})")
         
-        # Post the user's response as a USER message
-        # _post_message will also add it to self.context with the correct format
-        await self._post_message(
-            response,
-            "USER",
-            metadata=None
-        )
+        # Only add to context - message is already in DB from POST /agents/:id/messages
+        # This unblocks any wait_condition checking for USER messages
+        self.context.append({
+            "role": "USER",
+            "text": response,
+            "timestamp": workflow.now().isoformat()
+        })
     
     @workflow.signal
     async def child_progress(self, data: dict):
@@ -548,8 +601,8 @@ class AgentWorkflow:
         self.depth = depth  # Store nesting depth
         self.context = context or []
         
-        # Phase defaults to PREPARE_RESEARCH from __init__
-        # All agents start with the thinking phase (uses FAST model, no tools)
+        # Phase is detected statelessly from user messages
+        # First call uses fast model with no tools
         
         # Initialize last message check time to 1 hour ago so we fetch the goal message
         # (must use workflow.now() for determinism)
@@ -789,8 +842,9 @@ class AgentWorkflow:
                     # Sort context by timestamp to maintain chronological order
                     self.context.sort(key=lambda x: x.get("timestamp", ""))
 
-                # 2. Query blueprints on first iteration (using new event-driven system)
-                if self.iteration_count == 0:
+                # 2. Query blueprints AFTER first call (iteration 1, not 0)
+                # First call (iteration 0) is fast with no tools, blueprint query happens after
+                if self.iteration_count == 1:
                     blueprints = await query_blueprints(self, self.context, self.user_id, 3)
                     if blueprints:
                         # Insert blueprints as reference examples from past successful agents
@@ -874,7 +928,7 @@ class AgentWorkflow:
                             if manager.requires_approval:
                                 workflow.logger.info(f"🔐 Tool {tool_name} requires approval, requesting...")
                                 approval_question = manager.get_approval_question(tool_call)
-                                await request_user_attention_direct(
+                                await request_user_approval_direct(
                                     self,
                                     question=approval_question,
                                     metadata={"toolApproval": True, "toolName": tool_name}
@@ -904,50 +958,16 @@ class AgentWorkflow:
                 if tool_calls:
                     await asyncio.gather(*[execute_one_tool(tc) for tc in tool_calls])
                 
-                # 5.5. Check for phase transitions
-                # PREPARE_RESEARCH auto-transitions to RESEARCH after first response (no tools needed)
-                if self.phase == "PREPARE_RESEARCH":
-                    workflow.logger.info("📋 Phase transition: PREPARE_RESEARCH → RESEARCH (auto)")
-                    self.phase = "RESEARCH"
+                # 5.5. Mark first call as complete (after first LLM response)
+                if self.is_first_call:
+                    workflow.logger.info("📋 First call complete, subsequent calls will have tools")
+                    self.is_first_call = False
                 
-                # Check for tool-based phase transitions
-                tool_names_called = [tc.get("tool") for tc in tool_calls]
-                
-                if "mark_research_finished" in tool_names_called:
-                    workflow.logger.info("📋 Phase transition: RESEARCH → ATOMIZE")
-                    self.phase = "ATOMIZE"
-                    
-                elif "mark_atomization_finished" in tool_names_called:
-                    # Extract is_proximate from the tool call
-                    for tc in tool_calls:
-                        if tc.get("tool") == "mark_atomization_finished":
-                            is_proximate = tc.get("is_proximate", False)
-                            if is_proximate:
-                                workflow.logger.info("📋 Phase transition: ATOMIZE → EXECUTE (proximate)")
-                                self.phase = "EXECUTE"
-                            else:
-                                workflow.logger.info("📋 Phase transition: ATOMIZE → PLAN (needs decomposition)")
-                                self.phase = "PLAN"
-                            break
-                            
-                elif "mark_planning_finished" in tool_names_called:
-                    # Extract subtasks from the tool call
-                    for tc in tool_calls:
-                        if tc.get("tool") == "mark_planning_finished":
-                            subtasks = tc.get("subtasks", [])
-                            self.planned_subtasks = subtasks
-                            workflow.logger.info(f"📋 Phase transition: PLAN → SPAWN ({len(subtasks)} subtasks)")
-                            self.phase = "SPAWN"
-                            break
-                            
-                elif "spawn_sub_agents" in tool_names_called and self.phase == "SPAWN":
-                    # After spawning sub-agents, wait for them to complete
-                    # The spawn_sub_agents tool handles waiting via workflow signals
-                    # Transition to EXECUTE after spawning
-                    workflow.logger.info("📋 Phase transition: SPAWN → EXECUTE (sub-agents spawned)")
-                    self.phase = "EXECUTE"
+                # Phase is detected statelessly - no tool-based transitions needed
+                # The phase is determined at the start of _decide_next_action
                 
                 # 6. Check progress ONLY if mark_execution_complete was called
+                tool_names_called = [tc.get("tool") for tc in tool_calls]
                 if "mark_execution_complete" in tool_names_called:
                     # Generate a unique ID for this verifier call
                     verifier_call_id = workflow.uuid4()
@@ -1198,6 +1218,10 @@ class AgentWorkflow:
                 if event.status == MessageStatus.ERROR:
                     metadata["error"] = True
             
+            # Include structured data if provided (e.g., plan artifacts)
+            if event.data:
+                metadata["data"] = event.data
+            
             # Merge in any additional metadata from the event
             if event.metadata:
                 metadata.update(event.metadata)
@@ -1242,7 +1266,7 @@ class AgentWorkflow:
         elif event.type == EventType.WAIT_FOR_SIGNAL:
             # Wait for a signal (e.g., user response)
             if event.signal_key:
-                # For now, just log - specific tools like request_user_attention
+                # For now, just log - specific tools like send_message_to_user
                 # will handle their own wait logic
                 workflow.logger.info(f"Tool waiting for signal: {event.signal_key}")
         
@@ -1254,26 +1278,29 @@ class AgentWorkflow:
         """
         Decide next action based on goal, context, and current phase using LLM.
         
-        Phase Flow: PREPARE_RESEARCH → RESEARCH → ATOMIZE → PLAN → SPAWN → EXECUTE
+        Simplified 2-Phase Flow: PLAN → EXECUTE
         
-        Uses phase-specific tool filtering:
-        - PREPARE_RESEARCH: No tools (pure thinking, FAST model)
-        - RESEARCH: Read-only tools + mark_research_finished
-        - ATOMIZE: mark_atomization_finished
-        - PLAN: mark_planning_finished
-        - SPAWN: spawn_sub_agents
-        - EXECUTE: All tools
+        Phase is detected statelessly from user messages:
+        - If any USER message contains "execute" → EXECUTE phase
+        - Otherwise → PLAN phase
+        
+        First call (is_first_call=True): No tools, FAST model
+        PLAN phase: Read-only tools + plan-only tools (set_plan, progress_to_execute_phase)
+        EXECUTE phase: All tools except plan-only tools (which disappear)
         
         Returns:
             Dict with 'tool', 'args', 'reasoning'
         """
-        workflow.logger.info(f"Deciding next action (phase={self.phase})")
+        # Detect phase statelessly from user messages
+        phase = detect_phase_from_context(self.context)
+        workflow.logger.info(f"Deciding next action (phase={phase}, is_first_call={self.is_first_call})")
         
         try:
             # Get phase-specific tools and model preference
             phase_config = get_phase_tools_and_config(
-                phase=self.phase,
+                phase=phase,
                 all_tools=self.tools,
+                is_first_call=self.is_first_call,
             )
             
             enabled_tools = phase_config["enabled_tools"]
@@ -1289,7 +1316,7 @@ class AgentWorkflow:
             ]
             
             workflow.logger.info(
-                f"Phase routing: phase={self.phase}, enabled={len(enabled_tools)}, disabled={len(disabled_tools)}, model_pref={model_preference}"
+                f"Phase routing: phase={phase}, enabled={len(enabled_tools)}, disabled={len(disabled_tools)}, model_pref={model_preference}"
             )
             
             action = await workflow.execute_activity(
@@ -1303,7 +1330,7 @@ class AgentWorkflow:
                     self.model,
                     self.reasoning_effort,
                     self.user_id,
-                    self.phase,
+                    phase,
                     model_preference
                 ],
                 start_to_close_timeout=timedelta(seconds=60),
@@ -1337,7 +1364,8 @@ class AgentWorkflow:
         Returns:
             Dict with 'score' (float 0.0-1.0) and 'reasoning' (str)
         """
-        workflow.logger.info(f"🔍 Calling check_progress: phase={self.phase}, context_len={len(self.context)}, verifier_prompt={self.verifier['llmJudgePrompt'][:50]}, model={self.model}")
+        phase = detect_phase_from_context(self.context)
+        workflow.logger.info(f"🔍 Calling check_progress: phase={phase}, context_len={len(self.context)}, verifier_prompt={self.verifier['llmJudgePrompt'][:50]}, model={self.model}")
         
         try:
             # Filter browser sub-actions from context (same as decide_next_action)
@@ -1348,7 +1376,7 @@ class AgentWorkflow:
             
             result = await workflow.execute_activity(
                 check_progress,
-                args=[filtered_context, self.verifier["llmJudgePrompt"], self.model, self.phase],
+                args=[filtered_context, self.verifier["llmJudgePrompt"], self.model, phase],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,

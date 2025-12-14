@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, AsyncGenerator
 import structlog
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
-from tools.request_user_attention import request_user_attention_direct
+from tools.request_user_approval import request_user_approval_direct
 
 logger = structlog.get_logger()
 
@@ -80,7 +80,7 @@ class SendSmsAsUserManager(ToolManager):
             "to": phone_number,
             "message": message,
         }
-        request_metadata = {"requestUserAttention": dict(attention_metadata)}
+        request_metadata = {"sendMessageToUser": dict(attention_metadata)}
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -97,13 +97,13 @@ class SendSmsAsUserManager(ToolManager):
                 "Creating send_sms_as_user attention request",
                 phone_number=phone_number,
             )
-            result = await request_user_attention_direct(
+            result = await request_user_approval_direct(
                 workflow_instance,
                 question,
                 metadata=attention_metadata,
             )
             if result.get("attention_request_id"):
-                request_metadata["requestUserAttention"]["attentionRequestId"] = result["attention_request_id"]
+                request_metadata["sendMessageToUser"]["attentionRequestId"] = result["attention_request_id"]
         except Exception as exc:
             logger.error(
                 "Failed to request user attention for send_sms_as_user",
