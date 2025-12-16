@@ -465,8 +465,8 @@ export default function QueryInput({
                   <p className="text-xs flex items-center gap-1">
                     <span>Send</span>
                     <span>(</span>
-                    <span className="font-mono text-sm">⌘</span>
-                    <span>+ Enter)</span>
+                    <span className="font-mono text-base" style={{ transform: 'translateY(1px)' }}>⌘</span>
+                    <span>+ Enter )</span>
                   </p>
                 </TooltipContent>
               </Tooltip>

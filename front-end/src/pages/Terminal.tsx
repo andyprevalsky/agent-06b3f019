@@ -17,7 +17,6 @@ import {
   resumeAgent,
   pauseAgent,
   checkAndRespondToAttentionRequest,
-  hasActiveAttentionRequest as checkHasActiveAttentionRequest,
   getMyInviteCode,
   InviteCodeInfo,
   Agent,
@@ -431,8 +430,7 @@ export default function Terminal() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoadingAgent, setIsLoadingAgent] = useState(false);
   
-  // Attention request and pause state
-  const [hasActiveAttentionRequest, setHasActiveAttentionRequest] = useState(false);
+  // Pause state
   const [isPausing, setIsPausing] = useState(false);
   
   // Message input state
@@ -1047,6 +1045,13 @@ export default function Terminal() {
     return cleanup;
   }, [selectedAgentId, user, forceResubscribe]);
 
+  // Derive hasActiveAttentionRequest from messages - when a message has isUserAttentionMessage + IN_PROGRESS
+  const hasActiveAttentionRequest = useMemo(() => {
+    return messages.some(
+      (m) => m.metadata?.isUserAttentionMessage && m.metadata?.toolStatus === 'IN_PROGRESS'
+    );
+  }, [messages]);
+
   // Handle tab visibility changes - reconnect when tab becomes visible
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -1305,10 +1310,6 @@ export default function Terminal() {
       setMessages(data.messages); // Already in chronological order (oldest first)
       setSelectedModel(data.agent.model); // Sync UI model with agent's actual model
       
-      // Check for active attention requests
-      const hasRequest = await checkHasActiveAttentionRequest(agentId);
-      setHasActiveAttentionRequest(hasRequest);
-      
       // Mark this as an initial load so we can scroll to bottom
       isInitialLoadRef.current = true;
       
@@ -1360,7 +1361,6 @@ export default function Terminal() {
     setIsLoadingAgent(false);
     setIsSendingMessage(false);
     setMessageInput('');
-    setHasActiveAttentionRequest(false);
   }, []);
 
   // Reset landing page animation state
