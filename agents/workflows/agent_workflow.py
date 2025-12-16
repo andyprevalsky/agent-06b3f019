@@ -1319,6 +1319,9 @@ class AgentWorkflow:
                 f"Phase routing: phase={phase}, enabled={len(enabled_tools)}, disabled={len(disabled_tools)}, model_pref={model_preference}"
             )
             
+            # Generate a unique stream_id for this LLM call
+            stream_id = str(workflow.uuid4())
+            
             action = await workflow.execute_activity(
                 decide_next_action,
                 args=[
@@ -1331,9 +1334,11 @@ class AgentWorkflow:
                     self.reasoning_effort,
                     self.user_id,
                     phase,
-                    model_preference
+                    model_preference,
+                    self.agent_id,  # Enable streaming
+                    stream_id       # Enable streaming
                 ],
-                start_to_close_timeout=timedelta(seconds=60),
+                start_to_close_timeout=timedelta(seconds=60),  # Increased for streaming
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
                     backoff_coefficient=4.0,

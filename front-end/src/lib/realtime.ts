@@ -2,12 +2,24 @@ import { supabase, getStoredSession } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 /**
+ * Streaming chunk payload from ASSISTANT_STREAM events
+ * Note: Worker sends DELTAS (not accumulated text) for efficiency
+ */
+export interface StreamChunkPayload {
+  stream_id: string;
+  delta: string;  // The new text chunk (delta, not accumulated)
+  done: boolean;
+  sequence: number;
+}
+
+/**
  * Handlers for agent channel events
  */
 export interface AgentHandlers {
   onInsert?: (payload: any) => void;
   onUpdate?: (payload: any) => void;
   onDelete?: (payload: any) => void;
+  onAssistantStream?: (payload: StreamChunkPayload) => void;
 }
 
 /**
@@ -39,11 +51,13 @@ export async function subscribeToAgent(
     throw new Error('Not authenticated');
   }
 
+  // Private channel - requires auth, worker uses service_role_key to broadcast
   const channel = supabase.channel(`agent:${agentId}`, {
     config: { private: true }
   });
 
   channel
+    // Database triggers broadcast INSERT/UPDATE/DELETE events
     .on('broadcast', { event: 'INSERT' }, (payload) => {
       handlers?.onInsert?.(payload);
     })
@@ -52,6 +66,18 @@ export async function subscribeToAgent(
     })
     .on('broadcast', { event: 'DELETE' }, (payload) => {
       handlers?.onDelete?.(payload);
+    })
+    .on('broadcast', { event: 'ASSISTANT_STREAM' }, (payload) => {
+      // Extract stream chunk data from payload
+      const record = payload?.payload?.record;
+      if (record && handlers?.onAssistantStream) {
+        handlers.onAssistantStream({
+          stream_id: record.stream_id,
+          delta: record.delta,
+          done: record.done,
+          sequence: record.sequence,
+        });
+      }
     });
 
   return new Promise((resolve, reject) => {

@@ -132,10 +132,12 @@ function FadeInMarkdown({
     
     setWords(wordArray);
   }, [markdown]);
+  
+  // Calculate word count for hook order consistency
+  const wordCount = words.filter(w => w.isWord).length;
 
   // Step 2: When animation completes
   const handleLastWordComplete = () => {
-    console.log('✅ Animation complete!');
     if (onComplete) {
       onComplete();
     }
@@ -153,7 +155,6 @@ function FadeInMarkdown({
   }
 
   // Step 3: Render each word with its formatting preserved
-  const wordCount = words.filter(w => w.isWord).length;
   let wordIndex = 0; // Counter for actual words only (for delay calculation)
   
   // Find the last word item in the words array (for animation completion)
@@ -180,6 +181,10 @@ function FadeInMarkdown({
     let listItems: React.ReactNode[] = [];
     let currentListType: 'ul' | 'ol' | undefined = undefined;
     let currentBlockFirstWordIndex = 0; // Track first word index for block animation
+    
+    // Track ordered list numbering across multiple <ol> elements
+    let olItemCount = 0;
+    let olStartNumber = 1;
     
     // Group consecutive words with same inline formatting
     let inlineGroup: typeof words[0][] = [];
@@ -213,12 +218,15 @@ function FadeInMarkdown({
       const wordSpans = processedGroup.map((item, idx) => {
         let content;
         
-        if (animate && !reduce) {
-          const currentWordIndex = wordIndex;
-          // Only increment wordIndex for actual words (for delay calculation)
-          if (item.isWord) {
-            wordIndex++;
-          }
+        const currentWordIndex = wordIndex;
+        // Only increment wordIndex for actual words (for delay calculation)
+        if (item.isWord) {
+          wordIndex++;
+        }
+        
+        const shouldAnimateWord = animate && !reduce;
+        
+        if (shouldAnimateWord) {
           const delay = baseDelay + (currentWordIndex * perWordDelay);
           // Check if this is the last word item by object reference
           const isLastWord = item === lastWordItem;
@@ -301,6 +309,17 @@ function FadeInMarkdown({
       return groupContent;
     };
     
+    // Helper to flush list with proper start attribute for ol
+    const flushList = (listType: 'ul' | 'ol', items: React.ReactNode[], startNum?: number) => {
+      if (listType === 'ol' && startNum && startNum > 1) {
+        elements.push(<ol key={`list-${elements.length}`} start={startNum}>{items}</ol>);
+      } else if (listType === 'ol') {
+        elements.push(<ol key={`list-${elements.length}`}>{items}</ol>);
+      } else {
+        elements.push(<ul key={`list-${elements.length}`}>{items}</ul>);
+      }
+    };
+    
     words.forEach((item, index) => {
       if (!item.isWord) {
         // For whitespace, keep it in group if we're in an inline code or link group (not pre/code blocks)
@@ -358,21 +377,32 @@ function FadeInMarkdown({
           } else {
             listItems.push(<li key={`li-${listItems.length}`}>{currentBlock}</li>);
           }
+          
+          // Track ol items for numbering
+          if (currentListType === 'ol') {
+            olItemCount++;
+          }
+          
           currentBlock = [];
           
-          // If next block is NOT a list item, flush the accumulated list
+          // If next block is NOT a list item OR list type changed, flush the accumulated list
           if (!isListItem && listItems.length > 0 && currentListType) {
-            const ListTag = currentListType as any;
-            elements.push(<ListTag key={`list-${elements.length}`}>{listItems}</ListTag>);
+            flushList(currentListType, listItems, olStartNumber);
             listItems = [];
+            // Update start number for next ol
+            if (currentListType === 'ol') {
+              olStartNumber = olItemCount + 1;
+            }
             currentListType = undefined;
           }
         } else {
           // Flush any accumulated list items first
           if (listItems.length > 0 && currentListType) {
-            const ListTag = currentListType as any;
-            elements.push(<ListTag key={`list-${elements.length}`}>{listItems}</ListTag>);
+            flushList(currentListType, listItems, olStartNumber);
             listItems = [];
+            if (currentListType === 'ol') {
+              olStartNumber = olItemCount + 1;
+            }
             currentListType = undefined;
           }
           
@@ -437,9 +467,11 @@ function FadeInMarkdown({
       if (isListItem && item.listType) {
         // If list type changed, flush previous list
         if (currentListType && currentListType !== item.listType && listItems.length > 0) {
-          const ListTag = currentListType as any;
-          elements.push(<ListTag key={`list-${elements.length}`}>{listItems}</ListTag>);
+          flushList(currentListType, listItems, olStartNumber);
           listItems = [];
+          if (currentListType === 'ol') {
+            olStartNumber = olItemCount + 1;
+          }
         }
         currentListType = item.listType;
       }
@@ -499,12 +531,19 @@ function FadeInMarkdown({
         } else {
           listItems.push(<li key={`li-${listItems.length}`}>{currentBlock}</li>);
         }
+        
+        // Track ol items
+        if (currentListType === 'ol') {
+          olItemCount++;
+        }
       } else {
         // Flush any accumulated list items first
         if (listItems.length > 0 && currentListType) {
-          const ListTag = currentListType as any;
-          elements.push(<ListTag key={`list-${elements.length}`}>{listItems}</ListTag>);
+          flushList(currentListType, listItems, olStartNumber);
           listItems = [];
+          if (currentListType === 'ol') {
+            olStartNumber = olItemCount + 1;
+          }
         }
         
         // Then add the current block
@@ -515,9 +554,6 @@ function FadeInMarkdown({
           // For code blocks, trim trailing newlines
           let blockContent = [...currentBlock];
           if (currentBlockType === 'pre') {
-            console.log('🔍 Code block content BEFORE trim:', blockContent);
-            console.log('🔍 Last item:', blockContent[blockContent.length - 1]);
-            
             // Remove trailing whitespace/newline-only fragments
             while (blockContent.length > 0) {
               const lastItem = blockContent[blockContent.length - 1];
@@ -527,15 +563,12 @@ function FadeInMarkdown({
                 const children = lastItem.props.children;
                 // Match whitespace, newlines, or any combination
                 if (typeof children === 'string' && /^[\s\n]*$/.test(children)) {
-                  console.log('🗑️ Removing trailing whitespace/newline:', JSON.stringify(children));
                   blockContent.pop();
                   continue;
                 }
               }
               break;
             }
-            
-            console.log('✅ Code block content AFTER trim:', blockContent);
           }
           
           // Animate special block types
@@ -591,8 +624,7 @@ function FadeInMarkdown({
     
     // Final flush of any remaining list items
     if (listItems.length > 0 && currentListType) {
-      const ListTag = currentListType as any;
-      elements.push(<ListTag key={`list-${elements.length}`}>{listItems}</ListTag>);
+      flushList(currentListType, listItems, olStartNumber);
     }
     
     return elements;
@@ -744,7 +776,7 @@ export const MarkdownText = memo(function MarkdownText({
   text, 
   shouldAnimate = false, 
   onComplete,
-  className 
+  className,
 }: MarkdownTextProps) {
   
   // Normalize text to handle escape sequences from LLM/backend
@@ -760,6 +792,3 @@ export const MarkdownText = memo(function MarkdownText({
     />
   );
 });
-
-
-

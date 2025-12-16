@@ -14,6 +14,8 @@ interface MessageBubbleProps {
   shouldType?: boolean;
   onTypingComplete?: () => void;
   onNavigateToAgent?: (agentId: string) => void;
+  /** Indicates this is a streaming bubble (in-progress LLM response) */
+  isStreaming?: boolean;
 }
 
 interface ToolMessageData {
@@ -428,7 +430,7 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -444,6 +446,12 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   // Memoize tool data to prevent flickers on re-renders
   const toolData = useMemo(() => {
+    // Streaming messages should NOT render as "Thought" tool cards
+    // They use the direct text rendering at the bottom of the component
+    if (isStreaming) {
+      return null;
+    }
+    
     if (isAssistant) {
       const assistantStatus: ToolMessageData['status'] = shouldType ? 'IN_PROGRESS' : 'FINISHED';
       return {
@@ -460,11 +468,15 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     // Extract sendMessageToUser sub-metadata if present (fallback to legacy requestUserAttention)
     const attentionMeta = message.metadata.sendMessageToUser || message.metadata.requestUserAttention || {};
     
+    const toolStatus = message.metadata.toolStatus === 'ERROR'
+      ? 'FINISHED'
+      : (message.metadata.toolStatus || 'FINISHED');
+
     return {
       toolCallId: message.metadata.toolCallId || '',
       toolName: message.metadata.toolName || '',
       title: message.metadata.title || 'Tool',
-      status: message.metadata.toolStatus || 'FINISHED',
+      status: toolStatus,
       message: message.text,
       error: message.metadata.error || false,
       progressComplete: message.metadata.progressComplete,
@@ -474,11 +486,15 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       startTime: message.metadata.startTime || attentionMeta.startTime,
       simulated: message.metadata.simulated || attentionMeta.simulated,
     } as ToolMessageData;
-  }, [isAssistant, shouldType, isTool, message]);
+  }, [isAssistant, shouldType, isTool, message, isStreaming]);
 
   // Sub-agent tool messages: use special SubAgentToolBubble component
   const subAgentBubble = useMemo(() => {
     if (!isSubAgentTool || !message.metadata) return null;
+
+    const toolStatus = message.metadata.toolStatus === 'ERROR'
+      ? 'FINISHED'
+      : (message.metadata.toolStatus || 'FINISHED');
 
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
@@ -490,7 +506,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
             toolCallId={message.metadata.toolCallId || ''}
             title={message.metadata.title || 'Sub-agent'}
             message={message.text}
-            status={message.metadata.toolStatus || 'FINISHED'}
+            status={toolStatus}
             progress={message.metadata.progress || 0}
             agentId={message.metadata.subAgentId}
             onNavigate={(agentId) => {
@@ -554,13 +570,15 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     );
   }
 
-  // System messages: keep original style with icon and label
+  // System/Assistant messages: keep original style with icon and label
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
       <div className={cn(
         'flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center border',
         config.bg,
-        config.border
+        config.border,
+        // Add pulse animation for streaming messages
+        isStreaming && 'animate-pulse'
       )}>
         <Icon className="h-4 w-4" />
       </div>
@@ -570,17 +588,27 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
           <span className={cn('text-xs font-medium', config.text)}>
             {config.label}
           </span>
-          <span className="text-xs text-muted-foreground">
-            {new Date(message.timestamp).toLocaleTimeString()}
-          </span>
+          {!isStreaming && (
+            <span className="text-xs text-muted-foreground">
+              {new Date(message.timestamp).toLocaleTimeString()}
+            </span>
+          )}
+          {isStreaming && (
+            <span className="text-xs text-muted-foreground animate-pulse">
+              streaming...
+            </span>
+          )}
         </div>
         
         <div className={cn(
           'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
           config.bg,
-          config.border
+          config.border,
+          isStreaming && 'border-purple-500/50'
         )}>
-          <p className="text-sm whitespace-pre-wrap break-words">{message.text}</p>
+          <p className="text-sm whitespace-pre-wrap break-words">
+            {message.text}
+          </p>
         </div>
       </div>
     </div>

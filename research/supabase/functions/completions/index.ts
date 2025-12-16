@@ -193,10 +193,13 @@ async function handleStreaming(
   seed: number | undefined,
   tools: any[] | undefined,
   toolChoice: any,
+  responseFormat: any,  // Added: response_format for structured outputs
   openRouterKey: string,
   supabaseUrl: string,
   requestedModel: string,
-  isCerebras: boolean
+  isCerebras: boolean,
+  poolName: string,     // Added: for debugging
+  poolSize: number      // Added: for debugging
 ) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -226,6 +229,23 @@ async function handleStreaming(
             cerebrasStreamBody.tool_choice = toolChoice;
           }
           
+          // Add response_format with schema transformation for Cerebras
+          if (responseFormat) {
+            if (responseFormat.type === 'json_schema' && responseFormat.json_schema?.schema) {
+              const transformedSchema = transformSchemaForCerebras(responseFormat.json_schema.schema);
+              cerebrasStreamBody.response_format = {
+                type: 'json_schema',
+                json_schema: {
+                  name: responseFormat.json_schema.name || 'response',
+                  strict: true,
+                  schema: transformedSchema
+                }
+              };
+            } else {
+              cerebrasStreamBody.response_format = responseFormat;
+            }
+          }
+          
           response = await fetch(CEREBRAS_API_URL, {
             method: 'POST',
             headers: {
@@ -236,6 +256,22 @@ async function handleStreaming(
           });
         } else {
           // Call OpenRouter API for other Rose models
+          const openRouterBody: any = {
+            model: actualModel,
+            messages,
+            temperature,
+            max_tokens: maxTokens,
+            seed,
+            tools,
+            tool_choice: toolChoice,
+            stream: true
+          };
+          
+          // Add response_format for structured outputs
+          if (responseFormat) {
+            openRouterBody.response_format = responseFormat;
+          }
+          
           response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: {
@@ -244,22 +280,16 @@ async function handleStreaming(
               'HTTP-Referer': supabaseUrl,
               'X-Title': 'Rose Benchmark Suite'
             },
-            body: JSON.stringify({
-              model: actualModel,
-              messages,
-              temperature,
-              max_tokens: maxTokens,
-              seed,
-              tools,
-              tool_choice: toolChoice,
-              stream: true
-            })
+            body: JSON.stringify(openRouterBody)
           });
         }
 
         if (!response.ok) {
           const provider = isCerebras ? 'Cerebras' : 'OpenRouter';
-          throw new Error(`${provider} API error: ${response.status}`);
+          // Read error body for better debugging
+          const errorText = await response.text();
+          console.error(`${provider} streaming error:`, response.status, errorText);
+          throw new Error(`${provider} API error: ${response.status} - ${errorText.slice(0, 200)}`);
         }
 
         const reader = response.body?.getReader();
@@ -292,9 +322,11 @@ async function handleStreaming(
               
               try {
                 const parsed = JSON.parse(data);
-                // Include actual model for debugging (unmasked)
+                // Include metadata for debugging
                 parsed.requested_model = requestedModel;
                 parsed.actual_model = actualModel;
+                parsed.pool_name = poolName;
+                parsed.pool_size = poolSize;
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
               } catch (e) {
                 console.error('Error parsing streaming data:', e);
@@ -409,10 +441,13 @@ serve(async (req) => {
         seed,
         tools,
         tool_choice,
+        response_format,  // Pass response_format for structured outputs
         Deno.env.get('OPENROUTER_API_KEY')!,
         supabaseUrl,
         model,
-        isCerebras
+        isCerebras,
+        selection.poolName,
+        selection.poolSize
       );
     }
 

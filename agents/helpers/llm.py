@@ -1,6 +1,6 @@
 """LLM tool for agent reasoning and decision making."""
 
-from typing import List, Dict, Optional, Any, TypeVar, Type
+from typing import List, Dict, Optional, Any, TypeVar, Type, AsyncIterator, Tuple, Callable, Awaitable
 from temporalio import activity
 import structlog
 import json
@@ -19,8 +19,6 @@ from tools.base import ToolSchema
 logger = structlog.get_logger()
 
 T = TypeVar('T', bound=BaseModel)
-
-
 def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:
     """
     Convert a Pydantic model to a JSON schema ready for OpenAI strict structured outputs.
@@ -421,6 +419,246 @@ async def call_llm_structured(
     
     return response, usage
 
+async def call_llm_structured_streaming(
+    messages: List[Dict[str, str]],
+    model: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    response_model: type[T],
+    on_chunk: Callable[[str, int], Awaitable[None]],
+    reasoning_effort: Optional[str] = None,
+    model_preference: Optional[str] = None
+) -> Tuple[T, Dict]:
+    """
+    Call LLM with structured outputs using streaming, emitting partial text via callback.
+    
+    This variant streams the response and calls `on_chunk` at intervals (10, 25, 50, 100, 200 tokens,
+    then every 100 tokens) with the accumulated response text so far.
+    
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        model: Model to use
+        temperature: Sampling temperature
+        max_tokens: Maximum tokens
+        response_model: Pydantic model class for response structure
+        on_chunk: Async callback(text_so_far, token_count) called at streaming intervals
+        reasoning_effort: Optional reasoning effort level ("high", "medium", "low")
+        model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
+        
+    Returns:
+        Tuple of (response_model instance, usage dict with token counts)
+    """
+    import instructor
+    import httpx
+    
+    config = load_config()
+    
+    # Check if this is a Rose model - route to Supabase edge function with streaming
+    is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
+    
+    if is_rose_model:
+        logger.info(f"🌹 Streaming Rose model via Supabase: {model} → {config.rose.api_url}")
+        
+        # Build JSON schema from Pydantic model
+        schema = prepare_schema_for_openai(response_model)
+        
+        request_body = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,  # Enable SSE streaming
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_model.__name__,
+                    "schema": schema,
+                    "strict": True
+                }
+            }
+        }
+        
+        if model_preference:
+            request_body["model_preference"] = model_preference
+            logger.info(f"🎯 Streaming with model_preference: {model_preference}")
+        
+        # Stream SSE from Rose endpoint
+        accumulated_content = ""
+        last_emitted_text = ""  # Track last emitted text to avoid duplicate sends
+        token_count = 0
+        actual_model = "unknown"
+        pool_name = "unknown"
+        pool_size = 0
+        
+        async with httpx.AsyncClient(timeout=60.0) as http_client:
+            async with http_client.stream(
+                'POST',
+                config.rose.api_url,
+                json=request_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                    "x-api-key": config.rose.api_key,
+                }
+            ) as stream_response:
+                stream_response.raise_for_status()
+                logger.info(f"🔄 Rose streaming response started, status={stream_response.status_code}")
+                
+                chunk_count = 0
+                async for line in stream_response.aiter_lines():
+                    chunk_count += 1
+                    if chunk_count == 1:
+                        logger.info(f"📦 First streaming line received")
+                    if not line or not line.startswith('data: '):
+                        continue
+                    
+                    data_str = line[6:]  # Remove 'data: ' prefix
+                    if data_str == '[DONE]':
+                        break
+                    
+                    try:
+                        chunk_data = json.loads(data_str)
+                        
+                        # Extract model info from first chunk
+                        if chunk_data.get("actual_model"):
+                            actual_model = chunk_data["actual_model"]
+                        if chunk_data.get("pool_name"):
+                            pool_name = chunk_data["pool_name"]
+                        if chunk_data.get("pool_size"):
+                            pool_size = chunk_data["pool_size"]
+                        
+                        # Extract delta content
+                        delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                        content_delta = delta.get("content", "")
+                        
+                        if content_delta:
+                            accumulated_content += content_delta
+                            # Estimate tokens (rough: ~4 chars per token)
+                            token_count = len(accumulated_content) // 4
+                            
+                            # Emit every chunk immediately for real-time streaming
+                            response_text = _extract_response_from_partial_json(accumulated_content)
+                            if response_text and response_text != last_emitted_text:
+                                await on_chunk(response_text, token_count)
+                                last_emitted_text = response_text
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to parse chunk: {data_str}", error=str(e))
+                        continue
+        
+        logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, {len(accumulated_content)} chars")
+        
+        # Final emit if we have remaining content that wasn't sent
+        response_text = _extract_response_from_partial_json(accumulated_content)
+        if response_text and response_text != last_emitted_text:
+            await on_chunk(response_text, token_count)
+        
+        # Parse final JSON and validate with Pydantic
+        try:
+            parsed_content = json.loads(accumulated_content)
+            response = response_model.model_validate(parsed_content)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error(f"Failed to parse streaming Rose response: {accumulated_content[:500]}", error=str(e))
+            raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {str(e)}")
+        
+        usage = {
+            "prompt_tokens": 0,  # Not available in streaming mode
+            "completion_tokens": token_count,
+            "total_tokens": token_count,
+            "actual_model": actual_model,
+            "pool_name": pool_name,
+            "pool_size": pool_size
+        }
+        
+        return response, usage
+    
+    # For OpenRouter models, use Instructor's partial streaming
+    base_client = AsyncOpenAI(
+        api_key=config.openrouter.api_key,
+        base_url=config.openrouter.base_url
+    )
+    
+    # Use Instructor's partial streaming mode
+    client = instructor.from_openai(base_client, mode=instructor.Mode.JSON)
+    
+    extra_args = {}
+    if reasoning_effort:
+        extra_args["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
+    
+    last_emitted_text = ""
+    accumulated_text = ""
+    final_response = None
+    
+    # Use create_partial for streaming
+    try:
+        async for partial in client.chat.completions.create_partial(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_model=response_model,
+            **extra_args
+        ):
+            # Extract response text from partial object
+            if hasattr(partial, 'response') and partial.response:
+                current_text = partial.response
+                if current_text != last_emitted_text:
+                    accumulated_text = current_text
+                    # Emit every chunk immediately for real-time streaming
+                    token_count = len(accumulated_text) // 4
+                    await on_chunk(accumulated_text, token_count)
+                    last_emitted_text = current_text
+            
+            final_response = partial
+        
+        # Final emit if we have remaining content that wasn't sent
+        if accumulated_text and accumulated_text != last_emitted_text:
+            await on_chunk(accumulated_text, len(accumulated_text) // 4)
+        
+    except Exception as e:
+        logger.error(f"Streaming LLM call failed: {str(e)}", model=model)
+        raise
+    
+    if final_response is None:
+        raise ValueError(f"Streaming LLM returned no response (model={model})")
+    
+    # Usage not available in Instructor streaming, estimate from content
+    estimated_tokens = len(accumulated_text) // 4
+    usage = {
+        "prompt_tokens": 0,
+        "completion_tokens": estimated_tokens,
+        "total_tokens": estimated_tokens
+    }
+    
+    return final_response, usage
+
+
+def _extract_response_from_partial_json(partial_json: str) -> Optional[str]:
+    """
+    Try to extract the 'response' field from a partially streamed JSON string.
+    
+    This handles incomplete JSON by looking for the 'response' field pattern.
+    """
+    # Try to parse as complete JSON first
+    try:
+        data = json.loads(partial_json)
+        return data.get("response", "")
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to extract 'response' field with regex
+    import re
+    
+    # Look for "response": "..." pattern
+    match = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)"?', partial_json)
+    if match:
+        try:
+            # Decode escaped characters
+            return json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            return match.group(1)
+    
+    return None
+
 
 @activity.defn
 async def call_llm(
@@ -565,7 +803,9 @@ async def decide_next_action(
     reasoning_effort: str = "low",
     user_id: Optional[str] = None,
     phase: str = "EXECUTE",
-    model_preference: Optional[str] = None
+    model_preference: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    stream_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Use LLM to decide what action to take next.
@@ -584,6 +824,8 @@ async def decide_next_action(
         user_id: Optional Supabase user ID
         phase: Current workflow phase (PLAN or EXECUTE)
         model_preference: Optional Rose model preference (SMART, FAST, CHEAP)
+        agent_id: Optional agent ID for streaming (enables streaming when provided with stream_id)
+        stream_id: Optional stream ID for streaming (enables streaming when provided with agent_id)
         
     Returns:
         Dict with 'tool', 'args', 'reasoning'
@@ -630,15 +872,69 @@ async def decide_next_action(
         else:
             logger.info(f"💭 Reasoning disabled for {model}")
         
-        result, usage = await call_llm_structured(
-            messages=messages,
-            model=model,
-            temperature=0.7,
-            max_tokens=4096,
-            response_model=AgentActionModel,
-            reasoning_effort=effort,
-            model_preference=model_preference
-        )
+        # Use streaming if agent_id and stream_id are provided
+        if agent_id and stream_id:
+            from helpers.messages import stream_assistant_chunk
+            
+            sequence_counter = [0]  # Use list to allow mutation in closure
+            last_streamed_text = [""]  # Track what we've already sent to compute delta
+            
+            async def on_chunk(text_so_far: str, token_count: int):
+                """Callback for streaming chunks - sends DELTA to frontend."""
+                try:
+                    # Compute delta (only the new text)
+                    delta = text_so_far[len(last_streamed_text[0]):]
+                    if delta:  # Only send if there's new content
+                        await stream_assistant_chunk(
+                            agent_id=agent_id,
+                            stream_id=stream_id,
+                            delta=delta,
+                            done=False,
+                            sequence=sequence_counter[0]
+                        )
+                        sequence_counter[0] += 1
+                        last_streamed_text[0] = text_so_far
+                except Exception as e:
+                    # Don't fail on streaming errors - it's best-effort
+                    logger.warning(f"Streaming chunk failed (non-fatal): {str(e)}")
+            
+            logger.info(f"📡 Using streaming LLM call for agent {agent_id}")
+            result, usage = await call_llm_structured_streaming(
+                messages=messages,
+                model=model,
+                temperature=0.7,
+                max_tokens=4096,
+                response_model=AgentActionModel,
+                on_chunk=on_chunk,
+                reasoning_effort=effort,
+                model_preference=model_preference
+            )
+            
+            # Send final "done" chunk (delta may be empty if all content already streamed)
+            try:
+                final_delta = ""
+                if hasattr(result, 'response') and result.response:
+                    final_delta = result.response[len(last_streamed_text[0]):]
+                await stream_assistant_chunk(
+                    agent_id=agent_id,
+                    stream_id=stream_id,
+                    delta=final_delta,
+                    done=True,
+                    sequence=sequence_counter[0]
+                )
+            except Exception as e:
+                logger.warning(f"Final stream chunk failed (non-fatal): {str(e)}")
+        else:
+            # Non-streaming path
+            result, usage = await call_llm_structured(
+                messages=messages,
+                model=model,
+                temperature=0.7,
+                max_tokens=4096,
+                response_model=AgentActionModel,
+                reasoning_effort=effort,
+                model_preference=model_preference
+            )
         
         # Validate result - STRICT: no silent failures
         if result is None:

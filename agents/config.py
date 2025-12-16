@@ -102,6 +102,15 @@ class RoseConfig:
 
 
 @dataclass
+class SupabaseConfig:
+    """Supabase configuration for direct Realtime broadcasts."""
+    
+    url: str = "https://kzlurqihzaolhzsbkctf.supabase.co"
+    anon_key: str = ""  # Supabase anon key for Realtime
+    service_role_key: str = ""  # Supabase service role key (can broadcast to private channels)
+
+
+@dataclass
 class PaymentConfig:
     """Payment decryption configuration for agent autopay."""
     
@@ -129,6 +138,7 @@ class AppConfig:
     browserbase: BrowserbaseConfig
     parallel: ParallelConfig
     rose: RoseConfig
+    supabase: SupabaseConfig
     payment: PaymentConfig
     x402: X402Config
     
@@ -204,6 +214,12 @@ def load_config() -> AppConfig:
         supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", ""),
     )
     
+    supabase = SupabaseConfig(
+        url=os.getenv("SUPABASE_URL", "https://kzlurqihzaolhzsbkctf.supabase.co"),
+        anon_key=os.getenv("SUPABASE_ANON_KEY", ""),
+        service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
+    )
+    
     payment = PaymentConfig(
         decryption_key=os.getenv("PAYMENT_DECRYPTION_KEY", ""),
     )
@@ -223,6 +239,7 @@ def load_config() -> AppConfig:
         browserbase=browserbase,
         parallel=parallel,
         rose=rose,
+        supabase=supabase,
         payment=payment,
         x402=x402,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),

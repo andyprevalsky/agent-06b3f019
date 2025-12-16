@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
+import { motion } from 'framer-motion';
 import { useNavigate, Link } from 'react-router-dom';
 import * as amplitude from '@amplitude/analytics-browser';
 import { Button } from '@/components/ui/button';
@@ -7,7 +8,7 @@ import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bo
 import AppSidebar from '@/components/terminal/AppSidebar';
 import { supabase, signOut, initializeRealtime, clearStoredSession } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
-import { subscribeToAgent, unsubscribe } from '@/lib/realtime';
+import { subscribeToAgent, unsubscribe, StreamChunkPayload } from '@/lib/realtime';
 import {
   getAllAgents,
   getAgent,
@@ -26,6 +27,7 @@ import { getClientSource } from '@/lib/clientSource';
 import CreateAgentModal from '@/components/terminal/CreateAgentModal';
 import AgentListItem from '@/components/terminal/AgentListItem';
 import MessageBubble from '@/components/terminal/MessageBubble';
+import { MarkdownText } from '@/components/terminal/MarkdownText';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import QueryInput from '@/components/terminal/QueryInput';
@@ -46,6 +48,43 @@ import SmallTileAnimationCanvas from '@/components/terminal/SmallTileAnimationCa
 import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
 
 const BrowserStatusBar = lazy(() => import('@/components/terminal/BrowserStatusBar'));
+
+/**
+ * StreamingMarkdown - Renders text with fade-in animation for each chunk
+ * Each delta fades in like MarkdownText words do
+ */
+function StreamingMarkdown({ text }: { text: string }) {
+  const prevTextRef = useRef('');
+  const [chunks, setChunks] = useState<string[]>([]);
+  
+  useEffect(() => {
+    if (text.length > prevTextRef.current.length) {
+      // New content arrived - extract the delta
+      const delta = text.slice(prevTextRef.current.length);
+      setChunks(prev => [...prev, delta]);
+      prevTextRef.current = text;
+    } else if (text !== prevTextRef.current) {
+      // Text changed completely (rare) - reset
+      setChunks([text]);
+      prevTextRef.current = text;
+    }
+  }, [text]);
+  
+  return (
+    <span className="text-sm text-muted-foreground">
+      {chunks.map((chunk, i) => (
+        <motion.span
+          key={i}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.35, ease: 'easeOut' }}
+        >
+          {chunk}
+        </motion.span>
+      ))}
+    </span>
+  );
+}
 
 function getModelContextWindow(model: string, models: Model[]): number {
   // Look up the actual context length from the models data
@@ -421,6 +460,19 @@ export default function Terminal() {
   const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
   const isInitialLoadRef = useRef<boolean>(false);
   const [forceResubscribe, setForceResubscribe] = useState<number>(0);
+  
+  // Streaming state - tracks in-progress streaming bubbles
+  // Map: stream_id -> { text: string, sequence: number, done: boolean, timeoutId?: number }
+  const [streamingBubbles, setStreamingBubbles] = useState<Map<string, {
+    text: string;
+    sequence: number;
+    done: boolean;
+    timeoutId?: number;
+  }>>(new Map());
+  const STREAM_TIMEOUT_MS = 15000; // 15 seconds timeout fallback
+  
+  // Track text that was already shown via streaming - don't re-animate on INSERT
+  const streamedTextsRef = useRef<Set<string>>(new Set());
 
   // Opening messages reveal animation
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
@@ -765,6 +817,15 @@ export default function Terminal() {
         unsubscribe(channelRef.current);
         channelRef.current = null;
       }
+      // Clear streaming bubbles and their timeouts when cleaning up
+      setStreamingBubbles(prev => {
+        for (const [_, bubble] of prev) {
+          if (bubble.timeoutId) {
+            window.clearTimeout(bubble.timeoutId);
+          }
+        }
+        return new Map();
+      });
     };
 
     // Early return but STILL return cleanup function
@@ -822,9 +883,15 @@ export default function Terminal() {
         // Subscribe to agent channel using clean subscription pattern
         const channel = await subscribeToAgent(selectedAgentId, {
           onInsert: (payload) => {
+            // Log raw payload for debugging
+            console.log(`🔔 RAW INSERT PAYLOAD:`, JSON.stringify(payload, null, 2));
+            
             // Handle message inserts - data is in payload.record
             const data = payload.payload?.record;
-            if (!data) return;
+            if (!data) {
+              console.warn(`⚠️ INSERT payload missing record:`, payload);
+              return;
+            }
             
             const message: Message = {
               message_id: data.id,
@@ -833,6 +900,33 @@ export default function Terminal() {
               role: data.role,
               metadata: data.metadata,
             };
+            
+            // Log ALL insert events
+            console.log(`📥 INSERT EVENT:`, {
+              role: message.role,
+              message_id: message.message_id,
+              text_length: message.text.length,
+              text_preview: message.text.slice(0, 100) + (message.text.length > 100 ? '...' : ''),
+              metadata: message.metadata,
+            });
+            
+            // When a real ASSISTANT INSERT arrives, clear any streaming bubbles
+            // (the streaming bubble was a preview; now we have the real message)
+            if (message.role === 'ASSISTANT') {
+              console.log(`🎯 ASSISTANT INSERT - clearing streaming bubbles`);
+              setStreamingBubbles(prev => {
+                const newMap = new Map(prev);
+                console.log(`   Clearing ${newMap.size} streaming bubble(s)`);
+                for (const [streamId, bubble] of newMap) {
+                  console.log(`   - Removing stream: ${streamId.slice(0,8)}`);
+                  if (bubble.timeoutId) {
+                    window.clearTimeout(bubble.timeoutId);
+                  }
+                }
+                newMap.clear();
+                return newMap;
+              });
+            }
             
             // Add to buffer queue - it will be displayed when ready
             setMessageBuffer((prev) => [...prev, message]);
@@ -861,6 +955,61 @@ export default function Terminal() {
             });
             // Also refresh agents list to update sidebar
             loadAgents();
+          },
+          onAssistantStream: (chunk: StreamChunkPayload) => {
+            // Log stream events for debugging
+            console.log(`📡 STREAM EVENT:`, {
+              stream_id: chunk.stream_id,
+              sequence: chunk.sequence,
+              done: chunk.done,
+              delta_length: chunk.delta.length,
+              delta: chunk.delta,
+            });
+            
+            setStreamingBubbles(prev => {
+              const newMap = new Map(prev);
+              const existing = newMap.get(chunk.stream_id);
+              
+              // Only update if this is a newer sequence or we don't have this stream yet
+              if (!existing || chunk.sequence >= existing.sequence) {
+                // Clear existing timeout if any
+                if (existing?.timeoutId) {
+                  window.clearTimeout(existing.timeoutId);
+                }
+                
+                // Accumulate delta onto existing text
+                const accumulatedText = (existing?.text || '') + chunk.delta;
+                
+                // Set timeout fallback for when final INSERT doesn't arrive
+                let timeoutId: number | undefined;
+                if (chunk.done) {
+                  // Stream complete - remember this text so we don't re-animate on INSERT
+                  if (accumulatedText.trim()) {
+                    streamedTextsRef.current.add(accumulatedText.trim());
+                    console.log(`📝 Stored streamed text for skip-animation: "${accumulatedText.slice(0, 50)}..."`);
+                  }
+                  
+                  timeoutId = window.setTimeout(() => {
+                    // Timeout reached - the real INSERT never arrived
+                    console.warn(`Stream ${chunk.stream_id} timeout - final INSERT not received`);
+                    setStreamingBubbles(p => {
+                      const m = new Map(p);
+                      m.delete(chunk.stream_id);
+                      return m;
+                    });
+                  }, STREAM_TIMEOUT_MS);
+                }
+                
+                newMap.set(chunk.stream_id, {
+                  text: accumulatedText,
+                  sequence: chunk.sequence,
+                  done: chunk.done,
+                  timeoutId,
+                });
+              }
+              
+              return newMap;
+            });
           },
         });
 
@@ -1020,9 +1169,17 @@ export default function Terminal() {
       // Check if this message should animate
       let shouldAnimate = false;
       
-      // ASSISTANT messages always animate
+      // ASSISTANT messages animate UNLESS they were already shown via streaming
       if (nextMessage.role === 'ASSISTANT') {
-        shouldAnimate = true;
+        const textKey = (nextMessage.text || '').trim();
+        if (streamedTextsRef.current.has(textKey)) {
+          // This text was already streamed - don't re-animate
+          console.log(`⏭️ Skipping animation for already-streamed text: "${textKey.slice(0, 50)}..."`);
+          streamedTextsRef.current.delete(textKey); // Clean up
+          shouldAnimate = false;
+        } else {
+          shouldAnimate = true;
+        }
       }
       
       // TOOL messages animate if they are FINISHED or ERROR, have a message, AND are NOT sub-agent tools
@@ -1059,6 +1216,7 @@ export default function Terminal() {
     // - Agent is not active (paused, completed, failed)
     // - We have messages in the buffer waiting to display
     // - We're currently animating a message
+    // NOTE: We DO show thinking loader when streaming - streaming text appears below it
     if (!agentDetail || 
         agentDetail.status === 'COMPLETED' || 
         agentDetail.status === 'FAILED' || 
@@ -2052,6 +2210,8 @@ export default function Terminal() {
                   );
                 })}
                 
+{/* Streaming text is now shown under Thinking indicator below */}
+                
                 {/* Show paused text when agent is paused */}
                 {agentDetail?.status === 'PAUSED' && (
                   <div className="flex gap-3">
@@ -2088,21 +2248,33 @@ export default function Terminal() {
                   </div>
                 )}
                 
-                {/* Thinking placeholder should match streaming Thought rendering */}
-                {showThinkingLoader && (
+                {/* Thinking indicator with streaming text below */}
+                {(showThinkingLoader || streamingBubbles.size > 0) && (
                   <div className="flex gap-3">
                     <div className="flex-shrink-0 w-8" />
-                    <div className="flex items-center gap-2">
-                      <ThinkingAnimation
-                        dataUrl="/thinking_animations.txt"
-                        autoplay
-                        loop
-                        className="w-4 h-4 flex-shrink-0"
-                        style={{ width: '16px', height: '16px' }}
-                      />
-                      <span className="text-sm font-medium animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
-                        Thinking
-                      </span>
+                    <div className="flex flex-col gap-2">
+                      {/* Thinking header */}
+                      <div className="flex items-center gap-2">
+                        <ThinkingAnimation
+                          dataUrl="/thinking_animations.txt"
+                          autoplay
+                          loop
+                          className="w-4 h-4 flex-shrink-0"
+                          style={{ width: '16px', height: '16px' }}
+                        />
+                        <span className="text-sm font-medium animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
+                          Thinking
+                        </span>
+                      </div>
+                      
+                      {/* Streaming text - render directly with ReactMarkdown + fade-in on mount */}
+                      {streamingBubbles.size > 0 && (
+                        <div className="pl-6">
+                          {Array.from(streamingBubbles.entries()).map(([streamId, bubble]) => (
+                            <StreamingMarkdown key={streamId} text={bubble.text} />
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

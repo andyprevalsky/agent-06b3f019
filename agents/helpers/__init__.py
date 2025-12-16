@@ -1,7 +1,7 @@
 """Helper activities for workflow orchestration (not exposed to LLM)."""
 
 from .fetch_tools import fetch_agent_tools
-from .messages import poll_new_messages, post_agent_message
+from .messages import poll_new_messages, post_agent_message, stream_assistant_chunk
 from .llm import call_llm, decide_next_action, check_progress
 from .update_status import update_agent_status
 from .summarize import compress_context, generate_completion_summary
@@ -16,6 +16,7 @@ __all__ = [
     "fetch_agent_tools",
     "poll_new_messages",
     "post_agent_message",
+    "stream_assistant_chunk",
     "call_llm",
     "decide_next_action",
     "check_progress",

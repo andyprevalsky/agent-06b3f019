@@ -122,13 +122,18 @@ export default {
 				'shimmer': {
 					'0%': { backgroundPosition: '200% center' },
 					'100%': { backgroundPosition: '-200% center' }
+				},
+				'blink': {
+					'0%, 100%': { opacity: '1' },
+					'50%': { opacity: '0' }
 				}
 			},
 			animation: {
 				'accordion-down': 'accordion-down 0.2s ease-out',
 				'accordion-up': 'accordion-up 0.2s ease-out',
 				'gradient-rotate': 'gradient-rotate 8s ease-in-out infinite',
-				'shimmer': 'shimmer 2s linear infinite'
+				'shimmer': 'shimmer 2s linear infinite',
+				'blink': 'blink 1s ease-in-out infinite'
 			},
 			spacing: {
 				'120': '30rem',
