@@ -328,6 +328,26 @@ export interface AttentionRequest {
   answered: boolean;
 }
 
+// Check if there's a pending attention request for a specific agent
+export async function hasActiveAttentionRequest(agentId: string): Promise<boolean> {
+  const headers = await getAuthHeaders();
+  
+  const response = await fetch(`${API_BASE_WITH_PATH}/attention-requests`, {
+    headers,
+  });
+
+  if (!response.ok) {
+    return false;
+  }
+
+  const data = await response.json();
+  const pendingRequest = data.requests?.find(
+    (r: AttentionRequest) => r.agent_id === agentId && !r.answered
+  );
+
+  return !!pendingRequest;
+}
+
 // Check and respond to pending attention request for agent
 export async function checkAndRespondToAttentionRequest(
   agentId: string,

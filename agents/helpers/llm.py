@@ -1,5 +1,6 @@
 """LLM tool for agent reasoning and decision making."""
 
+import asyncio
 from typing import List, Dict, Optional, Any, TypeVar, Type, AsyncIterator, Tuple, Callable, Awaitable
 from temporalio import activity
 import structlog
@@ -427,7 +428,8 @@ async def call_llm_structured_streaming(
     response_model: type[T],
     on_chunk: Callable[[str, int], Awaitable[None]],
     reasoning_effort: Optional[str] = None,
-    model_preference: Optional[str] = None
+    model_preference: Optional[str] = None,
+    agent_id: Optional[str] = None  # For cancellation checking
 ) -> Tuple[T, Dict]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -444,9 +446,11 @@ async def call_llm_structured_streaming(
         on_chunk: Async callback(text_so_far, token_count) called at streaming intervals
         reasoning_effort: Optional reasoning effort level ("high", "medium", "low")
         model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
+        agent_id: Optional agent ID for cancellation checking (stops streaming if agent is paused)
         
     Returns:
         Tuple of (response_model instance, usage dict with token counts)
+        Usage dict includes 'cancelled': True if streaming was stopped early
     """
     import instructor
     import httpx
@@ -489,61 +493,97 @@ async def call_llm_structured_streaming(
         actual_model = "unknown"
         pool_name = "unknown"
         pool_size = 0
+        was_cancelled = False
+        chunk_count = 0
         
-        async with httpx.AsyncClient(timeout=60.0) as http_client:
-            async with http_client.stream(
-                'POST',
-                config.rose.api_url,
-                json=request_body,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
-                    "x-api-key": config.rose.api_key,
-                }
-            ) as stream_response:
-                stream_response.raise_for_status()
-                logger.info(f"🔄 Rose streaming response started, status={stream_response.status_code}")
-                
-                chunk_count = 0
-                async for line in stream_response.aiter_lines():
-                    chunk_count += 1
-                    if chunk_count == 1:
-                        logger.info(f"📦 First streaming line received")
-                    if not line or not line.startswith('data: '):
-                        continue
+        try:
+            # Heartbeat before starting - catches cancellation if pause was already clicked
+            activity.heartbeat("Starting Rose LLM stream...")
+            
+            async with httpx.AsyncClient(timeout=60.0) as http_client:
+                async with http_client.stream(
+                    'POST',
+                    config.rose.api_url,
+                    json=request_body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                        "x-api-key": config.rose.api_key,
+                    }
+                ) as stream_response:
+                    stream_response.raise_for_status()
                     
-                    data_str = line[6:]  # Remove 'data: ' prefix
-                    if data_str == '[DONE]':
-                        break
+                    # Heartbeat after connection established - catches cancellation during initial request
+                    activity.heartbeat("Rose stream connected, waiting for chunks...")
+                    logger.info(f"🔄 Rose streaming response started, status={stream_response.status_code}")
                     
-                    try:
-                        chunk_data = json.loads(data_str)
+                    async for line in stream_response.aiter_lines():
+                        chunk_count += 1
                         
-                        # Extract model info from first chunk
-                        if chunk_data.get("actual_model"):
-                            actual_model = chunk_data["actual_model"]
-                        if chunk_data.get("pool_name"):
-                            pool_name = chunk_data["pool_name"]
-                        if chunk_data.get("pool_size"):
-                            pool_size = chunk_data["pool_size"]
+                        # Heartbeat every 5 chunks - when activity is cancelled, this raises CancelledError
+                        if chunk_count % 5 == 0:
+                            activity.heartbeat(f"Streaming chunk {chunk_count}")
                         
-                        # Extract delta content
-                        delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                        content_delta = delta.get("content", "")
+                        if chunk_count == 1:
+                            logger.info(f"📦 First streaming line received")
                         
-                        if content_delta:
-                            accumulated_content += content_delta
-                            # Estimate tokens (rough: ~4 chars per token)
-                            token_count = len(accumulated_content) // 4
+                        if not line or not line.startswith('data: '):
+                            continue
+                        
+                        data_str = line[6:]  # Remove 'data: ' prefix
+                        if data_str == '[DONE]':
+                            break
+                        
+                        try:
+                            chunk_data = json.loads(data_str)
                             
-                            # Emit every chunk immediately for real-time streaming
-                            response_text = _extract_response_from_partial_json(accumulated_content)
-                            if response_text and response_text != last_emitted_text:
-                                await on_chunk(response_text, token_count)
-                                last_emitted_text = response_text
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to parse chunk: {data_str}", error=str(e))
-                        continue
+                            # Extract model info from first chunk
+                            if chunk_data.get("actual_model"):
+                                actual_model = chunk_data["actual_model"]
+                            if chunk_data.get("pool_name"):
+                                pool_name = chunk_data["pool_name"]
+                            if chunk_data.get("pool_size"):
+                                pool_size = chunk_data["pool_size"]
+                            
+                            # Extract delta content
+                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                            content_delta = delta.get("content", "")
+                            
+                            if content_delta:
+                                accumulated_content += content_delta
+                                # Estimate tokens (rough: ~4 chars per token)
+                                token_count = len(accumulated_content) // 4
+                                
+                                # Emit every chunk immediately for real-time streaming
+                                response_text = _extract_response_from_partial_json(accumulated_content)
+                                if response_text and response_text != last_emitted_text:
+                                    await on_chunk(response_text, token_count)
+                                    last_emitted_text = response_text
+                        except json.JSONDecodeError:
+                            logger.error(f"Failed to parse chunk: {data_str}")
+                            continue
+        except asyncio.CancelledError:
+            logger.info(f"⏹️ Rose streaming cancelled (asyncio.CancelledError)")
+            was_cancelled = True
+        
+        if was_cancelled:
+            logger.info(f"🛑 Rose streaming cancelled, returning partial usage: {token_count} tokens")
+            # Return empty response with partial usage - workflow will handle the pause
+            empty_response = response_model.model_validate({
+                "reasoning": "Streaming cancelled by user",
+                "response": "",
+                "tool_calls": []
+            })
+            usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": token_count,
+                "total_tokens": token_count,
+                "actual_model": actual_model,
+                "pool_name": pool_name,
+                "pool_size": pool_size,
+                "cancelled": True
+            }
+            return empty_response, usage
         
         logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, {len(accumulated_content)} chars")
         
@@ -566,7 +606,8 @@ async def call_llm_structured_streaming(
             "total_tokens": token_count,
             "actual_model": actual_model,
             "pool_name": pool_name,
-            "pool_size": pool_size
+            "pool_size": pool_size,
+            "cancelled": False
         }
         
         return response, usage
@@ -587,6 +628,8 @@ async def call_llm_structured_streaming(
     last_emitted_text = ""
     accumulated_text = ""
     final_response = None
+    was_cancelled = False
+    chunk_count = 0
     
     # Use create_partial for streaming
     try:
@@ -598,6 +641,12 @@ async def call_llm_structured_streaming(
             response_model=response_model,
             **extra_args
         ):
+            chunk_count += 1
+            
+            # Heartbeat every 5 chunks - when activity is cancelled, this raises CancelledError
+            if chunk_count % 5 == 0:
+                activity.heartbeat(f"OpenRouter streaming chunk {chunk_count}")
+            
             # Extract response text from partial object
             if hasattr(partial, 'response') and partial.response:
                 current_text = partial.response
@@ -611,12 +660,32 @@ async def call_llm_structured_streaming(
             final_response = partial
         
         # Final emit if we have remaining content that wasn't sent
-        if accumulated_text and accumulated_text != last_emitted_text:
+        if not was_cancelled and accumulated_text and accumulated_text != last_emitted_text:
             await on_chunk(accumulated_text, len(accumulated_text) // 4)
         
+    except asyncio.CancelledError:
+        logger.info(f"⏹️ OpenRouter streaming cancelled (asyncio.CancelledError)")
+        was_cancelled = True
     except Exception as e:
         logger.error(f"Streaming LLM call failed: {str(e)}", model=model)
         raise
+    
+    # Handle cancellation
+    if was_cancelled:
+        logger.info(f"🛑 OpenRouter streaming cancelled, returning partial usage")
+        empty_response = response_model.model_validate({
+            "reasoning": "Streaming cancelled by user",
+            "response": "",
+            "tool_calls": []
+        })
+        estimated_tokens = len(accumulated_text) // 4
+        usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": estimated_tokens,
+            "total_tokens": estimated_tokens,
+            "cancelled": True
+        }
+        return empty_response, usage
     
     if final_response is None:
         raise ValueError(f"Streaming LLM returned no response (model={model})")
@@ -626,7 +695,8 @@ async def call_llm_structured_streaming(
     usage = {
         "prompt_tokens": 0,
         "completion_tokens": estimated_tokens,
-        "total_tokens": estimated_tokens
+        "total_tokens": estimated_tokens,
+        "cancelled": False
     }
     
     return final_response, usage
@@ -907,7 +977,8 @@ async def decide_next_action(
                 response_model=AgentActionModel,
                 on_chunk=on_chunk,
                 reasoning_effort=effort,
-                model_preference=model_preference
+                model_preference=model_preference,
+                agent_id=agent_id  # For cancellation checking
             )
             
             # Send final "done" chunk (delta may be empty if all content already streamed)

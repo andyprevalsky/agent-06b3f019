@@ -15,7 +15,9 @@ import {
   createAgent as createAgentAPI,
   postMessage as postMessageAPI,
   resumeAgent,
+  pauseAgent,
   checkAndRespondToAttentionRequest,
+  hasActiveAttentionRequest as checkHasActiveAttentionRequest,
   getMyInviteCode,
   InviteCodeInfo,
   Agent,
@@ -428,6 +430,10 @@ export default function Terminal() {
   const [agentDetail, setAgentDetail] = useState<AgentDetail | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoadingAgent, setIsLoadingAgent] = useState(false);
+  
+  // Attention request and pause state
+  const [hasActiveAttentionRequest, setHasActiveAttentionRequest] = useState(false);
+  const [isPausing, setIsPausing] = useState(false);
   
   // Message input state
   const [messageInput, setMessageInput] = useState(
@@ -1262,6 +1268,13 @@ export default function Terminal() {
     return () => clearInterval(interval);
   }, [messages, agentDetail, isAnimating, messageBuffer]);
 
+  // Clear streaming bubbles when agent is paused (mid-stream cancellation)
+  useEffect(() => {
+    if (agentDetail?.status === 'PAUSED') {
+      setStreamingBubbles(new Map());
+    }
+  }, [agentDetail?.status]);
+
   const loadAgents = async () => {
     try {
       // Only show loading state on first load
@@ -1291,6 +1304,10 @@ export default function Terminal() {
       setAgentDetail(data.agent);
       setMessages(data.messages); // Already in chronological order (oldest first)
       setSelectedModel(data.agent.model); // Sync UI model with agent's actual model
+      
+      // Check for active attention requests
+      const hasRequest = await checkHasActiveAttentionRequest(agentId);
+      setHasActiveAttentionRequest(hasRequest);
       
       // Mark this as an initial load so we can scroll to bottom
       isInitialLoadRef.current = true;
@@ -1343,6 +1360,7 @@ export default function Terminal() {
     setIsLoadingAgent(false);
     setIsSendingMessage(false);
     setMessageInput('');
+    setHasActiveAttentionRequest(false);
   }, []);
 
   // Reset landing page animation state
@@ -1404,6 +1422,31 @@ export default function Terminal() {
       });
     } finally {
       setResumingAgentId(null);
+    }
+  };
+
+  const handlePauseAgent = async () => {
+    if (!selectedAgentId || !agentDetail) return;
+    
+    try {
+      setIsPausing(true);
+      await pauseAgent(selectedAgentId);
+      
+      // Reload agent details to get updated status
+      await loadAgentDetail(selectedAgentId);
+      
+      toast({
+        title: 'Agent pausing',
+        description: 'The agent will pause shortly',
+      });
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: 'Failed to pause agent',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsPausing(false);
     }
   };
 
@@ -1471,6 +1514,15 @@ export default function Terminal() {
         });
         setMessageInput('');
         return;
+      }
+      
+      // If agent is paused, resume it first
+      if (agentDetail?.status === 'PAUSED') {
+        await resumeAgent(selectedAgentId);
+        toast({
+          title: 'Agent resuming',
+          description: 'The agent will continue with your message',
+        });
       }
       
       // Normal message flow
@@ -2212,11 +2264,28 @@ export default function Terminal() {
                 
 {/* Streaming text is now shown under Thinking indicator below */}
                 
-                {/* Show paused text when agent is paused */}
+                {/* Show paused banner when agent is paused */}
                 {agentDetail?.status === 'PAUSED' && (
                   <div className="flex gap-3">
                     <div className="flex-shrink-0 w-8" />
-                    <p className="text-sm text-muted-foreground">agent is paused</p>
+                    <div 
+                      className="flex items-center gap-2 py-1.5 px-3 rounded-full border border-border"
+                      style={{
+                        backdropFilter: 'blur(12px)',
+                        WebkitBackdropFilter: 'blur(12px)',
+                        backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                      }}
+                    >
+                      <div className="flex items-center justify-center w-5 h-5 rounded-full border-[1.5px] border-muted-foreground">
+                        <svg className="w-2 h-2 text-muted-foreground" fill="currentColor" viewBox="0 0 24 24">
+                          <rect x="6" y="5" width="4" height="14" rx="1" />
+                          <rect x="14" y="5" width="4" height="14" rx="1" />
+                        </svg>
+                      </div>
+                      <span className="text-muted-foreground font-medium text-sm">
+                        Rose has stopped, send a new message to continue
+                      </span>
+                    </div>
                   </div>
                 )}
                 
@@ -2249,7 +2318,7 @@ export default function Terminal() {
                 )}
                 
                 {/* Thinking indicator with streaming text below */}
-                {(showThinkingLoader || streamingBubbles.size > 0) && (
+                {(showThinkingLoader || streamingBubbles.size > 0) && agentDetail?.status !== 'PAUSED' && (
                   <div className="flex gap-3">
                     <div className="flex-shrink-0 w-8" />
                     <div className="flex flex-col gap-2">
@@ -2365,6 +2434,9 @@ export default function Terminal() {
                 setCurrentView('agents');
                 loadAgents();
               }}
+              canSubmit={!selectedAgentId || hasActiveAttentionRequest || agentDetail?.status === 'PAUSED'}
+              onPause={handlePauseAgent}
+              isPausing={isPausing}
             />
             </div>
           </div>

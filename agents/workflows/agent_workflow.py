@@ -388,6 +388,7 @@ class AgentWorkflow:
         self.tokens_in: int = 0  # Cumulative input tokens (prompt)
         self.tokens_out: int = 0  # Cumulative output tokens (completion)
         self.is_paused: bool = False  # Pause state
+        self._current_activity_handle: Optional[workflow.ActivityHandle] = None  # For cancelling LLM mid-stream
         
         # Sub-agent tracking (for parent workflows)
         self.parent_workflow_id: Optional[str] = None
@@ -408,6 +409,11 @@ class AgentWorkflow:
         """Pause workflow execution (instant via signal)."""
         workflow.logger.info("🔴 Received PAUSE signal")
         self.is_paused = True
+        
+        # Cancel any in-progress LLM activity
+        if self._current_activity_handle:
+            self._current_activity_handle.cancel()
+            workflow.logger.info("⏹️ Cancelling in-progress LLM activity")
     
     @workflow.signal
     async def resume(self):
@@ -841,6 +847,11 @@ class AgentWorkflow:
                         })
                     # Sort context by timestamp to maintain chronological order
                     self.context.sort(key=lambda x: x.get("timestamp", ""))
+                
+                # Check for pause signal - if paused, immediately restart loop
+                if self.is_paused:
+                    workflow.logger.info("⏸️ Pause detected after polling messages, restarting loop")
+                    continue
 
                 # 2. Query blueprints AFTER first call (iteration 1, not 0)
                 # First call (iteration 0) is fast with no tools, blueprint query happens after
@@ -866,6 +877,11 @@ class AgentWorkflow:
                                 "text": formatted_blueprint,
                                 "timestamp": workflow.now().isoformat()
                             })
+                    
+                    # Check for pause signal after blueprints query
+                    if self.is_paused:
+                        workflow.logger.info("⏸️ Pause detected after blueprint query, restarting loop")
+                        continue
                 
                 # 3. Decide next action using LLM
                 action = await self._decide_next_action()
@@ -896,6 +912,17 @@ class AgentWorkflow:
                     self.tokens_in += usage["prompt_tokens"]
                     self.tokens_out += usage["completion_tokens"]
                     self.token_count += usage["total_tokens"]
+                
+                # Check if streaming was cancelled mid-stream
+                if usage.get("cancelled"):
+                    workflow.logger.info("⏹️ LLM streaming was cancelled, restarting loop")
+                    self.is_paused = True  # Ensure pause state is set
+                    continue
+                
+                # Check for pause signal after LLM decision
+                if self.is_paused:
+                    workflow.logger.info("⏸️ Pause detected after LLM decision, restarting loop")
+                    continue
                 
                 # 4. Post response to user (visible in UI and added to context)
                 # Reasoning is logged but not posted to chat
@@ -957,6 +984,11 @@ class AgentWorkflow:
                 
                 if tool_calls:
                     await asyncio.gather(*[execute_one_tool(tc) for tc in tool_calls])
+                
+                # Check for pause signal after tool execution
+                if self.is_paused:
+                    workflow.logger.info("⏸️ Pause detected after tool execution, restarting loop")
+                    continue
                 
                 # 5.5. Mark first call as complete (after first LLM response)
                 if self.is_first_call:
@@ -1067,6 +1099,11 @@ class AgentWorkflow:
                     # If not complete, verifier feedback is already in context from the FINISHED message
                     # Agent will continue executing with the feedback
                     workflow.logger.info(f"📋 Verifier returned {progress_score*100:.0f}%, continuing execution")
+                
+                # Check for pause signal after verifier
+                if self.is_paused:
+                    workflow.logger.info("⏸️ Pause detected after verifier, restarting loop")
+                    continue
                 
                 # 8. Update iteration count and token usage
                 self.iteration_count += 1
@@ -1322,7 +1359,8 @@ class AgentWorkflow:
             # Generate a unique stream_id for this LLM call
             stream_id = str(workflow.uuid4())
             
-            action = await workflow.execute_activity(
+            # Start activity (returns handle for cancellation)
+            activity_handle = workflow.start_activity(
                 decide_next_action,
                 args=[
                     filtered_context,
@@ -1338,7 +1376,8 @@ class AgentWorkflow:
                     self.agent_id,  # Enable streaming
                     stream_id       # Enable streaming
                 ],
-                start_to_close_timeout=timedelta(seconds=60),  # Increased for streaming
+                start_to_close_timeout=timedelta(seconds=60),
+                heartbeat_timeout=timedelta(seconds=10),  # Required for cancellation to work
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
                     backoff_coefficient=4.0,
@@ -1347,10 +1386,31 @@ class AgentWorkflow:
                 )
             )
             
+            # Store handle so pause signal can cancel it
+            self._current_activity_handle = activity_handle
+            
+            try:
+                # Await the result
+                action = await activity_handle
+                self._current_activity_handle = None
+            except asyncio.CancelledError:
+                self._current_activity_handle = None
+                workflow.logger.info("⏹️ LLM activity was cancelled by pause signal")
+                # Return cancelled response with zero usage
+                return {
+                    "reasoning": "LLM call cancelled by user",
+                    "response": "",
+                    "tool_calls": [],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cancelled": True}
+                }
+            
             tool_calls_count = len(action.get('tool_calls', []))
             workflow.logger.info(f"LLM decided: {tool_calls_count} tools - {action.get('reasoning')[:100]}")
             return action
             
+        except asyncio.CancelledError:
+            # Re-raise cancellation from inner try
+            raise
         except Exception as e:
             error_msg = f"Failed to decide action: {type(e).__name__}: {str(e)}"
             import traceback

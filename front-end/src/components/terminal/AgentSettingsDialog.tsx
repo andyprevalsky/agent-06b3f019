@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
-import { Settings, Loader2, Play, Pause, Trash2 } from 'lucide-react';
-import { AgentDetail, pauseAgent, resumeAgent, deleteAgent } from '@/lib/api';
+import { Settings, Loader2, Trash2 } from 'lucide-react';
+import { AgentDetail, deleteAgent } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
@@ -41,7 +41,6 @@ function calculateCost(tokensIn: number, tokensOut: number, toolCostCents: numbe
 
 export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: AgentSettingsDialogProps) {
   const [open, setOpen] = useState(false);
-  const [isUpdating, setIsUpdating] = useState(false);
   const [modalPosition, setModalPosition] = useState<{ bottom: number; right: number }>({ bottom: 80, right: 16 });
   const { toast } = useToast();
   const { models } = useAppData();
@@ -74,33 +73,6 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
       });
     }
   }, [open]);
-
-  const handlePauseResume = async () => {
-    console.log('Pause/Resume clicked, current status:', agent.status);
-    setIsUpdating(true);
-    try {
-      if (agent.status === 'PAUSED' || agent.status === 'OUT_OF_CREDITS') {
-        console.log('Resuming agent:', agent.agent_id);
-        await resumeAgent(agent.agent_id);
-        toast({ title: 'Agent resuming', description: 'The agent will resume shortly' });
-      } else {
-        console.log('Pausing agent:', agent.agent_id);
-        await pauseAgent(agent.agent_id);
-        toast({ title: 'Agent pausing', description: 'The agent will pause shortly' });
-      }
-      console.log('Operation successful, calling onUpdate');
-      onUpdate?.();
-    } catch (error) {
-      console.error('Pause/Resume error:', error);
-      toast({
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Operation failed',
-        variant: 'destructive',
-      });
-    } finally {
-      setIsUpdating(false);
-    }
-  };
 
   const handleDeleteAgent = async () => {
     if (!agent || deleteConfirmText !== 'I END MY GOAL') return;
@@ -184,27 +156,8 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
             </div>
           ) : (
           <div className="space-y-6">
-            {/* Pause/Resume Control */}
-            <div className="space-y-2">
-            <Button
-              onClick={handlePauseResume}
-              disabled={isUpdating || !['ACTIVE', 'PAUSED', 'OUT_OF_CREDITS'].includes(agent.status)}
-              className="w-full"
-              variant={['PAUSED', 'OUT_OF_CREDITS'].includes(agent.status) ? 'default' : 'outline'}
-            >
-              {isUpdating ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : ['PAUSED', 'OUT_OF_CREDITS'].includes(agent.status) ? (
-                <Play className="h-4 w-4 mr-2" />
-              ) : (
-                <Pause className="h-4 w-4 mr-2" />
-              )}
-              {['PAUSED', 'OUT_OF_CREDITS'].includes(agent.status) ? 'Resume' : 'Pause'}
-            </Button>
-          </div>
-
           {/* Metrics */}
-          <div className="space-y-3 pt-2 border-t">
+          <div className="space-y-3">
             <Label>Metrics</Label>
             
             <div className="space-y-1">

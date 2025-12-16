@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, ArrowUp, Square, Loader2 } from 'lucide-react';
 import * as amplitude from '@amplitude/analytics-browser';
 import { cn } from '@/lib/utils';
 import {
@@ -58,6 +58,10 @@ interface QueryInputProps {
   agentDetail?: AgentDetail | null;
   onAgentUpdate?: () => void;
   onAgentDelete?: () => void;
+  // Submit/Pause button state props
+  canSubmit?: boolean; // true when no agent selected OR has active attention request
+  onPause?: () => void; // callback to pause the agent
+  isPausing?: boolean; // loading state for pause action
 }
 
 export default function QueryInput({
@@ -93,6 +97,9 @@ export default function QueryInput({
   agentDetail = null,
   onAgentUpdate,
   onAgentDelete,
+  canSubmit = true,
+  onPause,
+  isPausing = false,
 }: QueryInputProps) {
   // Tool picker removed - LLM automatically selects tools based on goal
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -435,19 +442,61 @@ export default function QueryInput({
                 )}
             </div>
 
-            {/* CMD + Enter hint - clickable */}
-            <button
-              onClick={onSubmit}
-              disabled={disabled}
-              className={cn(
-                "flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-300 bg-gray-100 text-gray-700 text-xs shadow-sm transition-colors dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700",
-                disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-gray-200 cursor-pointer"
-              )}
-            >
-              <span className="font-mono text-[17px] leading-none">⌘</span>
-              <span className="font-mono text-xs">+</span>
-              <span className="font-mono text-xs">Enter</span>
-            </button>
+            {/* Submit/Stop Button - dual state */}
+            {canSubmit ? (
+              // UpArrow circle - submit mode
+              <Tooltip delayDuration={200}>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={onSubmit}
+                    disabled={disabled}
+                    className={cn(
+                      "flex items-center justify-center w-10 h-10 rounded-full border border-gray-300 dark:border-gray-700 transition-all",
+                      "bg-gray-100 dark:bg-gray-800 shadow-md",
+                      disabled 
+                        ? "opacity-50 cursor-not-allowed" 
+                        : "hover:brightness-95 cursor-pointer"
+                    )}
+                  >
+                    <ArrowUp className="w-5 h-5 text-gray-700 dark:text-gray-300" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" sideOffset={8}>
+                  <p className="text-xs flex items-center gap-1">
+                    <span>Send</span>
+                    <span>(</span>
+                    <span className="font-mono text-sm">⌘</span>
+                    <span>+ Enter)</span>
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              // Stop square - stop mode
+              <Tooltip delayDuration={200}>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={onPause}
+                    disabled={isPausing}
+                    className={cn(
+                      "flex items-center justify-center w-10 h-10 rounded-full border border-gray-300 dark:border-gray-700 transition-all",
+                      "bg-gray-100 dark:bg-gray-800 shadow-md",
+                      isPausing 
+                        ? "opacity-50 cursor-not-allowed" 
+                        : "hover:brightness-95 cursor-pointer"
+                    )}
+                  >
+                    {isPausing ? (
+                      <Loader2 className="w-5 h-5 text-gray-700 dark:text-gray-300 animate-spin" />
+                    ) : (
+                      <Square className="w-4 h-4 text-gray-700 dark:text-gray-300" fill="currentColor" />
+                    )}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" sideOffset={8}>
+                  <p className="text-xs">Stop</p>
+                </TooltipContent>
+              </Tooltip>
+            )}
           </div>
           </div>
         </div>
