@@ -3,7 +3,7 @@ import { Bell } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
-import { supabase, getStoredSession } from '@/lib/supabase';
+import { supabase } from '@/lib/supabase';
 import { respondToAttentionRequest, skipAttentionRequest } from '@/lib/api';
 import { subscribeToAttentionRequests, unsubscribe } from '@/lib/realtime';
 import { MarkdownText } from './MarkdownText';
@@ -47,7 +47,8 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   // Fetch requests
   const fetchRequests = async () => {
     try {
-      const session = getStoredSession();
+      // Use getSession() to trigger auto-refresh if token is expired
+      const { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) return;
 
       const response = await fetch(
@@ -86,7 +87,8 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   // Set up real-time subscription for attention requests
   useEffect(() => {
     const setupRealtimeSubscription = async () => {
-      const session = getStoredSession();
+      // Use getSession() to trigger auto-refresh if token is expired
+      const { data: { session } } = await supabase.auth.getSession();
       const userId = session?.user?.id;
       if (!userId) return;
 

@@ -1,4 +1,4 @@
-import { supabase, getStoredSession } from './supabase';
+import { supabase } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 /**
@@ -43,8 +43,8 @@ export async function subscribeToAgent(
   agentId: string,
   handlers: AgentHandlers
 ): Promise<RealtimeChannel> {
-  // Ensure realtime has auth token
-  const session = getStoredSession();
+  // Use getSession() to trigger auto-refresh if token is expired
+  const { data: { session } } = await supabase.auth.getSession();
   if (session?.access_token) {
     await supabase.realtime.setAuth(session.access_token);
   } else {
@@ -109,8 +109,8 @@ export async function subscribeToAttentionRequests(
   userId: string,
   handlers: AttentionRequestHandlers
 ): Promise<RealtimeChannel> {
-  // Ensure realtime has auth token
-  const session = getStoredSession();
+  // Use getSession() to trigger auto-refresh if token is expired
+  const { data: { session } } = await supabase.auth.getSession();
   if (session?.access_token) {
     await supabase.realtime.setAuth(session.access_token);
   } else {
