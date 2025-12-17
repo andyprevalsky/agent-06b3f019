@@ -407,30 +407,45 @@ class CheckMonitorEventsTool(BaseModel):
 # ============================================================================
 
 
-class SubGoalConfig(BaseModel):
-    """Configuration for a sub-goal that can be executed in parallel."""
-
-    goal: str = Field(description="The specific goal for this sub-agent to accomplish.")
-    context: str = Field(description="Research context and information to pass to the sub-agent so it doesn't need to re-research.")
-
-
 class SetPlanTool(BaseModel):
-    """Set or update the execution plan. Call this to define what will be done."""
+    """
+    Set or update the execution plan using the two-axis planning framework.
+    
+    Planning operates on two orthogonal axes:
+    1. Reducing uncertainty (ambiguity, unknown constraints, unknown strategy)
+    2. Reducing remaining work (executing known steps once the world is understood)
+    
+    Choose is_proximate based on whether the goal is atomic (can be done in one step)
+    or composite (must be broken into children with a composition operator).
+    """
 
     tool: Literal["set_plan"]
-    markdown_text: str = Field(description="The plan content as markdown text. Describe what will be done to accomplish the goal.")
-    is_parallelizable: bool = Field(
-        description="True if the goal can be parallelized across multiple sub-agents (for evaluating hypotheses, "
-        "increasing accuracy via decomposition, or speeding up execution). "
-        "False if sub-tasks are causally dependent and must be executed sequentially by a single agent."
+    title: str = Field(description="Short title for the plan.")
+    content: str = Field(description="The plan content as markdown text. Describe what will be done to accomplish the goal.")
+    is_proximate: bool = Field(
+        description="True if this goal is ATOMIC (can be executed by one agent). "
+        "False if this goal is COMPOSITE (must be expanded into sub-goals with a composition operator)."
     )
-    sub_tasks: List[str] = Field(description="List of steps/subtasks to complete the plan. These will be displayed to the user.")
-    sub_goals: Optional[List[SubGoalConfig]] = Field(
+    
+    # If proximate (atomic) - direct todos executed sequentially
+    sub_tasks: Optional[List[str]] = Field(
         default=None,
-        description="REQUIRED when is_parallelizable=true. List of context-independent goals for parallel sub-agents. "
-        "Each sub-goal needs: goal (what to accomplish) and context (research findings to avoid re-research). "
-        "Use sub-goals to: 1) evaluate multiple hypotheses in parallel, 2) increase accuracy by decomposing "
-        "into simpler goals, 3) speed up by parallelizing independent work.",
+        description="REQUIRED when is_proximate=true. List of sequential steps to complete the atomic goal. "
+        "These are causally dependent and will be executed in order."
+    )
+    
+    # If NOT proximate (composite) - sub-goals with composition operator
+    sub_goals: Optional[List[str]] = Field(
+        default=None,
+        description="REQUIRED when is_proximate=false. List of sub-goal descriptions for parallel execution. "
+        "Each string is a goal that will be delegated to a sub-agent."
+    )
+    join_modifier: Optional[Literal["&&", "||"]] = Field(
+        default=None,
+        description="REQUIRED when is_proximate=false. Composition operator for sub-goals:\n"
+        "- '&&' (AND): All sub-goals are complementary components that must complete and merge (parallelize work).\n"
+        "- '||' (OR): Sub-goals are alternative hypotheses; any one may satisfy the parent (reduce uncertainty).\n"
+        "Use OR when uncertainty > decomposability. Use AND when decomposability >= uncertainty."
     )
 
 
@@ -655,7 +670,6 @@ __all__ = [
     "EnrichTool",
     "MonitorTool",
     "CheckMonitorEventsTool",
-    "SubGoalConfig",
     "SetPlanTool",
     "ProgressToAutonomousExecutionPhaseTool",
     "MarkExecutionCompleteTool",

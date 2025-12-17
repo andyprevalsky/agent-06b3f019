@@ -1271,7 +1271,24 @@ export default function Terminal() {
     const interval = setInterval(checkThreshold, 100);
     
     return () => clearInterval(interval);
-  }, [messages, agentDetail, isAnimating, messageBuffer]);
+  }, [messages.length, agentDetail?.status, isAnimating, messageBuffer.length]);
+
+  // Debug logging for thinking bubble visibility
+  useEffect(() => {
+    const shouldShowThinking = (showThinkingLoader || streamingBubbles.size > 0) && agentDetail?.status !== 'PAUSED';
+    console.log('🧠 Thinking Bubble Debug:', {
+      // Input props
+      'showThinkingLoader': showThinkingLoader,
+      'streamingBubblesSize': streamingBubbles.size,
+      'agentStatus': agentDetail?.status,
+      'messageBufferLength': messageBuffer.length,
+      'isAnimating': isAnimating,
+      'lastMessageRole': messages[messages.length - 1]?.role,
+      'lastMessageToolStatus': messages[messages.length - 1]?.metadata?.toolStatus,
+      // Computed result
+      'shouldShowThinking': shouldShowThinking,
+    });
+  }, [showThinkingLoader, streamingBubbles.size, agentDetail?.status, messageBuffer.length, isAnimating, messages]);
 
   // Clear streaming bubbles when agent is paused (mid-stream cancellation)
   useEffect(() => {
@@ -2258,6 +2275,14 @@ export default function Terminal() {
                       shouldType={message.message_id === currentAnimatingId}
                       onTypingComplete={handleAnimationComplete}
                       onNavigateToAgent={handleSelectAgent}
+                      agentId={selectedAgentId || undefined}
+                      onSendMessage={selectedAgentId ? async (msg) => {
+                        try {
+                          await postMessageAPI(selectedAgentId, msg);
+                        } catch (error) {
+                          console.error('Failed to send message:', error);
+                        }
+                      } : undefined}
                     />
                   );
                 })}

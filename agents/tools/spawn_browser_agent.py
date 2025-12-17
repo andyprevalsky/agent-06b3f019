@@ -175,6 +175,12 @@ class SpawnBrowserAgentManager(ToolManager):
 
         logger.info("Browser agent starting", goal=original_goal, user_id=user_id, agent_id=agent_id)
         
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=f"Starting up a browser",
+            message='',
+            status=MessageStatus.IN_PROGRESS
+        )
         try:
             # Loop until task is complete
             while True:

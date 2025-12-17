@@ -434,8 +434,8 @@ async def call_llm_structured_streaming(
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
     
-    This variant streams the response and calls `on_chunk` at intervals (10, 25, 50, 100, 200 tokens,
-    then every 100 tokens) with the accumulated response text so far.
+    This variant streams the response and calls `on_chunk` when 18+ new characters have
+    accumulated since the last emit. A final flush is done at the end for any remaining content.
     
     Args:
         messages: List of message dicts with 'role' and 'content'
@@ -489,6 +489,7 @@ async def call_llm_structured_streaming(
         # Stream SSE from Rose endpoint
         accumulated_content = ""
         last_emitted_text = ""  # Track last emitted text to avoid duplicate sends
+        last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
         token_count = 0
         actual_model = "unknown"
         pool_name = "unknown"
@@ -554,11 +555,16 @@ async def call_llm_structured_streaming(
                                 # Estimate tokens (rough: ~4 chars per token)
                                 token_count = len(accumulated_content) // 4
                                 
-                                # Emit every chunk immediately for real-time streaming
+                                # Extract response and track for deduplication
                                 response_text = _extract_response_from_partial_json(accumulated_content)
                                 if response_text and response_text != last_emitted_text:
-                                    await on_chunk(response_text, token_count)
                                     last_emitted_text = response_text
+                                    
+                                    # Only emit when 18+ new chars since last emit
+                                    pending_delta = len(response_text) - len(last_emitted_for_chunk)
+                                    if pending_delta >= 18:
+                                        await on_chunk(response_text, token_count)
+                                        last_emitted_for_chunk = response_text
                         except json.JSONDecodeError:
                             logger.error(f"Failed to parse chunk: {data_str}")
                             continue
@@ -587,9 +593,9 @@ async def call_llm_structured_streaming(
         
         logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, {len(accumulated_content)} chars")
         
-        # Final emit if we have remaining content that wasn't sent
+        # Final emit - flush any remaining content that wasn't sent (under 18 chars)
         response_text = _extract_response_from_partial_json(accumulated_content)
-        if response_text and response_text != last_emitted_text:
+        if response_text and response_text != last_emitted_for_chunk:
             await on_chunk(response_text, token_count)
         
         # Parse final JSON and validate with Pydantic
@@ -626,6 +632,7 @@ async def call_llm_structured_streaming(
         extra_args["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
     
     last_emitted_text = ""
+    last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
     accumulated_text = ""
     final_response = None
     was_cancelled = False
@@ -652,15 +659,19 @@ async def call_llm_structured_streaming(
                 current_text = partial.response
                 if current_text != last_emitted_text:
                     accumulated_text = current_text
-                    # Emit every chunk immediately for real-time streaming
-                    token_count = len(accumulated_text) // 4
-                    await on_chunk(accumulated_text, token_count)
                     last_emitted_text = current_text
+                    
+                    # Only emit when 18+ new chars since last emit
+                    pending_delta = len(accumulated_text) - len(last_emitted_for_chunk)
+                    if pending_delta >= 18:
+                        token_count = len(accumulated_text) // 4
+                        await on_chunk(accumulated_text, token_count)
+                        last_emitted_for_chunk = accumulated_text
             
             final_response = partial
         
-        # Final emit if we have remaining content that wasn't sent
-        if not was_cancelled and accumulated_text and accumulated_text != last_emitted_text:
+        # Final emit - flush any remaining content that wasn't sent (under 18 chars)
+        if not was_cancelled and accumulated_text and accumulated_text != last_emitted_for_chunk:
             await on_chunk(accumulated_text, len(accumulated_text) // 4)
         
     except asyncio.CancelledError:

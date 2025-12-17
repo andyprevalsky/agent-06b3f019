@@ -95,6 +95,10 @@ const buildColorMapper = (colors: string[]) => {
 };
 
 const applyRoseGradient = (data: XmlFrameData | null): XmlFrameData | null => {
+  // TEMPORARILY DISABLED - return data unchanged
+  return data;
+  
+  /* Original implementation:
   if (!data?.frames?.length) return data;
 
   const allColors = new Set<string>();
@@ -120,6 +124,7 @@ const applyRoseGradient = (data: XmlFrameData | null): XmlFrameData | null => {
       xml: frame.xml ? remapXml(frame.xml) : frame.xml,
     })),
   };
+  */
 };
 
 export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAnimationProps>(

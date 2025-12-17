@@ -1,19 +1,18 @@
 """
 Set Plan - Plan phase tool for defining execution plans.
 
-This tool allows agents to set/update the plan that will be displayed to users
-in the plan artifact panel.
+This tool uses the two-axis planning framework:
+1. Reducing uncertainty (ambiguity, unknown constraints, unknown strategy)
+2. Reducing remaining work (executing known steps once the world is understood)
+
+Plans can be:
+- Proximate (atomic): Can be executed in one bounded step with sequential sub_tasks
+- Composite: Must be expanded into sub_goals with a composition operator (AND/OR)
 """
 
 from typing import Dict, Any, Optional, AsyncGenerator, List
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
-
-
-class SubGoal:
-    """A sub-goal for parallel execution."""
-    goal: str
-    context: str  # Research context to pass to sub-agent
 
 
 class SetPlanManager(ToolManager):
@@ -28,56 +27,100 @@ class SetPlanManager(ToolManager):
         tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """
-        Set or update the execution plan.
+        Set or update the execution plan using the two-axis framework.
         
         Args:
-            tool_call: Contains markdown_text, is_parallelizable, sub_tasks, and optionally sub_goals
+            tool_call: Contains title, content, is_proximate, and either:
+                - sub_tasks (for proximate/atomic goals)
+                - sub_goals + join_modifier (for composite goals)
             
         Yields:
             - Message with plan data for frontend display
-            - Error if is_parallelizable=true but sub_goals is empty
+            - Error if validation fails
         """
-        markdown_text = tool_call.get("markdown_text", "")
-        is_parallelizable = tool_call.get("is_parallelizable", False)
+        title = tool_call.get("title", "Untitled Plan")
+        content = tool_call.get("content", "")
+        is_proximate = tool_call.get("is_proximate", True)
         sub_tasks: List[str] = tool_call.get("sub_tasks", [])
-        sub_goals: List[Dict[str, str]] = tool_call.get("sub_goals", [])
+        sub_goals: List[str] = tool_call.get("sub_goals", [])
+        join_modifier: Optional[str] = tool_call.get("join_modifier")
         
-        # Validation: if is_parallelizable=true, sub_goals must be populated
-        if is_parallelizable and not sub_goals:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Plan Validation Error",
-                message=(
-                    "When is_parallelizable=true, you must provide sub_goals. "
-                    "Sub-goals are context-independent goals that can be executed in parallel by sub-agents. "
-                    "Either:\n"
-                    "1. Set is_parallelizable=false if sub-tasks are causally dependent\n"
-                    "2. Provide sub_goals with goal and context for each parallel workstream"
-                ),
-                status=MessageStatus.ERROR
-            )
-            return
+        # Validation based on is_proximate
+        if is_proximate:
+            # Proximate (atomic) goals need sub_tasks
+            if not sub_tasks:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Plan Validation Error",
+                    message=(
+                        "When is_proximate=true (atomic goal), you must provide sub_tasks. "
+                        "Sub-tasks are sequential steps to complete the atomic goal.\n\n"
+                        "Either:\n"
+                        "1. Provide sub_tasks with sequential steps\n"
+                        "2. Set is_proximate=false if this goal should be decomposed into parallel sub-goals"
+                    ),
+                    status=MessageStatus.ERROR
+                )
+                return
+        else:
+            # Composite goals need sub_goals + join_modifier
+            if not sub_goals:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Plan Validation Error",
+                    message=(
+                        "When is_proximate=false (composite goal), you must provide sub_goals. "
+                        "Sub-goals are parallel goals that will be delegated to sub-agents.\n\n"
+                        "Either:\n"
+                        "1. Provide sub_goals with goal descriptions\n"
+                        "2. Set is_proximate=true if this is an atomic goal with sequential steps"
+                    ),
+                    status=MessageStatus.ERROR
+                )
+                return
+            
+            if join_modifier not in ("&&", "||"):
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Plan Validation Error",
+                    message=(
+                        "When is_proximate=false, you must provide join_modifier ('&&' or '||').\n\n"
+                        "- '&&' (AND): All sub-goals must complete (parallelize work)\n"
+                        "- '||' (OR): Any sub-goal can satisfy the parent (reduce uncertainty via hypotheses)\n\n"
+                        "Use OR when uncertainty > decomposability, AND when decomposability >= uncertainty."
+                    ),
+                    status=MessageStatus.ERROR
+                )
+                return
         
         # Build plan data structure for frontend
         plan_data = {
             "type": "plan_artifact",
-            "markdown_text": markdown_text,
-            "is_parallelizable": is_parallelizable,
-            "sub_tasks": sub_tasks,
-            "sub_goals": sub_goals,
+            "title": title,
+            "content": content,
+            "is_proximate": is_proximate,
+            "sub_tasks": sub_tasks if is_proximate else [],
+            "sub_goals": sub_goals if not is_proximate else [],
+            "join_modifier": join_modifier if not is_proximate else None,
             "status": "planning"  # planning, ready, executing, complete
         }
         
-        # Build descriptive message
-        if is_parallelizable:
-            msg = f"Plan set with {len(sub_tasks)} steps. Will spawn {len(sub_goals)} parallel sub-agents."
+        # Store plan in workflow state (required before progress_to_execution)
+        workflow_instance.current_plan = plan_data
+        
+        # Build descriptive message based on plan type
+        if is_proximate:
+            msg = f"**{title}**\n\n{len(sub_tasks)} sequential steps to complete."
         else:
-            msg = f"Plan set with {len(sub_tasks)} steps. Sequential execution (causally dependent tasks)."
+            if join_modifier == "||":
+                msg = f"**{title}**\n\n{len(sub_goals)} hypotheses to evaluate (OR - any one may satisfy)."
+            else:
+                msg = f"**{title}**\n\n{len(sub_goals)} parallel sub-goals (AND - all must complete)."
         
         # Yield event with plan data embedded in message
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title="📋 Plan Updated",
+            title=title,
             message=msg,
             status=MessageStatus.FINISHED,
             data=plan_data
@@ -104,7 +147,7 @@ async def set_plan(
     
     Args:
         workflow_instance: The workflow instance
-        tool_call: Tool call dict with markdown_text, is_parallelizable, sub_tasks, sub_goals
+        tool_call: Tool call dict with title, content, is_proximate, sub_tasks/sub_goals, join_modifier
         tool_call_id: Unique ID for this tool call
     """
     manager = get_manager()

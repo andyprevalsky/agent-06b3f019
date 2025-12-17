@@ -79,19 +79,52 @@ def build_system_prompt(
             """
     CURRENT PHASE: PLAN
 
-    - Use only the ENABLED tools to gather the information required for execution.
-    - Call `set_plan` with markdown_text (detailed plan), is_parallelizable, sub_tasks, and sub_goals (required when parallelizing).
+    TWO-AXIS PLANNING FRAMEWORK
+    ---------------------------
+    All progress toward a goal happens along two orthogonal axes:
+    1. Reducing UNCERTAINTY (ambiguity, unknown constraints, unknown strategy, unknown correctness)
+    2. Reducing REMAINING WORK (doing known steps once the world is understood)
+
+    Decision heuristic:
+    - If uncertainty > decomposability → use OR composition (hypotheses to reduce uncertainty first)
+    - If decomposability >= uncertainty → use AND composition (parallelize work)
+    - Parallelism is only safe when entropy/uncertainty is low
+
+    PLANNING TOOLS
+    --------------
+    - Call `set_plan` with:
+        - `title`: Short plan name
+        - `content`: Detailed markdown explanation
+        - `is_proximate`: True if ATOMIC (sequential steps), False if COMPOSITE (parallel sub-goals)
+        - For atomic goals: `sub_tasks` (sequential steps)
+        - For composite goals: `sub_goals` (parallel goal strings) + `join_modifier`:
+            - '&&' (AND): All sub-goals must complete and merge (parallelize work)
+            - '||' (OR): Any sub-goal can satisfy the parent (reduce uncertainty via hypotheses)
+    
     - Immediately after finalizing the plan, send a concise summary to the user via `send_message_to_user({"message": "...", "is_question": false})` so they can see what will run. If you still need clarification/approval, set `is_question` to true so work pauses until they reply.
-    - Call `progress_to_autonomous_execution_phase` only when you no longer need clarifications and have a low-energy, elegant plan. Once you move to the EXECUTE phase, you can no longer get any input from the user, so make sure you have asked any necessary clarifying questions before moving on.
+    
+    - Call `progress_to_autonomous_execution_phase` only when:
+        1. You have called set_plan (REQUIRED - will error otherwise)
+        2. You no longer need clarifications
+        3. You have a low-energy, elegant plan
+    
+    - Once you move to EXECUTE phase, you can no longer get user input, so ask necessary clarifying questions first.
+
+    PARALLELIZATION GUIDANCE
+    ------------------------
     - Parallelize when evaluating multiple hypotheses, increasing accuracy via decomposition, or speeding execution with independent workstreams.
     - Keep work sequential when tasks are causally dependent.
     - spawn_sub_agents should be used anytime we want to do any or all of the following:
         1. speed up work via context-independent parallelization
         2. evaluate multiple context-independent hypotheses
         3. reduce complexity by decomposing the user goal into more proximate, context-independent sub-goals
-    - Once success criteria are set, treat them as fixed unless a tool failure forces a pivot.
+
+    GENERAL RULES
+    -------------
+    - Use only ENABLED tools to gather information required for execution.
     - Use `send_message_to_user({"message": "<markdown text to user>", "is_question": true})` whenever you truly need clarification or approvals; write the exact user-visible question in the message parameter.
     - Whenever you call `send_message_to_user`, it must be the ONLY tool in that turn (no bundling with other tool calls).
+    - Once success criteria are set, treat them as fixed unless a tool failure forces a pivot.
             """
         ).strip()
     else:

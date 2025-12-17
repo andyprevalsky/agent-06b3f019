@@ -204,13 +204,13 @@ PLAN_ONLY_TOOLS = {
     "set_plan": {
         "id": "plan-set-plan",
         "name": "set_plan",
-        "description": "Set or update the execution plan. Provide markdown_text (plan content), is_parallelizable (true if work can be parallelized, false if tasks are causally dependent), sub_tasks (steps list), and sub_goals (REQUIRED when is_parallelizable=true - list of goals with context for parallel sub-agents).",
+        "description": "Set or update the execution plan using the two-axis framework. Provide: title (short plan name), content (markdown explanation), is_proximate (true if atomic/sequential, false if composite/parallel). For atomic goals: provide sub_tasks (sequential steps). For composite goals: provide sub_goals (parallel sub-goal strings) and join_modifier ('&&' for AND/parallel work, '||' for OR/hypotheses).",
         "plan_only": True
     },
     "progress_to_autonomous_execution_phase": {
         "id": "plan-progress-to-execute",
         "name": "progress_to_autonomous_execution_phase",
-        "description": "Request to transition to autonomous execution phase. This will prompt the user to approve the plan before execution begins.",
+        "description": "Request to transition to autonomous execution phase. REQUIRES a plan to be set first via set_plan. The user will be prompted to approve the plan before execution begins.",
         "plan_only": True
     },
 }
@@ -400,6 +400,9 @@ class AgentWorkflow:
         # Simplified 2-phase system: PLAN → EXECUTE
         # Phase is detected statelessly from user messages containing "execute"
         self.is_first_call: bool = True  # First call uses fast model, no tools
+        
+        # Plan state - must be set before progress_to_autonomous_execution_phase
+        self.current_plan: Optional[Dict] = None
         
         # Lock for thread-safe token counter updates during parallel execution
         self._state_lock = asyncio.Lock()

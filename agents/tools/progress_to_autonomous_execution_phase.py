@@ -28,18 +28,51 @@ class ProgressToAutonomousExecutionPhaseManager(ToolManager):
         This posts a message that the frontend will render with a "Start Autonomous Execution" button.
         Phase transition happens statelessly when user sends "start autonomous execution".
         
+        GUARD: Requires workflow_instance.current_plan to be set (via set_plan tool).
+        
         Yields:
+            - Error if no plan set
             - Message indicating plan is ready for approval
         """
-        # Yield event with data for frontend to render Execute button
+        # GUARD: Get plan from workflow state - error if not set
+        plan = getattr(workflow_instance, 'current_plan', None)
+        
+        if plan is None:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="❌ Cannot Progress to Execution",
+                message=(
+                    "Cannot progress to execution without a plan. "
+                    "You must call **set_plan** first to define what will be executed.\n\n"
+                    "Use set_plan to specify:\n"
+                    "- `title`: Short plan name\n"
+                    "- `content`: Markdown explanation of the plan\n"
+                    "- `is_proximate`: True for atomic (sequential), False for composite (parallel)\n"
+                    "- `sub_tasks` or `sub_goals` + `join_modifier` depending on is_proximate"
+                ),
+                status=MessageStatus.ERROR
+            )
+            return
+        
+        # Get goal from workflow instance
+        goal = getattr(workflow_instance, 'goal', 'your goal')
+        
+        # Yield send_message_to_user style event (is_question=false, non-blocking FYI)
+        message = f"Looks like I have everything I need in order to accomplish your goal - **{goal}**\n\nWe will now proceed to fulfill your request, just sit back, relax, and let us figure out the rest :)"
+        
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title="✓ Plan Ready",
-            message="Plan is ready for execution. Click 'Start Autonomous Execution' to proceed.",
+            title="FYI for User",
+            message=message,
             status=MessageStatus.FINISHED,
-            data={
-                "type": "execute_phase_request",
-                "awaiting_approval": True
+            metadata={
+                "isUserAttentionMessage": True,
+                "attentionMessage": message,
+                "sendMessageToUser": {
+                    "isQuestion": False,
+                    "attentionKind": "info",
+                    "isWaitingForUser": False,
+                },
             }
         )
 

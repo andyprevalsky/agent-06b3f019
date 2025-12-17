@@ -1,3 +1,16 @@
+/**
+ * @deprecated This component is deprecated. Use PlanChip.tsx instead.
+ * 
+ * PlanChip renders plans inline in the conversation as an expandable chip,
+ * replacing this fixed right-pane approach.
+ * 
+ * Migration:
+ * - Import PlanChip from './PlanChip' instead
+ * - PlanChip uses the new two-axis planning framework schema:
+ *   - title, content, is_proximate, sub_tasks, sub_goals, join_modifier
+ * - PlanChip is automatically rendered in MessageBubble for set_plan tool messages
+ */
+
 import React, { memo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { MarkdownText } from './MarkdownText';
@@ -25,6 +38,8 @@ interface PlanArtifactProps {
 }
 
 /**
+ * @deprecated Use PlanChip instead. This component is kept for backwards compatibility only.
+ * 
  * PlanArtifact - Fixed right-pane component displaying the agent's plan
  * Similar to Cursor's plan mode UI
  */

@@ -3,8 +3,10 @@ import { cn } from '@/lib/utils';
 import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
 import { useState, useEffect, useMemo, memo } from 'react';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import SubAgentToolBubble from './SubAgentToolBubble';
 import { MarkdownText } from './MarkdownText';
+import { PlanChip } from './PlanChip';
 import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 import { useToast } from '@/hooks/use-toast';
 import ThinkingAnimation from '../ThinkingAnimation';
@@ -16,6 +18,10 @@ interface MessageBubbleProps {
   onNavigateToAgent?: (agentId: string) => void;
   /** Indicates this is a streaming bubble (in-progress LLM response) */
   isStreaming?: boolean;
+  /** Agent ID for sending messages */
+  agentId?: string;
+  /** Callback to send a message */
+  onSendMessage?: (message: string) => void;
 }
 
 interface ToolMessageData {
@@ -382,11 +388,13 @@ const AttentionMessage = memo(function AttentionMessage({
   isWaiting,
   shouldType = false,
   onComplete,
+  onStartExecution,
 }: {
   attentionMessage: string;
   isWaiting: boolean;
   shouldType?: boolean;
   onComplete?: () => void;
+  onStartExecution?: () => void;
 }) {
   const [hasAnimated, setHasAnimated] = useState(false);
   
@@ -415,22 +423,50 @@ const AttentionMessage = memo(function AttentionMessage({
         
         {/* Yellow dashed circle indicator - only show while waiting */}
         {isWaiting && (
-          <div className="flex items-center gap-2 text-amber-500">
-            <div 
-              className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500" 
-              style={{ animation: 'spin 3s linear infinite' }} 
-            />
-            <span className="text-xs font-medium">
-              Your Rose agent will continue working after your reply
-            </span>
-          </div>
+          <>
+            <div className="flex items-center gap-2 text-amber-500">
+              <div 
+                className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500" 
+                style={{ animation: 'spin 3s linear infinite' }} 
+              />
+              <span className="text-xs font-medium">
+                Your Rose agent will continue working after your reply
+              </span>
+            </div>
+            
+            {/* Start Autonomous Execution button */}
+            {onStartExecution && (
+              <TooltipProvider delayDuration={300}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={onStartExecution}
+                      className="flex items-center gap-2 text-muted-foreground hover:bg-muted/30 hover:text-muted-foreground"
+                    >
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="1" />
+                        <path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z" />
+                        <path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z" />
+                      </svg>
+                      Start Autonomous Execution
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="max-w-xs text-left text-xs">
+                    <p>Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask you any more questions and relentlessly explore all possible avenues in order to accomplish your goal given the context at its disposal.</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+          </>
         )}
       </div>
     </div>
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -443,6 +479,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   // Check if this is a sub-agent tool message (ones that link to an agent_id)
   const isSubAgentTool = !!message.metadata?.subAgentId;
+
+  // Check if this is a set_plan tool message (render as PlanChip)
+  const isSetPlanTool = isTool && message.metadata?.toolName === 'set_plan';
 
   // Memoize tool data to prevent flickers on re-renders
   const toolData = useMemo(() => {
@@ -522,10 +561,50 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   if (subAgentBubble) return subAgentBubble;
 
+  // set_plan tool: render as PlanChip instead of standard tool card
+  // NOTE: Must call onTypingComplete immediately since PlanChip doesn't animate text.
+  // The message queue in Terminal.tsx blocks on isAnimating until callback is called.
+  if (isSetPlanTool && message.metadata?.data) {
+    // Call callback immediately since PlanChip doesn't have text animation
+    if (shouldType && onTypingComplete) {
+      requestAnimationFrame(() => {
+        onTypingComplete();
+      });
+    }
+    
+    const planData = message.metadata.data;
+    return (
+      <div className="flex gap-3 animate-in fade-in duration-300">
+        <div className="flex-shrink-0 w-8" />
+        <div className="flex-1">
+          <PlanChip
+            plan={{
+              title: planData.title || 'Plan',
+              content: planData.content || '',
+              is_proximate: planData.is_proximate ?? true,
+              sub_tasks: planData.sub_tasks || [],
+              sub_goals: planData.sub_goals || [],
+              join_modifier: planData.join_modifier || null,
+              status: planData.status || 'planning',
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+
   // Request user attention: render as raw text with yellow indicator (swallow tool display)
   if (isUserAttentionMessage) {
     const attentionMessage = message.metadata?.attentionMessage || message.text;
     const isWaiting = message.metadata?.toolStatus === 'IN_PROGRESS';
+    
+    const handleStartExecution = () => {
+      if (onSendMessage) {
+        onSendMessage(
+          'Please do not ask me anymore questions. I trust your judgment, intuition, and ability to make reasonable assumptions. Please proceed to the Autonomous Execution phase.'
+        );
+      }
+    };
     
     return (
       <AttentionMessage
@@ -533,6 +612,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
         isWaiting={isWaiting}
         shouldType={shouldType}
         onComplete={onTypingComplete}
+        onStartExecution={onSendMessage ? handleStartExecution : undefined}
       />
     );
   }
