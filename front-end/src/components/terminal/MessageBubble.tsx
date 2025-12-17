@@ -454,7 +454,7 @@ const AttentionMessage = memo(function AttentionMessage({
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top" className="max-w-xs text-left text-xs">
-                    <p>Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask you any more questions and relentlessly explore all possible avenues in order to accomplish your goal given the context at its disposal.</p>
+                    <p>Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask you any more questions and will relentlessly explore all possible avenues in order to accomplish your goal given the context at its disposal.</p>
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
