@@ -94,6 +94,68 @@ async def stream_assistant_chunk(
         logger.debug(f"Stream chunk error (non-fatal): {str(e)}")
 
 
+async def stream_plan_event(
+    agent_id: str,
+    stream_id: str,
+    tool_call_id: str,
+    title: str,
+) -> None:
+    """
+    Broadcast plan streaming state DIRECTLY to Supabase Realtime (no DB insert).
+    
+    This is used to show the PlanChip with shimmer effect during LLM streaming,
+    without creating a database record. The FINISHED state comes later via
+    normal tool execution which does create a DB record.
+    
+    Args:
+        agent_id: The agent ID
+        stream_id: Unique ID for this streaming session (same as assistant stream)
+        tool_call_id: The tool_call_id that will be used for the final set_plan
+        title: The plan title (or "Generating Plan..." initially)
+    """
+    try:
+        from config import load_config
+        
+        config = load_config()
+        
+        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
+        
+        payload = {
+            "messages": [{
+                "topic": f"agent:{agent_id}",
+                "event": "PLAN_STREAM",
+                "payload": {
+                    "record": {
+                        "stream_id": stream_id,
+                        "tool_call_id": tool_call_id,
+                        "title": title,
+                    }
+                },
+                "private": True
+            }]
+        }
+        
+        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
+        
+        client = _get_broadcast_client()
+        response = await client.post(
+            broadcast_url,
+            json=payload,
+            headers={
+                "apikey": broadcast_key,
+                "Authorization": f"Bearer {broadcast_key}",
+                "Content-Type": "application/json"
+            }
+        )
+        
+        if response.status_code not in (200, 202):
+            logger.debug(f"Plan stream broadcast failed: status={response.status_code}")
+                
+    except Exception as e:
+        # Don't fail the workflow if streaming fails - it's best-effort
+        logger.debug(f"Plan stream error (non-fatal): {str(e)}")
+
+
 @activity.defn
 async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
     """

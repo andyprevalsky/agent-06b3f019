@@ -172,7 +172,7 @@ SYSTEM_TOOLS = [
     {
         "id": "system-spawn-browser-agent",
         "name": "spawn_browser_agent",
-        "description": "Spawn an autonomous browser agent to complete web tasks. The agent can navigate websites, fill forms, click buttons, and interact with web pages. Use this for any task that requires browsing the web interactively. Browser cookies have been injected - assume the user is logged in until proven otherwise."
+        "description": "Spawn an autonomous browser agent to complete web tasks including purchases, checkouts, and e-commerce transactions. The agent can navigate websites, fill forms, click buttons, add items to cart, complete checkout flows, and interact with any web page. Use this for any task that requires browsing the web interactively. Browser cookies have been injected - assume the user is logged in and payment methods are saved until proven otherwise."
     },
     {
         "id": "system-web-search",
@@ -237,7 +237,7 @@ def detect_phase_from_context(context: List[Dict]) -> str:
     
     Transitions to EXECUTE phase if:
     1. Any USER message contains "start autonomous execution" (case-insensitive)
-    2. OR the progress_to_autonomous_execution_phase tool was called
+    2. OR the progress_to_autonomous_execution_phase tool was called AND SUCCEEDED
     
     Otherwise, stays in PLAN phase.
     
@@ -254,20 +254,15 @@ def detect_phase_from_context(context: List[Dict]) -> str:
             if 'start autonomous execution' in text:
                 return 'EXECUTE'
         
-        # Check for progress_to_autonomous_execution_phase tool call
+        # Check for progress_to_autonomous_execution_phase tool call - ONLY if it SUCCEEDED
+        # The TOOL message contains the result status, so we check toolStatus != ERROR
         if msg.get('role') == 'TOOL':
             metadata = msg.get('metadata', {})
             tool_name = metadata.get('toolName', '')
-            if tool_name == 'progress_to_autonomous_execution_phase':
+            tool_status = metadata.get('toolStatus', '')
+            # Only transition if the tool SUCCEEDED (not ERROR/FAILED)
+            if tool_name == 'progress_to_autonomous_execution_phase' and tool_status not in ['ERROR', 'FAILED']:
                 return 'EXECUTE'
-        
-        # Also check ASSISTANT messages for tool_calls metadata
-        if msg.get('role') == 'ASSISTANT':
-            metadata = msg.get('metadata', {})
-            tool_calls = metadata.get('tool_calls', [])
-            for tc in tool_calls:
-                if tc.get('tool') == 'progress_to_autonomous_execution_phase':
-                    return 'EXECUTE'
     
     return 'PLAN'
 
@@ -403,6 +398,10 @@ class AgentWorkflow:
         
         # Plan state - must be set before progress_to_autonomous_execution_phase
         self.current_plan: Optional[Dict] = None
+        
+        # Current phase state for tool validation (set by _decide_next_action)
+        self._current_phase: str = "PLAN"
+        self._current_enabled_tool_names: List[str] = []
         
         # Lock for thread-safe token counter updates during parallel execution
         self._state_lock = asyncio.Lock()
@@ -952,6 +951,24 @@ class AgentWorkflow:
                         if tool_name not in EVENT_DRIVEN_TOOLS:
                             raise ValueError(f"Unknown tool: {tool_name}")
                         
+                        # Check if tool is enabled for current phase (block disabled tools)
+                        if tool_name not in self._current_enabled_tool_names:
+                            current_phase = self._current_phase
+                            error_msg = f"Tool '{tool_name}' is not available in {current_phase} phase. You must call set_plan and progress_to_autonomous_execution_phase first to unlock execute-phase tools."
+                            await self._post_message(
+                                error_msg,
+                                "TOOL",
+                                metadata={
+                                    "toolCallId": tool_call_id,
+                                    "toolName": tool_name,
+                                    "toolStatus": "ERROR",
+                                    "title": f"Tool Disabled in {current_phase} Phase",
+                                    "error": True
+                                }
+                            )
+                            workflow.logger.warning(f"⛔ Blocked disabled tool: {tool_name} in {current_phase} phase")
+                            return
+                        
                         # Check if tool requires user approval before execution
                         if tool_name in TOOL_MANAGERS:
                             manager = TOOL_MANAGERS[tool_name]()
@@ -1333,6 +1350,7 @@ class AgentWorkflow:
         """
         # Detect phase statelessly from user messages
         phase = detect_phase_from_context(self.context)
+        self._current_phase = phase  # Store for use in execute_one_tool
         workflow.logger.info(f"Deciding next action (phase={phase}, is_first_call={self.is_first_call})")
         
         try:
@@ -1345,6 +1363,7 @@ class AgentWorkflow:
             
             enabled_tools = phase_config["enabled_tools"]
             enabled_tool_names = phase_config["enabled_tool_names"]
+            self._current_enabled_tool_names = enabled_tool_names  # Store for use in execute_one_tool
             disabled_tools = phase_config["disabled_tools"]
             model_preference = phase_config["model_preference"]
             

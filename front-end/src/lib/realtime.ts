@@ -13,6 +13,16 @@ export interface StreamChunkPayload {
 }
 
 /**
+ * Plan streaming payload from PLAN_STREAM events
+ * Ephemeral (not persisted to DB) - shows PlanChip with shimmer during LLM streaming
+ */
+export interface PlanStreamPayload {
+  stream_id: string;
+  tool_call_id: string;
+  title: string;
+}
+
+/**
  * Handlers for agent channel events
  */
 export interface AgentHandlers {
@@ -20,6 +30,7 @@ export interface AgentHandlers {
   onUpdate?: (payload: any) => void;
   onDelete?: (payload: any) => void;
   onAssistantStream?: (payload: StreamChunkPayload) => void;
+  onPlanStream?: (payload: PlanStreamPayload) => void;
 }
 
 /**
@@ -76,6 +87,17 @@ export async function subscribeToAgent(
           delta: record.delta,
           done: record.done,
           sequence: record.sequence,
+        });
+      }
+    })
+    .on('broadcast', { event: 'PLAN_STREAM' }, (payload) => {
+      // Extract plan stream data from payload (ephemeral, no DB insert)
+      const record = payload?.payload?.record;
+      if (record && handlers?.onPlanStream) {
+        handlers.onPlanStream({
+          stream_id: record.stream_id,
+          tool_call_id: record.tool_call_id,
+          title: record.title,
         });
       }
     });

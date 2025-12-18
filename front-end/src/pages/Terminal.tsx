@@ -8,7 +8,7 @@ import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bo
 import AppSidebar from '@/components/terminal/AppSidebar';
 import { supabase, signOut, initializeRealtime, clearStoredSession } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
-import { subscribeToAgent, unsubscribe, StreamChunkPayload } from '@/lib/realtime';
+import { subscribeToAgent, unsubscribe, StreamChunkPayload, PlanStreamPayload } from '@/lib/realtime';
 import {
   getAllAgents,
   getAgent,
@@ -30,6 +30,7 @@ import AgentListItem from '@/components/terminal/AgentListItem';
 import MessageBubble from '@/components/terminal/MessageBubble';
 import { MarkdownText } from '@/components/terminal/MarkdownText';
 import AsciiLoader from '@/components/terminal/AsciiLoader';
+import { PlanChip } from '@/components/terminal/PlanChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import QueryInput from '@/components/terminal/QueryInput';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
@@ -477,6 +478,14 @@ export default function Terminal() {
   
   // Track text that was already shown via streaming - don't re-animate on INSERT
   const streamedTextsRef = useRef<Set<string>>(new Set());
+  
+  // Streaming plan state - ephemeral (not persisted) plan chip shown during LLM streaming
+  // Cleared when the real set_plan FINISHED message arrives via DB INSERT
+  const [streamingPlan, setStreamingPlan] = useState<{
+    stream_id: string;
+    tool_call_id: string;
+    title: string;
+  } | null>(null);
 
   // Opening messages reveal animation
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
@@ -830,6 +839,8 @@ export default function Terminal() {
         }
         return new Map();
       });
+      // Clear ephemeral streaming plan
+      setStreamingPlan(null);
     };
 
     // Early return but STILL return cleanup function
@@ -932,6 +943,14 @@ export default function Terminal() {
               });
             }
             
+            // Clear ephemeral streaming plan when real set_plan FINISHED arrives
+            if (message.role === 'TOOL' && 
+                message.metadata?.toolName === 'set_plan' && 
+                message.metadata?.toolStatus === 'FINISHED') {
+              console.log(`📋 set_plan FINISHED - clearing streaming plan`);
+              setStreamingPlan(null);
+            }
+            
             // Add to buffer queue - it will be displayed when ready
             setMessageBuffer((prev) => [...prev, message]);
           },
@@ -1013,6 +1032,15 @@ export default function Terminal() {
               }
               
               return newMap;
+            });
+          },
+          onPlanStream: (plan: PlanStreamPayload) => {
+            // Ephemeral plan streaming - show PlanChip with shimmer during LLM streaming
+            console.log(`📋 PLAN STREAM EVENT:`, plan);
+            setStreamingPlan({
+              stream_id: plan.stream_id,
+              tool_call_id: plan.tool_call_id,
+              title: plan.title,
             });
           },
         });
@@ -1290,10 +1318,11 @@ export default function Terminal() {
     });
   }, [showThinkingLoader, streamingBubbles.size, agentDetail?.status, messageBuffer.length, isAnimating, messages]);
 
-  // Clear streaming bubbles when agent is paused (mid-stream cancellation)
+  // Clear streaming bubbles and plan when agent is paused (mid-stream cancellation)
   useEffect(() => {
     if (agentDetail?.status === 'PAUSED') {
       setStreamingBubbles(new Map());
+      setStreamingPlan(null);
     }
   }, [agentDetail?.status]);
 
@@ -2367,6 +2396,24 @@ export default function Terminal() {
                           {Array.from(streamingBubbles.entries()).map(([streamId, bubble]) => (
                             <StreamingMarkdown key={streamId} text={bubble.text} />
                           ))}
+                        </div>
+                      )}
+                      
+                      {/* Ephemeral streaming plan - shown during LLM generation */}
+                      {streamingPlan && (
+                        <div className="pl-6 mt-2">
+                          <PlanChip
+                            plan={{
+                              title: streamingPlan.title,
+                              content: '',
+                              is_proximate: true,
+                              sub_tasks: [],
+                              sub_goals: [],
+                              join_modifier: null,
+                              status: 'planning',
+                            }}
+                            toolStatus="IN_PROGRESS"
+                          />
                         </div>
                       )}
                     </div>

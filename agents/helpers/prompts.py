@@ -2,6 +2,7 @@ from textwrap import dedent
 from typing import Dict, List
 
 from tools.base import ToolSchema
+from helpers.tool_schemas import TOOL_MODELS
 
 
 TOOL_PHASE_AVAILABILITY = {
@@ -43,10 +44,58 @@ def build_system_prompt(
             return tool.get("name", "<unnamed tool>")
         return getattr(tool, "name", "<unnamed tool>")
 
-    def _format_tool_list(tools: List[ToolSchema]) -> str:
+    def _format_tool_with_schema(tool: ToolSchema) -> str:
+        """Format a tool with its full schema including parameters and descriptions."""
+        name = tool.get("name", "<unnamed>") if isinstance(tool, dict) else getattr(tool, "name", "<unnamed>")
+        desc = tool.get("description", "") if isinstance(tool, dict) else getattr(tool, "description", "")
+        note = tool.get("_disabled_note", "") if isinstance(tool, dict) else ""
+        
+        header = f"- **{name}**"
+        if note:
+            header += f" ({note})"
+        
+        lines = [header]
+        
+        if desc:
+            lines.append(f"  {desc}")
+        
+        # Get full parameter schema from Pydantic model if available
+        if name in TOOL_MODELS:
+            model = TOOL_MODELS[name]
+            schema = model.model_json_schema()
+            properties = schema.get("properties", {})
+            required = set(schema.get("required", []))
+            
+            # Skip 'tool' field, show other params
+            params = [(k, v) for k, v in properties.items() if k != "tool"]
+            if params:
+                lines.append("  **Parameters:**")
+                for param_name, param_info in params:
+                    param_type = param_info.get("type", "any")
+                    param_desc = param_info.get("description", "")
+                    req_marker = " (required)" if param_name in required else ""
+                    truncated_desc = param_desc[:150] + ('...' if len(param_desc) > 150 else '')
+                    lines.append(f"    - `{param_name}` ({param_type}{req_marker}): {truncated_desc}")
+        
+        return "\n".join(lines)
+
+    def _format_tool_list(tools: List[ToolSchema], include_schema: bool = False) -> str:
         if not tools:
             return "- None"
-        return "\n".join(f"- {_tool_name(tool)}" for tool in tools)
+        
+        if include_schema:
+            return "\n\n".join(_format_tool_with_schema(t) for t in tools)
+        
+        # Simple name-only format (existing behavior)
+        lines = []
+        for tool in tools:
+            name = _tool_name(tool)
+            note = tool.get("_disabled_note") if isinstance(tool, dict) else None
+            if note:
+                lines.append(f"- {name} ({note})")
+            else:
+                lines.append(f"- {name}")
+        return "\n".join(lines)
 
     # IDENTITY
     identity_block = dedent(
@@ -122,7 +171,9 @@ def build_system_prompt(
 
     GENERAL RULES
     -------------
-    - Use only ENABLED tools to gather information required for execution.
+    - Use only ENABLED tools NOW to gather information required for planning.
+    - DISABLED tools marked "available in execute phase" can be included in your plan's sub_tasks - they become available when execution begins.
+    - For goals like "get me X", "buy X", "order X", or "purchase X", the plan MUST include the actual purchase/acquisition step using spawn_browser_agent - do NOT end with "send recommendations to user". The user asked you to GET the item, not recommend options.
     - Use `send_message_to_user({"message": "<markdown text to user>", "is_question": true})` whenever you truly need clarification or approvals; write the exact user-visible question in the message parameter.
     - Whenever you call `send_message_to_user`, it must be the ONLY tool in that turn (no bundling with other tool calls).
     - Once success criteria are set, treat them as fixed unless a tool failure forces a pivot.
@@ -175,7 +226,7 @@ def build_system_prompt(
 
         system_prompt += f"""
     DISABLED tools ({len(disabled_tools)}):
-{_format_tool_list(disabled_tools)}
+{_format_tool_list(disabled_tools, include_schema=True)}
     """
 
     # PROCESS / CONTROL LOGIC

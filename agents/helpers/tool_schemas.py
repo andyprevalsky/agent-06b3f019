@@ -119,11 +119,11 @@ class MessagePersonTool(BaseModel):
 
 
 class SpawnBrowserAgentTool(BaseModel):
-    """Spawn an autonomous browser agent to complete complex, multi-step web tasks. The browser agent uses AI to navigate, interact, and accomplish goals without step-by-step orchestration. Provide a complete, high-level goal - the browser agent will autonomously break it down and execute all necessary steps. Login state persists across sessions."""
+    """Spawn an autonomous browser agent to complete complex, multi-step web tasks including purchases, checkouts, and e-commerce transactions. The browser agent uses AI to navigate, interact, add items to cart, complete checkout flows, and accomplish goals without step-by-step orchestration. Provide a complete, high-level goal - the browser agent will autonomously break it down and execute all necessary steps. Login state and saved payment methods persist across sessions."""
 
     tool: Literal["spawn_browser_agent"]
     goal: str = Field(
-        description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Order a Chipotle bowl from Uber Eats with white rice, steak, fajita peppers, corn, pico de gallo, and hot sauce', 'Find the top 3 trending Python repos on GitHub and summarize their READMEs', 'Check my Gmail inbox and respond to any urgent emails from my manager', 'Research and compare prices for MacBook Pro M3 across Amazon, Best Buy, and Apple Store'"
+        description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy a black beanie under $35 from Amazon', 'Order a Chipotle bowl from Uber Eats with white rice, steak, fajita peppers, corn, pico de gallo, and hot sauce', 'Purchase the cheapest MacBook Pro M3 from Amazon, Best Buy, or Apple Store', 'Find the top 3 trending Python repos on GitHub and summarize their READMEs'"
     )
 
 
@@ -575,6 +575,7 @@ TOOL_MODELS = {
 
 def create_agent_action_model(
     available_tool_names: List[str],
+    max_reasoning_characters: int = 200,
 ) -> Type[BaseModel]:
     """
     Dynamically create an AgentAction Pydantic model based on available tools.
@@ -628,7 +629,7 @@ def create_agent_action_model(
         "AgentAction",
         reasoning=(
             Optional[str],
-            Field(default=None, description="Internal scratchpad. Use metaphysical seed thinking here. NEVER shown to user."),
+            Field(default=None, description=f"Internal scratchpad. Use metaphysical seed thinking here. MUST be under {max_reasoning_characters} characters. NEVER shown to user."),
         ),
         response=(
             str,

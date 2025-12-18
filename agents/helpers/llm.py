@@ -1,6 +1,8 @@
 """LLM tool for agent reasoning and decision making."""
 
 import asyncio
+import re
+import uuid
 from typing import List, Dict, Optional, Any, TypeVar, Type, AsyncIterator, Tuple, Callable, Awaitable
 from temporalio import activity
 import structlog
@@ -429,8 +431,10 @@ async def call_llm_structured_streaming(
     on_chunk: Callable[[str, int], Awaitable[None]],
     reasoning_effort: Optional[str] = None,
     model_preference: Optional[str] = None,
-    agent_id: Optional[str] = None  # For cancellation checking
-) -> Tuple[T, Dict]:
+    agent_id: Optional[str] = None,  # For cancellation checking
+    on_plan_start: Optional[Callable[[str], Awaitable[None]]] = None,  # Called when set_plan detected
+    on_plan_title: Optional[Callable[[str, str], Awaitable[None]]] = None,  # Called when plan title detected
+) -> Tuple[T, Dict, Optional[str]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
     
@@ -447,9 +451,11 @@ async def call_llm_structured_streaming(
         reasoning_effort: Optional reasoning effort level ("high", "medium", "low")
         model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
         agent_id: Optional agent ID for cancellation checking (stops streaming if agent is paused)
+        on_plan_start: Optional callback(tool_call_id) when set_plan tool is first detected
+        on_plan_title: Optional callback(tool_call_id, title) when plan title is detected
         
     Returns:
-        Tuple of (response_model instance, usage dict with token counts)
+        Tuple of (response_model instance, usage dict with token counts, plan_tool_call_id or None)
         Usage dict includes 'cancelled': True if streaming was stopped early
     """
     import instructor
@@ -497,6 +503,11 @@ async def call_llm_structured_streaming(
         was_cancelled = False
         chunk_count = 0
         
+        # Plan streaming tracking
+        plan_tool_call_id: Optional[str] = None
+        plan_in_progress_emitted = False
+        plan_title_emitted: Optional[str] = None
+        
         try:
             # Heartbeat before starting - catches cancellation if pause was already clicked
             activity.heartbeat("Starting Rose LLM stream...")
@@ -534,10 +545,9 @@ async def call_llm_structured_streaming(
                         data_str = line[6:]  # Remove 'data: ' prefix
                         if data_str == '[DONE]':
                             break
-                        
                         try:
                             chunk_data = json.loads(data_str)
-                            
+                            # logger.info(f"📊 Streaming chunk data: {chunk_data}")
                             # Extract model info from first chunk
                             if chunk_data.get("actual_model"):
                                 actual_model = chunk_data["actual_model"]
@@ -555,6 +565,27 @@ async def call_llm_structured_streaming(
                                 # Estimate tokens (rough: ~4 chars per token)
                                 token_count = len(accumulated_content) // 4
                                 
+                                # Detect set_plan and emit IN_PROGRESS on first detection
+                                if not plan_in_progress_emitted and '"set_plan"' in accumulated_content:
+                                    plan_tool_call_id = str(uuid.uuid4())
+                                    plan_in_progress_emitted = True
+                                    if on_plan_start:
+                                        logger.info(f"📋 Plan detected, emitting IN_PROGRESS with tool_call_id={plan_tool_call_id}")
+                                        await on_plan_start(plan_tool_call_id)
+                                
+                                # Detect title and emit updated IN_PROGRESS
+                                if plan_in_progress_emitted and plan_tool_call_id:
+                                    title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', accumulated_content)
+                                    if title_match:
+                                        try:
+                                            title = json.loads(f'"{title_match.group(1)}"')
+                                        except json.JSONDecodeError:
+                                            title = title_match.group(1)
+                                        if title != plan_title_emitted and on_plan_title:
+                                            plan_title_emitted = title
+                                            logger.info(f"📋 Plan title detected: {title[:50]}...")
+                                            await on_plan_title(plan_tool_call_id, title)
+                                
                                 # Extract response and track for deduplication
                                 response_text = _extract_response_from_partial_json(accumulated_content)
                                 if response_text and response_text != last_emitted_text:
@@ -563,6 +594,7 @@ async def call_llm_structured_streaming(
                                     # Only emit when 18+ new chars since last emit
                                     pending_delta = len(response_text) - len(last_emitted_for_chunk)
                                     if pending_delta >= 18:
+                                        # logger.info(f"📤 Emitting to on_chunk: delta={pending_delta} chars, total_response_len={len(response_text)}")
                                         await on_chunk(response_text, token_count)
                                         last_emitted_for_chunk = response_text
                         except json.JSONDecodeError:
@@ -589,7 +621,7 @@ async def call_llm_structured_streaming(
                 "pool_size": pool_size,
                 "cancelled": True
             }
-            return empty_response, usage
+            return empty_response, usage, plan_tool_call_id
         
         logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, {len(accumulated_content)} chars")
         
@@ -616,7 +648,7 @@ async def call_llm_structured_streaming(
             "cancelled": False
         }
         
-        return response, usage
+        return response, usage, plan_tool_call_id
     
     # For OpenRouter models, use Instructor's partial streaming
     base_client = AsyncOpenAI(
@@ -696,7 +728,7 @@ async def call_llm_structured_streaming(
             "total_tokens": estimated_tokens,
             "cancelled": True
         }
-        return empty_response, usage
+        return empty_response, usage, None  # No plan streaming in OpenRouter path
     
     if final_response is None:
         raise ValueError(f"Streaming LLM returned no response (model={model})")
@@ -710,33 +742,53 @@ async def call_llm_structured_streaming(
         "cancelled": False
     }
     
-    return final_response, usage
+    return final_response, usage, None  # No plan streaming in OpenRouter path
 
 
 def _extract_response_from_partial_json(partial_json: str) -> Optional[str]:
     """
-    Try to extract the 'response' field from a partially streamed JSON string.
+    Try to extract streamable text from a partially streamed JSON string.
     
-    This handles incomplete JSON by looking for the 'response' field pattern.
+    Priority:
+    1. 'response' field (main user-visible text)
+    2. 'content' field inside set_plan tool calls (plan content)
+    
+    This handles incomplete JSON by looking for field patterns with regex.
     """
+    import re
+    
     # Try to parse as complete JSON first
     try:
         data = json.loads(partial_json)
-        return data.get("response", "")
+        # Check response field
+        if data.get("response"):
+            return data["response"]
+        # Check for set_plan content in tool_calls
+        tool_calls = data.get("tool_calls", [])
+        for tc in tool_calls:
+            if tc.get("tool") == "set_plan" and tc.get("content"):
+                return tc["content"]
+        return ""
     except json.JSONDecodeError:
         pass
     
     # Try to extract 'response' field with regex
-    import re
-    
-    # Look for "response": "..." pattern
     match = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)"?', partial_json)
     if match:
         try:
-            # Decode escaped characters
             return json.loads(f'"{match.group(1)}"')
         except json.JSONDecodeError:
             return match.group(1)
+    
+    # Try to extract 'content' field from set_plan tool call
+    # Only match if we see set_plan context nearby
+    if '"set_plan"' in partial_json:
+        content_match = re.search(r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"?', partial_json)
+        if content_match:
+            try:
+                return json.loads(f'"{content_match.group(1)}"')
+            except json.JSONDecodeError:
+                return content_match.group(1)
     
     return None
 
@@ -953,9 +1005,12 @@ async def decide_next_action(
         else:
             logger.info(f"💭 Reasoning disabled for {model}")
         
+        # Track plan_tool_call_id for injecting into set_plan tool call
+        plan_tool_call_id = None
+        
         # Use streaming if agent_id and stream_id are provided
         if agent_id and stream_id:
-            from helpers.messages import stream_assistant_chunk
+            from helpers.messages import stream_assistant_chunk, stream_plan_event
             
             sequence_counter = [0]  # Use list to allow mutation in closure
             last_streamed_text = [""]  # Track what we've already sent to compute delta
@@ -979,8 +1034,32 @@ async def decide_next_action(
                     # Don't fail on streaming errors - it's best-effort
                     logger.warning(f"Streaming chunk failed (non-fatal): {str(e)}")
             
+            async def on_plan_start(tool_call_id: str):
+                """Broadcast plan start via Realtime (no DB insert)."""
+                try:
+                    await stream_plan_event(
+                        agent_id=agent_id,
+                        stream_id=stream_id,
+                        tool_call_id=tool_call_id,
+                        title="Generating Plan...",
+                    )
+                except Exception as e:
+                    logger.warning(f"Plan start notification failed (non-fatal): {str(e)}")
+            
+            async def on_plan_title(tool_call_id: str, title: str):
+                """Broadcast plan title via Realtime (no DB insert)."""
+                try:
+                    await stream_plan_event(
+                        agent_id=agent_id,
+                        stream_id=stream_id,
+                        tool_call_id=tool_call_id,
+                        title=title,
+                    )
+                except Exception as e:
+                    logger.warning(f"Plan title notification failed (non-fatal): {str(e)}")
+            
             logger.info(f"📡 Using streaming LLM call for agent {agent_id}")
-            result, usage = await call_llm_structured_streaming(
+            result, usage, plan_tool_call_id = await call_llm_structured_streaming(
                 messages=messages,
                 model=model,
                 temperature=0.7,
@@ -989,7 +1068,9 @@ async def decide_next_action(
                 on_chunk=on_chunk,
                 reasoning_effort=effort,
                 model_preference=model_preference,
-                agent_id=agent_id  # For cancellation checking
+                agent_id=agent_id,  # For cancellation checking
+                on_plan_start=on_plan_start,
+                on_plan_title=on_plan_title,
             )
             
             # Send final "done" chunk (delta may be empty if all content already streamed)
@@ -1022,8 +1103,7 @@ async def decide_next_action(
         if result is None:
             raise ValueError(f"call_llm_structured returned None result (model={model})")
         
-        if not hasattr(result, 'reasoning'):
-            raise ValueError(f"LLM result missing 'reasoning' field (model={model}, result_type={type(result)})")
+        # Note: reasoning field is optional/removed from schema - don't check for it
         
         if not hasattr(result, 'response'):
             raise ValueError(f"LLM result missing 'response' field (model={model}, result_type={type(result)})")
@@ -1036,7 +1116,7 @@ async def decide_next_action(
         
         logger.info(
             "Action decided",
-            reasoning=result.reasoning,
+            reasoning=getattr(result, 'reasoning', None),
             response=result.response,
             tool_calls_count=len(result.tool_calls) if result.tool_calls else 0,
             tokens=usage.get("total_tokens", 0),
@@ -1060,10 +1140,19 @@ async def decide_next_action(
                     logger.error(f"Failed to serialize tool call {i}: {str(e)}, tc_type={type(tc)}")
                     raise ValueError(f"Failed to serialize tool call {i}: {str(e)}")
         
+        # Inject pre-generated plan_tool_call_id into set_plan tool call
+        # This ensures the IN_PROGRESS messages match the FINISHED message
+        if plan_tool_call_id:
+            for tc in tool_calls_dict:
+                if tc.get("tool") == "set_plan":
+                    tc["tool_call_id"] = plan_tool_call_id
+                    logger.info(f"📋 Injected plan_tool_call_id={plan_tool_call_id} into set_plan tool call")
+        
         # Return as dict with usage for token tracking
         # Allow empty strings/lists, but not None values
+        # Note: reasoning field may not exist if schema removed it
         return {
-            "reasoning": result.reasoning if result.reasoning is not None else "",
+            "reasoning": getattr(result, 'reasoning', None) or "",
             "response": result.response if result.response is not None else "",
             "tool_calls": tool_calls_dict,
             "usage": usage  # Already validated to not be None above

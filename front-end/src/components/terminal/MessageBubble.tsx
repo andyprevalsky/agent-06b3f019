@@ -564,29 +564,42 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // set_plan tool: render as PlanChip instead of standard tool card
   // NOTE: Must call onTypingComplete immediately since PlanChip doesn't animate text.
   // The message queue in Terminal.tsx blocks on isAnimating until callback is called.
-  if (isSetPlanTool && message.metadata?.data) {
-    // Call callback immediately since PlanChip doesn't have text animation
-    if (shouldType && onTypingComplete) {
+  // IN_PROGRESS messages show shimmer effect, FINISHED shows final state.
+  if (isSetPlanTool) {
+    const toolStatus = message.metadata?.toolStatus as 'IN_PROGRESS' | 'FINISHED' | undefined;
+    const planData = message.metadata?.data;
+    
+    // Only call onTypingComplete for FINISHED status
+    if (toolStatus === 'FINISHED' && shouldType && onTypingComplete) {
+      requestAnimationFrame(() => {
+        onTypingComplete();
+      });
+    }
+    // Also call for IN_PROGRESS to not block the queue
+    if (toolStatus === 'IN_PROGRESS' && shouldType && onTypingComplete) {
       requestAnimationFrame(() => {
         onTypingComplete();
       });
     }
     
-    const planData = message.metadata.data;
+    // For IN_PROGRESS without data, use title from metadata
+    const title = planData?.title || message.metadata?.title || 'Plan';
+    
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         <div className="flex-shrink-0 w-8" />
         <div className="flex-1">
           <PlanChip
             plan={{
-              title: planData.title || 'Plan',
-              content: planData.content || '',
-              is_proximate: planData.is_proximate ?? true,
-              sub_tasks: planData.sub_tasks || [],
-              sub_goals: planData.sub_goals || [],
-              join_modifier: planData.join_modifier || null,
-              status: planData.status || 'planning',
+              title: title,
+              content: planData?.content || '',
+              is_proximate: planData?.is_proximate ?? true,
+              sub_tasks: planData?.sub_tasks || [],
+              sub_goals: planData?.sub_goals || [],
+              join_modifier: planData?.join_modifier || null,
+              status: planData?.status || 'planning',
             }}
+            toolStatus={toolStatus}
           />
         </div>
       </div>
