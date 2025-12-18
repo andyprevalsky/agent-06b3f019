@@ -22,11 +22,11 @@ Deno.test("GET /cost - returns cost for rose-1-lite", async () => {
   assertEquals(typeof response.data.contextLength, 'number');
 });
 
-Deno.test("GET /cost - returns cost for rose-1-pro", async () => {
-  const response = await testClient.get('/cost?model=rose-labs/rose-1-pro');
+Deno.test("GET /cost - returns cost for rose-1-ultra", async () => {
+  const response = await testClient.get('/cost?model=rose-labs/rose-1-ultra');
   
   assertStatusCode(response.status, 200);
-  assertEquals(response.data.model, 'rose-1-pro');
+  assertEquals(response.data.model, 'rose-1-ultra');
 });
 
 Deno.test("GET /cost - normalizes model name (removes rose-labs/ prefix)", async () => {

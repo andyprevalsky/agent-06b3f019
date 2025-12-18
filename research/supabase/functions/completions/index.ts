@@ -22,7 +22,7 @@ const MODEL_POOLS = {
     // 'minimax/minimax-m2', // Disabled
     'x-ai/grok-4-fast'
   ],
-  'rose-1-pro': [
+  'rose-1-ultra': [
     'openai/gpt-5.1',
     'anthropic/claude-sonnet-4.5',
     'moonshotai/kimi-k2-thinking',
@@ -105,7 +105,7 @@ function selectModel(
   const pool = MODEL_POOLS[normalized as keyof typeof MODEL_POOLS];
   
   if (!pool) {
-    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-lite' or 'rose-labs/rose-1-pro'`);
+    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-lite' or 'rose-labs/rose-1-ultra'`);
   }
   
   // If model_preference is provided, use hardcoded mapping (highest priority)

@@ -402,7 +402,7 @@ export default function QueryInput({
                 </Popover>
                 
                 {/* Tooltip for Rose models when selected */}
-                {(selectedModel === 'rose-labs/rose-1-lite' || selectedModel === 'rose-labs/rose-1-pro') && (
+                {(selectedModel === 'rose-labs/rose-1-lite' || selectedModel === 'rose-labs/rose-1-ultra') && (
                   <Tooltip open={showTooltip} onOpenChange={setShowTooltip}>
                     <TooltipTrigger asChild>
                       <button

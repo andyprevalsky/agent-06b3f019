@@ -12,7 +12,7 @@ export const ROSE_MODEL_POOLS = {
     'minimax/minimax-m2',
     'x-ai/grok-4-fast',
   ],
-  'rose-1-pro': [
+  'rose-1-ultra': [
     'openai/gpt-5.1',
     'anthropic/claude-sonnet-4.5',
     'moonshotai/kimi-k2-thinking',
@@ -28,7 +28,7 @@ export const ROSE_MODEL_POOLS = {
 
 export const ROSE_ALIAS_TO_POOL: Record<string, keyof typeof ROSE_MODEL_POOLS> = {
   'rose-labs/rose-1-lite': 'rose-1-lite',
-  'rose-labs/rose-1-pro': 'rose-1-pro',
+  'rose-labs/rose-1-ultra': 'rose-1-ultra',
   'rose-labs/rose-hyper': 'rose-hyper',
 };
 

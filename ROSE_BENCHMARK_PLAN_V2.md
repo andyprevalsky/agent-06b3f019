@@ -173,7 +173,7 @@ interface RoseCompletionsStreamChunk {
 **Query Parameters**:
 ```typescript
 {
-  model: string;  // e.g., "rose-labs/rose-1-lite", "rose-1-pro"
+  model: string;  // e.g., "rose-labs/rose-1-lite", "rose-1-ultra"
 }
 ```
 

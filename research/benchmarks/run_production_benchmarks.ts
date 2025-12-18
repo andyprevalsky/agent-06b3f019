@@ -46,7 +46,7 @@ async function main() {
   const flags = parse(Deno.args, {
     string: ['models', 'benchmarks', 'cot', 'samples'],
     default: {
-      models: 'rose-labs/rose-1-lite,rose-labs/rose-1-pro',
+      models: 'rose-labs/rose-1-lite,rose-labs/rose-1-ultra',
       benchmarks: 'mmlu-pro,terminal-bench',
       cot: '1,3,5',
       samples: '100'
