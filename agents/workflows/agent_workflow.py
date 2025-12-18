@@ -204,7 +204,7 @@ PLAN_ONLY_TOOLS = {
     "set_plan": {
         "id": "plan-set-plan",
         "name": "set_plan",
-        "description": "Set or update the execution plan using the two-axis framework. Provide: title (short plan name), content (markdown explanation), is_proximate (true if atomic/sequential, false if composite/parallel). For atomic goals: provide sub_tasks (sequential steps). For composite goals: provide sub_goals (parallel sub-goal strings) and join_modifier ('&&' for AND/parallel work, '||' for OR/hypotheses).",
+        "description": "Set or update the execution plan. Provide: title (short plan name), content (markdown explanation), tasks (list of task descriptions where index = task ID), dependencies (optional DAG as {taskIdx: [predecessorIndices]}), join ('all' for AND/must complete all, 'any' for OR/first success wins).",
         "plan_only": True
     },
     "progress_to_autonomous_execution_phase": {

@@ -415,37 +415,31 @@ class SetPlanTool(BaseModel):
     1. Reducing uncertainty (ambiguity, unknown constraints, unknown strategy)
     2. Reducing remaining work (executing known steps once the world is understood)
     
-    Choose is_proximate based on whether the goal is atomic (can be done in one step)
-    or composite (must be broken into children with a composition operator).
+    Use explicit dependency graph to define execution order.
     """
 
     tool: Literal["set_plan"]
     title: str = Field(description="Short title for the plan.")
-    content: str = Field(description="The plan content as markdown text. Describe what will be done to accomplish the goal.")
-    is_proximate: bool = Field(
-        description="True if this goal is ATOMIC (can be executed by one agent). "
-        "False if this goal is COMPOSITE (must be expanded into sub-goals with a composition operator)."
+    content: str = Field(description="Plan content as markdown text.")
+    
+    tasks: List[str] = Field(
+        description="List of task descriptions. Index position defines task ID (0, 1, 2...)."
     )
     
-    # If proximate (atomic) - direct todos executed sequentially
-    sub_tasks: Optional[List[str]] = Field(
+    dependencies: Optional[Dict[str, List[str]]] = Field(
         default=None,
-        description="REQUIRED when is_proximate=true. List of sequential steps to complete the atomic goal. "
-        "These are causally dependent and will be executed in order."
+        description="REQUIRED for sequential/causally-dependent tasks. Task dependency graph where keys are "
+        "task indices (as strings) and values are predecessor indices that must complete first. "
+        "ONLY use null/{} for truly independent parallel tasks. "
+        "Sequential chain: {'1': ['0'], '2': ['1'], '3': ['2']}. "
+        "Fan-in: {'3': ['0', '1', '2']}."
     )
     
-    # If NOT proximate (composite) - sub-goals with composition operator
-    sub_goals: Optional[List[str]] = Field(
-        default=None,
-        description="REQUIRED when is_proximate=false. List of sub-goal descriptions for parallel execution. "
-        "Each string is a goal that will be delegated to a sub-agent."
-    )
-    join_modifier: Optional[Literal["&&", "||"]] = Field(
-        default=None,
-        description="REQUIRED when is_proximate=false. Composition operator for sub-goals:\n"
-        "- '&&' (AND): All sub-goals are complementary components that must complete and merge (parallelize work).\n"
-        "- '||' (OR): Sub-goals are alternative hypotheses; any one may satisfy the parent (reduce uncertainty).\n"
-        "Use OR when uncertainty > decomposability. Use AND when decomposability >= uncertainty."
+    join: Literal["all", "any"] = Field(
+        description="How to combine task results:\n"
+        "- 'all' (AND): All tasks must complete; results are merged.\n"
+        "- 'any' (OR): First successful task satisfies the goal.\n"
+        "Use 'any' when uncertainty > decomposability (hypotheses). Use 'all' when decomposability >= uncertainty."
     )
 
 

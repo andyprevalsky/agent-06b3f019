@@ -6,8 +6,8 @@
  * 
  * Migration:
  * - Import PlanChip from './PlanChip' instead
- * - PlanChip uses the new two-axis planning framework schema:
- *   - title, content, is_proximate, sub_tasks, sub_goals, join_modifier
+ * - PlanChip uses the unified DAG planning schema:
+ *   - title, content, tasks, dependencies, join
  * - PlanChip is automatically rendered in MessageBubble for set_plan tool messages
  */
 

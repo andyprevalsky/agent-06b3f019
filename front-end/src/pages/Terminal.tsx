@@ -2406,10 +2406,9 @@ export default function Terminal() {
                             plan={{
                               title: streamingPlan.title,
                               content: '',
-                              is_proximate: true,
-                              sub_tasks: [],
-                              sub_goals: [],
-                              join_modifier: null,
+                              tasks: [],
+                              dependencies: null,
+                              join: 'all',
                               status: 'planning',
                             }}
                             toolStatus="IN_PROGRESS"

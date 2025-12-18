@@ -593,10 +593,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
             plan={{
               title: title,
               content: planData?.content || '',
-              is_proximate: planData?.is_proximate ?? true,
-              sub_tasks: planData?.sub_tasks || [],
-              sub_goals: planData?.sub_goals || [],
-              join_modifier: planData?.join_modifier || null,
+              tasks: planData?.tasks || [],
+              dependencies: planData?.dependencies || null,
+              join: planData?.join || 'all',
               status: planData?.status || 'planning',
             }}
             toolStatus={toolStatus}

@@ -136,34 +136,48 @@ def build_system_prompt(
     2. Reducing REMAINING WORK (doing known steps once the world is understood)
 
     Decision heuristic:
-    - If uncertainty > decomposability → use OR composition (hypotheses to reduce uncertainty first)
-    - If decomposability >= uncertainty → use AND composition (parallelize work)
+    - If uncertainty > decomposability → use join='any' (hypotheses to reduce uncertainty first)
+    - If decomposability >= uncertainty → use join='all' (parallelize work)
     - Parallelism is only safe when entropy/uncertainty is low
 
     PLANNING TOOLS
     --------------
-    - Call `set_plan` with:
-        - `title`: Short plan name
-        - `content`: Detailed markdown explanation
-        - `is_proximate`: True if ATOMIC (sequential steps), False if COMPOSITE (parallel sub-goals)
-        - For atomic goals: `sub_tasks` (sequential steps)
-        - For composite goals: `sub_goals` (parallel goal strings) + `join_modifier`:
-            - '&&' (AND): All sub-goals must complete and merge (parallelize work)
-            - '||' (OR): Any sub-goal can satisfy the parent (reduce uncertainty via hypotheses)
+    Call `set_plan` with:
+    - `title`: Short plan name
+    - `content`: Markdown explanation of the plan
+    - `tasks`: List of task descriptions (index position = task ID: 0, 1, 2...)
+    - `dependencies`: Execution order graph - CRITICAL for sequential tasks!
+        - Keys: task indices as strings ("0", "1", "2")
+        - Values: list of predecessor indices that must complete first
+        - ALWAYS specify dependencies for causally-dependent tasks (e.g., can't checkout before adding to cart)
+        - ONLY use null/{} for truly independent parallel tasks (e.g., researching 3 competitors simultaneously)
+    - `join`: How to combine task results
+        - 'all' (AND): Every task must complete; results are merged
+        - 'any' (OR): First successful task satisfies the goal (hypotheses)
+
+    DEPENDENCY PATTERNS (use the right one!):
+    - Sequential chain (most common): {"1": ["0"], "2": ["1"], "3": ["2"]}
+      Example: Search → Add to cart → Checkout → Confirm
+    - Fully parallel (ONLY for independent tasks): {} or null
+      Example: Research competitor A, Research competitor B, Research competitor C
+    - Fan-in synthesis: {"3": ["0", "1", "2"]}
+      Example: Research A, Research B, Research C → Synthesize report
+    - Diamond: {"1": ["0"], "2": ["0"], "3": ["1", "2"]}
+      Example: Gather requirements → (Design frontend, Design backend) → Integration
     
-    - Immediately after finalizing the plan, send a concise summary to the user via `send_message_to_user({"message": "...", "is_question": false})` so they can see what will run. If you still need clarification/approval, set `is_question` to true so work pauses until they reply.
+    After finalizing the plan, send a concise summary to the user via `send_message_to_user({"message": "...", "is_question": false})` so they can see what will run. If you still need clarification/approval, set `is_question` to true so work pauses until they reply.
     
-    - Call `progress_to_autonomous_execution_phase` only when:
+    Call `progress_to_autonomous_execution_phase` only when:
         1. You have called set_plan (REQUIRED - will error otherwise)
         2. You no longer need clarifications
-        3. You have a low-energy, elegant plan
+        3. You have a low-energy cost & elegant plan
     
-    - Once you move to EXECUTE phase, you can no longer get user input, so ask necessary clarifying questions first.
+    Once you move to EXECUTE phase, you can no longer get user input, so ask necessary clarifying questions first.
 
     PARALLELIZATION GUIDANCE
     ------------------------
     - Parallelize when evaluating multiple hypotheses, increasing accuracy via decomposition, or speeding execution with independent workstreams.
-    - Keep work sequential when tasks are causally dependent.
+    - Keep work sequential when tasks are causally dependent (use dependencies).
     - spawn_sub_agents should be used anytime we want to do any or all of the following:
         1. speed up work via context-independent parallelization
         2. evaluate multiple context-independent hypotheses
@@ -172,7 +186,7 @@ def build_system_prompt(
     GENERAL RULES
     -------------
     - Use only ENABLED tools NOW to gather information required for planning.
-    - DISABLED tools marked "available in execute phase" can be included in your plan's sub_tasks - they become available when execution begins.
+    - DISABLED tools marked "available in execute phase" can be included in your plan's tasks - they become available when execution begins.
     - For goals like "get me X", "buy X", "order X", or "purchase X", the plan MUST include the actual purchase/acquisition step using spawn_browser_agent - do NOT end with "send recommendations to user". The user asked you to GET the item, not recommend options.
     - Use `send_message_to_user({"message": "<markdown text to user>", "is_question": true})` whenever you truly need clarification or approvals; write the exact user-visible question in the message parameter.
     - Whenever you call `send_message_to_user`, it must be the ONLY tool in that turn (no bundling with other tool calls).

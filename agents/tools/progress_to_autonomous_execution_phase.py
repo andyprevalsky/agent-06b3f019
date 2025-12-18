@@ -47,8 +47,9 @@ class ProgressToAutonomousExecutionPhaseManager(ToolManager):
                     "Use set_plan to specify:\n"
                     "- `title`: Short plan name\n"
                     "- `content`: Markdown explanation of the plan\n"
-                    "- `is_proximate`: True for atomic (sequential), False for composite (parallel)\n"
-                    "- `sub_tasks` or `sub_goals` + `join_modifier` depending on is_proximate"
+                    "- `tasks`: List of task descriptions (index = task ID)\n"
+                    "- `dependencies`: Optional execution order graph (e.g., {'2': ['0', '1']})\n"
+                    "- `join`: 'all' (AND) or 'any' (OR)"
                 ),
                 status=MessageStatus.ERROR
             )
