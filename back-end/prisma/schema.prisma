@@ -19,7 +19,7 @@ model Agent {
   createdAt                 DateTime        @default(now())
   updatedAt                 DateTime        @updatedAt
   temporalWorkflowId        String?
-  model                     String          @default("rose-labs/rose-1-fast")
+  model                     String          @default("rose-labs/rose-1-lite")
   source                    AgentSource     @default(WEB)
   contextSize               Int             @default(0)
   messageCount              Int             @default(0)

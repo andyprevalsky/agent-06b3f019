@@ -91,7 +91,7 @@ Available commands:
             # Call Rose completions API
             try:
                 request_body = {
-                    'model': self.model_name or 'rose-labs/rose-1-fast',
+                    'model': self.model_name or 'rose-labs/rose-1-lite',
                     'messages': conversation_history,
                     'temperature': 0.7,
                     'max_tokens': 2000

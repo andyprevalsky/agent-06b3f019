@@ -73,7 +73,7 @@ model BenchmarkRun {
 **Request Body** (OpenAI-compatible):
 ```typescript
 interface RoseCompletionsRequest {
-  model: string;              // e.g., "rose-labs/rose-1-fast"
+  model: string;              // e.g., "rose-labs/rose-1-lite"
   messages: Message[];        // Array of chat messages
   temperature?: number;       // Default: 0.7
   max_tokens?: number;        // Default: 2000
@@ -178,7 +178,7 @@ interface RoseCompletionsStreamChunk {
 **Query Parameters**:
 ```typescript
 {
-  model: string;  // e.g., "rose-labs/rose-1-fast", "rose-1-ultra"
+  model: string;  // e.g., "rose-labs/rose-1-lite", "rose-1-pro"
 }
 ```
 
@@ -303,7 +303,7 @@ interface RoseBenchmarkRequest {
 }
 
 interface ModelConfig {
-  model: string;                        // e.g., "rose-labs/rose-1-fast"
+  model: string;                        // e.g., "rose-labs/rose-1-lite"
   temperature?: number;                 // Default: 0.7
   maxTokens?: number;                   // Default: 2000
   seed?: number;                        // For reproducible model outputs

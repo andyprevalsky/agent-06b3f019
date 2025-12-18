@@ -1,5 +1,5 @@
 export const ROSE_MODEL_POOLS = {
-  'rose-1-fast': [
+  'rose-1-lite': [
     'openai/gpt-oss-120b',
     // 'qwen/qwen3-235b-a22b-thinking-2507', // Disabled - produces garbage tool calls disconnected from reasoning
     'moonshotai/kimi-k2-0905',
@@ -12,7 +12,7 @@ export const ROSE_MODEL_POOLS = {
     'minimax/minimax-m2',
     'x-ai/grok-4-fast',
   ],
-  'rose-1-ultra': [
+  'rose-1-pro': [
     'openai/gpt-5.1',
     'anthropic/claude-sonnet-4.5',
     'moonshotai/kimi-k2-thinking',
@@ -27,8 +27,8 @@ export const ROSE_MODEL_POOLS = {
 } as const;
 
 export const ROSE_ALIAS_TO_POOL: Record<string, keyof typeof ROSE_MODEL_POOLS> = {
-  'rose-labs/rose-1-fast': 'rose-1-fast',
-  'rose-labs/rose-1-ultra': 'rose-1-ultra',
+  'rose-labs/rose-1-lite': 'rose-1-lite',
+  'rose-labs/rose-1-pro': 'rose-1-pro',
   'rose-labs/rose-hyper': 'rose-hyper',
 };
 

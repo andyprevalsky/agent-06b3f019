@@ -16,7 +16,7 @@ function selectModel(requestedModel: string): { model: string; isCerebras: boole
   const pool = ROSE_MODEL_POOLS[normalized as keyof typeof ROSE_MODEL_POOLS];
   
   if (!pool) {
-    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-fast', 'rose-labs/rose-1-ultra', or 'rose-labs/rose-hyper'`);
+    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-lite', 'rose-labs/rose-1-pro', or 'rose-labs/rose-hyper'`);
   }
   
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];

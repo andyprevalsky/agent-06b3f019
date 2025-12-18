@@ -9,7 +9,7 @@ Terminal-Bench now uses Rose models through a **custom Harbor agent** that calls
 ```
 User Request
     ↓
-POST /v1/bench {benchmark: "terminal-bench", model: "rose-labs/rose-1-fast"}
+POST /v1/bench {benchmark: "terminal-bench", model: "rose-labs/rose-1-lite"}
     ↓
 Terminal-Bench Harness
     ↓
@@ -31,7 +31,7 @@ Custom Harbor agent that:
 - Uses agentic loop: observe → think → act → repeat
 - Extracts bash commands from model responses
 - Executes commands in Daytona container
-- Supports any Rose model (`rose-labs/rose-1-fast`, `rose-labs/rose-1`, etc.)
+- Supports any Rose model (`rose-labs/rose-1-lite`, `rose-labs/rose-1`, etc.)
 
 ### 2. Patched Terminal-Bench Tasks (`/tmp/terminal-bench-2`)
 
@@ -59,7 +59,7 @@ curl -X POST http://localhost:3001/v1/bench \
   -H "Content-Type: application/json" \
   -d '{
     "benchmark": "terminal-bench",
-    "model": "rose-labs/rose-1-fast",
+    "model": "rose-labs/rose-1-lite",
     "cotSteps": 1,
     "samples": 3,
     "seed": 42

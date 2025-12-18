@@ -1,7 +1,7 @@
 /**
  * Rose Model Pool Test
  * 
- * Tests each model in the rose-1-fast pool using model_seed parameter
+ * Tests each model in the rose-1-lite pool using model_seed parameter
  * with realistic agent conversation data formatted properly.
  * 
  * Run with: node tests/test-rose-model-pool.mjs
@@ -11,7 +11,7 @@ const ROSE_API_URL = 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/comp
 const ROSE_API_KEY = process.env.ROSE_API_KEY || 'af1ea4b12ea8dbe07c555a45a8ad4dc8';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk4ODkzMzYsImV4cCI6MjA3NTQ2NTMzNn0.oWv0CqdAbVpDsR-pBMn3A9sScgLtWKh0DYc8sXZz3XU';
 
-// Expected models in rose-1-fast pool (after typo fix)
+// Expected models in rose-1-lite pool (after typo fix)
 const EXPECTED_MODELS = [
   'openai/gpt-oss-120b',
   'qwen/qwen3-235b-a22b-thinking-2507',
@@ -136,7 +136,7 @@ async function testModelSeed(seed) {
   const startTime = Date.now();
   
   const requestBody = {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     messages: TEST_MESSAGES,
     temperature: 0.7,
     max_tokens: 1000,
@@ -218,7 +218,7 @@ async function testModelSeed(seed) {
 
 async function main() {
   console.log('═'.repeat(80));
-  console.log('🧪 ROSE MODEL POOL TEST - rose-1-fast');
+  console.log('🧪 ROSE MODEL POOL TEST - rose-1-lite');
   console.log('═'.repeat(80));
   console.log('');
   console.log(`Testing ${EXPECTED_MODELS.length} models with realistic agent conversation...\n`);

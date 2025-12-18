@@ -28,7 +28,7 @@ document.head.appendChild(style);
 const Launcher = () => {
   const [query, setQuery] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-fast');
+  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-lite');
   const [showModelPicker, setShowModelPicker] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { models } = useAppData();

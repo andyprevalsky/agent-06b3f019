@@ -7,7 +7,7 @@ const corsHeaders = {
 
 // Model pools for Rose variants - sync with backend/src/routes/rose.ts
 const MODEL_POOLS = {
-  'rose-1-fast': [
+  'rose-1-lite': [
     // 'openai/gpt-oss-120b', // Disabled - produces 120+ garbage tool calls disconnected from reasoning
     // 'qwen/qwen3-235b-a22b-thinking-2507', // Disabled - produces garbage tool calls disconnected from reasoning
     'moonshotai/kimi-k2-0905',
@@ -20,7 +20,7 @@ const MODEL_POOLS = {
     'minimax/minimax-m2',
     'x-ai/grok-4-fast'
   ],
-  'rose-1-ultra': [
+  'rose-1-pro': [
     'openai/gpt-5.1',
     'anthropic/claude-sonnet-4.5',
     'moonshotai/kimi-k2-thinking',
@@ -50,7 +50,7 @@ serve(async (req) => {
     
     modelName = modelName.toLowerCase();
     
-    // Normalize: 'rose-labs/rose-1-fast' → 'rose-1-fast'
+    // Normalize: 'rose-labs/rose-1-lite' → 'rose-1-lite'
     if (modelName.startsWith('rose-labs/')) {
       modelName = modelName.replace('rose-labs/', '');
     }

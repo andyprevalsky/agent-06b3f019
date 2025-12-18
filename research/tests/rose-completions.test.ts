@@ -11,7 +11,7 @@ const ROSE_API_KEY = Deno.env.get('ROSE_API_KEY') || '';
 
 Deno.test("POST /completions - returns chat completion with valid API key", async () => {
   const response = await testClient.post('/completions', {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     messages: sampleMessages,
   }, {
     headers: { 'x-api-key': ROSE_API_KEY },
@@ -34,7 +34,7 @@ Deno.test("POST /completions - returns chat completion with valid API key", asyn
 
 Deno.test("POST /completions - rejects request without API key", async () => {
   const response = await testClient.post('/completions', {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     messages: sampleMessages,
   });
   
@@ -44,7 +44,7 @@ Deno.test("POST /completions - rejects request without API key", async () => {
 
 Deno.test("POST /completions - accepts seed parameter", async () => {
   const response = await testClient.post('/completions', {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     messages: sampleMessages,
     seed: 42,
   }, {
@@ -62,7 +62,7 @@ Deno.test("POST /completions - accepts seed parameter", async () => {
 
 Deno.test("POST /completions - accepts cot_steps parameter", async () => {
   const response = await testClient.post('/completions', {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     messages: sampleMessages,
     cot_steps: 3,
   }, {
@@ -80,7 +80,7 @@ Deno.test("POST /completions - accepts cot_steps parameter", async () => {
 
 Deno.test("POST /completions - accepts tools parameter", async () => {
   const response = await testClient.post('/completions', {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     messages: [{ role: 'user', content: 'What is the weather?' }],
     tools: [{
       type: 'function',
@@ -126,7 +126,7 @@ Deno.test("POST /completions - returns 400 for missing model", async () => {
 
 Deno.test("POST /completions - returns 400 for missing messages", async () => {
   const response = await testClient.post('/completions', {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
   }, {
     headers: { 'x-api-key': ROSE_API_KEY },
   });

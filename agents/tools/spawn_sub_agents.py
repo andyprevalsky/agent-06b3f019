@@ -192,7 +192,7 @@ async def spawn_sub_agents_activity(
         user_id: User ID (agents will be created for this user)
         sub_agents: List of agent configs, each with:
             - goal (str): The subtask goal
-            - model (str, optional): LLM model to use (defaults to rose-1-fast)
+            - model (str, optional): LLM model to use (defaults to rose-1-lite)
             - verifier (dict): {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "..."}
         parent_agent_id: Parent agent ID (for hierarchy)
         parent_workflow_id: Parent workflow ID (for signaling)
@@ -229,8 +229,8 @@ async def spawn_sub_agents_activity(
                     "pause_state": parent_is_paused  # Inherit parent's pause state
                 }
                 
-                # Default to rose-1-fast if no model specified
-                model = agent.get("model") or "rose-labs/rose-1-fast"
+                # Default to rose-1-lite if no model specified
+                model = agent.get("model") or "rose-labs/rose-1-lite"
                 payload["model"] = model
                 # Note: reasoning_effort not passed - sub-agents use backend default ('low')
                 

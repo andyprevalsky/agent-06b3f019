@@ -40,7 +40,7 @@ const JWT_TOKEN = await getAuthToken();
 Deno.test("POST /v1/bench - MMLU-Pro with CoT=1, samples=3", async () => {
   const response = await testClient.post('/v1/bench', {
     benchmark: 'mmlu-pro',
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     cotSteps: 1,
     samples: 3,
     seed: 42
@@ -72,7 +72,7 @@ Deno.test("POST /v1/bench - Terminal-Bench with CoT=1, samples=3", async () => {
   
   const response = await testClient.post('/v1/bench', {
     benchmark: 'terminal-bench',
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     cotSteps: 1,
     samples: 3,
     seed: 42
@@ -112,7 +112,7 @@ Deno.test("POST /v1/bench - Terminal-Bench with CoT=1, samples=3", async () => {
 Deno.test("POST /v1/bench - Multiple CoT steps", async () => {
   const response = await testClient.post('/v1/bench', {
     benchmark: 'mmlu-pro',
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     cotSteps: 3,
     samples: 2,
     seed: 42
@@ -130,7 +130,7 @@ Deno.test("POST /v1/bench - Multiple CoT steps", async () => {
 Deno.test("POST /v1/bench - returns 400 for invalid benchmark", async () => {
   const response = await testClient.post('/v1/bench', {
     benchmark: 'invalid-benchmark-xyz',
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     cotSteps: 1,
     samples: 3,
     seed: 42
@@ -148,7 +148,7 @@ Deno.test("POST /v1/bench - returns 400 for invalid benchmark", async () => {
 
 Deno.test("POST /v1/bench - returns 400 for missing benchmark", async () => {
   const response = await testClient.post('/v1/bench', {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     cotSteps: 1,
     samples: 3,
     seed: 42
@@ -166,7 +166,7 @@ Deno.test("POST /v1/bench - returns 400 for missing benchmark", async () => {
 Deno.test("POST /v1/bench - respects seed for reproducibility", async () => {
   const config = {
     benchmark: 'mmlu-pro',
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     cotSteps: 1,
     samples: 3,
     seed: 12345

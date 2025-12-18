@@ -46,8 +46,8 @@ All features have been successfully implemented and tested.
 **Current Output:**
 ```json
 {
-  "id": "rose-labs/rose-1-fast",
-  "name": "rose-1-fast",
+  "id": "rose-labs/rose-1-lite",
+  "name": "rose-1-lite",
   "provider": "rose-labs",
   "contextLength": 163840,  // ← True minimum
   "pricing": {
@@ -143,7 +143,7 @@ Response masked and returned to agent
 1. **Build**: TypeScript compiles without errors
 2. **Server**: Running and responsive
 3. **Models List**: 
-   - rose-1-fast shows at top with provider "rose-labs"
+   - rose-1-lite shows at top with provider "rose-labs"
    - Context length: 163,840 (true minimum)
 4. **Rose Ultra**: Context length: 400,000 (true minimum)
 5. **Authentication**: Properly requires Supabase JWT

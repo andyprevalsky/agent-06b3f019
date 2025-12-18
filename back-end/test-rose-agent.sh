@@ -16,14 +16,14 @@ AGENT_PATH="/Users/andyprevalsky/Desktop/projects/navi-whisper-lux/back-end/src/
 
 echo "🧪 Testing Rose Agent with Harbor"
 echo "   Task: pypi-server"
-echo "   Model: rose-labs/rose-1-fast (via Rose API)"
+echo "   Model: rose-labs/rose-1-lite (via Rose API)"
 echo "   Agent: rose-agent (custom)"
 echo "   Environment: daytona"
 echo ""
 
 harbor run \
   --path pypi-server \
-  -m rose-labs/rose-1-fast \
+  -m rose-labs/rose-1-lite \
   --agent-import-path "$AGENT_PATH" \
   --env daytona \
   --force-build \

@@ -143,7 +143,7 @@ if (x402ReceivingWallet) {
             type: "object",
             properties: {
               goal: { type: "string", description: "What should the agent accomplish?" },
-              model: { type: "string", description: "LLM model (default: rose-1-fast)" }
+              model: { type: "string", description: "LLM model (default: rose-1-lite)" }
             },
             required: ["goal"]
           },

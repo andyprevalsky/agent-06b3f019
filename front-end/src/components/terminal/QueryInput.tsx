@@ -70,7 +70,7 @@ export default function QueryInput({
   onSubmit,
   disabled = false,
   placeholder = 'Type your message...',
-  selectedModel = 'rose-labs/rose-1-fast',
+  selectedModel = 'rose-labs/rose-1-lite',
   onModelChange,
   availableModels = [],
   modelsLoading = false,
@@ -402,7 +402,7 @@ export default function QueryInput({
                 </Popover>
                 
                 {/* Tooltip for Rose models when selected */}
-                {(selectedModel === 'rose-labs/rose-1-fast' || selectedModel === 'rose-labs/rose-1-ultra') && (
+                {(selectedModel === 'rose-labs/rose-1-lite' || selectedModel === 'rose-labs/rose-1-pro') && (
                   <Tooltip open={showTooltip} onOpenChange={setShowTooltip}>
                     <TooltipTrigger asChild>
                       <button
@@ -433,7 +433,7 @@ export default function QueryInput({
                     </TooltipTrigger>
                     <TooltipContent className="z-[100] max-w-[280px]">
                       <p className="text-xs">
-                        {selectedModel === 'rose-labs/rose-1-fast'
+                        {selectedModel === 'rose-labs/rose-1-lite'
                           ? "Rose-1-Fast is a mixed-model approach from the best workhorse models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability."
                           : "Rose-1-Ultra is a mixed-model approach from the smartest models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability."}
                       </p>

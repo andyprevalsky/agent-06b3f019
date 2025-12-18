@@ -31,7 +31,7 @@ export const sampleBenchmarkConfig = {
     'x-api-key': ROSE_API_KEY,
   },
   modelConfig: {
-    model: 'rose-labs/rose-1-fast',
+    model: 'rose-labs/rose-1-lite',
     temperature: 0.7,
     maxTokens: 100,
     seed: 42,

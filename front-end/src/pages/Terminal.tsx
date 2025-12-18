@@ -441,7 +441,7 @@ export default function Terminal() {
       : ''
   );
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-fast');
+  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-lite');
   
   // Models and tools from cached context
   const { models, modelsLoading } = useAppData();

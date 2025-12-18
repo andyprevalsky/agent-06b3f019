@@ -330,7 +330,7 @@ export class TerminalBenchHarness extends BaseBenchmarkHarness {
       const result = await harborClient.run({
         dataset: 'terminal-bench',
         version: '2.0',
-        model,  // Pass Rose model name (e.g., "rose-labs/rose-1-fast")
+        model,  // Pass Rose model name (e.g., "rose-labs/rose-1-lite")
         agent: 'rose-agent',  // Use our custom agent
         agentImportPath: customAgentPath,
         environment,

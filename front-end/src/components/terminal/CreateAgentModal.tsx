@@ -32,7 +32,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
 
   const [goal, setGoal] = useState(defaultGoal);
   const [llmJudgePrompt, setLlmJudgePrompt] = useState(defaultLlmJudgePrompt);
-  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-fast');
+  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-lite');
   const [reasoningEffort, setReasoningEffort] = useState<'off' | 'low' | 'medium' | 'high'>('high');
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
@@ -112,7 +112,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
 
       // Reset form
       setGoal(defaultGoal);
-      setSelectedModel('rose-labs/rose-1-fast');
+      setSelectedModel('rose-labs/rose-1-lite');
       setReasoningEffort('high');
       
       onClose();

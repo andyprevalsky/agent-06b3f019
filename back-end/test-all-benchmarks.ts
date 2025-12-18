@@ -36,7 +36,7 @@ async function testMMLUPro(sampleSize: number = 10): Promise<BenchmarkResult> {
   console.log('═══════════════════════════════════════════════════════\n');
   
   const harness = new MMLUProHarness();
-  const model = 'rose-labs/rose-1-fast';
+  const model = 'rose-labs/rose-1-lite';
   
   console.log(`📚 Loading MMLU-Pro dataset...`);
   const allQuestions = await harness.loadDataset();
@@ -148,7 +148,7 @@ async function testTerminalBench(sampleSize: number = 3): Promise<BenchmarkResul
   console.log('═══════════════════════════════════════════════════════\n');
   
   const harness = new TerminalBenchHarness();
-  const model = 'rose-labs/rose-1-fast';
+  const model = 'rose-labs/rose-1-lite';
   
   console.log(`📚 Loading Terminal-Bench dataset...`);
   const allTasks = await harness.loadDataset();
@@ -254,7 +254,7 @@ function printSummary(results: BenchmarkResult[]) {
 
 async function main() {
   console.log('🚀 Running comprehensive benchmark suite for Rose models\n');
-  console.log(`Model: rose-labs/rose-1-fast`);
+  console.log(`Model: rose-labs/rose-1-lite`);
   console.log(`Rose API URL: ${process.env.SUPABASE_URL}/functions/v1/completions`);
   console.log(`API Key: ${process.env.ROSE_API_KEY?.substring(0, 10)}...\n`);
   

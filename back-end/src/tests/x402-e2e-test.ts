@@ -225,7 +225,7 @@ async function testSpawnAgentDirect() {
       },
       body: JSON.stringify({
         goal: 'x402 E2E test agent - verify status endpoint',
-        model: 'rose-labs/rose-1-fast',
+        model: 'rose-labs/rose-1-lite',
         user_id: 'x402-test-user-' + Date.now(), // Unique test user
         task_queue: 'navi-agent-tasks-test',
       }),

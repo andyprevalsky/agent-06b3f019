@@ -51,7 +51,7 @@ cat jobs/$LATEST_JOB/pypi-server*/trial.log
 # Try running with debug flag
 harbor run --path pypi-server \
   --agent-import-path harbor.agents.installed.rose_agent:RoseAgent \
-  -m rose-labs/rose-1-fast \
+  -m rose-labs/rose-1-lite \
   --env daytona \
   --debug
 ```
@@ -75,7 +75,7 @@ curl -X POST http://localhost:3001/v1/bench \
   -H "x-api-key: $ROSE_API_KEY" \
   -d '{
     "benchmark": "terminal-bench",
-    "model": "rose-labs/rose-1-fast",
+    "model": "rose-labs/rose-1-lite",
     "samples": 3
   }'
 ```

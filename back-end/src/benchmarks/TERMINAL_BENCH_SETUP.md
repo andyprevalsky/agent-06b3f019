@@ -93,7 +93,7 @@ Same interface as MMLU-Pro:
 POST /v1/bench
 {
   "benchmark": "terminal-bench",
-  "model": "rose-labs/rose-1-fast",
+  "model": "rose-labs/rose-1-lite",
   "samples": 3,
   "cotSteps": 1,
   "seed": 42
@@ -104,7 +104,7 @@ Response format (identical to MMLU-Pro):
 ```json
 {
   "benchmarkName": "Terminal-Bench 2.0",
-  "model": "rose-labs/rose-1-fast",
+  "model": "rose-labs/rose-1-lite",
   "accuracy": 66.67,
   "sampledQuestions": 3,
   "totalQuestions": 89,

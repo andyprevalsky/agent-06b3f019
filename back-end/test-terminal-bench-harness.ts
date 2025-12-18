@@ -49,7 +49,7 @@ async function testTerminalBenchHarness() {
   
   // Test 5: Dry run - show what would be executed
   console.log('5️⃣ Dry run - Command that would be executed:');
-  const model = 'rose-labs/rose-1-fast';  // Rose model via custom agent
+  const model = 'rose-labs/rose-1-lite';  // Rose model via custom agent
   const agent = 'rose-agent';
   const environment = 'daytona';
   

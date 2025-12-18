@@ -156,8 +156,8 @@ router.get('/', async (req: Request, res: Response) => {
     const sortedModels = sortModels(toolSupportedModels);
 
     // Calculate metadata for Rose models dynamically (pricing + context length)
-    const roseFastMetadata = await calculateRoseMetadata('rose-1-fast', allModels);
-    const roseUltraMetadata = await calculateRoseMetadata('rose-1-ultra', allModels);
+    const roseFastMetadata = await calculateRoseMetadata('rose-1-lite', allModels);
+    const roseUltraMetadata = await calculateRoseMetadata('rose-1-pro', allModels);
 
     // NOTE: rose-hyper disabled - Cerebras doesn't support complex JSON schemas
     // (maxLength not supported, anyOf limited to 5 options, schema max 5000 chars)
@@ -166,16 +166,16 @@ router.get('/', async (req: Request, res: Response) => {
     // Inject Rose models at the beginning
   const roseModels: SortedModel[] = [
     {
-      id: 'rose-labs/rose-1-fast',
-      name: 'rose-1-fast',
+      id: 'rose-labs/rose-1-lite',
+      name: 'rose-1-lite',
       provider: 'rose-labs',
       description: 'Rose Labs fast model optimized for low latency (< 6s avg)',
       contextLength: roseFastMetadata.contextLength,
       pricing: roseFastMetadata.pricing
     },
     {
-      id: 'rose-labs/rose-1-ultra',
-      name: 'rose-1-ultra',
+      id: 'rose-labs/rose-1-pro',
+      name: 'rose-1-pro',
       provider: 'rose-labs',
       description: 'Rose Labs ultra model for complex tasks (> 6s avg)',
       contextLength: roseUltraMetadata.contextLength,

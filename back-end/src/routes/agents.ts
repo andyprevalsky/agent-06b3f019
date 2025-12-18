@@ -27,7 +27,7 @@ Scoring Instructions:
 // Validation schemas
 const createAgentSchema = z.object({
   goal: z.string().min(1),
-  model: z.string().optional().default('rose-labs/rose-1-fast'),
+  model: z.string().optional().default('rose-labs/rose-1-lite'),
   reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional().default('low'),
   tool_ids: z.array(z.string().uuid()).nullable().optional().default([]).transform(val => val ?? []),
   source: z.enum(['WEB', 'MAC_APP']).optional().default('WEB'),

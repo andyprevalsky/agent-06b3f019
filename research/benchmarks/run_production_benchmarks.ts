@@ -5,7 +5,7 @@
  * 
  * Usage:
  *   deno run --allow-all run_production_benchmarks.ts
- *   deno run --allow-all run_production_benchmarks.ts --models rose-1-fast --cot 1,3,5
+ *   deno run --allow-all run_production_benchmarks.ts --models rose-1-lite --cot 1,3,5
  */
 
 import { parse } from "https://deno.land/std/flags/mod.ts";
@@ -46,7 +46,7 @@ async function main() {
   const flags = parse(Deno.args, {
     string: ['models', 'benchmarks', 'cot', 'samples'],
     default: {
-      models: 'rose-labs/rose-1-fast,rose-labs/rose-1-ultra',
+      models: 'rose-labs/rose-1-lite,rose-labs/rose-1-pro',
       benchmarks: 'mmlu-pro,terminal-bench',
       cot: '1,3,5',
       samples: '100'
