@@ -1,23 +1,16 @@
 export const ROSE_MODEL_POOLS = {
   'rose-1-lite': [
-    'openai/gpt-oss-120b',
-    // 'qwen/qwen3-235b-a22b-thinking-2507', // Disabled - produces garbage tool calls disconnected from reasoning
     'moonshotai/kimi-k2-0905',
-    'meta-llama/llama-4-maverick',
-    'deepseek/deepseek-v3.2-exp',
-    'openai/gpt-5.1',
-    'mistralai/mistral-medium-3.1',
+    'openai/gpt-5.2',
     'google/gemini-2.5-flash',
-    'nousresearch/hermes-4-405b',
-    'minimax/minimax-m2',
     'x-ai/grok-4-fast',
   ],
   'rose-1-ultra': [
-    'openai/gpt-5.1',
+    'openai/gpt-5.2',
     'anthropic/claude-sonnet-4.5',
     'moonshotai/kimi-k2-thinking',
-    'google/gemini-2.5-pro',
-    'x-ai/grok-4-fast',
+    'google/gemini-3-pro-preview',
+    'x-ai/grok-4.1-fast',
   ],
   // Cerebras-powered hyper model - direct API calls for ultra-fast inference
   'rose-hyper': [

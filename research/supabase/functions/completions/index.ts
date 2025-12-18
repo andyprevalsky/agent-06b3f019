@@ -12,10 +12,9 @@ const MODEL_POOLS = {
     // 'openai/gpt-oss-120b', // Disabled - produces 120+ garbage tool calls disconnected from reasoning
     // 'qwen/qwen3-235b-a22b-thinking-2507', // Disabled - produces garbage tool calls disconnected from reasoning
     'moonshotai/kimi-k2-0905',
-    'meta-llama/llama-4-maverick',
     // 'deepseek/deepseek-v3.2-exp', // Disabled - produces garbage tool calls disconnected from reasoning
     // 'z-ai/glm-4.6', // Disabled - causes tool call confusion (calls wrong tools)
-    'openai/gpt-5.1',
+    'openai/gpt-5.2',
     // 'mistralai/mistral-medium-3.1', // Disabled
     'google/gemini-2.5-flash',
     // 'nousresearch/hermes-4-405b', // Disabled
@@ -23,11 +22,11 @@ const MODEL_POOLS = {
     'x-ai/grok-4-fast'
   ],
   'rose-1-ultra': [
-    'openai/gpt-5.1',
+    'openai/gpt-5.2',
     'anthropic/claude-sonnet-4.5',
     'moonshotai/kimi-k2-thinking',
-    'google/gemini-2.5-pro',
-    'x-ai/grok-4-fast'
+    'google/gemini-3-pro-preview',
+    'x-ai/grok-4.1-fast'
   ]
 };
 
@@ -35,7 +34,7 @@ const MODEL_POOLS = {
 // FAST uses Cerebras for ultra-low latency inference
 type ModelPreference = 'SMART' | 'FAST' | 'CHEAP';
 const MODEL_PREFERENCES: Record<ModelPreference, { model: string; isCerebras: boolean }> = {
-  'SMART': { model: 'openai/gpt-5.1', isCerebras: false },
+  'SMART': { model: 'openai/gpt-5.2', isCerebras: false },
   'FAST': { model: 'qwen-3-235b-a22b-instruct-2507', isCerebras: true },
   'CHEAP': { model: 'google/gemini-2.5-flash', isCerebras: false }
 };
