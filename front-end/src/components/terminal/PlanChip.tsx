@@ -217,10 +217,11 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
       <motion.div
         layout
         className={cn(
-          'rounded-lg border overflow-hidden transition-colors',
-          'bg-muted/30 border-border/60',
-          'hover:bg-muted/50 hover:border-border'
+          'rounded-lg border overflow-hidden transition-colors backdrop-blur-[12px]',
+          'bg-[#EEEFF2]/60 dark:bg-[#1a1a1a]/60 border-border/60',
+          'hover:bg-[#EEEFF2]/80 dark:hover:bg-[#1a1a1a]/80 hover:border-border'
         )}
+        style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
       >
         {/* Header - Always visible, clickable if has content */}
         <button

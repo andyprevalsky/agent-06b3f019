@@ -15,6 +15,6 @@
     "agents"
   ],
   "dependencies": {
-    "@browserbasehq/stagehand": "^2.5.2"
+    "@browserbasehq/stagehand": "^2.5.6"
   }
 }

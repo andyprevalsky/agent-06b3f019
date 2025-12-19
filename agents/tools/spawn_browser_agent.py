@@ -1,4 +1,4 @@
-"""Browser automation tool using Stagehand + Browserbase."""
+"""Browser automation tool using Stagehand + Browserbase with Rose agent."""
 
 from typing import Dict, Any, Optional, AsyncGenerator
 from temporalio import activity, workflow
@@ -10,12 +10,14 @@ import time
 import asyncio
 import base64
 import json
-from google.genai import types
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
+from browser_tools import get_browser_tool_definitions, get_system_prompt, execute_browser_tool
+from browser_tools.message_processing import transform_tool_result, compress_messages
+from helpers.model_pricing import get_model_pricing_with_fallback
 
 with workflow.unsafe.imports_passed_through():
     from config import load_config
@@ -572,15 +574,17 @@ async def spawn_browser_agent_activity(
                 callback_set=custom_logger_callback is not None
             )
         
+        # Configure Stagehand with Rose for internal observe/extract calls
         stagehand_config = StagehandConfig(
             env="BROWSERBASE",
             api_key=config.browserbase.api_key,
             project_id=config.browserbase.project_id,
             browserbase_session_id=session_id,
-            model_name="gemini-2.5-computer-use-preview-10-2025",  # Hardcoded Gemini model
-            model_api_key=config.gemini.api_key,  # Use Google API key from config
+            model_name="rose-1-ultra",  # Rose for internal Stagehand calls
+            model_api_key=config.rose.api_key,
+            model_base_url=config.rose.api_url.replace("/completions", ""),  # Rose endpoint
             verbose=2,  # Debug level for detailed action logging
-            logger=custom_logger_callback,  # ← Real-time action logger!
+            logger=custom_logger_callback,
             use_rich_logging=False,  # We handle formatting ourselves
             browserbase_session_create_params={
                 "keepAlive": True,  # Prevent premature session closure
@@ -591,41 +595,10 @@ async def spawn_browser_agent_activity(
         stagehand = Stagehand(stagehand_config)
         await stagehand.init()
         
-        # Note: Backend already navigated to saved URL during resume if applicable
+        activity.heartbeat("Stagehand initialized - Setting up Rose agent")
         
-        # 5. CUSTOM AGENT LOOP: Call Gemini Computer Use API directly
-        # This gives us full control over execution, token usage tracking, and custom tools
-
-        from google import genai
-        from google.genai import types
-        from stagehand.handlers.cua_handler import CUAHandler
-        from stagehand.types.agent import AgentAction, AgentActionType
-        from pydantic import TypeAdapter
-
-        activity.heartbeat("IMPORTS COMPLETE - Creating CUAHandler")
-
-        # Create CUAHandler for executing browser actions
-        cua_handler = CUAHandler(
-            stagehand=stagehand,
-            page=stagehand.page._page,
-            logger=logger
-        )
-
-        activity.heartbeat("CUAHandler created - Injecting cursor")
-        
-        # Inject visual cursor for screenshots (matches Stagehand's run_task)
-        await cua_handler.inject_cursor()
-        
-        # Capture initial state BEFORE agent loop (will be reused for open_web_browser)
-        initial_screenshot_b64 = await cua_handler.get_screenshot_base64()
-        initial_url = cua_handler.page.url
-        
-        activity.heartbeat("Initial state captured - Getting viewport")
-
-        # Get viewport dimensions for coordinate normalization
-        viewport = stagehand.page._page.viewport_size
-        display_width = viewport['width'] if viewport else 1288
-        display_height = viewport['height'] if viewport else 711
+        # 5. ROSE AGENT LOOP: Use browser tools with Rose
+        # This gives us full control over execution and token usage tracking
         
         # Capture initial URL
         try:
@@ -663,79 +636,9 @@ async def spawn_browser_agent_activity(
             except:
                 pass
 
-        activity.heartbeat("Creating Google CUA Client")
-
-        # Create Google CUA Client (handles all Gemini transformations)
-        from stagehand.agent.google_cua import GoogleCUAClient
-        from stagehand.types.agent import AgentConfig
-        
-        google_cua_client = GoogleCUAClient(
-            model="gemini-2.5-computer-use-preview-10-2025",
-            instructions=None,  # We handle instructions ourselves
-            config=AgentConfig(
-                max_steps=200,
-                options={"apiKey": config.gemini.api_key}
-            ),
-            logger=logger,  # Use our logger
-            handler=cua_handler,
-            viewport={"width": 1288, "height": 711}
-        )
-
-        # === ADD OUR CUSTOM TOOLS TO GEMINI'S TOOLS ===
-        # GoogleCUAClient initializes _generate_content_config with Computer Use tool
-        # We append our custom function declarations to the existing tools list
-        custom_tools = types.Tool(
-            function_declarations=[
-                types.FunctionDeclaration(
-                    name="send_message_to_user",
-                    description="Request the user to complete an action that the agent cannot do (login, payment, CAPTCHA, etc.). Always used for blocking clarifications—host will wait for the user's response.",
-                    parameters=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "message": types.Schema(
-                                type=types.Type.STRING,
-                                description="Explain what the user needs to do and why you cannot do it"
-                            ),
-                            "reason": types.Schema(
-                                type=types.Type.STRING,
-                                description="Brief category: login, payment, captcha, verification, etc."
-                            )
-                        },
-                        required=["message", "reason"]
-                    )
-                ),
-                types.FunctionDeclaration(
-                    name="mark_task_completed",
-                    description="Mark the task as complete. Use this when you have successfully accomplished the goal or when it's clear the task cannot be completed.",
-                    parameters=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "success": types.Schema(
-                                type=types.Type.BOOLEAN,
-                                description="Whether the task was completed successfully"
-                            ),
-                            "message": types.Schema(
-                                type=types.Type.STRING,
-                                description="Detailed message about what was accomplished or why it failed"
-                            )
-                        },
-                        required=["success", "message"]
-                    )
-                )
-            ]
-        )
-
-        # Append our custom tools to the existing tools list
-        google_cua_client._generate_content_config.tools.append(custom_tools)
-
-        # Get reference to Gemini client for direct API calls (for usage tracking)
-        genai_client = google_cua_client.genai_client
-
-        # === INITIALIZE CONVERSATION ===
-        # Fetch user profile for shipping info and payment info
+        # === FETCH USER PROFILE ===
         user_profile = {}
         try:
-            config = load_config()
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
                     f"{config.backend.api_url}/api/user-settings",
@@ -780,32 +683,62 @@ IMPORTANT: During any checkout process, verify that the shipping address shown m
 
 PAYMENT AUTHORIZATION:
 You have the user's payment method on file, but autopay is DISABLED (limit set to $0).
-For ALL purchases, you MUST use send_message_to_user with is_question=true to get explicit approval before entering any payment details."""
+For ALL purchases, you MUST use send_message_to_user to get explicit approval before entering any payment details."""
             else:
                 logger.warning("Failed to decrypt payment info - payment features disabled for this session")
 
-        system_prompt = """Your browser is in full screen mode. There is no search bar, navigation bar, or shortcut to control it. You can use browser actions to complete tasks.
+        # === BUILD SYSTEM PROMPT AND TOOLS ===
+        custom_instructions = """Your browser is in full screen mode. There is no search bar, navigation bar, or shortcut to control it. You can use browser actions to complete tasks.
 
 Browser cookies have been injected - assume the user is logged in until proven otherwise.""" + shipping_section + autopay_section + """
 
-Use send_message_to_user when you need human help (login, CAPTCHA, or payments over your autopay limit). Use mark_task_completed when the task is done."""
+Use send_message_to_user when you need human help (login, CAPTCHA, or payments over your autopay limit). Use close tool with success=true when the task is done."""
 
-        # Use Stagehand's formatting for initial message
-        google_cua_client._format_initial_messages(
-            instruction=f"{system_prompt}\n\nYour goal: {goal}",
-            screenshot_base64=initial_screenshot_b64
-        )
-
-        # === ADD RESUME CONTEXT (if resuming after user attention) ===
+        current_url = stagehand.page.url if stagehand.page else ""
+        system_prompt = get_system_prompt(goal, current_url, custom_instructions)
+        browser_tools = get_browser_tool_definitions(current_url)
+        
+        # Add send_message_to_user custom tool
+        custom_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_message_to_user",
+                    "description": "Request the user to complete an action that the agent cannot do (login, payment, CAPTCHA, etc.). Always used for blocking clarifications—host will wait for the user's response.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {
+                                "type": "string",
+                                "description": "Explain what the user needs to do and why you cannot do it"
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "Category: login, payment, captcha, verification, blocked, other"
+                            }
+                        },
+                        "required": ["message", "reason"],
+                        "additionalProperties": False
+                    }
+                }
+            }
+        ]
+        
+        all_tools = browser_tools + custom_tools
+        
+        # === INITIALIZE CONVERSATION ===
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": goal}
+        ]
+        
+        # Add resume context if resuming after user attention
         if is_resume:
             logger.info("🔄 Resuming after user attention - adding context message")
-            resume_context_message = types.Content(
-                role="user",
-                parts=[
-                    types.Part(text="You previously requested user assistance. The user has completed the action. Review the current browser state and continue.")
-                ]
-            )
-            google_cua_client.history.append(resume_context_message)
+            messages.append({
+                "role": "user",
+                "content": "You previously requested user assistance. The user has completed the action. Review the current browser state and continue."
+            })
 
         # Token tracking
         total_input_tokens = 0
@@ -818,52 +751,104 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
         close_success = False
         close_reasoning = ""
         
-        # Retry tracking for Gemini API failures
+        # Retry tracking for API failures
         max_retries = 3
         retry_delay_base = 2  # Base delay in seconds
 
-        activity.heartbeat(f"Starting custom agent loop: {goal}")
+        activity.heartbeat(f"Starting Rose agent loop: {goal}")
+        
+        # Fetch dynamic model pricing from Supabase cache
+        model_pricing = await get_model_pricing_with_fallback("rose-1-ultra")
+        logger.info(
+            "📊 Model pricing loaded",
+            input_cents_per_1k=model_pricing["input_cents_per_1k"],
+            output_cents_per_1k=model_pricing["output_cents_per_1k"]
+        )
 
         # ============================================
-        # MAIN AGENT LOOP (Using GoogleCUAClient)
+        # MAIN AGENT LOOP (Using Rose + Browser Tools)
         # ============================================
+        # 
+        # NEW ACTION TYPES for frontend (toolIcons.tsx):
+        # - "observation": ariaTree, screenshot (agent observing page state)
+        # - "extraction": extract (pulling structured data)
+        # - "action": act, wait, fillForm (generic actions)
+        # - "navigation": goto, navback
+        # - "scroll": scroll
+        # - "thinking": agent reasoning
+        # - "task_complete": close tool
+        # - "session_paused": send_message_to_user
+        # - "error": failed actions
+        # - "system": system messages
+        #
         for step in range(max_steps):
             try:
                 activity.heartbeat(f"Executing step {step + 1}/{max_steps}")
                 logger.info(f"🔄 Step {step + 1}/{max_steps}")
 
-                # ===== CALL GEMINI API WITH RETRY LOGIC =====
-                response = None
+                # ===== CALL ROSE API WITH RETRY LOGIC =====
+                response_data = None
                 for retry_attempt in range(max_retries + 1):
                     try:
-                        # Log retry attempt
                         if retry_attempt > 0:
                             logger.info(f"🔄 Retry attempt {retry_attempt}/{max_retries}")
                         
-                        logger.info("🌐 Calling Gemini API...")
-                        response = genai_client.models.generate_content(
-                            model="gemini-2.5-computer-use-preview-10-2025",
-                            contents=google_cua_client.history,  # Use client's managed history
-                            config=google_cua_client._generate_content_config
-                        )
-                        logger.info("✅ Gemini API response received")
+                        logger.info("🌹 Calling Rose API...")
+                        
+                        # Compress old screenshots and aria trees to save tokens
+                        compressed_messages = compress_messages(messages)
+                        
+                        # Log tool_call IDs in messages for debugging
+                        for i, msg in enumerate(compressed_messages):
+                            if msg.get("role") == "assistant" and "tool_calls" in msg:
+                                for j, tc in enumerate(msg["tool_calls"]):
+                                    tool_call_id = tc.get("id", "")
+                                    tool_name = tc.get("function", {}).get("name", "")
+                                    import re
+                                    pattern_valid = bool(re.match(r'^[a-zA-Z0-9_-]+$', tool_call_id)) if tool_call_id else False
+                                    if not pattern_valid:
+                                        logger.error(
+                                            f"❌ Invalid tool_call_id in messages[{i}].tool_calls[{j}]",
+                                            tool_name=tool_name,
+                                            tool_call_id=tool_call_id,
+                                            full_tool_call=tc
+                                        )
+                        
+                        async with httpx.AsyncClient(timeout=120.0) as http_client:
+                            response = await http_client.post(
+                                config.rose.api_url,
+                                json={
+                                    "model": "rose-1-ultra",
+                                    "messages": compressed_messages,
+                                    "temperature": 1.0,
+                                    "max_tokens": 4096,
+                                    "tools": all_tools,
+                                    "tool_choice": "auto"
+                                },
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                                    "x-api-key": config.rose.api_key,
+                                }
+                            )
+                            response.raise_for_status()
+                            response_data = response.json()
+                        
+                        logger.info("✅ Rose API response received")
 
                         # Track token usage
-                        if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                            total_input_tokens += (getattr(response.usage_metadata, 'prompt_token_count', 0) or 0)
-                            total_output_tokens += (getattr(response.usage_metadata, 'candidates_token_count', 0) or 0)
-                            logger.info(f"📊 Tokens: {total_input_tokens} in, {total_output_tokens} out")
+                        usage = response_data.get("usage", {})
+                        total_input_tokens += usage.get("prompt_tokens", 0)
+                        total_output_tokens += usage.get("completion_tokens", 0)
+                        logger.info(f"📊 Tokens: {total_input_tokens} in, {total_output_tokens} out")
 
-                        # Extract response
-                        if not response.candidates or len(response.candidates) == 0:
-                            logger.error(f"❌ No candidates in Gemini response (attempt {retry_attempt + 1}/{max_retries + 1})")
-                            logger.error(f"📋 Full Gemini response: {response}")
+                        # Check for valid response
+                        choices = response_data.get("choices", [])
+                        if not choices:
+                            logger.error(f"❌ No choices in Rose response (attempt {retry_attempt + 1}/{max_retries + 1})")
                             
-                            # If this was the last retry, fail the task
                             if retry_attempt >= max_retries:
                                 logger.error("❌ Max retries exhausted, failing task")
-                                
-                                # Save task failed message
                                 await save_browser_action_message(
                                     agent_id=agent_id,
                                     title="Task Failed",
@@ -873,75 +858,176 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                                     browser_url=browser_url,
                                     action_type="task_complete"
                                 )
-                                
                                 close_success = False
                                 close_reasoning = "Model returned no response after multiple retries"
-                                break  # Exit main agent loop
+                                break
                             
-                            # Wait with exponential backoff before retrying
                             retry_delay = retry_delay_base ** (retry_attempt + 1)
                             logger.info(f"⏳ Retrying in {retry_delay} seconds...")
                             await asyncio.sleep(retry_delay)
-                            continue  # Try again
+                            continue
                         
-                        # Success! Got candidates, break out of retry loop
+                        # Success
                         break
                         
-                    except Exception as api_error:
-                        logger.error(f"❌ Gemini API call failed (attempt {retry_attempt + 1}/{max_retries + 1})", error=str(api_error))
+                    except httpx.HTTPStatusError as api_error:
+                        # Try to get response body for better error details
+                        error_body = ""
+                        try:
+                            error_body = api_error.response.text
+                        except:
+                            pass
                         
-                        # If this was the last retry, re-raise the exception
+                        logger.error(f"❌ Rose API call failed (attempt {retry_attempt + 1}/{max_retries + 1})", 
+                                    error=str(api_error), 
+                                    status_code=api_error.response.status_code,
+                                    response_body=error_body[:500] if error_body else "")
+                        
                         if retry_attempt >= max_retries:
                             raise
                         
-                        # Wait with exponential backoff before retrying
+                        retry_delay = retry_delay_base ** (retry_attempt + 1)
+                        logger.info(f"⏳ Retrying in {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                        
+                    except Exception as api_error:
+                        logger.error(f"❌ Rose API call failed (attempt {retry_attempt + 1}/{max_retries + 1})", error=str(api_error))
+                        
+                        if retry_attempt >= max_retries:
+                            raise
+                        
                         retry_delay = retry_delay_base ** (retry_attempt + 1)
                         logger.info(f"⏳ Retrying in {retry_delay} seconds...")
                         await asyncio.sleep(retry_delay)
 
-                # If we broke out of retry loop due to no candidates, exit main loop
+                # If we broke out of retry loop due to failure, exit main loop
                 if close_reasoning:
                     break
 
-                # ===== CHECK FOR CUSTOM TOOLS FIRST (BEFORE STAGEHAND PROCESSING) =====
-                candidate = response.candidates[0]
-                # Check if content exists before accessing parts
-                if candidate.content and candidate.content.parts:
-                    all_function_calls = [p.function_call for p in candidate.content.parts if p.function_call]
-                else:
-                    all_function_calls = []
-                    logger.warning("Candidate has no content or parts, skipping custom tool check")
+                # ===== EXTRACT RESPONSE DATA =====
+                message_data = response_data["choices"][0]["message"]
+                content = message_data.get("content", "") or ""
+                tool_calls = message_data.get("tool_calls", [])
                 
-                custom_tool_found = False
-                for fc in all_function_calls:
-                    # ===== CUSTOM TOOL: send_message_to_user =====
-                    if fc.name == "send_message_to_user":
-                        custom_tool_found = True
-                        reason = fc.args.get("reason", "")
-                        attention_message = fc.args.get("message", "")
+                # Sanitize and log tool_call IDs
+                if tool_calls:
+                    import re
+                    import uuid
+                    for tc in tool_calls:
+                        original_id = tc.get("id", "")
+                        tool_name = tc.get("function", {}).get("name", "")
                         
-                        # Track action for context
+                        # Sanitize tool_call ID to match Anthropic's pattern: ^[a-zA-Z0-9_-]+$
+                        if original_id:
+                            sanitized_id = re.sub(r'[^a-zA-Z0-9_-]', '_', original_id)
+                            # Ensure it's not empty after sanitization
+                            if not sanitized_id:
+                                sanitized_id = f"tool_{uuid.uuid4().hex[:16]}"
+                        else:
+                            sanitized_id = f"tool_{uuid.uuid4().hex[:16]}"
+                        
+                        # Update the ID if it was changed
+                        if sanitized_id != original_id:
+                            logger.warning(
+                                f"⚠️ Sanitized tool_call_id",
+                                tool_name=tool_name,
+                                original_id=original_id,
+                                sanitized_id=sanitized_id
+                            )
+                            tc["id"] = sanitized_id
+                        else:
+                            logger.info(
+                                f"📋 Received tool_call from LLM",
+                                tool_name=tool_name,
+                                tool_call_id=sanitized_id
+                            )
+                
+                # Add assistant message to conversation history
+                assistant_message = {"role": "assistant", "content": content}
+                if tool_calls:
+                    assistant_message["tool_calls"] = tool_calls
+                messages.append(assistant_message)
+                
+                # ===== LOG REASONING (if any content) =====
+                reasoning_text = content.strip()
+                if reasoning_text:
+                    reasoning_messages.append(reasoning_text)
+                    if len(reasoning_messages) > 5:
+                        reasoning_messages = reasoning_messages[-5:]
+                    
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Thinking",
+                        message=reasoning_text,
+                        status=MessageStatus.FINISHED,
+                        task_id=task_id,
+                        browser_url=browser_url,
+                        action_type="thinking"
+                    )
+                
+                # ===== EXECUTE TOOL CALLS =====
+                if not tool_calls:
+                    continue  # No tools - loop continues
+                
+                tool_responses = []
+                for tool_call in tool_calls:
+                    # Safely extract tool call data
+                    function_data = tool_call.get("function", {})
+                    tool_name = function_data.get("name", "")
+                    tool_id = tool_call.get("id", "")
+                    
+                    if not tool_name:
+                        logger.warning(f"⚠️ Skipping tool call with missing name", tool_call=tool_call)
+                        continue
+                    
+                    # Safely get arguments
+                    arguments_str = function_data.get("arguments", "{}")
+                    try:
+                        tool_args = json.loads(arguments_str) if arguments_str else {}
+                    except json.JSONDecodeError as decode_error:
+                        logger.error(
+                            f"❌ Failed to parse tool arguments JSON for {tool_name}",
+                            tool_id=tool_id,
+                            arguments_str=arguments_str[:200] if arguments_str else "",
+                            error=str(decode_error)
+                        )
+                        tool_args = {}
+                    except (TypeError, ValueError) as parse_error:
+                        logger.error(
+                            f"❌ Invalid arguments format for {tool_name}",
+                            tool_id=tool_id,
+                            arguments_type=type(arguments_str).__name__,
+                            error=str(parse_error)
+                        )
+                        tool_args = {}
+                    
+                    logger.info(f"🔧 Executing tool: {tool_name}", args=tool_args)
+                    
+                    # === CUSTOM TOOL: send_message_to_user ===
+                    if tool_name == "send_message_to_user":
+                        reason = tool_args.get("reason", "")
+                        attention_message = tool_args.get("message", "")
+                        
+                        # Track action
                         action_summary.append(f"send_message_to_user: {reason or 'user help needed'}")
                         if len(action_summary) > 10:
                             action_summary = action_summary[-10:]
                         
                         logger.info("Agent requested user attention", reason=reason, message=attention_message[:100])
-                        
-                        # Set closing flag
                         is_closing = True
                         
-                        # Get current URL before closing Stagehand
+                        # Get current URL
                         try:
-                            current_page_url = cua_handler.page.url
+                            current_page_url = stagehand.page.url
                             logger.info(f"📍 Captured current URL: {current_page_url}")
                         except Exception as url_error:
                             logger.error(f"⚠️ Failed to get current URL: {url_error}")
                             current_page_url = None
                         
-                        # Close Stagehand (disconnect from browser)
+                        # Close Stagehand
                         await stagehand.close()
                         
-                        # Pause the browser session
+                        # Pause browser session
                         try:
                             logger.info(f"Pausing browser session {session_id} (user attention needed)")
                             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -952,7 +1038,6 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                                 )
                                 logger.info(f"Pause response status: {response_pause.status_code}")
                             
-                            # Save pause message for frontend
                             await save_browser_action_message(
                                 agent_id=agent_id,
                                 title="Browser Session Paused",
@@ -967,14 +1052,19 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                         except Exception as pause_error:
                             logger.error(f"⚠️ Failed to pause browser session: {pause_error}")
                         
-                        # Calculate usage before returning
+                        # Calculate usage and return
                         execution_time_ms = (time.time() - start_time) * 1000
                         
+                        # Use dynamic pricing from Supabase cache
                         usage_items = [
                             {
                                 "type": "llm",
-                                "cost_cents": round((total_input_tokens / 1000) * 0.125 + (total_output_tokens / 1000) * 1.0, 4),
-                                "provider": "Gemini 2.5 Computer Use",
+                                "cost_cents": round(
+                                    (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"] + 
+                                    (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"],
+                                    4
+                                ),
+                                "provider": "Rose 1 Ultra",
                                 "input_tokens": total_input_tokens,
                                 "output_tokens": total_output_tokens
                             },
@@ -985,7 +1075,6 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             }
                         ]
                         
-                        # Return checkpoint for resume
                         return {
                             "status": "NEEDS_USER_HELP",
                             "message": attention_message,
@@ -998,22 +1087,20 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             "usage_items": usage_items
                         }
                     
-                    # ===== CUSTOM TOOL: mark_task_completed =====
-                    elif fc.name == "mark_task_completed":
-                        custom_tool_found = True
-                        close_success = fc.args.get("success", True)
-                        close_reasoning = fc.args.get("message", "")
+                    # === BROWSER TOOL: close ===
+                    elif tool_name == "close":
+                        close_success = tool_args.get("success", True)
+                        close_reasoning = tool_args.get("reasoning", "")
                         is_closing = True
                         
-                        # Track action for context
+                        # Track action
                         status_str = "success" if close_success else "failure"
-                        action_summary.append(f"mark_task_completed: {status_str}")
+                        action_summary.append(f"close: {status_str}")
                         if len(action_summary) > 10:
                             action_summary = action_summary[-10:]
                         
-                        logger.info("Agent marked task as complete", success=close_success, message=close_reasoning[:100])
+                        logger.info("Agent called close", success=close_success, reasoning=close_reasoning[:100])
                         
-                        # Save completion message for frontend
                         await save_browser_action_message(
                             agent_id=agent_id,
                             title="Task Complete" if close_success else "Task Failed",
@@ -1023,259 +1110,134 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             browser_url=browser_url,
                             action_type="task_complete"
                         )
-                        break
-                
-                # If we handled custom tools, add acknowledgement to history and continue
-                if custom_tool_found:
-                    custom_responses = []
-                    for fc in all_function_calls:
-                        if fc.name in ["send_message_to_user", "mark_task_completed"]:
-                            custom_responses.append(
-                                types.Part(
-                                    function_response=types.FunctionResponse(
-                                        name=fc.name,
-                                        response={"status": "acknowledged"}
-                                    )
-                                )
-                            )
+                        
+                        tool_responses.append({
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "content": json.dumps({"success": True, "acknowledged": True})
+                        })
+                        break  # Exit tool loop
                     
-                    if custom_responses:
-                        google_cua_client.history.append(
-                            types.Content(role="user", parts=custom_responses)
-                        )
-                    
-                    if is_closing:
-                        break
-                    continue  # Go to next iteration
-                
-                # ===== USE STAGEHAND TO TRANSFORM RESPONSE =====
-                try:
-                    (
-                        agent_actions,           # List[AgentAction] - properly transformed with ALL Gemini fields
-                        reasoning_text,          # Optional[str] - agent's reasoning
-                        task_completed,          # bool - did agent finish?
-                        final_model_message,     # Optional[str] - completion message
-                        invoked_function_info    # List[tuple[str, dict]] - [(name, args)] for each action
-                    ) = google_cua_client._process_provider_response(response)
-                except Exception as parse_error:
-                    # Gemini returned an invalid/malformed action - log and retry
-                    error_msg = str(parse_error)
-                    # Truncate long validation errors for display
-                    if len(error_msg) > 200:
-                        error_msg = error_msg[:200] + "..."
-                    
-                    logger.warning(f"Invalid action from model, retrying: {error_msg}")
-                    
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Invalid Action (retrying)",
-                        message=f"Model returned malformed action: {error_msg}",
-                        status=MessageStatus.ERROR,
-                        task_id=task_id,
-                        browser_url=browser_url,
-                        action_type="error"
-                    )
-                    
-                    # Continue to next iteration - will get fresh screenshot and retry
-                    continue
-                
-                # === TRACK REASONING (OUR CUSTOM FEATURE) ===
-                if reasoning_text:
-                    reasoning_messages.append(reasoning_text)
-                    if len(reasoning_messages) > 5:
-                        reasoning_messages = reasoning_messages[-5:]
-                    
-                    # Log to browser panel
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Thinking",
-                        message=reasoning_text,
-                        status=MessageStatus.FINISHED,
-                        task_id=task_id,
-                        browser_url=browser_url,
-                        action_type="thinking"
-                    )
-                
-                # === HANDLE TASK COMPLETION ===
-                if task_completed:
-                    logger.info(f"✅ Task complete: {final_model_message}")
-                    close_success = True
-                    close_reasoning = final_model_message or "Task completed"
-                    
-                    # Save completion message to browser panel
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Task Complete",
-                        message=close_reasoning,
-                        status=MessageStatus.FINISHED,
-                        task_id=task_id,
-                        browser_url=browser_url,
-                        action_type="task_complete"
-                    )
-                    break
-                
-                # === HANDLE NO ACTIONS ===
-                if not agent_actions:
-                    logger.warning("No actions from model, ending task")
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Task Failed",
-                        message="Model provided no further actions",
-                        status=MessageStatus.ERROR,
-                        task_id=task_id,
-                        browser_url=browser_url,
-                        action_type="task_complete"
-                    )
-                    close_success = False
-                    close_reasoning = "Model provided no further actions"
-                    break
-                
-                # ===== EXECUTE BROWSER ACTIONS (WITH OUR CUSTOM LOGGING) =====
-                for idx, agent_action in enumerate(agent_actions):
-                    function_name, function_args = invoked_function_info[idx]
-                    
-                    # === BUILD ACTION TITLE AND TYPE (OUR CUSTOM FORMATTING) ===
-                    action_title_map = {
-                        "type_text_at": f'Type: "{function_args.get("text", "")}"',
-                        "click_at": f'Click at ({function_args.get("x", 0)}, {function_args.get("y", 0)})',
-                        "navigate": f'Navigation → {function_args.get("url", "")}',
-                        "open_web_browser": "Browser Ready",
-                        "scroll_document": f'Scroll {function_args.get("direction", "down")}',
-                        "hover_at": f'Hover at ({function_args.get("x", 0)}, {function_args.get("y", 0)})',
-                        "key_combination": f'Key: {function_args.get("keys", "")}',
-                        "go_back": "Navigate Back",
-                        "go_forward": "Navigate Forward",
-                        "search": "Search (Google)",
-                        "wait_5_seconds": "Wait (5s)"
-                    }
-                    action_title = action_title_map.get(function_name, function_name)
-                    
-                    # Map to frontend action types (matches toolIcons.tsx)
-                    action_type_map = {
-                        "type_text_at": "type",
-                        "click_at": "click",
-                        "navigate": "navigation",
-                        "open_web_browser": "navigation",
-                        "scroll_document": "scroll",
-                        "hover_at": "mouse",
-                        "key_combination": "keypress",
-                        "go_back": "navigation",
-                        "go_forward": "navigation",
-                        "search": "navigation",
-                        "wait_5_seconds": "action"
-                    }
-                    frontend_action_type = action_type_map.get(function_name, "action")
-                    
-                    # === LOG ACTION START ===
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title=action_title,
-                        message="",
-                        status=MessageStatus.FINISHED,
-                        task_id=task_id,
-                        browser_url=browser_url,
-                        action_type=frontend_action_type
-                    )
-                    
-                    # === EXECUTE ACTION ===
-                    try:
-                        # Special case: open_web_browser (matches Stagehand's run_task behavior)
-                        if function_name == "open_web_browser":
-                            logger.info("⏭️  open_web_browser: reusing initial state (browser already open)")
-                            action_result = {"success": True, "error": None}
-                            # Reuse initial state captured before loop
-                            new_screenshot_b64 = initial_screenshot_b64
-                            new_url = initial_url
-                            # Don't track URL change
-                            
-                        # Special case: type_text_at with clear_before_typing (Stagehand doesn't handle this)
-                        elif function_name == "type_text_at":
-                            clear_before = function_args.get("clear_before_typing", True)  # Gemini defaults to True
-                            
-                            if clear_before:
-                                logger.info("⌨️  type_text_at with clear_before_typing=True - manually handling")
-                                try:
-                                    # Get action details (Stagehand already normalized coordinates)
-                                    x = agent_action.action.x
-                                    y = agent_action.action.y
-                                    text = agent_action.action.text
-                                    
-                                    # Step 1: Click at coordinates to focus
-                                    await cua_handler.page.mouse.click(x, y)
-                                    await asyncio.sleep(0.1)
-                                    
-                                    # Step 2: Select all existing text
-                                    await cua_handler.page.keyboard.press("Control+a")
-                                    await asyncio.sleep(0.05)
-                                    
-                                    # Step 3: Type new text (replaces selection)
-                                    await cua_handler.page.keyboard.type(text)
-                                    
-                                    action_result = {"success": True, "error": None}
-                                except Exception as e:
-                                    logger.error(f"Failed to type with clear: {e}")
-                                    action_result = {"success": False, "error": str(e)}
-                            else:
-                                # Normal typing without clearing
-                                action_result = await cua_handler.perform_action(agent_action)
-                            
-                            logger.info(f"✅ {function_name}", success=action_result.get("success"))
-                            
-                            # Track URL changes for type actions
-                            track_url_change()
-                            
-                            # Get new state after type action
-                            new_screenshot_b64 = await cua_handler.get_screenshot_base64()
-                            new_url = cua_handler.page.url
-                            
+                    # === BROWSER TOOLS ===
+                    else:
+                        # Map tool names to frontend action types
+                        # NEW action types: "observation" and "extraction"
+                        action_type_map = {
+                            "act": "action",           # Generic action (click, type, etc.)
+                            "ariaTree": "observation", # NEW: Observing page state
+                            "screenshot": "observation",  # NEW: Visual observation
+                            "extract": "extraction",   # NEW: Extracting structured data
+                            "goto": "navigation",
+                            "navback": "navigation",
+                            "scroll": "scroll",
+                            "wait": "action",
+                            "fillForm": "action"
+                        }
+                        action_type = action_type_map.get(tool_name, "action")
+                        
+                        # Build action title for logging
+                        if tool_name == "act":
+                            action_title = f"Action: {tool_args.get('action', '')[:50]}"
+                        elif tool_name == "goto":
+                            action_title = f"Navigate → {tool_args.get('url', '')[:50]}"
+                        elif tool_name == "fillForm":
+                            field_count = len(tool_args.get('fields', []))
+                            action_title = f"Fill Form ({field_count} fields)"
+                        elif tool_name == "scroll":
+                            direction = tool_args.get('direction', 'down')
+                            pixels = tool_args.get('pixels', 0)
+                            action_title = f"Scroll {direction} {pixels}px"
+                        elif tool_name == "ariaTree":
+                            action_title = "Reading Page Content"
+                        elif tool_name == "screenshot":
+                            action_title = "Taking Screenshot"
+                        elif tool_name == "extract":
+                            action_title = f"Extracting: {tool_args.get('instruction', '')[:30]}"
+                        elif tool_name == "navback":
+                            action_title = "Navigate Back"
+                        elif tool_name == "wait":
+                            time_ms = tool_args.get('timeMs', 0)
+                            action_title = f"Wait ({time_ms}ms)"
                         else:
-                            # All other actions - normal execution
-                            action_result = await cua_handler.perform_action(agent_action)
-                            logger.info(f"✅ {function_name}", success=action_result.get("success"))
-                            
-                            # Track URL changes for non-open_web_browser actions
-                            track_url_change()
-                            
-                            # Get new state after action
-                            new_screenshot_b64 = await cua_handler.get_screenshot_base64()
-                            new_url = cua_handler.page.url
-                            
-                    except Exception as e:
-                        logger.error(f"❌ {function_name} failed: {e}")
-                        action_result = {"success": False, "error": str(e)}
-                        # On error, still need state for feedback
-                        new_screenshot_b64 = await cua_handler.get_screenshot_base64()
-                        new_url = cua_handler.page.url
-                    
-                    # === FORMAT FEEDBACK (happens for ALL actions including open_web_browser) ===
-                    google_cua_client._format_action_feedback(
-                        function_name_called=function_name,
-                        action_result=action_result,
-                        new_screenshot_base64=new_screenshot_b64,
-                        current_url=new_url,
-                        function_call_args=function_args
-                    )
-                    
-                    # === LOG ERROR IF FAILED ===
-                    if not action_result["success"]:
+                            action_title = tool_name
+                        
+                        # Log action start (IN_PROGRESS)
                         await save_browser_action_message(
                             agent_id=agent_id,
                             title=action_title,
-                            message=action_result.get("error", "Action failed"),
-                            status=MessageStatus.ERROR,
+                            message="",
+                            status=MessageStatus.IN_PROGRESS,
                             task_id=task_id,
                             browser_url=browser_url,
-                            action_type=frontend_action_type
+                            action_type=action_type
                         )
-                    
-                    # === TRACK ACTION SUMMARY (OUR CUSTOM FEATURE) ===
-                    action_summary.append(f"{function_name}: {str(function_args)[:50]}")
-                    if len(action_summary) > 10:
-                        action_summary = action_summary[-10:]
+                        
+                        # Execute the tool
+                        try:
+                            result = await execute_browser_tool(
+                                tool_name,
+                                tool_args,
+                                stagehand,
+                                logger,
+                                execution_model="rose-1-ultra"
+                            )
+                            
+                            logger.info(f"✅ Tool {tool_name} executed", success=result.get("success", True))
+                            
+                            # Update to FINISHED after completion
+                            await save_browser_action_message(
+                                agent_id=agent_id,
+                                title=action_title,
+                                message=result.get("message", "") or "Completed successfully",
+                                status=MessageStatus.FINISHED,
+                                task_id=task_id,
+                                browser_url=browser_url,
+                                action_type=action_type
+                            )
+                            
+                            # Track URL changes for navigation tools
+                            if tool_name in ["goto", "act", "navback"]:
+                                track_url_change()
+                            
+                            # Track action for context summary
+                            action_summary.append(f"{tool_name}: {str(tool_args)[:50]}")
+                            if len(action_summary) > 10:
+                                action_summary = action_summary[-10:]
+                            
+                            # Transform tool result to correct format (multimodal for screenshots)
+                            content = transform_tool_result(tool_name, result)
+                            tool_responses.append({
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": content
+                            })
+                            
+                        except Exception as tool_error:
+                            logger.error(f"❌ Tool {tool_name} failed", error=str(tool_error))
+                            
+                            # Log error to browser panel
+                            await save_browser_action_message(
+                                agent_id=agent_id,
+                                title=action_title,
+                                message=str(tool_error),
+                                status=MessageStatus.ERROR,
+                                task_id=task_id,
+                                browser_url=browser_url,
+                                action_type="error"
+                            )
+                            
+                            tool_responses.append({
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": json.dumps({"success": False, "error": str(tool_error)})
+                            })
                 
-                # If task was marked complete via custom tool, exit
+                # Check if we're closing (from close or send_message_to_user)
                 if is_closing:
                     break
+                
+                # Add tool responses to conversation history
+                messages.extend(tool_responses)
 
             except Exception as e:
                 error_str = str(e)
@@ -1289,7 +1251,7 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="Model Overloaded - Retrying",
-                        message=f"Gemini API overloaded. Waiting 10s before retry.",
+                        message="Rose API overloaded. Waiting 10s before retry.",
                         status=MessageStatus.IN_PROGRESS,
                         task_id=task_id,
                         browser_url=browser_url,
@@ -1338,20 +1300,17 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                 else:
                     logger.warning(f"Failed to close session: {close_error}")
 
-        # Calculate usage
+        # Calculate usage with dynamic pricing from Supabase cache
         usage_items = []
         
-        # Gemini 2.5 Computer Use pricing (as of Oct 2025):
-        # - Input: $1.25 per million tokens (up to 200k context)
-        # - Output: $10.00 per million tokens (up to 200k context)
-        input_cost_cents = (total_input_tokens / 1000) * 0.125
-        output_cost_cents = (total_output_tokens / 1000) * 1.0
+        input_cost_cents = (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"]
+        output_cost_cents = (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"]
         total_llm_cost_cents = input_cost_cents + output_cost_cents
         
         usage_items.append({
             "type": "llm",
             "cost_cents": round(total_llm_cost_cents, 4),
-            "provider": "Gemini 2.5 Computer Use",
+            "provider": "Rose 1 Ultra",
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens
         })
