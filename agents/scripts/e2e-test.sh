@@ -177,7 +177,7 @@ AGENT_RESPONSE=$(curl -s "$BACKEND_URL/api/agents" \
   -d "{
     \"goal\": \"Post 5 messages. Each message should contain only a single number: 1, 2, 3, 4, 5. Use wait_seconds(1) between each message. Do not explain what you're doing - just post the numbers.\",
     \"model\": \"google/gemini-2.5-flash\",
-    \"reasoning_effort\": \"off\",
+    \"reasoning_max_tokens\": 0,
     \"tool_ids\": [],
     \"task_queue\": \"$TEST_TASK_QUEUE\",
     \"verifier\": {

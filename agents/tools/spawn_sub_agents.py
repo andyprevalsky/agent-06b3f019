@@ -232,7 +232,7 @@ async def spawn_sub_agents_activity(
                 # Default to rose-1-lite if no model specified
                 model = agent.get("model") or "rose-labs/rose-1-lite"
                 payload["model"] = model
-                # Note: reasoning_effort not passed - sub-agents use backend default ('low')
+                # Note: reasoning_max_tokens not passed - sub-agents use backend default (2048)
                 
                 logger.info("Spawning sub-agent", payload=payload)
                 tasks.append(

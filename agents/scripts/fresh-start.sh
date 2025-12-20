@@ -122,7 +122,7 @@ PAYLOAD=$(jq -n \
   '{
     goal: $goal,
     model: "google/gemini-2.5-flash",
-    reasoning_effort: "high",
+    reasoning_max_tokens: 4096,
     tool_ids: [],
     verifier: {
       type: "FLOAT_LLM_JUDGE",

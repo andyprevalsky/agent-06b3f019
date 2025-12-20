@@ -47,7 +47,7 @@ export async function startAgentWorkflow(params: {
   userId: string;
   goal: string;
   model: string;
-  reasoningEffort: string;
+  reasoningMaxTokens: number;
   toolIds: string[];
   verifier: {
     type: string;
@@ -76,7 +76,7 @@ export async function startAgentWorkflow(params: {
       params.userId,
       params.goal,
       params.model,
-      params.reasoningEffort,
+      params.reasoningMaxTokens,
       params.toolIds,
       {
         type: params.verifier.type,

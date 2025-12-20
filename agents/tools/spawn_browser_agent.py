@@ -18,6 +18,7 @@ from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageTy
 from browser_tools import get_browser_tool_definitions, get_system_prompt, execute_browser_tool
 from browser_tools.message_processing import transform_tool_result, compress_messages
 from helpers.model_pricing import get_model_pricing_with_fallback
+from helpers.llm import call_rose_streaming
 
 with workflow.unsafe.imports_passed_through():
     from config import load_config
@@ -793,79 +794,28 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                         if retry_attempt > 0:
                             logger.info(f"🔄 Retry attempt {retry_attempt}/{max_retries}")
                         
-                        logger.info("🌹 Calling Rose API...")
+                        logger.info("🌹 Calling Rose API via unified streaming function...")
                         
                         # Compress old screenshots and aria trees to save tokens
                         compressed_messages = compress_messages(messages)
                         
-                        # Log tool_call IDs in messages for debugging
-                        for i, msg in enumerate(compressed_messages):
-                            if msg.get("role") == "assistant" and "tool_calls" in msg:
-                                for j, tc in enumerate(msg["tool_calls"]):
-                                    tool_call_id = tc.get("id", "")
-                                    tool_name = tc.get("function", {}).get("name", "")
-                                    import re
-                                    pattern_valid = bool(re.match(r'^[a-zA-Z0-9_-]+$', tool_call_id)) if tool_call_id else False
-                                    if not pattern_valid:
-                                        logger.error(
-                                            f"❌ Invalid tool_call_id in messages[{i}].tool_calls[{j}]",
-                                            tool_name=tool_name,
-                                            tool_call_id=tool_call_id,
-                                            full_tool_call=tc
-                                        )
-                        
-                        async with httpx.AsyncClient(timeout=120.0) as http_client:
-                            response = await http_client.post(
-                                config.rose.api_url,
-                                json={
-                                    "model": "rose-1-ultra",
-                                    "messages": compressed_messages,
-                                    "temperature": 1.0,
-                                    "max_tokens": 4096,
-                                    "tools": all_tools,
-                                    "tool_choice": "auto"
-                                },
-                                headers={
-                                    "Content-Type": "application/json",
-                                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
-                                    "x-api-key": config.rose.api_key,
-                                }
-                            )
-                            response.raise_for_status()
-                            response_data = response.json()
-                        
-                        logger.info("✅ Rose API response received")
+                        # Call unified Rose streaming function
+                        response_data = await call_rose_streaming(
+                            messages=compressed_messages,
+                            model="rose-1-ultra",
+                            temperature=1.0,
+                            max_tokens=4096,
+                            tools=all_tools,
+                            tool_choice="auto",
+                            reasoning_max_tokens=2048,
+                            heartbeat_fn=activity.heartbeat,
+                        )
 
                         # Track token usage
                         usage = response_data.get("usage", {})
                         total_input_tokens += usage.get("prompt_tokens", 0)
                         total_output_tokens += usage.get("completion_tokens", 0)
                         logger.info(f"📊 Tokens: {total_input_tokens} in, {total_output_tokens} out")
-
-                        # Check for valid response
-                        choices = response_data.get("choices", [])
-                        if not choices:
-                            logger.error(f"❌ No choices in Rose response (attempt {retry_attempt + 1}/{max_retries + 1})")
-                            
-                            if retry_attempt >= max_retries:
-                                logger.error("❌ Max retries exhausted, failing task")
-                                await save_browser_action_message(
-                                    agent_id=agent_id,
-                                    title="Task Failed",
-                                    message="Model returned no response after multiple retries",
-                                    status=MessageStatus.ERROR,
-                                    task_id=task_id,
-                                    browser_url=browser_url,
-                                    action_type="task_complete"
-                                )
-                                close_success = False
-                                close_reasoning = "Model returned no response after multiple retries"
-                                break
-                            
-                            retry_delay = retry_delay_base ** (retry_attempt + 1)
-                            logger.info(f"⏳ Retrying in {retry_delay} seconds...")
-                            await asyncio.sleep(retry_delay)
-                            continue
                         
                         # Success
                         break
@@ -905,9 +855,14 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                     break
 
                 # ===== EXTRACT RESPONSE DATA =====
-                message_data = response_data["choices"][0]["message"]
-                content = message_data.get("content", "") or ""
-                tool_calls = message_data.get("tool_calls", [])
+                # Response from call_rose_streaming is already flat (content, tool_calls, reasoning_details)
+                content = response_data.get("content", "") or ""
+                tool_calls = response_data.get("tool_calls") or []
+                
+                # Extract reasoning_details for preservation in subsequent API calls
+                reasoning_details = response_data.get("reasoning_details")
+                if reasoning_details:
+                    logger.debug(f"📝 Extracted reasoning_details from Rose response", count=len(reasoning_details))
                 
                 # Sanitize and log tool_call IDs
                 if tool_calls:
@@ -946,6 +901,9 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                 assistant_message = {"role": "assistant", "content": content}
                 if tool_calls:
                     assistant_message["tool_calls"] = tool_calls
+                # Include reasoning_details for preservation in subsequent API calls
+                if reasoning_details:
+                    assistant_message["reasoning_details"] = reasoning_details
                 messages.append(assistant_message)
                 
                 # ===== LOG REASONING (if any content) =====

@@ -569,7 +569,6 @@ TOOL_MODELS = {
 
 def create_agent_action_model(
     available_tool_names: List[str],
-    max_reasoning_characters: int = 200,
 ) -> Type[BaseModel]:
     """
     Dynamically create an AgentAction Pydantic model based on available tools.
@@ -578,10 +577,13 @@ def create_agent_action_model(
     - Only available tools are in the schema (better LLM guidance)
     - Type-safe tool calls (Pydantic validates structure)
     - No JSON string parsing hacks needed
+    
+    NOTE: reasoning is NOT part of this model anymore. Reasoning is handled via
+    OpenRouter's reasoning_details which are extracted from API responses and
+    stored in message metadata.
 
     Args:
         available_tool_names: List of tool names this agent can use
-        sub_agent_config_model: Optional dynamic SubAgentConfig model (for spawn_sub_agents tool)
 
     Returns:
         Pydantic model class for AgentAction with proper tool union
@@ -619,12 +621,9 @@ def create_agent_action_model(
         tool_calls_field = (List[ToolCallUnion], Field(default_factory=list, description="List of tools to call in sequence"))
 
     # Dynamically create the AgentAction model
+    # NOTE: reasoning is handled externally via OpenRouter reasoning_details
     AgentAction = create_model(
         "AgentAction",
-        reasoning=(
-            Optional[str],
-            Field(default=None, description=f"Internal scratchpad. Use metaphysical seed thinking here. MUST be under {max_reasoning_characters} characters. NEVER shown to user."),
-        ),
         response=(
             str,
             Field(description="Message to user. Plain professional language only - NEVER mention seeds, nurturing, fruition, or internal concepts. Use markdown."),

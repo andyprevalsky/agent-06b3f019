@@ -22,6 +22,7 @@ interface BrowserStatusBarProps {
   taskId: string;
   browserUrl: string;
   actions: BrowserAction[];
+  forceMinimized?: boolean;
 }
 
 function getActionIcon(actionType?: string) {
@@ -70,10 +71,14 @@ function ActionItem({ action }: { action: BrowserAction }) {
   );
 }
 
-function BrowserStatusBarImpl({ taskId, browserUrl, actions }: BrowserStatusBarProps) {
+function BrowserStatusBarImpl({ taskId, browserUrl, actions, forceMinimized = false }: BrowserStatusBarProps) {
   // UI state only - no derived state from props
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isExpandedState, setIsExpanded] = useState(false);
+  const [isFullscreenState, setIsFullscreen] = useState(false);
+  
+  // When forceMinimized, override expansion states
+  const isExpanded = forceMinimized ? false : isExpandedState;
+  const isFullscreen = forceMinimized ? false : isFullscreenState;
   const [isResuming, setIsResuming] = useState(false);
   
   // Refs for DOM elements
@@ -200,12 +205,12 @@ function BrowserStatusBarImpl({ taskId, browserUrl, actions }: BrowserStatusBarP
   // Minimized state
   if (!isExpanded) {
     return (
-      <div onClick={handleExpandClick} className="w-full max-w-4xl mx-auto mb-3 px-2 md:px-0 cursor-pointer relative z-30">
+      <div onClick={forceMinimized ? undefined : handleExpandClick} className={`w-full ${forceMinimized ? '' : 'cursor-pointer'}`}>
         <div className="relative flex items-center gap-3 p-2 pr-3 pl-36 rounded-xl border border-border bg-card/50 backdrop-blur-sm hover:bg-card/80 transition-colors">
           {/* Thumbnail - positioned absolutely to overflow container, 16:10 aspect ratio */}
           <div
-            onClick={handleThumbnailClick}
-            className="absolute left-2 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden cursor-pointer shadow-lg hover:shadow-xl hover:ring-2 hover:ring-primary/50 transition-all z-40"
+            onClick={forceMinimized ? undefined : handleThumbnailClick}
+            className={`absolute left-2 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden shadow-lg transition-all z-40 ${forceMinimized ? '' : 'cursor-pointer hover:shadow-xl hover:ring-2 hover:ring-primary/50'}`}
             style={{ width: '128px', height: '80px', marginBottom: '8px' }}
           >
             <iframe src={browserUrl} className="border-0 pointer-events-none"
@@ -236,7 +241,7 @@ function BrowserStatusBarImpl({ taskId, browserUrl, actions }: BrowserStatusBarP
 
   // Expanded state
   return (
-    <div className="w-full max-w-4xl mx-auto mb-3 px-2 md:px-0 relative z-30">
+    <div className="w-full">
       <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm overflow-visible">
         <div className="relative flex items-center gap-3 p-3 pl-40 border-b border-border">
           {/* Thumbnail - positioned absolutely to overflow container, 16:10 aspect ratio */}

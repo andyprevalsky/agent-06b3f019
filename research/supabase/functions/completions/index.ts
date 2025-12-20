@@ -193,6 +193,7 @@ async function handleStreaming(
   tools: any[] | undefined,
   toolChoice: any,
   responseFormat: any,  // Added: response_format for structured outputs
+  reasoning: { max_tokens?: number } | undefined,  // Added: reasoning config for OpenRouter
   openRouterKey: string,
   supabaseUrl: string,
   requestedModel: string,
@@ -269,6 +270,12 @@ async function handleStreaming(
           // Add response_format for structured outputs
           if (responseFormat) {
             openRouterBody.response_format = responseFormat;
+          }
+          
+          // Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
+          if (reasoning) {
+            openRouterBody.reasoning = reasoning;
+            console.log(`🧠 Streaming with reasoning config:`, reasoning);
           }
           
           response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -392,6 +399,7 @@ serve(async (req) => {
       tool_choice,
       cot_steps,
       response_format,
+      reasoning,  // OpenRouter reasoning config: { max_tokens: number }
       model_seed,  // Optional: index into model pool for testing
       model_preference,  // Optional: 'SMART' | 'FAST' | 'CHEAP' for hardcoded model selection
       ...otherParams
@@ -441,6 +449,7 @@ serve(async (req) => {
         tools,
         tool_choice,
         response_format,  // Pass response_format for structured outputs
+        reasoning,        // Pass reasoning config for OpenRouter reasoning models
         Deno.env.get('OPENROUTER_API_KEY')!,
         supabaseUrl,
         model,

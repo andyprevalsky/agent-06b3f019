@@ -58,7 +58,7 @@ async def fetch_agent_config(agent_id: str) -> Dict:
         
         result = {
             "model": agent["model"],
-            "reasoning_effort": agent.get("reasoning_effort", "low"),
+            "reasoning_max_tokens": agent.get("reasoning_max_tokens", 2048),
             "status": agent["status"],
             "tool_ids": [tool["id"] for tool in agent["tools"]],
             "verifier_prompt": agent["verifier"]["llm_judge_prompt"] if agent.get("verifier") else None,
@@ -69,7 +69,7 @@ async def fetch_agent_config(agent_id: str) -> Dict:
             "Agent config fetched",
             agent_id=agent_id,
             model=result["model"],
-            reasoning_effort=result["reasoning_effort"],
+            reasoning_max_tokens=result["reasoning_max_tokens"],
             status=result["status"]
         )
         

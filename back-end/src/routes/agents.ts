@@ -28,7 +28,7 @@ Scoring Instructions:
 const createAgentSchema = z.object({
   goal: z.string().min(1),
   model: z.string().optional().default('rose-labs/rose-1-lite'),
-  reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional().default('low'),
+  reasoning_max_tokens: z.number().int().min(0).optional().default(2048),
   tool_ids: z.array(z.string().uuid()).nullable().optional().default([]).transform(val => val ?? []),
   source: z.enum(['WEB', 'MAC_APP']).optional().default('WEB'),
   task_queue: z.string().optional(), // Optional: for test isolation
@@ -82,7 +82,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         id: true,
         goal: true,
         model: true,
-        reasoningEffort: true,
+        reasoningMaxTokens: true,
         source: true,
         progress: true,
         status: true,
@@ -107,7 +107,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         goal: agent.goal,
         model: agent.model,
         source: agent.source,
-        reasoning_effort: agent.reasoningEffort,
+        reasoning_max_tokens: agent.reasoningMaxTokens,
         progress: agent.progress,
         status: agent.status,
         status_message: agent.statusMessage,
@@ -233,7 +233,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           depth: body.depth || 0,
           goal: body.goal,
           model: body.model,
-          reasoningEffort: body.reasoning_effort,
+          reasoningMaxTokens: body.reasoning_max_tokens,
           source: body.source,
           tokenInPriceMicrodollars,
           tokenOutPriceMicrodollars,
@@ -282,7 +282,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         userId,
         goal: body.goal,
         model: body.model,
-        reasoningEffort: body.reasoning_effort,
+        reasoningMaxTokens: body.reasoning_max_tokens,
         toolIds: mergedToolIds, // Use merged tool IDs
         verifier: {
           type: verifier.type,
@@ -330,7 +330,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       goal: agent.agent.goal,
       model: agent.agent.model,
       source: body.source,
-      reasoning_effort: body.reasoning_effort,
+      reasoning_max_tokens: body.reasoning_max_tokens,
       status: agent.agent.status,
       status_message: agent.agent.statusMessage,
       temporal_workflow_id: workflowId, // Use the workflow ID we just got
@@ -500,7 +500,7 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
         goal: agent.goal,
         model: agent.model,
         source: agent.source,
-        reasoning_effort: agent.reasoningEffort,
+        reasoning_max_tokens: agent.reasoningMaxTokens,
         progress: agent.progress,
         status: agent.status,
         status_message: agent.statusMessage,
@@ -907,7 +907,7 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
 // PATCH /api/agents/:id - Update agent configuration
 const updateAgentSchema = z.object({
   model: z.string().optional(),
-  reasoning_effort: z.enum(['off', 'low', 'medium', 'high']).optional(),
+  reasoning_max_tokens: z.number().int().min(0).optional(),
   tool_ids: z.array(z.string().uuid()).optional(),
   verifier_prompt: z.string().min(1).optional(),
 });
@@ -939,8 +939,8 @@ router.patch('/:id', authenticate, async (req: AuthRequest, res) => {
     if (body.model) {
       agentUpdateData.model = body.model;
     }
-    if (body.reasoning_effort) {
-      agentUpdateData.reasoningEffort = body.reasoning_effort;
+    if (body.reasoning_max_tokens !== undefined) {
+      agentUpdateData.reasoningMaxTokens = body.reasoning_max_tokens;
     }
     if (Object.keys(agentUpdateData).length > 0) {
       await prisma.agent.update({
@@ -991,7 +991,7 @@ router.patch('/:id', authenticate, async (req: AuthRequest, res) => {
         agent_id: updatedAgent!.id,
         goal: updatedAgent!.goal,
         model: updatedAgent!.model,
-        reasoning_effort: updatedAgent!.reasoningEffort,
+        reasoning_max_tokens: updatedAgent!.reasoningMaxTokens,
         progress: updatedAgent!.progress,
         status: updatedAgent!.status,
         status_message: updatedAgent!.statusMessage,
@@ -1082,7 +1082,7 @@ router.post('/:id/restart', authenticate, async (req: AuthRequest, res) => {
       userId: agent.userId,
       goal: agent.goal,
       model: agent.model,
-      reasoningEffort: agent.reasoningEffort,
+      reasoningMaxTokens: agent.reasoningMaxTokens,
       toolIds: agent.tools.map(t => t.toolId),
       verifier: {
         type: agent.verifier.type,

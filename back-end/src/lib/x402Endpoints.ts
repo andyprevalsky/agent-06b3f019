@@ -91,11 +91,11 @@ export function getX402Endpoints(agentId?: string): X402Endpoints {
           description: 'Model to use (defaults to rose-labs/rose-1)',
           example: 'rose-labs/rose-1',
         },
-        reasoning_effort: {
-          type: 'string',
+        reasoning_max_tokens: {
+          type: 'number',
           required: false,
-          description: 'Reasoning effort level: low, medium, high',
-          example: 'medium',
+          description: 'Max tokens for reasoning (0 disables, default 2048)',
+          example: 2048,
         },
         tool_ids: {
           type: 'array',

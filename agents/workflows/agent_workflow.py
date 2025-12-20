@@ -122,7 +122,7 @@ SYSTEM_TOOLS = [
     {
         "id": "system-spawn-sub-agents",
         "name": "spawn_sub_agents",
-        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Use sub-agents to parallelize work: evaluate multiple hypotheses at once, execute context-independent tasks in parallel, and/or decompose the current goal into context-independent subgoals for faster and more accurate completion. Each sub-agent runs independently with its own goal and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_effort (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
+        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Use sub-agents to parallelize work: evaluate multiple hypotheses at once, execute context-independent tasks in parallel, and/or decompose the current goal into context-independent subgoals for faster and more accurate completion. Each sub-agent runs independently with its own goal and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_max_tokens (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
     },
     {
         "id": "system-send-message-to-user",
@@ -370,7 +370,7 @@ class AgentWorkflow:
         # user_phone removed - now fetched from user context via get_user_context
         self.goal: Optional[str] = None
         self.model: str = "anthropic/claude-sonnet-4.5"
-        self.reasoning_effort: str = "low"  # OpenRouter reasoning effort
+        self.reasoning_max_tokens: int = 2048  # OpenRouter reasoning max tokens (0 disables)
         self.tool_ids: List[str] = []
         self.tools: List[Dict[str, str]] = []  # Tools with descriptions from DB
         self.verifier: Optional[Dict] = None
@@ -574,7 +574,7 @@ class AgentWorkflow:
         user_id: str,
         goal: str,
         model: str,
-        reasoning_effort: str,
+        reasoning_max_tokens: int,
         tool_ids: List[str],
         verifier: Dict,
         context: Optional[List[Dict]] = None,
@@ -590,7 +590,7 @@ class AgentWorkflow:
             user_id: User ID who owns this agent
             goal: What the agent should accomplish
             model: LLM model to use for reasoning (e.g., anthropic/claude-sonnet-4.5)
-            reasoning_effort: OpenRouter reasoning effort level (low, medium, high)
+            reasoning_max_tokens: Max tokens for reasoning (0 disables reasoning)
             tool_ids: List of tool IDs available to this agent
             verifier: Verification config (type: FLOAT_LLM_JUDGE, llmJudgePrompt: str)
             
@@ -602,7 +602,7 @@ class AgentWorkflow:
         # user_phone removed - now fetched from user context
         self.goal = goal
         self.model = model
-        self.reasoning_effort = reasoning_effort
+        self.reasoning_max_tokens = reasoning_max_tokens
         self.tool_ids = tool_ids
         self.verifier = verifier
         self.parent_workflow_id = parent_workflow_id  # Store parent ID for signaling
@@ -718,9 +718,9 @@ class AgentWorkflow:
                         workflow.logger.info(f"📝 Model changed: {self.model} → {config['model']}")
                         self.model = config['model']
                     
-                    if 'reasoning_effort' in config and config['reasoning_effort'] != self.reasoning_effort:
-                        workflow.logger.info(f"📝 Reasoning effort changed: {self.reasoning_effort} → {config['reasoning_effort']}")
-                        self.reasoning_effort = config['reasoning_effort']
+                    if 'reasoning_max_tokens' in config and config['reasoning_max_tokens'] != self.reasoning_max_tokens:
+                        workflow.logger.info(f"📝 Reasoning max tokens changed: {self.reasoning_max_tokens} → {config['reasoning_max_tokens']}")
+                        self.reasoning_max_tokens = config['reasoning_max_tokens']
                     
                     if config.get('verifier_prompt'):
                         self.verifier['llmJudgePrompt'] = config['verifier_prompt']
@@ -929,6 +929,7 @@ class AgentWorkflow:
                 # 4. Post response to user (visible in UI and added to context)
                 # Reasoning is logged but not posted to chat
                 # Include tool_calls in metadata for proper OpenAI format reconstruction
+                # Include reasoning_details for preserving reasoning blocks in subsequent API calls
                 response = action.get("response", "")
                 tool_calls = action.get("tool_calls", [])
                 
@@ -938,8 +939,18 @@ class AgentWorkflow:
                         tool_call['tool_call_id'] = workflow.uuid4()
                 
                 if response:
-                    metadata = {"tool_calls": tool_calls} if tool_calls else None
-                    await self._post_message(response, "ASSISTANT", metadata=metadata)
+                    # Build metadata with tool_calls and reasoning_details
+                    metadata = {}
+                    if tool_calls:
+                        metadata["tool_calls"] = tool_calls
+                    
+                    # Extract reasoning_details from usage (if present from LLM response)
+                    usage = action.get("usage", {})
+                    if usage.get("reasoning_details"):
+                        metadata["reasoning_details"] = usage["reasoning_details"]
+                        workflow.logger.debug(f"📝 Storing reasoning_details in assistant message metadata", count=len(usage["reasoning_details"]))
+                    
+                    await self._post_message(response, "ASSISTANT", metadata=metadata if metadata else None)
                 
                 # 5. Execute all tools in parallel
                 async def execute_one_tool(tool_call):
@@ -1172,7 +1183,7 @@ class AgentWorkflow:
                         user_id=self.user_id,
                         goal=self.goal,
                         model=self.model,
-                        reasoning_effort=self.reasoning_effort,
+                        reasoning_max_tokens=self.reasoning_max_tokens,
                         tool_ids=self.tool_ids,
                         verifier=self.verifier,
                         context=compressed_context,
@@ -1391,7 +1402,7 @@ class AgentWorkflow:
                     disabled_tools,
                     self.iteration_count,
                     self.model,
-                    self.reasoning_effort,
+                    self.reasoning_max_tokens,
                     self.user_id,
                     phase,
                     model_preference,

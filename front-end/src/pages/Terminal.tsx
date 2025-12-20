@@ -49,7 +49,7 @@ import { colorPalette, frameSequence, getTileColorsForFrame } from '@/lib/tileAn
 import SmallTileAnimationCanvas from '@/components/terminal/SmallTileAnimationCanvas';
 import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
 
-const BrowserStatusBar = lazy(() => import('@/components/terminal/BrowserStatusBar'));
+const BrowserStatusBarCarousel = lazy(() => import('@/components/terminal/BrowserStatusBarCarousel'));
 
 /**
  * StreamingMarkdown - Renders text with fade-in animation for each chunk
@@ -1750,15 +1750,17 @@ export default function Terminal() {
   });
 
   // Memoize deduplicated messages to prevent unnecessary re-renders
-  const { displayedMessages, lastActiveBrowserPanel } = useMemo(() => {
+  const { displayedMessages, activeBrowserPanels } = useMemo(() => {
     // Filter out SYSTEM messages only
     const filteredMessages = messages.filter((m) => m.role !== 'SYSTEM');
     const deduplicated = deduplicateToolMessages(filteredMessages);
     const grouped = groupBrowserMessages(deduplicated);
 
-    let lastActivePanel: {
+    // Collect ALL active (incomplete) browser panels for carousel display
+    type BrowserPanelData = {
       taskId: string;
       browserUrl: string;
+      goal?: string;
       actions: {
         id: string;
         title: string;
@@ -1768,16 +1770,19 @@ export default function Terminal() {
         action_type?: string;
         auxiliary?: { current_step?: string; total_steps?: string };
       }[];
-    } | null = null;
+    };
+    
+    const activeBrowserPanels: BrowserPanelData[] = [];
 
     if (grouped.browserPanels.size > 0) {
       const entries = Array.from(grouped.browserPanels.entries());
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const [taskId, panelData] = entries[i];
+      for (const [taskId, panelData] of entries) {
         const lastAction = panelData.actions[panelData.actions.length - 1];
         const isComplete =
           lastAction?.metadata?.action_type === 'task_complete' ||
           lastAction?.metadata?.action_type === 'error';
+        
+        // Include all active (non-complete) browser panels
         if (!isComplete) {
           const mappedActions = panelData.actions.map((action) => ({
             id: action.message_id,
@@ -1791,32 +1796,34 @@ export default function Terminal() {
             action_type: action.metadata?.action_type,
             auxiliary: action.metadata?.auxiliary,
           }));
-          lastActivePanel = {
+          
+          // Extract goal from init message if available
+          const goal = panelData.initMessage.metadata?.goal;
+          
+          activeBrowserPanels.push({
             taskId,
             browserUrl:
               panelData.currentBrowserUrl || panelData.initMessage.metadata?.browser_url || '',
+            goal,
             actions: mappedActions,
-          };
-          break;
+          });
         }
       }
     }
 
     return {
       displayedMessages: grouped.messages,
-      lastActiveBrowserPanel: lastActivePanel,
+      activeBrowserPanels,
     };
   }, [messages]);
 
   // Stable props for BrowserStatusBar to avoid unnecessary re-renders
   const browserStatusProps = useMemo(() => {
-    if (!lastActiveBrowserPanel) return null;
+    if (activeBrowserPanels.length === 0) return null;
     return {
-      taskId: lastActiveBrowserPanel.taskId,
-      browserUrl: lastActiveBrowserPanel.browserUrl,
-      actions: lastActiveBrowserPanel.actions,
+      browsers: activeBrowserPanels,
     };
-  }, [lastActiveBrowserPanel]);
+  }, [activeBrowserPanels]);
 
   // Get system messages
   const systemMessages = messages.filter((m) => m.role === 'SYSTEM');
@@ -2427,10 +2434,8 @@ export default function Terminal() {
           {browserStatusProps && (
             <Suspense fallback={null}>
               <div className="px-2 md:px-0">
-                <BrowserStatusBar
-                  taskId={browserStatusProps.taskId}
-                  browserUrl={browserStatusProps.browserUrl}
-                  actions={browserStatusProps.actions}
+                <BrowserStatusBarCarousel
+                  browsers={browserStatusProps.browsers}
                 />
               </div>
             </Suspense>

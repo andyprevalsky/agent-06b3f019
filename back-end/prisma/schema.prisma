@@ -24,7 +24,7 @@ model Agent {
   contextSize               Int             @default(0)
   messageCount              Int             @default(0)
   tokenCount                Int             @default(0)
-  reasoningEffort           ReasoningEffort @default(low)
+  reasoningMaxTokens        Int             @default(2048)
   tokensIn                  Int             @default(0)
   tokensOut                 Int             @default(0)
   parentAgentId             String?
@@ -406,12 +406,6 @@ enum AgentSource {
   MAC_APP
 }
 
-enum ReasoningEffort {
-  low
-  medium
-  high
-  off
-}
 
 enum VerifierType {
   FLOAT_LLM_JUDGE

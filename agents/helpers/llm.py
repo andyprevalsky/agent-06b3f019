@@ -189,6 +189,12 @@ def convert_context_to_messages(
                         }
                     })
                 assistant_msg["tool_calls"] = tool_calls
+            
+            # Include reasoning_details if present in metadata (for preserving reasoning blocks)
+            # Per OpenRouter docs: "preserve the complete reasoning_details array returned in each response"
+            if metadata.get('reasoning_details'):
+                assistant_msg["reasoning_details"] = metadata['reasoning_details']
+            
             messages.append(assistant_msg)
             
         elif role == 'TOOL':
@@ -231,196 +237,220 @@ def convert_context_to_messages(
     return messages
 
 
-async def call_llm_structured(
-    messages: List[Dict[str, str]],
-    model: Optional[str],
-    temperature: float,
-    max_tokens: int,
-    response_model: type[T],
-    reasoning_effort: Optional[str] = None,
-    model_preference: Optional[str] = None
-) -> tuple[T, Dict]:
+async def call_rose_streaming(
+    messages: List[Dict[str, Any]],
+    model: str = "rose-1-ultra",
+    temperature: float = 1.0,
+    max_tokens: int = 4096,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[str] = "auto",
+    response_format: Optional[Dict[str, Any]] = None,
+    reasoning_max_tokens: Optional[int] = None,
+    on_chunk: Optional[Callable[[str], Awaitable[None]]] = None,
+    heartbeat_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
     """
-    Call LLM with structured outputs using Instructor.
+    Unified streaming LLM call for Rose models via Supabase edge function.
     
-    Instructor handles all the complexity of different models' structured output
-    capabilities and automatically falls back to appropriate methods.
+    This is the single entry point for all Rose API calls. It supports:
+    - Simple text completion
+    - Tool/function calling
+    - Structured JSON output
     
     Args:
-        messages: List of message dicts with 'role' and 'content'
-        model: Model to use
-        temperature: Sampling temperature
-        max_tokens: Maximum tokens
-        response_model: Pydantic model class for response structure
-        reasoning_effort: Optional reasoning effort level ("high", "medium", "low")
-        model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
+        messages: List of message dicts (role, content, tool_calls, tool_call_id, etc.)
+        model: Model name (default: rose-1-ultra)
+        temperature: Sampling temperature (default: 1.0)
+        max_tokens: Maximum tokens to generate (default: 4096)
+        tools: Optional list of tool definitions for function calling
+        tool_choice: Tool choice mode ("auto", "none", "required", or specific tool)
+        response_format: Optional response format (e.g., JSON schema)
+        reasoning_max_tokens: Optional max tokens for reasoning
+        on_chunk: Optional async callback for streaming text chunks
+        heartbeat_fn: Optional heartbeat function for long-running calls
         
     Returns:
-        Tuple of (response_model instance, usage dict with token counts)
+        Dict with:
+        - content: str - Text content from the response
+        - tool_calls: List[Dict] - Tool calls from the response (if any)
+        - reasoning_details: List[Dict] - Reasoning details (if any)
+        - usage: Dict - Token usage info
+        - actual_model: str - Actual model used
+        - finish_reason: str - Why generation stopped
     """
-    # Lazy import instructor to avoid loading rich/threading.local in workflow sandbox
-    # Instructor must only be imported in activities, not at module level
-    import instructor
-    from instructor import Instructor
+    import httpx
     
     config = load_config()
     
-    # Check if this is a Rose model - route to Supabase edge function
-    is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
-    
-    if is_rose_model:
-        # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
-        import httpx
-        
-        logger.info(f"🌹 Routing Rose model to Supabase: {model} → {config.rose.api_url}")
-        
-        # Build JSON schema from Pydantic model for structured output
-        # Use prepare_schema_for_openai to ensure strict mode compatibility
-        # (adds additionalProperties: false to all objects, ensures all fields required)
-        schema = prepare_schema_for_openai(response_model)
-        schema_str = json.dumps(schema)
-        logger.info(f"📋 Schema size: {len(schema_str)} chars (Cerebras limit: 5000)")
-        if len(schema_str) > 5000:
-            logger.warning(f"⚠️ Schema exceeds Cerebras 5000 char limit! May cause 400 error.")
-        
-        request_body = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": response_model.__name__,
-                    "schema": schema,
-                    "strict": True
-                }
-            }
-        }
-        
-        # Add model_preference for Rose pool selection (SMART, FAST, CHEAP)
-        if model_preference:
-            request_body["model_preference"] = model_preference
-            logger.info(f"🎯 Using model_preference: {model_preference}")
-        
-        # Make direct HTTP call to Supabase function
-        async with httpx.AsyncClient(timeout=120.0) as http_client:
-            for attempt in range(3):
-                try:
-                    http_response = await http_client.post(
-                        config.rose.api_url,
-                        json=request_body,
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {config.rose.supabase_anon_key}",
-                            "x-api-key": config.rose.api_key,
-                        }
-                    )
-                    http_response.raise_for_status()
-                    break
-                except httpx.HTTPStatusError as e:
-                    error_body = e.response.text[:1000] if e.response.text else "No response body"
-                    logger.warning(f"Rose API attempt {attempt + 1} failed: {e.response.status_code}", error_body=error_body)
-                    if attempt == 2:
-                        raise
-                except Exception as e:
-                    logger.warning(f"Rose API attempt {attempt + 1} failed: {str(e)}")
-                    if attempt == 2:
-                        raise
-        
-        data = http_response.json()
-        
-        # Log the actual model selected from the pool (for debugging tool call issues)
-        actual_model = data.get("actual_model", "unknown")
-        pool_name = data.get("pool_name", "unknown")
-        pool_size = data.get("pool_size", 0)
-        logger.info(f"🎯 Rose pool selection: {model} → {actual_model} (pool={pool_name}, size={pool_size})")
-        
-        # Parse the response content as JSON and validate with Pydantic
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        try:
-            parsed_content = json.loads(content)
-            response = response_model.model_validate(parsed_content)
-        except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"Failed to parse Rose response: {content[:500]}", error=str(e))
-            raise ValueError(f"Failed to parse Rose response as {response_model.__name__}: {str(e)}")
-        
-        # Extract usage (include actual model for debugging)
-        usage = {
-            "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
-            "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
-            "total_tokens": data.get("usage", {}).get("total_tokens", 0),
-            "actual_model": actual_model,
-            "pool_name": pool_name,
-            "pool_size": pool_size
-        }
-        
-        return response, usage
-    
-    # Use OpenRouter for all other models
-    base_client = AsyncOpenAI(
-        api_key=config.openrouter.api_key,
-        base_url=config.openrouter.base_url
-    )
-    
-    # Patch client with Instructor for structured outputs
-    # Force JSON mode instead of native function calling because:
-    # - We have a LIST of tool calls in one response (not multiple function calls)
-    # - Native function calling expects one function call per response
-    # - JSON mode lets us have any structure we want
-    client = instructor.from_openai(base_client, mode=instructor.Mode.JSON)
-    
-    # Build extra args for reasoning (OpenRouter reasoning tokens)
-    extra_args = {}
-    if reasoning_effort:
-        extra_args["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
-    
-    # Call with structured output - Instructor handles everything
-    # Use create_with_completion to get both the structured response and raw completion
-    try:
-        response, completion = await client.chat.completions.create_with_completion(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_model=response_model,
-            max_retries=3,
-            **extra_args
-        )
-    except Exception as e:
-        logger.error(f"LLM call failed in create_with_completion: {str(e)}", model=model)
-        raise
-    
-    # Validate response
-    if response is None:
-        raise ValueError(f"LLM returned None response (model={model})")
-    
-    if completion is None:
-        raise ValueError(f"LLM returned None completion (model={model})")
-    
-    # Extract usage data from completion - STRICT: no silent failures
-    if not hasattr(completion, 'usage'):
-        raise ValueError(f"LLM completion missing 'usage' attribute (model={model}, completion_type={type(completion)})")
-    
-    if completion.usage is None:
-        raise ValueError(f"LLM completion.usage is None (model={model})")
-    
-    if not hasattr(completion.usage, 'prompt_tokens'):
-        raise ValueError(f"LLM completion.usage missing 'prompt_tokens' (model={model}, usage_type={type(completion.usage)})")
-    
-    if not hasattr(completion.usage, 'completion_tokens'):
-        raise ValueError(f"LLM completion.usage missing 'completion_tokens' (model={model}, usage_type={type(completion.usage)})")
-    
-    if not hasattr(completion.usage, 'total_tokens'):
-        raise ValueError(f"LLM completion.usage missing 'total_tokens' (model={model}, usage_type={type(completion.usage)})")
-    
-    usage = {
-        "prompt_tokens": completion.usage.prompt_tokens,
-        "completion_tokens": completion.usage.completion_tokens,
-        "total_tokens": completion.usage.total_tokens
+    # Build request body
+    request_body = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
     }
     
-    return response, usage
+    if tools:
+        request_body["tools"] = tools
+        request_body["tool_choice"] = tool_choice
+    
+    if response_format:
+        request_body["response_format"] = response_format
+    
+    if reasoning_max_tokens:
+        request_body["reasoning"] = {"max_tokens": reasoning_max_tokens}
+    
+    # Log outbound request summary for debugging 400s
+    logger.info(
+        "📤 Rose streaming request",
+        model=model,
+        message_count=len(messages),
+        tool_count=len(tools) if tools else 0,
+        has_response_format=bool(response_format),
+        has_reasoning=bool(reasoning_max_tokens),
+    )
+    
+    # Detailed debug logging for tool_calls in messages
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and "tool_calls" in msg:
+            for j, tc in enumerate(msg.get("tool_calls", [])):
+                func_data = tc.get("function", {})
+                tool_args = func_data.get("arguments")
+                has_valid_args = tool_args is not None and isinstance(tool_args, str)
+                
+                if not has_valid_args:
+                    logger.error(
+                        f"❌ Invalid tool_call in messages[{i}].tool_calls[{j}]",
+                        tool_name=func_data.get("name", ""),
+                        tool_call_id=tc.get("id", ""),
+                        has_function=("function" in tc),
+                        has_arguments=("arguments" in func_data),
+                        arguments_type=type(tool_args).__name__ if tool_args is not None else "None",
+                        arguments_value=str(tool_args)[:100] if tool_args else "MISSING",
+                    )
+    
+    # Stream the response
+    accumulated_content = ""
+    tool_calls_data = []
+    reasoning_details = None
+    usage_data = {}
+    actual_model = model
+    finish_reason = "stop"
+    
+    if heartbeat_fn:
+        heartbeat_fn("Starting Rose API stream...")
+    
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as http_client:
+            async with http_client.stream(
+                'POST',
+                config.rose.api_url,
+                json=request_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                    "x-api-key": config.rose.api_key,
+                }
+            ) as stream_response:
+                stream_response.raise_for_status()
+                
+                chunk_count = 0
+                async for line in stream_response.aiter_lines():
+                    chunk_count += 1
+                    
+                    # Heartbeat periodically
+                    if heartbeat_fn and chunk_count % 5 == 0:
+                        heartbeat_fn(f"Streaming chunk {chunk_count}")
+                    
+                    if not line or not line.startswith('data: '):
+                        continue
+                    
+                    data_str = line[6:]  # Remove 'data: ' prefix
+                    if data_str == '[DONE]':
+                        break
+                    
+                    try:
+                        chunk_data = json.loads(data_str)
+                        
+                        # Extract model info
+                        if chunk_data.get("actual_model"):
+                            actual_model = chunk_data["actual_model"]
+                        
+                        # Extract usage
+                        if chunk_data.get("usage"):
+                            usage_data = chunk_data["usage"]
+                        
+                        # Process choices
+                        choices = chunk_data.get("choices", [])
+                        if not choices:
+                            continue
+                        
+                        delta = choices[0].get("delta", {})
+                        
+                        # Accumulate content
+                        if delta.get("content"):
+                            accumulated_content += delta["content"]
+                            if on_chunk:
+                                await on_chunk(accumulated_content)
+                        
+                        # Accumulate tool calls
+                        if delta.get("tool_calls"):
+                            for tc_delta in delta["tool_calls"]:
+                                tc_index = tc_delta.get("index", 0)
+                                
+                                # Ensure we have enough slots
+                                while len(tool_calls_data) <= tc_index:
+                                    tool_calls_data.append({
+                                        "id": "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""}
+                                    })
+                                
+                                # Update the tool call
+                                if tc_delta.get("id"):
+                                    tool_calls_data[tc_index]["id"] = tc_delta["id"]
+                                if tc_delta.get("function", {}).get("name"):
+                                    tool_calls_data[tc_index]["function"]["name"] = tc_delta["function"]["name"]
+                                if tc_delta.get("function", {}).get("arguments"):
+                                    tool_calls_data[tc_index]["function"]["arguments"] += tc_delta["function"]["arguments"]
+                        
+                        # Extract reasoning_details
+                        if delta.get("reasoning_details"):
+                            reasoning_details = delta["reasoning_details"]
+                        
+                        # Check finish reason
+                        if choices[0].get("finish_reason"):
+                            finish_reason = choices[0]["finish_reason"]
+                            
+                    except json.JSONDecodeError:
+                        continue
+        
+        logger.info(
+            "✅ Rose streaming complete",
+            actual_model=actual_model,
+            content_length=len(accumulated_content),
+            tool_calls_count=len(tool_calls_data),
+            usage=usage_data,
+        )
+        
+        return {
+            "content": accumulated_content,
+            "tool_calls": tool_calls_data if tool_calls_data else None,
+            "reasoning_details": reasoning_details,
+            "usage": usage_data,
+            "actual_model": actual_model,
+            "finish_reason": finish_reason,
+        }
+        
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            "❌ Rose API call failed",
+            status_code=e.response.status_code,
+            response_body=e.response.text[:500] if e.response.text else "EMPTY",
+        )
+        raise
+
 
 async def call_llm_structured_streaming(
     messages: List[Dict[str, str]],
@@ -429,7 +459,7 @@ async def call_llm_structured_streaming(
     max_tokens: int,
     response_model: type[T],
     on_chunk: Callable[[str, int], Awaitable[None]],
-    reasoning_effort: Optional[str] = None,
+    reasoning_max_tokens: Optional[int] = None,
     model_preference: Optional[str] = None,
     agent_id: Optional[str] = None,  # For cancellation checking
     on_plan_start: Optional[Callable[[str], Awaitable[None]]] = None,  # Called when set_plan detected
@@ -448,7 +478,7 @@ async def call_llm_structured_streaming(
         max_tokens: Maximum tokens
         response_model: Pydantic model class for response structure
         on_chunk: Async callback(text_so_far, token_count) called at streaming intervals
-        reasoning_effort: Optional reasoning effort level ("high", "medium", "low")
+        reasoning_max_tokens: Optional max tokens for reasoning (default 2048)
         model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
         agent_id: Optional agent ID for cancellation checking (stops streaming if agent is paused)
         on_plan_start: Optional callback(tool_call_id) when set_plan tool is first detected
@@ -492,6 +522,11 @@ async def call_llm_structured_streaming(
             request_body["model_preference"] = model_preference
             logger.info(f"🎯 Streaming with model_preference: {model_preference}")
         
+        # Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
+        if reasoning_max_tokens:
+            request_body["reasoning"] = {"max_tokens": reasoning_max_tokens}
+            logger.info(f"🧠 Streaming with reasoning max_tokens: {reasoning_max_tokens}")
+        
         # Stream SSE from Rose endpoint
         accumulated_content = ""
         last_emitted_text = ""  # Track last emitted text to avoid duplicate sends
@@ -502,6 +537,7 @@ async def call_llm_structured_streaming(
         pool_size = 0
         was_cancelled = False
         chunk_count = 0
+        reasoning_details = None  # Track reasoning_details from response for preservation
         
         # Plan streaming tracking
         plan_tool_call_id: Optional[str] = None
@@ -509,6 +545,34 @@ async def call_llm_structured_streaming(
         plan_title_emitted: Optional[str] = None
         
         try:
+            # Log outbound request summary for debugging 400s
+            logger.debug(
+                "📤 Rose streaming request payload",
+                model=request_body.get("model"),
+                message_count=len(messages),
+                has_response_format=bool(request_body.get("response_format")),
+                has_reasoning=bool(request_body.get("reasoning")),
+                messages_summary=[
+                    {
+                        "index": i,
+                        "role": m.get("role"),
+                        "has_content": bool(m.get("content")),
+                        "tool_calls": [
+                            {
+                                "id": tc.get("id"),
+                                "name": tc.get("function", {}).get("name"),
+                                "has_arguments": "arguments" in tc.get("function", {}),
+                                "arguments_type": type(tc.get("function", {}).get("arguments")).__name__,
+                                "arguments_preview": str(tc.get("function", {}).get("arguments"))[:50] if tc.get("function", {}).get("arguments") else "MISSING"
+                            }
+                            for tc in m.get("tool_calls", [])
+                        ] if m.get("tool_calls") else None,
+                        "tool_call_id": m.get("tool_call_id") if m.get("role") == "tool" else None
+                    }
+                    for i, m in enumerate(messages)
+                ]
+            )
+            
             # Heartbeat before starting - catches cancellation if pause was already clicked
             activity.heartbeat("Starting Rose LLM stream...")
             
@@ -555,6 +619,13 @@ async def call_llm_structured_streaming(
                                 pool_name = chunk_data["pool_name"]
                             if chunk_data.get("pool_size"):
                                 pool_size = chunk_data["pool_size"]
+                            
+                            # Extract reasoning_details if present (for preservation in subsequent calls)
+                            # OpenRouter reasoning models return this in the message
+                            message = chunk_data.get("choices", [{}])[0].get("message", {})
+                            if message.get("reasoning_details"):
+                                reasoning_details = message["reasoning_details"]
+                                logger.debug(f"📝 Extracted reasoning_details from SSE chunk", count=len(reasoning_details))
                             
                             # Extract delta content
                             delta = chunk_data.get("choices", [{}])[0].get("delta", {})
@@ -621,6 +692,9 @@ async def call_llm_structured_streaming(
                 "pool_size": pool_size,
                 "cancelled": True
             }
+            # Include reasoning_details if captured (for preservation in subsequent calls)
+            if reasoning_details:
+                usage["reasoning_details"] = reasoning_details
             return empty_response, usage, plan_tool_call_id
         
         logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, {len(accumulated_content)} chars")
@@ -647,6 +721,10 @@ async def call_llm_structured_streaming(
             "pool_size": pool_size,
             "cancelled": False
         }
+        # Include reasoning_details if captured (for preservation in subsequent calls)
+        if reasoning_details:
+            usage["reasoning_details"] = reasoning_details
+            logger.info(f"📝 Returning reasoning_details from Rose streaming", count=len(reasoning_details))
         
         return response, usage, plan_tool_call_id
     
@@ -660,8 +738,8 @@ async def call_llm_structured_streaming(
     client = instructor.from_openai(base_client, mode=instructor.Mode.JSON)
     
     extra_args = {}
-    if reasoning_effort:
-        extra_args["extra_body"] = {"reasoning": {"effort": reasoning_effort}}
+    if reasoning_max_tokens:
+        extra_args["extra_body"] = {"reasoning": {"max_tokens": reasoning_max_tokens}}
     
     last_emitted_text = ""
     last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
@@ -838,6 +916,33 @@ async def call_llm(
             if response_format:
                 request_body["response_format"] = response_format
             
+            # Log outbound request summary for debugging 400s
+            logger.debug(
+                "📤 Rose non-streaming request payload",
+                model=request_body.get("model"),
+                message_count=len(messages),
+                has_response_format=bool(response_format),
+                messages_summary=[
+                    {
+                        "index": i,
+                        "role": m.get("role"),
+                        "has_content": bool(m.get("content")),
+                        "tool_calls": [
+                            {
+                                "id": tc.get("id"),
+                                "name": tc.get("function", {}).get("name"),
+                                "has_arguments": "arguments" in tc.get("function", {}),
+                                "arguments_type": type(tc.get("function", {}).get("arguments")).__name__,
+                                "arguments_preview": str(tc.get("function", {}).get("arguments"))[:50] if tc.get("function", {}).get("arguments") else "MISSING"
+                            }
+                            for tc in m.get("tool_calls", [])
+                        ] if m.get("tool_calls") else None,
+                        "tool_call_id": m.get("tool_call_id") if m.get("role") == "tool" else None
+                    }
+                    for i, m in enumerate(messages)
+                ]
+            )
+            
             async with httpx.AsyncClient(timeout=120.0) as http_client:
                 http_response = await http_client.post(
                     config.rose.api_url,
@@ -933,7 +1038,7 @@ async def decide_next_action(
     disabled_tools: List[Dict[str, Any]],
     iteration: int,
     model: str = "anthropic/claude-sonnet-4.5",
-    reasoning_effort: str = "low",
+    reasoning_max_tokens: int = 2048,
     user_id: Optional[str] = None,
     phase: str = "EXECUTE",
     model_preference: Optional[str] = None,
@@ -953,7 +1058,7 @@ async def decide_next_action(
         disabled_tools: List of tools not available yet (shown in prompt for visibility)
         iteration: Current iteration number
         model: LLM model to use
-        reasoning_effort: OpenRouter reasoning effort level (low, medium, high)
+        reasoning_max_tokens: Max tokens for reasoning (0 disables reasoning)
         user_id: Optional Supabase user ID
         phase: Current workflow phase (PLAN or EXECUTE)
         model_preference: Optional Rose model preference (SMART, FAST, CHEAP)
@@ -961,7 +1066,7 @@ async def decide_next_action(
         stream_id: Optional stream ID for streaming (enables streaming when provided with agent_id)
         
     Returns:
-        Dict with 'tool', 'args', 'reasoning'
+        Dict with 'tool', 'args', 'reasoning_details'
     """
     try:
         activity.heartbeat(f"Deciding next action (iteration {iteration}, phase={phase})")
@@ -998,10 +1103,10 @@ async def decide_next_action(
         AgentActionModel = create_agent_action_model(enabled_tool_names)
         
         # Use structured output with Pydantic schema
-        # Use the reasoning effort from agent settings (None if "off")
-        effort = reasoning_effort if reasoning_effort != "off" else None
-        if effort:
-            logger.info(f"🧠 Using {effort} reasoning for {model}")
+        # Use the reasoning_max_tokens from agent settings (0 disables reasoning)
+        effective_reasoning_tokens = reasoning_max_tokens if reasoning_max_tokens > 0 else None
+        if effective_reasoning_tokens:
+            logger.info(f"🧠 Using {effective_reasoning_tokens} max reasoning tokens for {model}")
         else:
             logger.info(f"💭 Reasoning disabled for {model}")
         
@@ -1066,7 +1171,7 @@ async def decide_next_action(
                 max_tokens=4096,
                 response_model=AgentActionModel,
                 on_chunk=on_chunk,
-                reasoning_effort=effort,
+                reasoning_max_tokens=effective_reasoning_tokens,
                 model_preference=model_preference,
                 agent_id=agent_id,  # For cancellation checking
                 on_plan_start=on_plan_start,
@@ -1088,16 +1193,8 @@ async def decide_next_action(
             except Exception as e:
                 logger.warning(f"Final stream chunk failed (non-fatal): {str(e)}")
         else:
-            # Non-streaming path
-            result, usage = await call_llm_structured(
-                messages=messages,
-                model=model,
-                temperature=0.7,
-                max_tokens=4096,
-                response_model=AgentActionModel,
-                reasoning_effort=effort,
-                model_preference=model_preference
-            )
+            # Streaming is required - agent_id and stream_id must be provided
+            raise ValueError("decide_next_action requires agent_id and stream_id for streaming")
         
         # Validate result - STRICT: no silent failures
         if result is None:
@@ -1227,13 +1324,17 @@ async def check_progress(
             context_summary=[f"{m.get('role')}: {m.get('text', '')[:50]}..." for m in context[-5:]]  # Last 5 messages
         )
         
-        # Use structured output with Pydantic schema
-        result, usage = await call_llm_structured(
+        # Use streaming LLM call (no-op callback since we don't stream verifier output)
+        async def noop_chunk(text_so_far: str, token_count: int):
+            pass
+        
+        result, usage, _ = await call_llm_structured_streaming(
             messages=messages,
             model=model,
             temperature=0.3,
             max_tokens=4096,  # Generous limit for verifier reasoning
-            response_model=ProgressScore
+            response_model=ProgressScore,
+            on_chunk=noop_chunk
         )
         
         logger.info(
