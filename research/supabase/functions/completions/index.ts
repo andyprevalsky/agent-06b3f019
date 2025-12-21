@@ -212,6 +212,45 @@ async function updateLatencyCache(supabase: any, model: string, pool: string, la
   }
 }
 
+// Increment loser's cached latency by 80ms (reduces sandbagging, gives them better chance next race)
+// Uses atomic SQL increment via RPC to avoid race conditions
+const LOSER_LATENCY_INCREMENT_MS = 80;
+
+async function incrementLoserLatency(supabase: any, model: string, pool: string): Promise<void> {
+  // Use raw SQL for atomic increment - Supabase doesn't have direct increment API
+  // We'll use UPDATE with latencyMs = latencyMs + 10
+  const { error } = await supabase.rpc('increment_loser_latency', {
+    p_model: model,
+    p_pool: pool,
+    p_increment: LOSER_LATENCY_INCREMENT_MS
+  });
+  
+  if (error) {
+    // Fallback: if RPC doesn't exist, do manual increment (less atomic but works)
+    console.warn(`⚠️ RPC increment failed for ${model}, trying manual update:`, error.message);
+    
+    // Fetch current value
+    const { data } = await supabase
+      .from('RoseModelLatency')
+      .select('latencyMs')
+      .eq('model', model)
+      .eq('pool', pool)
+      .single();
+    
+    if (data) {
+      const newLatency = data.latencyMs + LOSER_LATENCY_INCREMENT_MS;
+      await supabase
+        .from('RoseModelLatency')
+        .update({ latencyMs: newLatency, measuredAt: new Date().toISOString() })
+        .eq('model', model)
+        .eq('pool', pool);
+      console.log(`📉 Loser ${model}: latency incremented ${data.latencyMs} → ${newLatency}ms (less sandbagging)`);
+    }
+  } else {
+    console.log(`📉 Loser ${model}: latency incremented by ${LOSER_LATENCY_INCREMENT_MS}ms (atomic)`);
+  }
+}
+
 // ============================================
 // CONVERSATION MODEL TRACKING
 // ============================================
@@ -527,12 +566,22 @@ async function raceModels(
           console.log(`🏆 Winner: ${result.model} (TTFT: ${result.ttftMs}ms)`);
           
           // ABORT ALL OTHER REQUESTS to save API costs!
+          // Also increment losers' cached latency (fire-and-forget, doesn't block response)
           controllers.forEach((controller, i) => {
             if (i !== winnerIndex) {
               console.log(`🛑 Aborting loser: ${racingModels[i].model}`);
               controller.abort();
+              
+              // Increment loser's latency by 10ms (reduces sandbagging, gives them better chance next race)
+              incrementLoserLatency(supabase, racingModels[i].model, pool)
+                .catch(e => console.error(`⚠️ Failed to increment loser latency:`, e));
             }
           });
+          
+          // Update cache for winning model with actual race TTFT (keeps cache fresh)
+          updateLatencyCache(supabase, result.model, pool, result.ttftMs)
+            .then(() => console.log(`📝 Cache updated for winner: ${result.model} = ${result.ttftMs}ms`))
+            .catch(e => console.error(`⚠️ Failed to update winner cache:`, e));
           
           resolve({ model: result.model, reader: result.reader, ttftMs: result.ttftMs, firstData: result.firstData });
         } else if (completed === racePromises.length && !resolved) {
@@ -917,6 +966,14 @@ serve(async (req) => {
     const cotSteps = cot_steps || 1;
     const maxTokens = max_tokens;
     let messages = originalMessages;
+    
+    // Default reasoning tokens to 256 if reasoning is enabled but no max_tokens specified
+    const DEFAULT_REASONING_TOKENS = 256;
+    let cappedReasoning = reasoning;
+    if (reasoning && !reasoning.max_tokens) {
+      cappedReasoning = { ...reasoning, max_tokens: DEFAULT_REASONING_TOKENS };
+      console.log(`🧠 Setting default reasoning tokens: ${DEFAULT_REASONING_TOKENS}`);
+    }
 
     if (!model) {
       return new Response(JSON.stringify({ error: 'Missing required field: model' }), {
@@ -937,14 +994,43 @@ serve(async (req) => {
       poolName = poolName.replace('rose-labs/', '');
     }
     
+    // Check if it's a direct model passthrough (for testing)
+    const DIRECT_MODEL_PREFIXES = ['openai/', 'google/', 'anthropic/', 'deepseek/', 'qwen/', 'x-ai/', 'meta/', 'moonshotai/'];
+    const isDirectModel = DIRECT_MODEL_PREFIXES.some(prefix => model.toLowerCase().startsWith(prefix));
+    
     const pool = MODEL_POOLS[poolName];
-    if (!pool) {
+    if (!pool && !isDirectModel) {
       return new Response(JSON.stringify({ 
         error: `Unknown model: ${model}. Use 'rose-labs/rose-1-lite' or 'rose-labs/rose-1-ultra'` 
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 400,
       });
+    }
+    
+    // Handle direct model passthrough (bypass racing)
+    if (isDirectModel) {
+      console.log(`🔧 Direct model passthrough: ${model}`);
+      if (stream) {
+        return await handleStreaming(
+          model,
+          messages,
+          temperature,
+          maxTokens,
+          seed,
+          tools,
+          tool_choice,
+          response_format,
+          cappedReasoning,
+          Deno.env.get('OPENROUTER_API_KEY')!,
+          supabaseUrl,
+          model,
+          false,  // isCerebras
+          'direct',
+          1
+        );
+      }
+      // Non-streaming direct passthrough handled below
     }
 
     // Track selected model for non-streaming fallback
@@ -976,7 +1062,7 @@ serve(async (req) => {
           tools,
           tool_choice,
           response_format,
-          reasoning,
+          cappedReasoning,
           Deno.env.get('OPENROUTER_API_KEY')!,
           supabaseUrl,
           model,
@@ -1252,7 +1338,7 @@ serve(async (req) => {
           tools,
           tool_choice,
           response_format,
-          reasoning,
+          cappedReasoning,
           Deno.env.get('OPENROUTER_API_KEY')!,
           supabaseUrl,
           model,

@@ -94,7 +94,7 @@ export function getX402Endpoints(agentId?: string): X402Endpoints {
         reasoning_max_tokens: {
           type: 'number',
           required: false,
-          description: 'Max tokens for reasoning (0 disables, default 2048)',
+          description: 'Max tokens for reasoning (0 disables, default 256)',
           example: 2048,
         },
         tool_ids: {

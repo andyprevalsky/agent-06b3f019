@@ -259,6 +259,52 @@ function groupBrowserMessages(messages: Message[]): { messages: Message[]; brows
   return { messages: combinedMessages, browserPanels };
 }
 
+// Collapse consecutive "Starting up a browser" messages into a single message with count
+function collapseBrowserStartupMessages(messages: Message[]): Message[] {
+  const result: Message[] = [];
+  let browserStartupGroup: Message[] = [];
+  
+  const flushGroup = () => {
+    if (browserStartupGroup.length === 0) return;
+    
+    if (browserStartupGroup.length === 1) {
+      // Single message, keep as-is
+      result.push(browserStartupGroup[0]);
+    } else {
+      // Multiple messages, collapse into one with count
+      const firstMessage = browserStartupGroup[0];
+      result.push({
+        ...firstMessage,
+        metadata: {
+          ...firstMessage.metadata,
+          title: `Starting up ${browserStartupGroup.length} browsers`,
+          _collapsedCount: browserStartupGroup.length,
+        },
+      });
+    }
+    browserStartupGroup = [];
+  };
+  
+  for (const message of messages) {
+    const isStartingBrowser = 
+      message.role === 'TOOL' && 
+      message.metadata?.title === 'Starting up a browser';
+    
+    if (isStartingBrowser) {
+      browserStartupGroup.push(message);
+    } else {
+      // Flush any accumulated browser startup messages before adding this one
+      flushGroup();
+      result.push(message);
+    }
+  }
+  
+  // Flush any remaining browser startup messages at the end
+  flushGroup();
+  
+  return result;
+}
+
 // Component for displaying invite code content inside popover
 function InviteCodeContent() {
   const { toast } = useToast();
@@ -1248,6 +1294,10 @@ export default function Terminal() {
 
   // Check if we should show the loader (agent is thinking)
   const [showThinkingLoader, setShowThinkingLoader] = useState(false);
+  // Track thinking phase: 'thinking' | 'harder' | 'extra_hard'
+  const [thinkingPhase, setThinkingPhase] = useState<'thinking' | 'harder' | 'extra_hard'>('thinking');
+  // Track when thinking started
+  const thinkingStartRef = useRef<number | null>(null);
   
   useEffect(() => {
     // Don't show loader if:
@@ -1264,12 +1314,17 @@ export default function Terminal() {
         messageBuffer.length > 0 ||
         isAnimating) {
       setShowThinkingLoader(false);
+      // Reset thinking phase when thinking stops
+      setThinkingPhase('thinking');
+      thinkingStartRef.current = null;
       return;
     }
 
     const lastMessage = messages[messages.length - 1];
     if (!lastMessage) {
       setShowThinkingLoader(false);
+      setThinkingPhase('thinking');
+      thinkingStartRef.current = null;
       return;
     }
 
@@ -1278,6 +1333,8 @@ export default function Terminal() {
       const status = lastMessage.metadata?.toolStatus;
       if (status === 'IN_PROGRESS') {
         setShowThinkingLoader(false);
+        setThinkingPhase('thinking');
+        thinkingStartRef.current = null;
         return;
       }
     }
@@ -1300,6 +1357,52 @@ export default function Terminal() {
     
     return () => clearInterval(interval);
   }, [messages.length, agentDetail?.status, isAnimating, messageBuffer.length]);
+  
+  // Progressive thinking phases: thinking -> harder (2s) -> extra hard (5s)
+  useEffect(() => {
+    if (!showThinkingLoader) {
+      // Reset when not showing
+      setThinkingPhase('thinking');
+      thinkingStartRef.current = null;
+      return;
+    }
+    
+    // Start tracking when thinking begins
+    if (thinkingStartRef.current === null) {
+      thinkingStartRef.current = Date.now();
+    }
+    
+    const updatePhase = () => {
+      if (thinkingStartRef.current === null) return;
+      
+      const elapsed = Date.now() - thinkingStartRef.current;
+      
+      if (elapsed >= 5000) {
+        setThinkingPhase('extra_hard');
+      } else if (elapsed >= 2000) {
+        setThinkingPhase('harder');
+      } else {
+        setThinkingPhase('thinking');
+      }
+    };
+    
+    // Check immediately
+    updatePhase();
+    
+    // Update every 100ms
+    const interval = setInterval(updatePhase, 100);
+    
+    return () => clearInterval(interval);
+  }, [showThinkingLoader]);
+  
+  // Get the display text for thinking phase
+  const thinkingText = useMemo(() => {
+    switch (thinkingPhase) {
+      case 'extra_hard': return 'Thinking extra hard';
+      case 'harder': return 'Thinking harder';
+      default: return 'Thinking';
+    }
+  }, [thinkingPhase]);
 
   // Debug logging for thinking bubble visibility
   useEffect(() => {
@@ -1755,6 +1858,9 @@ export default function Terminal() {
     const filteredMessages = messages.filter((m) => m.role !== 'SYSTEM');
     const deduplicated = deduplicateToolMessages(filteredMessages);
     const grouped = groupBrowserMessages(deduplicated);
+    
+    // Collapse consecutive "Starting up a browser" messages
+    grouped.messages = collapseBrowserStartupMessages(grouped.messages);
 
     // Collect ALL active (incomplete) browser panels for carousel display
     type BrowserPanelData = {
@@ -2393,7 +2499,7 @@ export default function Terminal() {
                           style={{ width: '16px', height: '16px' }}
                         />
                         <span className="text-sm font-medium animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
-                          Thinking
+                          {thinkingText}
                         </span>
                       </div>
                       

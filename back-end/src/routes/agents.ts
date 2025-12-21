@@ -28,7 +28,7 @@ Scoring Instructions:
 const createAgentSchema = z.object({
   goal: z.string().min(1),
   model: z.string().optional().default('rose-labs/rose-1-lite'),
-  reasoning_max_tokens: z.number().int().min(0).optional().default(2048),
+  reasoning_max_tokens: z.number().int().min(0).optional().default(256),
   tool_ids: z.array(z.string().uuid()).nullable().optional().default([]).transform(val => val ?? []),
   source: z.enum(['WEB', 'MAC_APP']).optional().default('WEB'),
   task_queue: z.string().optional(), // Optional: for test isolation

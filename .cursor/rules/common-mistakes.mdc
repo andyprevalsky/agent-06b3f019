@@ -30,6 +30,12 @@ description: >
   20. Adding unnecessary fallbacks instead of fixing the root issue—prefer simple, correct implementations (see rules.mdc).
   21. Not importing PrismaClient from the singleton
   22. Using absolute paths for assets (e.g., src="/image.png") in shared front-end code—these break in Electron (file:// protocol). Use CSS gradients, imported assets, or inline SVGs instead.
+  23. Not realizing build it == this code
+  broken = True
+  while broken:
+  - attempt-to-fix
+  - deploy (if needed)
+  - broken = test(code)
 
 
 apply:

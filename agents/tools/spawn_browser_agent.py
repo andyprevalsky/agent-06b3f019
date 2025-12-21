@@ -807,7 +807,7 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             max_tokens=4096,
                             tools=all_tools,
                             tool_choice="auto",
-                            reasoning_max_tokens=2048,
+                            reasoning_max_tokens=256,
                             heartbeat_fn=activity.heartbeat,
                         )
 

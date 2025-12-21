@@ -190,11 +190,6 @@ def convert_context_to_messages(
                     })
                 assistant_msg["tool_calls"] = tool_calls
             
-            # Include reasoning_details if present in metadata (for preserving reasoning blocks)
-            # Per OpenRouter docs: "preserve the complete reasoning_details array returned in each response"
-            if metadata.get('reasoning_details'):
-                assistant_msg["reasoning_details"] = metadata['reasoning_details']
-            
             messages.append(assistant_msg)
             
         elif role == 'TOOL':
@@ -271,9 +266,8 @@ async def call_rose_streaming(
         
     Returns:
         Dict with:
-        - content: str - Text content from the response
+        - content: str - Text content from the response (includes reasoning if enabled)
         - tool_calls: List[Dict] - Tool calls from the response (if any)
-        - reasoning_details: List[Dict] - Reasoning details (if any)
         - usage: Dict - Token usage info
         - actual_model: str - Actual model used
         - finish_reason: str - Why generation stopped
@@ -311,6 +305,14 @@ async def call_rose_streaming(
         has_reasoning=bool(reasoning_max_tokens),
     )
     
+    # Log FULL request for replay/debugging slow requests
+    import json
+    logger.info(
+        "📋 Rose request FULL (for replay)",
+        url=config.rose.api_url,
+        request_body_json=json.dumps(request_body, default=str),
+    )
+    
     # Detailed debug logging for tool_calls in messages
     for i, msg in enumerate(messages):
         if msg.get("role") == "assistant" and "tool_calls" in msg:
@@ -333,13 +335,17 @@ async def call_rose_streaming(
     # Stream the response
     accumulated_content = ""
     tool_calls_data = []
-    reasoning_details = None
     usage_data = {}
     actual_model = model
+    actual_model_logged = False
     finish_reason = "stop"
     
     if heartbeat_fn:
         heartbeat_fn("Starting Rose API stream...")
+    
+    import time
+    request_start_time = time.time()
+    ttft_logged = False
     
     try:
         async with httpx.AsyncClient(timeout=120.0) as http_client:
@@ -357,6 +363,11 @@ async def call_rose_streaming(
                 
                 chunk_count = 0
                 async for line in stream_response.aiter_lines():
+                    # Log TTFT on first chunk
+                    if not ttft_logged:
+                        ttft_ms = int((time.time() - request_start_time) * 1000)
+                        logger.info(f"⏱️ Rose TTFT: {ttft_ms}ms")
+                        ttft_logged = True
                     chunk_count += 1
                     
                     # Heartbeat periodically
@@ -374,8 +385,10 @@ async def call_rose_streaming(
                         chunk_data = json.loads(data_str)
                         
                         # Extract model info
-                        if chunk_data.get("actual_model"):
+                        if chunk_data.get("actual_model") and not actual_model_logged:
                             actual_model = chunk_data["actual_model"]
+                            actual_model_logged = True
+                            logger.info(f"🎯 Rose model selected: {actual_model}")
                         
                         # Extract usage
                         if chunk_data.get("usage"):
@@ -388,9 +401,12 @@ async def call_rose_streaming(
                         
                         delta = choices[0].get("delta", {})
                         
-                        # Accumulate content
-                        if delta.get("content"):
-                            accumulated_content += delta["content"]
+                        # Only accumulate content, not reasoning
+                        # Reasoning is internal model thinking, content is the actual response
+                        content_delta = delta.get("content") or ""
+                        
+                        if content_delta:
+                            accumulated_content += content_delta
                             if on_chunk:
                                 await on_chunk(accumulated_content)
                         
@@ -415,10 +431,6 @@ async def call_rose_streaming(
                                 if tc_delta.get("function", {}).get("arguments"):
                                     tool_calls_data[tc_index]["function"]["arguments"] += tc_delta["function"]["arguments"]
                         
-                        # Extract reasoning_details
-                        if delta.get("reasoning_details"):
-                            reasoning_details = delta["reasoning_details"]
-                        
                         # Check finish reason
                         if choices[0].get("finish_reason"):
                             finish_reason = choices[0]["finish_reason"]
@@ -437,7 +449,6 @@ async def call_rose_streaming(
         return {
             "content": accumulated_content,
             "tool_calls": tool_calls_data if tool_calls_data else None,
-            "reasoning_details": reasoning_details,
             "usage": usage_data,
             "actual_model": actual_model,
             "finish_reason": finish_reason,
@@ -478,7 +489,7 @@ async def call_llm_structured_streaming(
         max_tokens: Maximum tokens
         response_model: Pydantic model class for response structure
         on_chunk: Async callback(text_so_far, token_count) called at streaming intervals
-        reasoning_max_tokens: Optional max tokens for reasoning (default 2048)
+        reasoning_max_tokens: Optional max tokens for reasoning (default 256)
         model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
         agent_id: Optional agent ID for cancellation checking (stops streaming if agent is paused)
         on_plan_start: Optional callback(tool_call_id) when set_plan tool is first detected
@@ -533,11 +544,11 @@ async def call_llm_structured_streaming(
         last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
         token_count = 0
         actual_model = "unknown"
+        actual_model_logged = False
         pool_name = "unknown"
         pool_size = 0
         was_cancelled = False
         chunk_count = 0
-        reasoning_details = None  # Track reasoning_details from response for preservation
         
         # Plan streaming tracking
         plan_tool_call_id: Optional[str] = None
@@ -573,8 +584,20 @@ async def call_llm_structured_streaming(
                 ]
             )
             
+            # Log FULL request for replay/debugging slow requests
+            import json
+            logger.info(
+                "📋 Rose structured request FULL (for replay)",
+                url=config.rose.api_url,
+                request_body_json=json.dumps(request_body, default=str),
+            )
+            
             # Heartbeat before starting - catches cancellation if pause was already clicked
             activity.heartbeat("Starting Rose LLM stream...")
+            
+            import time
+            request_start_time = time.time()
+            ttft_logged = False
             
             async with httpx.AsyncClient(timeout=60.0) as http_client:
                 async with http_client.stream(
@@ -596,6 +619,12 @@ async def call_llm_structured_streaming(
                     async for line in stream_response.aiter_lines():
                         chunk_count += 1
                         
+                        # Log TTFT on first chunk
+                        if not ttft_logged:
+                            ttft_ms = int((time.time() - request_start_time) * 1000)
+                            logger.info(f"⏱️ Rose structured TTFT: {ttft_ms}ms")
+                            ttft_logged = True
+                        
                         # Heartbeat every 5 chunks - when activity is cancelled, this raises CancelledError
                         if chunk_count % 5 == 0:
                             activity.heartbeat(f"Streaming chunk {chunk_count}")
@@ -613,23 +642,32 @@ async def call_llm_structured_streaming(
                             chunk_data = json.loads(data_str)
                             # logger.info(f"📊 Streaming chunk data: {chunk_data}")
                             # Extract model info from first chunk
-                            if chunk_data.get("actual_model"):
+                            if chunk_data.get("actual_model") and not actual_model_logged:
                                 actual_model = chunk_data["actual_model"]
+                                actual_model_logged = True
+                                logger.info(f"🎯 Rose model selected: {actual_model}")
                             if chunk_data.get("pool_name"):
                                 pool_name = chunk_data["pool_name"]
                             if chunk_data.get("pool_size"):
                                 pool_size = chunk_data["pool_size"]
                             
-                            # Extract reasoning_details if present (for preservation in subsequent calls)
-                            # OpenRouter reasoning models return this in the message
-                            message = chunk_data.get("choices", [{}])[0].get("message", {})
-                            if message.get("reasoning_details"):
-                                reasoning_details = message["reasoning_details"]
-                                logger.debug(f"📝 Extracted reasoning_details from SSE chunk", count=len(reasoning_details))
-                            
                             # Extract delta content
                             delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                            content_delta = delta.get("content", "")
+                            
+                            # Extract reasoning from delta.reasoning (GPT-5.2, Gemini, DeepSeek use this)
+                            # NOTE: For structured streaming, reasoning is logged but NOT added to accumulated_content
+                            # because accumulated_content must be valid JSON for parsing at the end
+                            reasoning_delta = delta.get("reasoning") or ""
+                            content_only = delta.get("content") or ""
+                            fin = chunk_data.get("choices", [{}])[0].get("finish_reason") or ""
+                            
+                            # DEBUG: Log chunk content (reasoning + content)
+                            if reasoning_delta or content_only or fin:
+                                logger.info(f"🔍 C{chunk_count} r={reasoning_delta[:50] if reasoning_delta else ''} c={content_only[:100] if content_only else ''} fin={fin}")
+                            
+                            # Only accumulate content (JSON) - reasoning is for logging/debugging only
+                            # The JSON response is what gets parsed into AgentAction
+                            content_delta = content_only
                             
                             if content_delta:
                                 accumulated_content += content_delta
@@ -692,9 +730,6 @@ async def call_llm_structured_streaming(
                 "pool_size": pool_size,
                 "cancelled": True
             }
-            # Include reasoning_details if captured (for preservation in subsequent calls)
-            if reasoning_details:
-                usage["reasoning_details"] = reasoning_details
             return empty_response, usage, plan_tool_call_id
         
         logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, {len(accumulated_content)} chars")
@@ -721,10 +756,6 @@ async def call_llm_structured_streaming(
             "pool_size": pool_size,
             "cancelled": False
         }
-        # Include reasoning_details if captured (for preservation in subsequent calls)
-        if reasoning_details:
-            usage["reasoning_details"] = reasoning_details
-            logger.info(f"📝 Returning reasoning_details from Rose streaming", count=len(reasoning_details))
         
         return response, usage, plan_tool_call_id
     
@@ -943,6 +974,14 @@ async def call_llm(
                 ]
             )
             
+            # Log FULL request for replay/debugging slow requests
+            import json
+            logger.info(
+                "📋 Rose non-streaming request FULL (for replay)",
+                url=config.rose.api_url,
+                request_body_json=json.dumps(request_body, default=str),
+            )
+            
             async with httpx.AsyncClient(timeout=120.0) as http_client:
                 http_response = await http_client.post(
                     config.rose.api_url,
@@ -1038,7 +1077,7 @@ async def decide_next_action(
     disabled_tools: List[Dict[str, Any]],
     iteration: int,
     model: str = "anthropic/claude-sonnet-4.5",
-    reasoning_max_tokens: int = 2048,
+    reasoning_max_tokens: int = 256,
     user_id: Optional[str] = None,
     phase: str = "EXECUTE",
     model_preference: Optional[str] = None,
@@ -1066,7 +1105,7 @@ async def decide_next_action(
         stream_id: Optional stream ID for streaming (enables streaming when provided with agent_id)
         
     Returns:
-        Dict with 'tool', 'args', 'reasoning_details'
+        Dict with 'tool', 'args'
     """
     try:
         activity.heartbeat(f"Deciding next action (iteration {iteration}, phase={phase})")
@@ -1158,7 +1197,7 @@ async def decide_next_action(
                         agent_id=agent_id,
                         stream_id=stream_id,
                         tool_call_id=tool_call_id,
-                        title=title,
+                        title='Building Plan: ' + title,
                     )
                 except Exception as e:
                     logger.warning(f"Plan title notification failed (non-fatal): {str(e)}")

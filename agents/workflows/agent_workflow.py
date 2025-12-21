@@ -370,7 +370,7 @@ class AgentWorkflow:
         # user_phone removed - now fetched from user context via get_user_context
         self.goal: Optional[str] = None
         self.model: str = "anthropic/claude-sonnet-4.5"
-        self.reasoning_max_tokens: int = 2048  # OpenRouter reasoning max tokens (0 disables)
+        self.reasoning_max_tokens: int = 256  # OpenRouter reasoning max tokens (0 disables)
         self.tool_ids: List[str] = []
         self.tools: List[Dict[str, str]] = []  # Tools with descriptions from DB
         self.verifier: Optional[Dict] = None

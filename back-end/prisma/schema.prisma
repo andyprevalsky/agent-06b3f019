@@ -24,7 +24,7 @@ model Agent {
   contextSize               Int             @default(0)
   messageCount              Int             @default(0)
   tokenCount                Int             @default(0)
-  reasoningMaxTokens        Int             @default(2048)
+  reasoningMaxTokens        Int             @default(256)
   tokensIn                  Int             @default(0)
   tokensOut                 Int             @default(0)
   parentAgentId             String?
@@ -390,6 +390,30 @@ model BenchmarkRun {
   @@index([userId])
   @@index([benchmarkName])
   @@index([createdAt])
+}
+
+// Rose model latency cache - stores TTFT measurements per model
+// TTL is enforced at query time (filter by measuredAt > now() - 1 min)
+model RoseModelLatency {
+  id         String   @id @default(uuid())
+  model      String   // e.g., "openai/gpt-5.2"
+  pool       String   // e.g., "rose-1-lite"
+  latencyMs  Int      // time to first token in ms
+  measuredAt DateTime @default(now())
+
+  @@unique([model, pool])
+  @@index([pool, measuredAt])
+}
+
+// Rose conversation model tracking - ensures same model per conversation
+model RoseConversationModel {
+  id             String   @id @default(uuid())
+  conversationId String   @unique
+  model          String   // selected model for this conversation
+  pool           String   // which pool was used
+  createdAt      DateTime @default(now())
+
+  @@index([conversationId])
 }
 
 enum AgentStatus {

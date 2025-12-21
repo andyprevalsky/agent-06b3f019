@@ -102,19 +102,25 @@ export async function subscribeToAgent(
       }
     });
 
+  let resolved = false;
   return new Promise((resolve, reject) => {
     channel.subscribe((status) => {
+      // Log all status changes for debugging
+      console.log(`🔌 Agent channel (${agentId.slice(0,8)}...) status: ${status}`);
+      
       if (status === 'SUBSCRIBED') {
+        console.log(`✅ Connected to agent:${agentId.slice(0,8)}...`);
+        resolved = true;
         resolve(channel);
       } else if (status === 'CHANNEL_ERROR') {
-        console.error(`Failed to subscribe to agent:${agentId} - CHANNEL_ERROR`);
-        reject(new Error(`Channel error for agent:${agentId}`));
+        console.error(`❌ Disconnected from agent:${agentId.slice(0,8)}... - CHANNEL_ERROR`);
+        if (!resolved) reject(new Error(`Channel error for agent:${agentId}`));
       } else if (status === 'TIMED_OUT') {
-        console.error(`Failed to subscribe to agent:${agentId} - TIMED_OUT`);
-        reject(new Error(`Subscription timed out for agent:${agentId}`));
+        console.error(`❌ Disconnected from agent:${agentId.slice(0,8)}... - TIMED_OUT`);
+        if (!resolved) reject(new Error(`Subscription timed out for agent:${agentId}`));
       } else if (status === 'CLOSED') {
-        console.error(`Failed to subscribe to agent:${agentId} - CLOSED`);
-        reject(new Error(`Channel closed for agent:${agentId}`));
+        console.warn(`🔴 Disconnected from agent:${agentId.slice(0,8)}... - CLOSED`);
+        if (!resolved) reject(new Error(`Channel closed for agent:${agentId}`));
       }
     });
   });
@@ -154,19 +160,25 @@ export async function subscribeToAttentionRequests(
       handlers?.onDelete?.(payload);
     });
 
+  let resolved = false;
   return new Promise((resolve, reject) => {
     channel.subscribe((status) => {
+      // Log all status changes for debugging
+      console.log(`🔌 User attention channel (${userId.slice(0,8)}...) status: ${status}`);
+      
       if (status === 'SUBSCRIBED') {
+        console.log(`✅ Connected to user:${userId.slice(0,8)}... attention requests`);
+        resolved = true;
         resolve(channel);
       } else if (status === 'CHANNEL_ERROR') {
-        console.error(`Failed to subscribe to user:${userId} attention requests - CHANNEL_ERROR`);
-        reject(new Error(`Channel error for user:${userId}`));
+        console.error(`❌ Disconnected from user:${userId.slice(0,8)}... attention requests - CHANNEL_ERROR`);
+        if (!resolved) reject(new Error(`Channel error for user:${userId}`));
       } else if (status === 'TIMED_OUT') {
-        console.error(`Failed to subscribe to user:${userId} attention requests - TIMED_OUT`);
-        reject(new Error(`Subscription timed out for user:${userId}`));
+        console.error(`❌ Disconnected from user:${userId.slice(0,8)}... attention requests - TIMED_OUT`);
+        if (!resolved) reject(new Error(`Subscription timed out for user:${userId}`));
       } else if (status === 'CLOSED') {
-        console.error(`Failed to subscribe to user:${userId} attention requests - CLOSED`);
-        reject(new Error(`Channel closed for user:${userId}`));
+        console.warn(`🔴 Disconnected from user:${userId.slice(0,8)}... attention requests - CLOSED`);
+        if (!resolved) reject(new Error(`Channel closed for user:${userId}`));
       }
     });
   });
