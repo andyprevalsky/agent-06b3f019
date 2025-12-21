@@ -1136,7 +1136,6 @@ async def decide_next_action(
         # NOTE: SYSTEM messages (like blueprints) ARE included for decide_next_action
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(convert_context_to_messages(context, include_system=True))
-        messages.append({"role": "user", "content": "Based on everything so far, what should I do next?"})
         
         # Create custom AgentAction model based on enabled tools
         AgentActionModel = create_agent_action_model(enabled_tool_names)
