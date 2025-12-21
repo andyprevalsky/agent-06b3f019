@@ -6,19 +6,20 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-api-key",
 };
 
+// ============================================
+// LATENCY RACING CONFIGURATION
+// ============================================
+const MAX_LATENCY_CAP_MS = 3000;    // Models with TTFT > 3s excluded entirely
+const MAX_DELAY_CAP_MS = 1000;      // Max delay to equalize latencies (faster models excluded if need more delay)
+const LATENCY_CACHE_TTL_MS = 60000; // 1 minute cache TTL
+const TRIO_SIZE = 3;                // Race 3 models per request
+
 // Model pools for Rose variants - sync with backend/src/routes/rose.ts
-const MODEL_POOLS = {
+const MODEL_POOLS: Record<string, string[]> = {
   'rose-1-lite': [
-    // 'openai/gpt-oss-120b', // Disabled - produces 120+ garbage tool calls disconnected from reasoning
-    // 'qwen/qwen3-235b-a22b-thinking-2507', // Disabled - produces garbage tool calls disconnected from reasoning
     'moonshotai/kimi-k2-0905',
-    // 'deepseek/deepseek-v3.2-exp', // Disabled - produces garbage tool calls disconnected from reasoning
-    // 'z-ai/glm-4.6', // Disabled - causes tool call confusion (calls wrong tools)
     'openai/gpt-5.2',
-    // 'mistralai/mistral-medium-3.1', // Disabled
     'google/gemini-2.5-flash',
-    // 'nousresearch/hermes-4-405b', // Disabled
-    // 'minimax/minimax-m2', // Disabled
     'x-ai/grok-4-fast'
   ],
   'rose-1-ultra': [
@@ -41,6 +42,513 @@ const MODEL_PREFERENCES: Record<ModelPreference, { model: string; isCerebras: bo
 
 // Cerebras API base URL (OpenAI-compatible)
 const CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions';
+
+// ============================================
+// LATENCY CACHE FUNCTIONS
+// ============================================
+
+// Standard test prompt for latency probes - minimal tokens, consistent across all models
+const LATENCY_PROBE_MESSAGES = [
+  { role: "user", content: "Reply with just 'ok'" }
+];
+const LATENCY_PROBE_MAX_TOKENS = 16;
+
+interface LatencyEntry {
+  model: string;
+  pool: string;
+  latencyMs: number;
+  measuredAt: Date;
+}
+
+// Get cached latencies for a pool (only entries < 1 min old)
+// Returns both the latencies and whether any models are missing/stale
+async function getCachedLatencies(supabase: any, pool: string, poolModels: string[]): Promise<{
+  latencies: Map<string, number>;
+  needsRefresh: boolean;
+  missingModels: string[];
+}> {
+  const cutoff = new Date(Date.now() - LATENCY_CACHE_TTL_MS).toISOString();
+  console.log(`📊 Fetching cached latencies for ${pool} (cutoff: ${cutoff})`);
+  
+  const { data, error } = await supabase
+    .from('RoseModelLatency')
+    .select('model, latencyMs, measuredAt')
+    .eq('pool', pool)
+    .gt('measuredAt', cutoff);
+  
+  const latencies = new Map<string, number>();
+  if (error) {
+    console.error('❌ Error fetching latency cache:', error);
+    return { latencies, needsRefresh: true, missingModels: poolModels };
+  }
+  
+  for (const entry of data || []) {
+    latencies.set(entry.model, entry.latencyMs);
+  }
+  
+  // Check which models are missing from cache
+  const missingModels = poolModels.filter(model => !latencies.has(model));
+  const needsRefresh = missingModels.length > 0;
+  
+  if (latencies.size === 0) {
+    console.log(`📊 No cached latencies for ${pool} (cache empty or expired)`);
+  } else {
+    console.log(`📊 Cached latencies for ${pool}:`, Object.fromEntries(latencies));
+    if (missingModels.length > 0) {
+      console.log(`📊 Missing from cache: ${missingModels.join(', ')}`);
+    }
+  }
+  
+  return { latencies, needsRefresh, missingModels };
+}
+
+// Fire latency probes to specified models (runs in background, updates cache)
+async function fireLatencyProbes(
+  models: string[],
+  pool: string,
+  openRouterKey: string,
+  supabaseUrl: string,
+  supabase: any
+): Promise<void> {
+  console.log(`🔬 Firing latency probes for ${models.length} models: ${models.join(', ')}`);
+  
+  const probePromises = models.map(async (model) => {
+    const startTime = Date.now();
+    
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openRouterKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': supabaseUrl,
+          'X-Title': 'Rose AI - Latency Probe'
+        },
+        body: JSON.stringify({
+          model,
+          messages: LATENCY_PROBE_MESSAGES,
+          max_tokens: LATENCY_PROBE_MAX_TOKENS,
+          stream: true
+        })
+      });
+      
+      if (!response.ok) {
+        console.error(`❌ Probe failed for ${model}: ${response.status}`);
+        return;
+      }
+      
+      // Wait for FIRST DATA line, not just headers (matches racing behavior)
+      const reader = response.body?.getReader();
+      if (!reader) {
+        console.error(`❌ Probe no body for ${model}`);
+        return;
+      }
+      
+      const decoder = new TextDecoder();
+      let buffer = '';
+      
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        
+        // Check for actual data line (not just ": OPENROUTER PROCESSING" comment)
+        if (buffer.includes('data:') && !buffer.includes('[DONE]')) {
+          const lines = buffer.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('data:')) {
+              const ttftMs = Date.now() - startTime;
+              console.log(`🔬 Probe result: ${model} = ${ttftMs}ms (first data)`);
+              reader.cancel(); // Don't need the rest
+              await updateLatencyCache(supabase, model, pool, ttftMs);
+              return;
+            }
+          }
+        }
+      }
+      
+      console.error(`❌ Probe no data for ${model}`);
+      
+    } catch (error) {
+      console.error(`❌ Probe error for ${model}:`, error);
+    }
+  });
+  
+  // Wait for all probes to complete
+  await Promise.allSettled(probePromises);
+  console.log(`🔬 All latency probes completed for ${pool}`);
+}
+
+// Update latency cache for a model (upsert)
+// Ignores outlier latencies (> 10s) which are likely timeouts or errors
+async function updateLatencyCache(supabase: any, model: string, pool: string, latencyMs: number): Promise<void> {
+  // Ignore outliers - latencies > 10s are likely timeouts or cold starts
+  const MAX_VALID_LATENCY_MS = 10000;
+  if (latencyMs > MAX_VALID_LATENCY_MS) {
+    console.warn(`⚠️ Ignoring outlier latency for ${model}: ${latencyMs}ms > ${MAX_VALID_LATENCY_MS}ms`);
+    return;
+  }
+  
+  // Generate a UUID for the id field
+  const id = crypto.randomUUID();
+  
+  const { error } = await supabase
+    .from('RoseModelLatency')
+    .upsert({
+      id,
+      model,
+      pool,
+      latencyMs,
+      measuredAt: new Date().toISOString()
+    }, {
+      onConflict: 'model,pool'
+    });
+  
+  if (error) {
+    console.error(`❌ Error updating latency cache for ${model}:`, error);
+  } else {
+    console.log(`⏱️ Updated latency cache: ${model} = ${latencyMs}ms`);
+  }
+}
+
+// ============================================
+// CONVERSATION MODEL TRACKING
+// ============================================
+
+// Get existing model selection for a conversation
+async function getConversationModel(supabase: any, conversationId: string): Promise<string | null> {
+  console.log(`🔍 Looking up model for conversation: ${conversationId}`);
+  
+  const { data, error } = await supabase
+    .from('RoseConversationModel')
+    .select('model')
+    .eq('conversationId', conversationId)
+    .maybeSingle();  // Use maybeSingle to avoid error when no rows found
+  
+  if (error) {
+    console.error(`❌ Error looking up conversation model:`, error);
+    return null;
+  }
+  
+  if (!data) {
+    console.log(`📝 No existing model for conversation ${conversationId}`);
+    return null;
+  }
+  
+  console.log(`🔗 Found existing model for conversation ${conversationId}: ${data.model}`);
+  return data.model;
+}
+
+// Save model selection for a conversation
+async function saveConversationModel(supabase: any, conversationId: string, model: string, pool: string): Promise<void> {
+  console.log(`💾 Saving model ${model} for conversation ${conversationId}`);
+  
+  // Generate a UUID for the id field
+  const id = crypto.randomUUID();
+  
+  const { error } = await supabase
+    .from('RoseConversationModel')
+    .upsert({
+      id,
+      conversationId,
+      model,
+      pool,
+      createdAt: new Date().toISOString()
+    }, {
+      onConflict: 'conversationId'
+    });
+  
+  if (error) {
+    console.error(`❌ Error saving conversation model:`, error);
+  } else {
+    console.log(`✅ Saved model for conversation ${conversationId}: ${model}`);
+  }
+}
+
+// ============================================
+// TRIO RACING LOGIC
+// ============================================
+
+interface RacingModel {
+  model: string;
+  latencyMs: number;
+  delayMs: number;
+}
+
+// Select a random trio from the pool, calculate delays based on cached latencies
+// 
+// Strategy: 
+// 1. First, exclude models with latency > 3s (hard cap)
+// 2. Group remaining models by latency bands (within 1000ms of each other)
+// 3. Prefer the fastest band, randomly select trio from that band
+// 4. Add delays to fast models so they finish at same time as the slowest in the trio
+function selectRacingTrio(
+  pool: string[],
+  cachedLatencies: Map<string, number>
+): RacingModel[] {
+  const DEFAULT_LATENCY_MS = 500;
+  
+  // Get all models with their latencies
+  const modelsWithLatency = pool.map(model => ({
+    model,
+    latencyMs: cachedLatencies.get(model) || DEFAULT_LATENCY_MS
+  }));
+  
+  // Filter out models exceeding hard latency cap (3s)
+  const underHardCap = modelsWithLatency.filter(m => {
+    if (m.latencyMs > MAX_LATENCY_CAP_MS) {
+      console.warn(`⚠️ Excluding ${m.model} - latency ${m.latencyMs}ms exceeds ${MAX_LATENCY_CAP_MS}ms cap`);
+      return false;
+    }
+    return true;
+  });
+  
+  if (underHardCap.length === 0) {
+    console.warn('⚠️ No eligible models after 3s cap, using full pool with fastest models');
+    const sorted = modelsWithLatency.sort((a, b) => a.latencyMs - b.latencyMs);
+    return sorted.slice(0, TRIO_SIZE).map(m => ({ ...m, delayMs: 0 }));
+  }
+  
+  // Sort by latency (fastest first)
+  underHardCap.sort((a, b) => a.latencyMs - b.latencyMs);
+  
+  // Find models within MAX_DELAY_CAP_MS of the fastest model
+  // This ensures no model needs more than 1s delay
+  const fastestLatency = underHardCap[0].latencyMs;
+  const withinDelayCap = underHardCap.filter(m => 
+    (m.latencyMs - fastestLatency) <= MAX_DELAY_CAP_MS
+  );
+  
+  // Log what we excluded due to delay cap
+  const excludedByDelay = underHardCap.filter(m => 
+    (m.latencyMs - fastestLatency) > MAX_DELAY_CAP_MS
+  );
+  for (const m of excludedByDelay) {
+    console.warn(`⚠️ Excluding ${m.model} - latency ${m.latencyMs}ms is ${m.latencyMs - fastestLatency}ms slower than fastest (${fastestLatency}ms), exceeds ${MAX_DELAY_CAP_MS}ms delay cap`);
+  }
+  
+  // ALWAYS include the fastest model, then randomly select the rest
+  // This ensures we don't accidentally exclude a fast model for complex payloads
+  const fastestModel = withinDelayCap[0];  // Already sorted, index 0 is fastest
+  const otherModels = withinDelayCap.slice(1);
+  
+  // Shuffle the rest and pick TRIO_SIZE - 1
+  const shuffledOthers = [...otherModels].sort(() => Math.random() - 0.5);
+  const randomOthers = shuffledOthers.slice(0, Math.min(TRIO_SIZE - 1, shuffledOthers.length));
+  
+  // Combine: fastest + random others
+  const selectedModels = [fastestModel, ...randomOthers];
+  console.log(`🏁 Trio: fastest=${fastestModel.model}, others=[${randomOthers.map(m => m.model).join(', ')}]`);
+  
+  // Find the slowest model in the selected trio
+  const slowestInTrio = Math.max(...selectedModels.map(m => m.latencyMs));
+  
+  // Calculate delays: fast models wait so all finish ~simultaneously
+  const racingModels: RacingModel[] = selectedModels.map(m => ({
+    model: m.model,
+    latencyMs: m.latencyMs,
+    delayMs: slowestInTrio - m.latencyMs
+  }));
+  
+  console.log(`🏁 Racing trio (target finish ~${slowestInTrio}ms):`, 
+    racingModels.map(m => `${m.model} (${m.latencyMs}ms + ${m.delayMs}ms delay = ${m.latencyMs + m.delayMs}ms)`));
+  
+  return racingModels;
+}
+
+// Race multiple models and return the first response
+// Uses AbortController to cancel losing requests and save API costs
+async function raceModels(
+  racingModels: RacingModel[],
+  messages: any[],
+  temperature: number | undefined,
+  maxTokens: number | undefined,
+  seed: number | undefined,
+  tools: any[] | undefined,
+  toolChoice: any,
+  responseFormat: any,
+  reasoning: any,
+  openRouterKey: string,
+  supabaseUrl: string,
+  supabase: any,
+  pool: string,
+  timings: { [key: string]: number }  // Track timing breakdown
+): Promise<{ model: string; reader: ReadableStreamDefaultReader<Uint8Array>; ttftMs: number; firstData: string }> {
+  
+  console.log(`🏁 Starting race with ${racingModels.length} models:`, racingModels.map(m => `${m.model} (delay: ${m.delayMs}ms)`));
+  const raceInternalStart = Date.now();
+  timings.race_internal_start = 0;
+  
+  // Create AbortController for each model to cancel losers
+  const controllers = racingModels.map(() => new AbortController());
+  let winnerIndex = -1;
+  
+  // Create race promises that resolve on success and never reject (errors become null)
+  const racePromises = racingModels.map(async ({ model, delayMs }, index): Promise<{ model: string; reader: ReadableStreamDefaultReader<Uint8Array>; ttftMs: number; index: number; firstData: string } | null> => {
+    const modelKey = model.split('/').pop() || model;
+    try {
+      // Apply delay to equalize finish times
+      if (delayMs > 0) {
+        console.log(`⏳ ${model} waiting ${delayMs}ms before firing...`);
+        timings[`${modelKey}_delay_start`] = Date.now() - raceInternalStart;
+        await new Promise((resolve, reject) => {
+          const timeoutId = setTimeout(resolve, delayMs);
+          // If aborted during delay, reject immediately
+          controllers[index].signal.addEventListener('abort', () => {
+            clearTimeout(timeoutId);
+            reject(new DOMException('Aborted during delay', 'AbortError'));
+          });
+        });
+        timings[`${modelKey}_delay_end`] = Date.now() - raceInternalStart;
+      }
+      
+      // Check if already aborted before firing
+      if (controllers[index].signal.aborted) {
+        console.log(`🛑 ${model} aborted before firing`);
+        return null;
+      }
+      
+      const startTime = Date.now();
+      timings[`${modelKey}_fire`] = Date.now() - raceInternalStart;
+      console.log(`🚀 ${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
+      
+      const body: any = {
+        model,
+        messages,
+        temperature,
+        max_tokens: maxTokens,
+        seed,
+        tools,
+        tool_choice: toolChoice,
+        stream: true
+      };
+      
+      if (responseFormat) {
+        body.response_format = responseFormat;
+      }
+      if (reasoning) {
+        body.reasoning = reasoning;
+      }
+      
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openRouterKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': supabaseUrl,
+          'X-Title': 'Rose AI - Trio Racing'
+        },
+        body: JSON.stringify(body),
+        signal: controllers[index].signal  // Enable abort
+      });
+      
+      const headersTime = Date.now() - startTime;
+      timings[`${modelKey}_headers`] = Date.now() - raceInternalStart;
+      console.log(`📨 ${model} headers in ${headersTime}ms at t=${timings[`${modelKey}_headers`]}ms (status: ${response.status})`);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`❌ ${model} failed: ${response.status} - ${errorText.slice(0, 100)}`);
+        return null;
+      }
+      
+      // CRITICAL: Wait for FIRST ACTUAL DATA, not just headers!
+      // This prevents slow models from winning just because their headers arrive first
+      const reader = response.body?.getReader();
+      if (!reader) {
+        console.error(`❌ ${model} no response body`);
+        return null;
+      }
+      
+      const decoder = new TextDecoder();
+      let buffer = '';
+      
+      // Read until we get a real data line (not just ": OPENROUTER PROCESSING")
+      while (true) {
+        // Check if aborted while waiting for content
+        if (controllers[index].signal.aborted) {
+          console.log(`🛑 ${model} aborted while waiting for content`);
+          reader.cancel();
+          return null;
+        }
+        
+        const { done, value } = await reader.read();
+        if (done) {
+          console.error(`❌ ${model} stream ended before data`);
+          return null;
+        }
+        
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        
+        for (const line of lines) {
+          // Look for actual data line (not processing comments)
+          if (line.startsWith('data:') && !line.includes('[DONE]')) {
+            const ttftMs = Date.now() - startTime;
+            timings[`${modelKey}_ttft`] = ttftMs;
+            timings[`${modelKey}_first_data`] = Date.now() - raceInternalStart;
+            console.log(`✅ ${model} FIRST DATA in ${ttftMs}ms at t=${timings[`${modelKey}_first_data`]}ms`);
+            
+            // Return the reader (not response) since we've already started reading
+            // Also return the buffer with data we've read so far
+            return { model, reader, ttftMs, index, firstData: buffer };
+          }
+        }
+        
+        // Keep incomplete line in buffer
+        buffer = lines[lines.length - 1] || '';
+      }
+    } catch (error) {
+      // Don't log abort errors - they're expected for losers
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        console.log(`🛑 ${model} aborted (race lost)`);
+        return null;
+      }
+      console.error(`❌ ${model} error:`, error);
+      return null;
+    }
+  });
+  
+  // Use Promise.race with a filter for successful responses
+  // We need custom logic since Promise.race doesn't skip null values
+  const winner = await new Promise<{ model: string; reader: ReadableStreamDefaultReader<Uint8Array>; ttftMs: number; firstData: string }>((resolve, reject) => {
+    let resolved = false;
+    let completed = 0;
+    
+    racePromises.forEach(async (promise) => {
+      try {
+        const result = await promise;
+        completed++;
+        
+        if (result && !resolved) {
+          resolved = true;
+          winnerIndex = result.index;
+          console.log(`🏆 Winner: ${result.model} (TTFT: ${result.ttftMs}ms)`);
+          
+          // ABORT ALL OTHER REQUESTS to save API costs!
+          controllers.forEach((controller, i) => {
+            if (i !== winnerIndex) {
+              console.log(`🛑 Aborting loser: ${racingModels[i].model}`);
+              controller.abort();
+            }
+          });
+          
+          resolve({ model: result.model, reader: result.reader, ttftMs: result.ttftMs, firstData: result.firstData });
+        } else if (completed === racePromises.length && !resolved) {
+          reject(new Error('All models failed'));
+        }
+      } catch (e) {
+        completed++;
+        if (completed === racePromises.length && !resolved) {
+          reject(new Error('All models failed'));
+        }
+      }
+    });
+  });
+  
+  return winner;
+}
 
 // Transform JSON schema to be Cerebras-compatible
 // Cerebras requires: additionalProperties: false for all objects with required arrays
@@ -402,6 +910,7 @@ serve(async (req) => {
       reasoning,  // OpenRouter reasoning config: { max_tokens: number }
       model_seed,  // Optional: index into model pool for testing
       model_preference,  // Optional: 'SMART' | 'FAST' | 'CHEAP' for hardcoded model selection
+      conversation_id,  // Optional: ensures same model used for entire conversation
       ...otherParams
     } = await req.json();
     
@@ -422,42 +931,341 @@ serve(async (req) => {
       });
     }
 
-    // Select actual model from pool
-    let selection: { model: string; isCerebras: boolean; poolName: string; poolSize: number };
-    try {
-      selection = selectModel(model, model_seed, model_preference as ModelPreference | undefined);
-    } catch (error) {
+    // Normalize pool name
+    let poolName = model.toLowerCase();
+    if (poolName.startsWith('rose-labs/')) {
+      poolName = poolName.replace('rose-labs/', '');
+    }
+    
+    const pool = MODEL_POOLS[poolName];
+    if (!pool) {
       return new Response(JSON.stringify({ 
-        error: error instanceof Error ? error.message : 'Invalid model' 
+        error: `Unknown model: ${model}. Use 'rose-labs/rose-1-lite' or 'rose-labs/rose-1-ultra'` 
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 400,
       });
     }
 
-    const actualModel = selection.model;
-    const isCerebras = selection.isCerebras;
+    // Track selected model for non-streaming fallback
+    let selectedModel: string | null = null;
+    let selectedIsCerebras = false;
 
-    // Handle streaming
-    if (stream) {
-      return await handleStreaming(
-        actualModel,
-        messages,
-        temperature,
-        maxTokens,
-        seed,
-        tools,
-        tool_choice,
-        response_format,  // Pass response_format for structured outputs
-        reasoning,        // Pass reasoning config for OpenRouter reasoning models
-        Deno.env.get('OPENROUTER_API_KEY')!,
-        supabaseUrl,
-        model,
-        isCerebras,
-        selection.poolName,
-        selection.poolSize
-      );
+    // Check for model_preference or model_seed (bypass racing)
+    if (model_preference || model_seed !== undefined) {
+      // Use legacy single-model selection
+      let selection: { model: string; isCerebras: boolean; poolName: string; poolSize: number };
+      try {
+        selection = selectModel(model, model_seed, model_preference as ModelPreference | undefined);
+      } catch (error) {
+        return new Response(JSON.stringify({ 
+          error: error instanceof Error ? error.message : 'Invalid model' 
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 400,
+        });
+      }
+
+      if (stream) {
+        return await handleStreaming(
+          selection.model,
+          messages,
+          temperature,
+          maxTokens,
+          seed,
+          tools,
+          tool_choice,
+          response_format,
+          reasoning,
+          Deno.env.get('OPENROUTER_API_KEY')!,
+          supabaseUrl,
+          model,
+          selection.isCerebras,
+          selection.poolName,
+          selection.poolSize
+        );
+      }
+      
+      // Non-streaming with legacy selection
+      selectedModel = selection.model;
+      selectedIsCerebras = selection.isCerebras;
     }
+
+    // ============================================
+    // TRIO RACING MODE (default for streaming)
+    // ============================================
+    
+    // Check if conversation already has a model selected
+    if (conversation_id && !selectedModel) {
+      const existingModel = await getConversationModel(supabase, conversation_id);
+      if (existingModel) {
+        console.log(`🔗 Using existing model for conversation: ${existingModel}`);
+        
+        if (stream) {
+          return await handleStreaming(
+            existingModel,
+            messages,
+            temperature,
+            maxTokens,
+            seed,
+            tools,
+            tool_choice,
+            response_format,
+            reasoning,
+            Deno.env.get('OPENROUTER_API_KEY')!,
+            supabaseUrl,
+            model,
+            false, // Not Cerebras
+            poolName,
+            pool.length
+          );
+        }
+        
+        selectedModel = existingModel;
+        selectedIsCerebras = false;
+      }
+    }
+
+    // Handle streaming with trio racing
+    if (stream && !selectedModel) {
+      const openRouterKey = Deno.env.get('OPENROUTER_API_KEY')!;
+      
+      // ===== TIMING INSTRUMENTATION =====
+      const timings: { [key: string]: number } = {};
+      const raceStartTime = Date.now();
+      timings.race_start = 0;
+      
+      // Get cached latencies for this pool
+      const cacheStartTime = Date.now();
+      const { latencies: cachedLatencies, needsRefresh, missingModels } = await getCachedLatencies(supabase, poolName, pool);
+      timings.cache_lookup_ms = Date.now() - cacheStartTime;
+      console.log(`⏱️ TIMING: cache_lookup=${timings.cache_lookup_ms}ms`);
+      
+      // If cache is stale/missing, fire latency probes in PARALLEL with the race
+      // Probes use a standard test prompt, not the user's messages
+      let probePromise: Promise<void> | null = null;
+      if (needsRefresh && missingModels.length > 0) {
+        console.log(`🔬 Cache needs refresh, firing probes in parallel for: ${missingModels.join(', ')}`);
+        // Fire probes in background - don't await, let them run alongside the race
+        probePromise = fireLatencyProbes(missingModels, poolName, openRouterKey, supabaseUrl, supabase);
+        timings.probes_fired = missingModels.length;
+      } else {
+        timings.probes_fired = 0;
+      }
+      
+      // Select racing trio with delays (using current cached values, even if stale)
+      const trioSelectStart = Date.now();
+      const racingTrio = selectRacingTrio(pool, cachedLatencies);
+      timings.trio_select_ms = Date.now() - trioSelectStart;
+      console.log(`⏱️ TIMING: trio_select=${timings.trio_select_ms}ms`);
+      
+      if (racingTrio.length === 0) {
+        return new Response(JSON.stringify({ error: 'No eligible models in pool' }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 500,
+        });
+      }
+      
+      // If only one model eligible, skip racing
+      if (racingTrio.length === 1) {
+        const singleModel = racingTrio[0].model;
+        console.log(`🎯 Single model eligible, skipping race: ${singleModel}`);
+        
+        if (conversation_id) {
+          await saveConversationModel(supabase, conversation_id, singleModel, poolName);
+        }
+        
+        return await handleStreaming(
+          singleModel,
+          messages,
+          temperature,
+          maxTokens,
+          seed,
+          tools,
+          tool_choice,
+          response_format,
+          reasoning,
+          openRouterKey,
+          supabaseUrl,
+          model,
+          false,
+          poolName,
+          pool.length
+        );
+      }
+      
+      // Race the trio!
+      try {
+        const raceCallStart = Date.now();
+        timings.race_call_start_ms = raceCallStart - raceStartTime;
+        console.log(`⏱️ TIMING: race_call_start=${timings.race_call_start_ms}ms (time before raceModels)`);
+        
+        const { model: winningModel, reader: winningReader, ttftMs, firstData } = await raceModels(
+          racingTrio,
+          messages,
+          temperature,
+          maxTokens,
+          seed,
+          tools,
+          tool_choice,
+          response_format,
+          reasoning,
+          openRouterKey,
+          supabaseUrl,
+          supabase,
+          poolName,
+          timings
+        );
+        
+        timings.race_complete_ms = Date.now() - raceStartTime;
+        timings.race_duration_ms = Date.now() - raceCallStart;
+        console.log(`⏱️ TIMING: race_complete=${timings.race_complete_ms}ms, race_duration=${timings.race_duration_ms}ms`);
+        
+        // Save winning model for conversation
+        if (conversation_id) {
+          await saveConversationModel(supabase, conversation_id, winningModel, poolName);
+        }
+        
+        // Stream the winning response to client
+        const encoder = new TextEncoder();
+        const modelsRaced = racingTrio.length;
+        const streamStartTime = Date.now();
+        timings.stream_start_ms = streamStartTime - raceStartTime;
+        console.log(`⏱️ TIMING: stream_start=${timings.stream_start_ms}ms`);
+        
+        const stream = new ReadableStream({
+          async start(controller) {
+            try {
+              // Use the reader we already have from the race (can't call getReader twice!)
+              const reader = winningReader;
+              const decoder = new TextDecoder();
+              // Start with the buffer we already read during racing
+              let buffer = firstData;
+              let firstEnqueueTime: number | null = null;
+              
+              // Process the firstData buffer immediately
+              console.log(`⏱️ TIMING: processing firstData buffer (${firstData.length} chars)`);
+              
+              // Helper to process buffer lines
+              const processBuffer = () => {
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                return lines;
+              };
+              
+              // Helper to process a single line
+              const processLine = (line: string) => {
+                if (line.startsWith('data: ')) {
+                  const data = line.slice(6);
+                  if (data === '[DONE]') {
+                    return;
+                  }
+                  
+                  try {
+                    const parsed = JSON.parse(data);
+                    // Include metadata
+                    parsed.requested_model = model;
+                    parsed.actual_model = winningModel;
+                    parsed.pool_name = poolName;
+                    parsed.pool_size = pool.length;
+                    parsed.racing_ttft_ms = ttftMs;
+                    parsed.models_raced = modelsRaced;
+                    
+                    // Track first enqueue timing
+                    if (firstEnqueueTime === null) {
+                      firstEnqueueTime = Date.now() - streamStartTime;
+                      timings.first_enqueue_to_client_ms = firstEnqueueTime;
+                      console.log(`⏱️ TIMING: first_enqueue_to_client=${firstEnqueueTime}ms`);
+                    }
+                    parsed.timings = timings;
+                    
+                    // Adjust usage to reflect TRUE cost (all racing models consumed input tokens)
+                    if (parsed.usage && parsed.usage.prompt_tokens) {
+                      const winnerPromptTokens = parsed.usage.prompt_tokens;
+                      const winnerCompletionTokens = parsed.usage.completion_tokens || 0;
+                      parsed.usage.prompt_tokens = winnerPromptTokens * modelsRaced;
+                      parsed.usage.total_tokens = parsed.usage.prompt_tokens + winnerCompletionTokens;
+                      parsed.usage.winner_prompt_tokens = winnerPromptTokens;
+                      parsed.usage.winner_completion_tokens = winnerCompletionTokens;
+                      console.log(`📊 Usage adjusted: ${winnerPromptTokens} input × ${modelsRaced} models = ${parsed.usage.prompt_tokens} total input tokens`);
+                    }
+                    
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
+                  } catch (e) {
+                    controller.enqueue(encoder.encode(`${line}\n`));
+                  }
+                }
+              };
+              
+              // Process any complete lines already in firstData buffer
+              let lines = processBuffer();
+              for (const line of lines) {
+                processLine(line);
+              }
+              
+              // Continue reading from the stream
+              while (true) {
+                const { done, value } = await reader.read();
+                
+                if (done) {
+                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                  controller.close();
+                  break;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+                lines = processBuffer();
+                
+                for (const line of lines) {
+                  processLine(line);
+                }
+              }
+            } catch (error) {
+              console.error('Streaming race winner error:', error);
+              controller.error(error);
+            }
+          }
+        });
+
+        return new Response(stream, {
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          },
+        });
+        
+      } catch (error) {
+        console.error('❌ Trio racing failed:', error);
+        
+        // Fallback to random model
+        const fallbackModel = pool[Math.floor(Math.random() * pool.length)];
+        console.log(`🔄 Falling back to random model: ${fallbackModel}`);
+        
+        return await handleStreaming(
+          fallbackModel,
+          messages,
+          temperature,
+          maxTokens,
+          seed,
+          tools,
+          tool_choice,
+          response_format,
+          reasoning,
+          Deno.env.get('OPENROUTER_API_KEY')!,
+          supabaseUrl,
+          model,
+          false,
+          poolName,
+          pool.length
+        );
+      }
+    }
+    
+    // For non-streaming, use selected model or pick random from pool
+    const actualModel = selectedModel || pool[Math.floor(Math.random() * pool.length)];
+    const isCerebras = selectedIsCerebras;
 
     // Handle CoT steps (non-streaming)
     let finalResponse: any;
@@ -670,8 +1478,8 @@ serve(async (req) => {
     // The requested model alias is preserved in a separate field
     finalResponse.requested_model = model;
     finalResponse.actual_model = actualModel;
-    finalResponse.pool_name = selection.poolName;
-    finalResponse.pool_size = selection.poolSize;
+    finalResponse.pool_name = poolName;
+    finalResponse.pool_size = pool.length;
 
     // Calculate cost
     const costCents = calculateCost(totalPromptTokens, totalCompletionTokens, actualModel);
