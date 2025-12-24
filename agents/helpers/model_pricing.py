@@ -169,3 +169,4 @@ async def get_model_pricing_with_fallback(model: str) -> Dict[str, float]:
     
     return pricing
 
+
