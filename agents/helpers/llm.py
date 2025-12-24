@@ -473,9 +473,9 @@ async def call_llm_structured_streaming(
     reasoning_max_tokens: Optional[int] = None,
     model_preference: Optional[str] = None,
     agent_id: Optional[str] = None,  # For cancellation checking
-    on_plan_start: Optional[Callable[[str], Awaitable[None]]] = None,  # Called when set_plan detected
-    on_plan_title: Optional[Callable[[str, str], Awaitable[None]]] = None,  # Called when plan title detected
-) -> Tuple[T, Dict, Optional[str]]:
+    on_tool_detected: Optional[Callable[[str, str], Awaitable[None]]] = None,  # Called when any tool detected (tool_name, tool_call_id)
+    on_attention_stream: Optional[Callable[[str, str, bool], Awaitable[None]]] = None,  # Called with (tool_call_id, message, is_question) for send_message_to_user
+) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
     
@@ -492,12 +492,12 @@ async def call_llm_structured_streaming(
         reasoning_max_tokens: Optional max tokens for reasoning (default 256)
         model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
         agent_id: Optional agent ID for cancellation checking (stops streaming if agent is paused)
-        on_plan_start: Optional callback(tool_call_id) when set_plan tool is first detected
-        on_plan_title: Optional callback(tool_call_id, title) when plan title is detected
+        on_tool_detected: Optional callback(tool_name, tool_call_id) when any tool is first detected
         
     Returns:
-        Tuple of (response_model instance, usage dict with token counts, plan_tool_call_id or None)
+        Tuple of (response_model instance, usage dict with token counts, plan_tool_call_id or None, detected_tools_ordered list)
         Usage dict includes 'cancelled': True if streaming was stopped early
+        detected_tools_ordered: List of (tool_name, tool_call_id, timestamp) tuples in detection order
     """
     import instructor
     import httpx
@@ -539,7 +539,8 @@ async def call_llm_structured_streaming(
             logger.info(f"🧠 Streaming with reasoning max_tokens: {reasoning_max_tokens}")
         
         # Stream SSE from Rose endpoint
-        accumulated_content = ""
+        accumulated_reasoning = ""  # Reasoning/thinking text (displayed before response)
+        accumulated_json = ""  # JSON content for parsing
         last_emitted_text = ""  # Track last emitted text to avoid duplicate sends
         last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
         token_count = 0
@@ -550,10 +551,13 @@ async def call_llm_structured_streaming(
         was_cancelled = False
         chunk_count = 0
         
-        # Plan streaming tracking
-        plan_tool_call_id: Optional[str] = None
-        plan_in_progress_emitted = False
-        plan_title_emitted: Optional[str] = None
+        # Tool detection tracking (for early IN_PROGRESS messages)
+        detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
+        detected_tool_positions: Dict[str, int] = {}  # tool_name -> count detected (for tracking multiple same-name tools)
+        
+        # Attention message streaming tracking (for send_message_to_user)
+        attention_tool_call_id: Optional[str] = None
+        last_attention_message = ""
         
         try:
             # Log outbound request summary for debugging 400s
@@ -665,47 +669,80 @@ async def call_llm_structured_streaming(
                             if reasoning_delta or content or fin:
                                 logger.info(f"🔍 C{chunk_count} r={reasoning_delta[:50] if reasoning_delta else ''} c={content[:100] if content else ''} fin={fin}")
                             
-                            # Only accumulate content (JSON) - reasoning is for logging/debugging only
-                            # The JSON response is what gets parsed into AgentAction
-                            content_delta = reasoning_delta + content
+                            # Accumulate reasoning and JSON separately
+                            if reasoning_delta:
+                                accumulated_reasoning += reasoning_delta
+                            if content:
+                                accumulated_json += content
                             
-                            if content_delta:
-                                accumulated_content += content_delta
-                                # Estimate tokens (rough: ~4 chars per token)
-                                token_count = len(accumulated_content) // 4
-                                
-                                # Detect set_plan and emit IN_PROGRESS on first detection
-                                if not plan_in_progress_emitted and '"set_plan"' in accumulated_content:
-                                    plan_tool_call_id = str(uuid.uuid4())
-                                    plan_in_progress_emitted = True
-                                    if on_plan_start:
-                                        logger.info(f"📋 Plan detected, emitting IN_PROGRESS with tool_call_id={plan_tool_call_id}")
-                                        await on_plan_start(plan_tool_call_id)
-                                
-                                # Detect title and emit updated IN_PROGRESS
-                                if plan_in_progress_emitted and plan_tool_call_id:
-                                    title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', accumulated_content)
-                                    if title_match:
-                                        try:
-                                            title = json.loads(f'"{title_match.group(1)}"')
-                                        except json.JSONDecodeError:
-                                            title = title_match.group(1)
-                                        if title != plan_title_emitted and on_plan_title:
-                                            plan_title_emitted = title
-                                            logger.info(f"📋 Plan title detected: {title[:50]}...")
-                                            await on_plan_title(plan_tool_call_id, title)
-                                
-                                # Extract response and track for deduplication
-                                response_text = _extract_response_from_partial_json(accumulated_content)
-                                if response_text and response_text != last_emitted_text:
-                                    last_emitted_text = response_text
+                            # Estimate tokens (rough: ~4 chars per token)
+                            token_count = (len(accumulated_reasoning) + len(accumulated_json)) // 4
+                            
+                            # Detect any tool calls and emit early IN_PROGRESS
+                            # Look for "tool": "tool_name" patterns in the JSON content
+                            # Skip tools that shouldn't show early IN_PROGRESS (direct user communication)
+                            SKIP_EARLY_PROGRESS = {"send_message_to_user"}
+                            
+                            if on_tool_detected and '"tool_calls"' in accumulated_json:
+                                tool_matches = re.findall(r'"tool"\s*:\s*"([^"]+)"', accumulated_json)
+                                for tool_name in tool_matches:
+                                    # Skip tools that shouldn't have early progress messages
+                                    if tool_name in SKIP_EARLY_PROGRESS:
+                                        continue
                                     
-                                    # Only emit when 18+ new chars since last emit
-                                    pending_delta = len(response_text) - len(last_emitted_for_chunk)
-                                    if pending_delta >= 18:
-                                        # logger.info(f"📤 Emitting to on_chunk: delta={pending_delta} chars, total_response_len={len(response_text)}")
-                                        await on_chunk(response_text, token_count)
-                                        last_emitted_for_chunk = response_text
+                                    # Track position for this tool name (handles multiple same-name tools)
+                                    current_position = detected_tool_positions.get(tool_name, 0)
+                                    # Count how many of this tool we've already detected
+                                    existing_count = sum(1 for t, _, _ in detected_tools_ordered if t == tool_name)
+                                    
+                                    # Only detect if this is a new occurrence
+                                    if existing_count < tool_matches.count(tool_name) and existing_count == current_position:
+                                        import time
+                                        tool_call_id = str(uuid.uuid4())
+                                        detected_tools_ordered.append((tool_name, tool_call_id, time.time()))
+                                        detected_tool_positions[tool_name] = current_position + 1
+                                        logger.info(f"🔧 Tool detected: {tool_name} #{current_position + 1}, tool_call_id={tool_call_id}")
+                                        await on_tool_detected(tool_name, tool_call_id)
+                            
+                            # Stream send_message_to_user content progressively
+                            if on_attention_stream and '"send_message_to_user"' in accumulated_json:
+                                # Assign tool_call_id if not yet assigned
+                                if not attention_tool_call_id:
+                                    import time
+                                    attention_tool_call_id = str(uuid.uuid4())
+                                    detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, time.time()))
+                                    logger.info(f"📢 Attention message detected, tool_call_id={attention_tool_call_id}")
+                                
+                                # Extract message content
+                                msg_match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"?', accumulated_json)
+                                if msg_match:
+                                    try:
+                                        attention_message = json.loads(f'"{msg_match.group(1)}"')
+                                    except json.JSONDecodeError:
+                                        attention_message = msg_match.group(1)
+                                    
+                                    # Extract is_question (default True)
+                                    is_question = True
+                                    iq_match = re.search(r'"is_question"\s*:\s*(true|false)', accumulated_json)
+                                    if iq_match:
+                                        is_question = iq_match.group(1) == "true"
+                                    
+                                    # Stream if message has grown
+                                    if attention_message and attention_message != last_attention_message:
+                                        last_attention_message = attention_message
+                                        await on_attention_stream(attention_tool_call_id, attention_message, is_question)
+                            
+                            # Extract response and track for deduplication
+                            response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
+                            if response_text and response_text != last_emitted_text:
+                                last_emitted_text = response_text
+                                
+                                # Only emit when 18+ new chars since last emit
+                                pending_delta = len(response_text) - len(last_emitted_for_chunk)
+                                if pending_delta >= 18:
+                                    # logger.info(f"📤 Emitting to on_chunk: delta={pending_delta} chars, total_response_len={len(response_text)}")
+                                    await on_chunk(response_text, token_count)
+                                    last_emitted_for_chunk = response_text
                         except json.JSONDecodeError:
                             logger.error(f"Failed to parse chunk: {data_str}")
                             continue
@@ -730,21 +767,61 @@ async def call_llm_structured_streaming(
                 "pool_size": pool_size,
                 "cancelled": True
             }
-            return empty_response, usage, plan_tool_call_id
+            return empty_response, usage, detected_tools_ordered
         
-        logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, {len(accumulated_content)} chars")
+        logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars")
         
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
-        response_text = _extract_response_from_partial_json(accumulated_content)
+        response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
         if response_text and response_text != last_emitted_for_chunk:
             await on_chunk(response_text, token_count)
         
         # Parse final JSON and validate with Pydantic
+        # Rose models output: [explanation text]```json\n{...}\n``` 
+        # We need to extract the JSON from within the markdown code block
         try:
-            parsed_content = json.loads(accumulated_content)
+            if not accumulated_json:
+                raise ValueError("No JSON content received in response")
+            
+            # Extract JSON from markdown code block if present
+            # Look for ```json ... ``` pattern, or just raw JSON
+            json_content = accumulated_json
+            explanation_text = ""
+            
+            # Check for markdown code block: ```json ... ```
+            code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*\})\s*```', accumulated_json)
+            if code_block_match:
+                json_content = code_block_match.group(1)
+                # Everything before the code block is explanation
+                explanation_text = accumulated_json[:code_block_match.start()].strip()
+                logger.info(f"📦 Extracted JSON from markdown code block, explanation={len(explanation_text)} chars")
+            else:
+                # No code block - try to find raw JSON object
+                json_start = accumulated_json.find('{')
+                json_end = accumulated_json.rfind('}')
+                if json_start != -1 and json_end != -1 and json_end > json_start:
+                    explanation_text = accumulated_json[:json_start].strip()
+                    json_content = accumulated_json[json_start:json_end + 1]
+                    logger.info(f"📦 Extracted raw JSON, explanation={len(explanation_text)} chars")
+            
+            parsed_content = json.loads(json_content)
+            
+            # Prepend explanation/reasoning to response so it shows in the same section
+            combined_reasoning = ""
+            if accumulated_reasoning:
+                combined_reasoning = accumulated_reasoning.strip()
+            if explanation_text:
+                if combined_reasoning:
+                    combined_reasoning += "\n\n" + explanation_text
+                else:
+                    combined_reasoning = explanation_text
+            
+            if combined_reasoning and "response" in parsed_content:
+                parsed_content["response"] = combined_reasoning + "\n\n" + parsed_content["response"]
+            
             response = response_model.model_validate(parsed_content)
         except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"Failed to parse streaming Rose response: {accumulated_content[:500]}", error=str(e))
+            logger.error(f"Failed to parse streaming Rose response: json={accumulated_json[:500]}", error=str(e))
             raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {str(e)}")
         
         usage = {
@@ -757,7 +834,7 @@ async def call_llm_structured_streaming(
             "cancelled": False
         }
         
-        return response, usage, plan_tool_call_id
+        return response, usage, detected_tools_ordered
     
     # For OpenRouter models, use Instructor's partial streaming
     base_client = AsyncOpenAI(
@@ -837,7 +914,7 @@ async def call_llm_structured_streaming(
             "total_tokens": estimated_tokens,
             "cancelled": True
         }
-        return empty_response, usage, None  # No plan streaming in OpenRouter path
+        return empty_response, usage, []  # No tool detection in OpenRouter path
     
     if final_response is None:
         raise ValueError(f"Streaming LLM returned no response (model={model})")
@@ -851,55 +928,79 @@ async def call_llm_structured_streaming(
         "cancelled": False
     }
     
-    return final_response, usage, None  # No plan streaming in OpenRouter path
+    return final_response, usage, []  # No tool detection in OpenRouter path
 
 
-def _extract_response_from_partial_json(partial_json: str) -> Optional[str]:
+def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Optional[str]:
     """
-    Try to extract streamable text from a partially streamed JSON string.
+    Extract streamable text from reasoning and partial JSON content.
     
-    Priority:
-    1. 'response' field (main user-visible text)
-    2. 'content' field inside set_plan tool calls (plan content)
+    Rose models output: [explanation text]```json\n{...}\n```
+    We extract both the explanation and the response field.
     
-    This handles incomplete JSON by looking for field patterns with regex.
+    Note: send_message_to_user.message is NOT streamed here because it creates
+    a separate TOOL message in the DB - streaming it would cause duplicate display.
+    
+    Args:
+        reasoning: Accumulated reasoning/thinking text (may be empty for Rose)
+        json_content: Accumulated content which may include explanation + markdown code block
+    
+    Returns:
+        Combined text: "explanation\n\nresponse" (whichever parts exist)
     """
     import re
     
-    # Try to parse as complete JSON first
+    reasoning = reasoning.strip() if reasoning else ""
+    
+    # No content yet, just return reasoning
+    if not json_content:
+        return reasoning if reasoning else None
+    
+    # Extract explanation text (everything before the JSON/markdown block)
+    explanation = ""
+    json_only = json_content
+    
+    # Check for markdown code block start
+    code_block_start = json_content.find('```')
+    if code_block_start > 0:
+        explanation = json_content[:code_block_start].strip()
+        json_only = json_content[code_block_start:]
+    else:
+        # Look for raw JSON start
+        json_start = json_content.find('{')
+        if json_start > 0:
+            explanation = json_content[:json_start].strip()
+            json_only = json_content[json_start:]
+    
+    response_text = ""
+    
+    # Try to extract response field from the JSON portion
+    # First try complete JSON parse
     try:
-        data = json.loads(partial_json)
-        # Check response field
-        if data.get("response"):
-            return data["response"]
-        # Check for set_plan content in tool_calls
-        tool_calls = data.get("tool_calls", [])
-        for tc in tool_calls:
-            if tc.get("tool") == "set_plan" and tc.get("content"):
-                return tc["content"]
-        return ""
+        # Strip markdown delimiters if present
+        clean_json = re.sub(r'^```(?:json)?\s*', '', json_only)
+        clean_json = re.sub(r'\s*```$', '', clean_json)
+        data = json.loads(clean_json)
+        response_text = data.get("response", "")
     except json.JSONDecodeError:
-        pass
-    
-    # Try to extract 'response' field with regex
-    match = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)"?', partial_json)
-    if match:
-        try:
-            return json.loads(f'"{match.group(1)}"')
-        except json.JSONDecodeError:
-            return match.group(1)
-    
-    # Try to extract 'content' field from set_plan tool call
-    # Only match if we see set_plan context nearby
-    if '"set_plan"' in partial_json:
-        content_match = re.search(r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"?', partial_json)
-        if content_match:
+        # Try regex extraction for partial JSON
+        match = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)"?', json_only)
+        if match:
             try:
-                return json.loads(f'"{content_match.group(1)}"')
+                response_text = json.loads(f'"{match.group(1)}"')
             except json.JSONDecodeError:
-                return content_match.group(1)
+                response_text = match.group(1)
     
-    return None
+    # Combine all parts: reasoning + explanation + response
+    parts = []
+    if reasoning:
+        parts.append(reasoning)
+    if explanation:
+        parts.append(explanation)
+    if response_text:
+        parts.append(response_text)
+    
+    return "\n\n".join(parts) if parts else None
 
 
 @activity.defn
@@ -1153,7 +1254,7 @@ async def decide_next_action(
         
         # Use streaming if agent_id and stream_id are provided
         if agent_id and stream_id:
-            from helpers.messages import stream_assistant_chunk, stream_plan_event
+            from helpers.messages import stream_assistant_chunk, stream_tool_event, stream_attention_event
             
             sequence_counter = [0]  # Use list to allow mutation in closure
             last_streamed_text = [""]  # Track what we've already sent to compute delta
@@ -1177,32 +1278,47 @@ async def decide_next_action(
                     # Don't fail on streaming errors - it's best-effort
                     logger.warning(f"Streaming chunk failed (non-fatal): {str(e)}")
             
-            async def on_plan_start(tool_call_id: str):
-                """Broadcast plan start via Realtime (no DB insert)."""
+            async def on_tool_detected_callback(tool_name: str, tool_call_id: str):
+                """Broadcast tool start via Realtime (no DB insert)."""
                 try:
-                    await stream_plan_event(
+                    # Use friendlier title for set_plan
+                    if tool_name == "set_plan":
+                        title = "Generating Plan..."
+                    else:
+                        title = f"Starting {tool_name}..."
+                    
+                    await stream_tool_event(
                         agent_id=agent_id,
                         stream_id=stream_id,
                         tool_call_id=tool_call_id,
-                        title="Generating Plan...",
+                        tool_name=tool_name,
+                        title=title,
                     )
                 except Exception as e:
-                    logger.warning(f"Plan start notification failed (non-fatal): {str(e)}")
+                    logger.warning(f"Tool detection notification failed (non-fatal): {str(e)}")
             
-            async def on_plan_title(tool_call_id: str, title: str):
-                """Broadcast plan title via Realtime (no DB insert)."""
+            attention_sequence = [0]  # Track attention message sequence
+            
+            async def on_attention_stream_callback(tool_call_id: str, message: str, is_question: bool):
+                """Stream attention message content via Realtime."""
                 try:
-                    await stream_plan_event(
-                        agent_id=agent_id,
-                        stream_id=stream_id,
-                        tool_call_id=tool_call_id,
-                        title='Building Plan: ' + title,
-                    )
+                    # Temporarily disabled attention streaming
+                    # await stream_attention_event(
+                    #     agent_id=agent_id,
+                    #     stream_id=stream_id,
+                    #     tool_call_id=tool_call_id,
+                    #     message=message,
+                    #     is_question=is_question,
+                    #     done=False,
+                    #     sequence=attention_sequence[0],
+                    # )
+                    # attention_sequence[0] += 1
+                    pass  # Do nothing
                 except Exception as e:
-                    logger.warning(f"Plan title notification failed (non-fatal): {str(e)}")
+                    logger.warning(f"Attention stream failed (non-fatal): {str(e)}")
             
             logger.info(f"📡 Using streaming LLM call for agent {agent_id}")
-            result, usage, plan_tool_call_id = await call_llm_structured_streaming(
+            result, usage, detected_tools_ordered = await call_llm_structured_streaming(
                 messages=messages,
                 model=model,
                 temperature=0.7,
@@ -1212,8 +1328,8 @@ async def decide_next_action(
                 reasoning_max_tokens=effective_reasoning_tokens,
                 model_preference=model_preference,
                 agent_id=agent_id,  # For cancellation checking
-                on_plan_start=on_plan_start,
-                on_plan_title=on_plan_title,
+                on_tool_detected=on_tool_detected_callback,
+                on_attention_stream=on_attention_stream_callback,
             )
             
             # Send final "done" chunk (delta may be empty if all content already streamed)
@@ -1274,6 +1390,38 @@ async def decide_next_action(
                 except Exception as e:
                     logger.error(f"Failed to serialize tool call {i}: {str(e)}, tc_type={type(tc)}")
                     raise ValueError(f"Failed to serialize tool call {i}: {str(e)}")
+        
+        # Match detected tools to tool_calls by position (for each tool_name)
+        # This ensures early IN_PROGRESS messages use the same tool_call_id as later execution
+        if detected_tools_ordered:
+            tool_name_counters: Dict[str, int] = {}  # tool_name -> count matched
+            for tc_dict in tool_calls_dict:
+                tool_name = tc_dict.get("tool")
+                if not tool_name:
+                    continue
+                
+                # Get count for this tool_name (how many of this name we've matched so far)
+                count = tool_name_counters.get(tool_name, 0)
+                
+                # Find the (count+1)th occurrence of this tool_name in detected_tools_ordered
+                matched_id = None
+                matched_count = 0
+                for detected_name, detected_id, _ts in detected_tools_ordered:
+                    if detected_name == tool_name:
+                        if matched_count == count:
+                            matched_id = detected_id
+                            break
+                        matched_count += 1
+                
+                if matched_id:
+                    tc_dict['tool_call_id'] = matched_id
+                    tool_name_counters[tool_name] = count + 1
+                    logger.info(f"🔗 Matched {tool_name} #{count + 1} to pre-detected tool_call_id: {matched_id}")
+                else:
+                    # Fallback: generate new ID if no match found
+                    if 'tool_call_id' not in tc_dict:
+                        tc_dict['tool_call_id'] = str(uuid.uuid4())
+                        logger.warning(f"⚠️ No pre-detected ID for {tool_name} #{count + 1}, generated new one: {tc_dict['tool_call_id']}")
         
         # Inject pre-generated plan_tool_call_id into set_plan tool call
         # This ensures the IN_PROGRESS messages match the FINISHED message

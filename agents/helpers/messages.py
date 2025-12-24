@@ -156,6 +156,141 @@ async def stream_plan_event(
         logger.debug(f"Plan stream error (non-fatal): {str(e)}")
 
 
+async def stream_tool_event(
+    agent_id: str,
+    stream_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    title: str,
+) -> None:
+    """
+    Broadcast tool start event DIRECTLY to Supabase Realtime (no DB insert).
+    
+    This is used to show early IN_PROGRESS tool messages during LLM streaming,
+    before tool parameters are fully parsed. The actual IN_PROGRESS with params
+    comes later via normal tool execution, using the same tool_call_id to overwrite.
+    
+    Args:
+        agent_id: The agent ID
+        stream_id: Unique ID for this streaming session
+        tool_call_id: The tool_call_id that will be used for the final tool execution
+        tool_name: Name of the tool being called
+        title: The display title (e.g., "Starting web_search...")
+    """
+    try:
+        from config import load_config
+        
+        config = load_config()
+        
+        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
+        
+        payload = {
+            "messages": [{
+                "topic": f"agent:{agent_id}",
+                "event": "TOOL_START",
+                "payload": {
+                    "record": {
+                        "stream_id": stream_id,
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "title": title,
+                    }
+                },
+                "private": True
+            }]
+        }
+        
+        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
+        
+        client = _get_broadcast_client()
+        response = await client.post(
+            broadcast_url,
+            json=payload,
+            headers={
+                "apikey": broadcast_key,
+                "Authorization": f"Bearer {broadcast_key}",
+                "Content-Type": "application/json"
+            }
+        )
+        
+        if response.status_code not in (200, 202):
+            logger.debug(f"Tool stream broadcast failed: status={response.status_code}")
+                
+    except Exception as e:
+        # Don't fail the workflow if streaming fails - it's best-effort
+        logger.debug(f"Tool stream error (non-fatal): {str(e)}")
+
+
+async def stream_attention_event(
+    agent_id: str,
+    stream_id: str,
+    tool_call_id: str,
+    message: str,
+    is_question: bool = True,
+    done: bool = False,
+    sequence: int = 0,
+) -> None:
+    """
+    Broadcast attention message streaming DIRECTLY to Supabase Realtime.
+    
+    This streams send_message_to_user content progressively so the frontend
+    can show the attention message being generated.
+    
+    Args:
+        agent_id: The agent ID
+        stream_id: Unique ID for this streaming session
+        tool_call_id: The tool_call_id for the send_message_to_user call
+        message: The current message content (accumulated, not delta)
+        is_question: Whether this is a blocking question or FYI
+        done: Whether streaming is complete
+        sequence: Sequence number for ordering
+    """
+    try:
+        from config import load_config
+        
+        config = load_config()
+        
+        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
+        
+        payload = {
+            "messages": [{
+                "topic": f"agent:{agent_id}",
+                "event": "ATTENTION_STREAM",
+                "payload": {
+                    "record": {
+                        "stream_id": stream_id,
+                        "tool_call_id": tool_call_id,
+                        "message": message,
+                        "is_question": is_question,
+                        "done": done,
+                        "sequence": sequence,
+                    }
+                },
+                "private": True
+            }]
+        }
+        
+        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
+        
+        client = _get_broadcast_client()
+        response = await client.post(
+            broadcast_url,
+            json=payload,
+            headers={
+                "apikey": broadcast_key,
+                "Authorization": f"Bearer {broadcast_key}",
+                "Content-Type": "application/json"
+            }
+        )
+        
+        if response.status_code not in (200, 202):
+            logger.debug(f"Attention stream broadcast failed: status={response.status_code}")
+                
+    except Exception as e:
+        # Don't fail the workflow if streaming fails - it's best-effort
+        logger.debug(f"Attention stream error (non-fatal): {str(e)}")
+
+
 @activity.defn
 async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
     """

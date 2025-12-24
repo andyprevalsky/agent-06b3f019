@@ -503,6 +503,32 @@ class ToolManager(ABC):
             f"Tool '{self.tool_name}' has requires_approval=True but does not implement get_approval_question()"
         )
     
+    def yield_in_progress(self, title: Optional[str] = None, message: Optional[str] = None) -> ToolEvent:
+        """
+        Helper method to create an IN_PROGRESS event.
+        
+        Tools can call this early in execute_tool (e.g., before params validation)
+        to show immediate feedback. If early tool detection is enabled, this will
+        use the same tool_call_id that was broadcast during streaming, so the
+        second IN_PROGRESS call with full params will overwrite the initial one.
+        
+        Args:
+            title: Optional title (defaults to "Starting {tool_name}...")
+            message: Optional message
+            
+        Returns:
+            ToolEvent with IN_PROGRESS status
+        """
+        if title is None:
+            title = f"Starting {self.tool_name}..."
+        
+        return ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=title,
+            message=message or "",
+            status=MessageStatus.IN_PROGRESS
+        )
+    
     @abstractmethod
     async def execute_tool(
         self,

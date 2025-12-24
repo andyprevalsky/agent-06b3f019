@@ -1,7 +1,7 @@
 import { Message, respondToAttentionRequest } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
-import { useState, useEffect, useMemo, memo } from 'react';
+import { useState, useEffect, useMemo, memo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import SubAgentToolBubble from './SubAgentToolBubble';
@@ -382,6 +382,36 @@ const ToolMessage = memo(function ToolMessage({
   );
 });
 
+// StreamingText - renders text with fade-in animation for each chunk (for streaming attention)
+function StreamingText({ text }: { text: string }) {
+  const prevTextRef = useRef('');
+  const [chunks, setChunks] = useState<string[]>([]);
+  
+  useEffect(() => {
+    if (text.length > prevTextRef.current.length) {
+      const delta = text.slice(prevTextRef.current.length);
+      setChunks(prev => [...prev, delta]);
+      prevTextRef.current = text;
+    } else if (text !== prevTextRef.current) {
+      setChunks([text]);
+      prevTextRef.current = text;
+    }
+  }, [text]);
+  
+  return (
+    <span className="text-sm">
+      {chunks.map((chunk, i) => (
+        <span
+          key={i}
+          className="animate-in fade-in duration-300"
+        >
+          {chunk}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 // AttentionMessage - renders send_message_to_user as raw text with animation tracking
 const AttentionMessage = memo(function AttentionMessage({
   attentionMessage,
@@ -389,12 +419,14 @@ const AttentionMessage = memo(function AttentionMessage({
   shouldType = false,
   onComplete,
   onStartExecution,
+  isStreaming = false,
 }: {
   attentionMessage: string;
   isWaiting: boolean;
   shouldType?: boolean;
   onComplete?: () => void;
   onStartExecution?: () => void;
+  isStreaming?: boolean;
 }) {
   const [hasAnimated, setHasAnimated] = useState(false);
   
@@ -414,15 +446,19 @@ const AttentionMessage = memo(function AttentionMessage({
       <div className="flex-1 space-y-3">
         {/* Render message as raw markdown text */}
         <div className="text-sm">
-          <MarkdownText 
-            text={attentionMessage}
-            shouldAnimate={isWaiting && !hasAnimated}
-            onComplete={handleAnimationComplete}
-          />
+          {isStreaming ? (
+            <StreamingText text={attentionMessage} />
+          ) : (
+            <MarkdownText 
+              text={attentionMessage}
+              shouldAnimate={isWaiting && !hasAnimated}
+              onComplete={handleAnimationComplete}
+            />
+          )}
         </div>
         
         {/* Yellow dashed circle indicator - only show while waiting */}
-        {isWaiting && (
+        {isWaiting && !isStreaming && (
           <>
             <div className="flex items-center gap-2 text-amber-500">
               <div 
@@ -625,6 +661,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
         shouldType={shouldType}
         onComplete={onTypingComplete}
         onStartExecution={onSendMessage ? handleStartExecution : undefined}
+        isStreaming={isStreaming}
       />
     );
   }

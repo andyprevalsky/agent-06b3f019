@@ -8,7 +8,7 @@ import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bo
 import AppSidebar from '@/components/terminal/AppSidebar';
 import { supabase, signOut, initializeRealtime, clearStoredSession } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
-import { subscribeToAgent, unsubscribe, StreamChunkPayload, PlanStreamPayload } from '@/lib/realtime';
+import { subscribeToAgent, unsubscribe, StreamChunkPayload, PlanStreamPayload, AttentionStreamPayload } from '@/lib/realtime';
 import {
   getAllAgents,
   getAgent,
@@ -532,6 +532,15 @@ export default function Terminal() {
     tool_call_id: string;
     title: string;
   } | null>(null);
+  
+  // Streaming attention message state - ephemeral attention card shown during LLM streaming
+  // Cleared when the real send_message_to_user TOOL message arrives via DB INSERT
+  const [streamingAttention, setStreamingAttention] = useState<{
+    stream_id: string;
+    tool_call_id: string;
+    message: string;
+    is_question: boolean;
+  } | null>(null);
 
   // Opening messages reveal animation
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
@@ -885,8 +894,9 @@ export default function Terminal() {
         }
         return new Map();
       });
-      // Clear ephemeral streaming plan
+      // Clear ephemeral streaming states
       setStreamingPlan(null);
+      setStreamingAttention(null);
     };
 
     // Early return but STILL return cleanup function
@@ -997,6 +1007,13 @@ export default function Terminal() {
               setStreamingPlan(null);
             }
             
+            // Clear ephemeral streaming attention when real send_message_to_user arrives
+            if (message.role === 'TOOL' && 
+                message.metadata?.toolName === 'send_message_to_user') {
+              console.log(`📢 send_message_to_user arrived - clearing streaming attention`);
+              setStreamingAttention(null);
+            }
+            
             // Add to buffer queue - it will be displayed when ready
             setMessageBuffer((prev) => [...prev, message]);
           },
@@ -1087,6 +1104,16 @@ export default function Terminal() {
               stream_id: plan.stream_id,
               tool_call_id: plan.tool_call_id,
               title: plan.title,
+            });
+          },
+          onAttentionStream: (attention: AttentionStreamPayload) => {
+            // Ephemeral attention message streaming - show attention card during LLM streaming
+            console.log(`📢 ATTENTION STREAM EVENT:`, attention);
+            setStreamingAttention({
+              stream_id: attention.stream_id,
+              tool_call_id: attention.tool_call_id,
+              message: attention.message,
+              is_question: false, // Force to false for streaming attention messages
             });
           },
         });
@@ -2375,8 +2402,6 @@ export default function Terminal() {
                   );
                 })}
                 
-{/* Streaming text is now shown under Thinking indicator below */}
-                
                 {/* Show paused banner when agent is paused */}
                 {agentDetail?.status === 'PAUSED' && (
                   <div className="flex gap-3">
@@ -2474,7 +2499,40 @@ export default function Terminal() {
                           />
                         </div>
                       )}
+
                     </div>
+                  </div>
+                )}
+
+                {/* Streaming attention message - appears below thinking bubble */}
+                {streamingAttention && (showThinkingLoader || streamingBubbles.size > 0) && (
+                  <div className="flex gap-3 mt-4">
+                    <div className="flex-shrink-0 w-8" />
+                    <MessageBubble
+                      key={`streaming-attention-${streamingAttention.tool_call_id}`}
+                      message={{
+                        message_id: `streaming-${streamingAttention.tool_call_id}`,
+                        role: 'TOOL',
+                        text: streamingAttention.message,
+                        timestamp: new Date().toISOString(),
+                        metadata: {
+                          toolCallId: streamingAttention.tool_call_id,
+                          toolName: 'send_message_to_user',
+                          toolStatus: 'IN_PROGRESS',
+                          isUserAttentionMessage: true,
+                          attentionMessage: streamingAttention.message,
+                          sendMessageToUser: {
+                            isQuestion: false, // Default to false instead of streamingAttention.is_question
+                            attentionKind: 'info', // Default to info instead of question
+                            isWaitingForUser: false, // Default to false instead of streamingAttention.is_question
+                          },
+                        },
+                      }}
+                      shouldType={false}
+                      onTypingComplete={() => {}}
+                      onSendMessage={handleSendMessage}
+                      isStreaming={true}
+                    />
                   </div>
                 )}
                 

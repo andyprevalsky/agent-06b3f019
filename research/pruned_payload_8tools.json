@@ -1,0 +1,695 @@
+{
+  "model": "rose-labs/rose-1-lite",
+  "messages": [
+    {
+      "role": "system",
+      "content": "ROLE / IDENTITY\n----------------\nYou are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal; your job is to nurture it to fruition (100% accomplishment) using the tools available.\n\nOperate with the lowest energy expenditure possible\u2014each tool invocation consumes human attention, social credibility, or monetary capital. You are autonomous; never ask \u201chow can I help?\u201d and never hand execution back to the user.\nTO BE ABSOLUTELY CLEAR: you are you're own autonomous entity. You are to not burden the user with constant questions. You behave like a world class COO, you don't get blocked because you make reasonable assumptions and you move on.\n\n\nGOAL / SUCCESS CRITERIA\n----------------------------CURRENT PHASE: PLAN\n\nTWO-AXIS PLANNING FRAMEWORK\n---------------------------\nAll progress toward a goal happens along two orthogonal axes:\n1. Reducing UNCERTAINTY (ambiguity, unknown constraints, unknown strategy, unknown correctness)\n2. Reducing REMAINING WORK (doing known steps once the world is understood)\n\nDecision heuristic:\n- If uncertainty > decomposability \u2192 use join='any' (hypotheses to reduce uncertainty first)\n- If decomposability >= uncertainty \u2192 use join='all' (parallelize work)\n- Parallelism is only safe when entropy/uncertainty is low\n\nPLANNING TOOLS\n--------------\nCall `set_plan` with:\n- `title`: Short plan name\n- `content`: Markdown explanation of the plan\n- `tasks`: List of task descriptions (index position = task ID: 0, 1, 2...)\n- `dependencies`: Execution order graph - CRITICAL for sequential tasks!\n    - Keys: task indices as strings (\"0\", \"1\", \"2\")\n    - Values: list of predecessor indices that must complete first\n    - ALWAYS specify dependencies for causally-dependent tasks (e.g., can't checkout before adding to cart)\n    - ONLY use null/{} for truly independent parallel tasks (e.g., researching 3 competitors simultaneously)\n- `join`: How to combine task results\n    - 'all' (AND): Every task must complete; results are merged\n    - 'any' (OR): First successful task satisfies the goal (hypotheses)\n\nDEPENDENCY PATTERNS (use the right one!):\n- Sequential chain (most common): {\"1\": [\"0\"], \"2\": [\"1\"], \"3\": [\"2\"]}\n  Example: Search \u2192 Add to cart \u2192 Checkout \u2192 Confirm\n- Fully parallel (ONLY for independent tasks): {} or null\n  Example: Research competitor A, Research competitor B, Research competitor C\n- Fan-in synthesis: {\"3\": [\"0\", \"1\", \"2\"]}\n  Example: Research A, Research B, Research C \u2192 Synthesize report\n- Diamond: {\"1\": [\"0\"], \"2\": [\"0\"], \"3\": [\"1\", \"2\"]}\n  Example: Gather requirements \u2192 (Design frontend, Design backend) \u2192 Integration\n\nAfter finalizing the plan, send a concise summary to the user via `send_message_to_user({\"message\": \"...\", \"is_question\": false})` so they can see what will run. If you still need clarification/approval, set `is_question` to true so work pauses until they reply.\n\nCall `progress_to_autonomous_execution_phase` only when:\n    1. You have called set_plan (REQUIRED - will error otherwise)\n    2. You no longer need clarifications\n    3. You have a low-energy cost & elegant plan\n\nOnce you move to EXECUTE phase, you can no longer get user input, so ask necessary clarifying questions first.\n\nPARALLELIZATION GUIDANCE\n------------------------\n- Parallelize when evaluating multiple hypotheses, increasing accuracy via decomposition, or speeding execution with independent workstreams.\n- Keep work sequential when tasks are causally dependent (use dependencies).\n- spawn_sub_agents should be used anytime we want to do any or all of the following:\n    1. speed up work via context-independent parallelization\n    2. evaluate multiple context-independent hypotheses\n    3. reduce complexity by decomposing the user goal into more proximate, context-independent sub-goals\n\nGENERAL RULES\n-------------\n- Use only ENABLED tools NOW to gather information required for planning.\n- DISABLED tools marked \"available in execute phase\" can be included in your plan's tasks - they become available when execution begins.\n- For goals like \"get me X\", \"buy X\", \"order X\", or \"purchase X\", the plan MUST include the actual purchase/acquisition step using spawn_browser_agent - do NOT end with \"send recommendations to user\". The user asked you to GET the item, not recommend options.\n- Use `send_message_to_user({\"message\": \"<markdown text to user>\", \"is_question\": true})` whenever you truly need clarification or approvals; write the exact user-visible question in the message parameter.\n- Whenever you call `send_message_to_user`, it must be the ONLY tool in that turn (no bundling with other tool calls).\n- Once success criteria are set, treat them as fixed unless a tool failure forces a pivot.\n- Part of the plan is to define the artifact that you must produce in order to achieve the goal. This can be a confirmation page of an order you need to place, a json blob of data you need to retrieve, etc.\n- Think through whether the plan you devise will REALLY suffice to achieving the goal, EXPLICITLY, if your plan requires additional user input at the end, THEN YOUR PLAN IS NOT CORRECT.\n- Make sure you do not get scared of taking action in your plan, don't worry, you are in an orchestrator that will automotically request user permission when you try to take actions that require it. Act as if you are in a fully permissioned environment and don't need to worry about\nany repercussions, even though you may have some deep system requirements that ensure you don't do things like, enter credit card information, pay for a service, etc. act as if you are in a fully permissioned environment and don't need to worry about any repercussions.CONTEXT / CAPABILITIES\n----------------------\nYou MUST NOT call any tool that is not explicitly listed under \"ENABLED tools\" for this turn.\nUSER CONTEXT:\n\nAUTHENTICATED BROWSER SESSIONS\nYou have stored auth credentials for these sites. When using spawn_browser_agent\nfor these domains, the user is already logged in - no authentication required:\nadobe.com, adprime.com, affirm.com, airbnb.com, airwallex.com, amazon.com, aritzia.com, ashbyhq.com, bing.com, boardy.ai, browserbase.com, carta.com, chase.com, chatgpt.com, classpass.com, claude.ai, coda.io, colossusssp.com, cookunity.com, director.ai, docusign.com, doordash.com, ebay.com, etsy.com, facebook.com, fastmail.com, firecrawl.dev, getadblock.com, gitbook.com, github.com, google.com, happenstance.ai, homedepot.com, hotplate.com, instagram.com, jdsports.com, johnvarvatos.com, krushmedia.com, lightfield.app, linkedin.com, litellm.ai, lovable.dev, loveable.dev, massimodutti.com, mindbodyonline.com, muji.us, nebula.org, nips.cc, onlyfans.com, openrouter.ai, ... (+31 more)\n\nUSER PROFILE\nName: Andy Prevalsky\nPhone: +19729777432\nWhen sending SMS messages to the user, use: +19729777432\nLocation: New York, New York, United States\n\nFREQUENT CONTACTS\n- Tatti | weekly | @ George Prevalsky's Boxing & Muay Thai Boxing Club | +19729775605\n- Mom | weekly | +19729787787\n- Anna Sim | weekly | +12144764182\n- \ud83d\udc1b\ud83d\udc1e\ud83d\udc1dAya | weekly | +19729461122\n- Cali \u2728 | monthly | +14699995163\n- Ina | weekly | +19728225709\n- Aman | weekly | +17134712306\n- Rohit | monthly | +19723107210\n- Bala Bala | monthly | +14088059585\n- Rishi | monthly | +12149121303\n- Brian Cheung | monthly | +18326204829\n- Kaixi | weekly | +13477346967\n- Ben Klenk | weekly | +12158214931\n- Andy Prevalsky | monthly | +19729777432\n- Kunal | monthly | +18323107064\n- Brain Xiang | monthly | +13412398841\n- Aarya Nukala | monthly | +12147969207\n- Jason Liu | monthly | +14156106247\n\n    ENABLED tools (10):\n- send_message_to_user\n- find_all\n- check_monitor_events\n- search_user_network_for_people\n- read_message_history_with_person\n- web_search\n- deep_research\n- search_x402_bazaar\n- set_plan\n- progress_to_autonomous_execution_phase\n    \n    DISABLED tools (7):\n- **wait_seconds** (available in execute phase)\n  Pause execution for a specified number of seconds (1-3600). Use this when you need to wait for time-dependent results or real-world delays.\n  **Parameters:**\n    - `seconds` (integer (required)): Number of seconds to wait (1-3600)\n\n- **spawn_sub_agents** (available in execute phase)\n  Spawn multiple sub-agents to work on parallel subtasks concurrently. Use sub-agents to parallelize work: evaluate multiple hypotheses at once, execute context-independent tasks in parallel, and/or decompose the current goal into context-independent subgoals for faster and more accurate completion. Each sub-agent runs independently with its own goal and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_max_tokens (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents.\n\n- **enrich** (available in execute phase)\n  Enrich an entity (person/company) with additional structured data from the web. Provide input data (name, email, company, url, etc.) and an output_schema JSON schema defining what fields to extract. Processors: 'lite' (basic info, 5s-60s, $0.005), 'base' (simple research, 15s-100s, $0.01), 'core' (complex research, 1-5min, $0.025), 'core2x' (very complex, 2-5min, $0.05), 'pro' (exploratory, 3-9min, $0.10), 'ultra' (extensive deep research, 5-25min, $0.30), 'ultra2x/4x/8x' (advanced deep research with 2x/4x/8x compute, $0.60/$1.20/$2.40). Choose processor based on research complexity needed.\n  **Parameters:**\n    - `input` (object (required)): JSON object with person/company metadata to enrich. All fields are optional/nullable. Common fields: name, email, company, url, location, title, etc. ...\n    - `output_schema` (object (required)): JSON schema defining what structured data to extract. Must follow this exact format:\n{\n  'type': 'json',\n  'json_schema': {\n    'type': 'object',\n    ...\n    - `processor` (any): Processor type for enrichment execution:\n- 'lite' [DEFAULT]: Basic tasks, minimal complexity. Fastest and most cost-effective.\n- 'base': Standard task...\n\n- **monitor** (available in execute phase)\n  Continuously monitor the web for material changes relevant to a query on a schedule. Cadence options: 'hourly', 'daily', 'weekly'. Returns monitor_id for tracking. Use check_monitor_events to retrieve detected events. Cost: $0.003 per request to create monitor. Best for: tracking news, competitor changes, regulatory updates, market events.\n  **Parameters:**\n    - `query` (string (required)): Natural language query describing what to monitor. Be specific about what changes matter. Examples: 'Latest news on AI regulations from the Federal Re...\n    - `cadence` (any): Frequency of monitoring runs. - 'hourly': Check every hour. Best for fast-moving topics requiring immediate updates.\n- 'daily' [DEFAULT]: Check once p...\n    - `webhook_url` (any): Optional URL to receive HTTP POST notifications when events are detected or monitors finish scheduled runs. Format: 'https://your-domain.com/webhook'....\n    - `metadata` (any): Optional metadata to store with the monitor. Keys and values must be strings. Maximum 16 characters per key, 512 characters per value. Useful for trac...\n\n- **message_person** (available in execute phase)\n  Send a message to a person via SMS or email. IMPORTANT: You MUST first call read_message_history_with_person for the SAME person before using this tool - if you haven't read their message history, this tool will fail with an error. Requires: 'channel' ('sms' or 'email'), person identifier (phone for SMS, email for email), and 'message'. For email, 'subject' is also required.\n  **Parameters:**\n    - `channel` (string (required)): Communication channel: 'sms' for text message, 'email' for email\n    - `phone` (any): Phone number in E.164 format (required for SMS channel)\n    - `email` (any): Email address (required for email channel)\n    - `first_name` (any): First name of the person (optional, for context matching)\n    - `last_name` (any): Last name of the person (optional, for context matching)\n    - `message` (string (required)): The message content to send\n    - `subject` (any): Email subject line (required for email channel)\n\n- **spawn_browser_agent** (available in execute phase)\n  Spawn an autonomous browser agent to complete web tasks including purchases, checkouts, and e-commerce transactions. The agent can navigate websites, fill forms, click buttons, add items to cart, complete checkout flows, and interact with any web page. Use this for any task that requires browsing the web interactively. Browser cookies have been injected - assume the user is logged in and payment methods are saved until proven otherwise.\n  **Parameters:**\n    - `goal` (string (required)): Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy a black beanie under $35 from Amazon', 'Order a Chipotle bowl...\n\n- **pay_for_x402_bazaar_service** (available in execute phase)\n  Execute a paid API call to an x402 service discovered from search_x402_bazaar. Handles the x402 payment protocol automatically. Requires: resource_url (from search results), method (GET/POST), params (request parameters), and max_amount_cents (safety limit on payment). The call will fail if the service requires more than the max_amount_cents limit.\n  **Parameters:**\n    - `resource_url` (string (required)): The x402 service URL from search_x402_bazaar results. Example: 'https://minifetch.com/api/v1/x402/extract/url-metadata'\n    - `method` (string): HTTP method for the request (shown in search results). Default: GET\n    - `params` (object): REQUIRED: Request parameters from the service's input_schema. Look at the 'Params:' line in search results for required fields. For GET requests: thes...\n    - `max_amount_cents` (integer (required)): Maximum amount in cents willing to pay for this call (safety limit). The call will fail if the service requires more than this amount. Set this to at ...\n    PROCESS / CONTROL LOGIC\n------------------------\nThink \u2192 use tools \u2192 update response. Continue until progress is 100%.\n\nResponse fields:\n    - \"reasoning\": internal scratchpad (never shown to user).\n    - \"response\": internal running log for continuity and assumptions; it may or may not be surfaced by the UI, so never rely on it for critical communication.\n    - Multiple tools can be issued per turn\u2014they execute in parallel.\n\nUser-visible communication:\n    - PLAN phase only: `send_message_to_user({\"message\": \"<user-visible markdown>\", \"is_question\": true|false})` guarantees the user sees the message exactly as written.\n    - Set `is_question=true` when you must pause for clarification/approval. Set `is_question=false` when broadcasting critical information (like the plan you intend to execute) without blocking progress.\n    - Share every finalized plan via `send_message_to_user` so the user knows what will run.\n    - If you call `send_message_to_user`, do not include any other tool in that same tool_calls list.\n\nBehavioral rules (always enforce):\n    1. Never claim you searched/sent/paid/changed anything unless the tool call actually executed (no tool simulation).\n    2. When a tool/action fails, log the failure and reason inside \"response\". Do not repeat the same failing action more than twice without changing approach; pivot autonomously instead of defaulting to `send_message_to_user`.\n    3. Batch independent tool calls within the same tool_calls array.\n    4. Record assumptions plainly inside \"response\" as part of the log (no labels).\n    5. Keep context minimal\u2014do not restate rules or plans unless something changed.\n    6. Favor tool usage over narration whenever a tool can advance the goal (tool-first execution bias).\n    7. Obey instruction hierarchy at all times: system > developer > user.\n\nCommon mistakes to avoid:\n    1. Acting like an assistant instead of deciding, planning, and executing.\n    2. Repeating failed approaches instead of pivoting.\n    3. Giving up when a creative path exists.\n    4. Forgetting that tools execute in parallel.\nYou are the planner:\n- Gather the information required for execution.\n- Define clear steps that will accomplish the goal.\n- Decide if work stays single-agent or needs parallel sub-agents.\nOUTPUT CONTRACT\n---------------\nReturn valid JSON matching {\"reasoning\": string, \"response\": string, \"tool_calls\": []}.\nReasoning is private. Response is internal log text (still professional, no seeds/nurturing/internal jargon) and may or may not be shown to the user.\nOutput ONLY valid JSON\u2014no markdown or extra text\u2014and always include reasoning, response, and tool_calls every turn.\ntool_calls must match the registered tool schemas; if no tools run, return [].\nCall `mark_execution_complete` only when you have verifiable proof the goal is finished."
+    },
+    {
+      "role": "user",
+      "content": "Get me a black beanie < 35$ and well-made"
+    },
+    {
+      "role": "assistant",
+      "content": "Beginning with initial assessment of available platforms for purchasing a black beanie under $35 that is well-made. Will prioritize authenticated retail sites where user is already logged in to streamline selection and checkout. Platforms include Amazon, Etsy, Aritzia, Muji, and others with fashion or apparel sections. Need to define 'well-made' by evaluating material composition, customer reviews, brand reputation, and construction details. Will proceed to search and filter options once tools are available."
+    },
+    {
+      "role": "system",
+      "content": "Searched for similar goals: "
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 4096,
+  "stream": true,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "AgentAction",
+      "schema": {
+        "$defs": {
+          "FindAllTool": {
+            "description": "Tool for discovering entities on the open internet matching specific criteria using natural language queries.\n\nThis tool uses Parallel AI's Find All API to search for entities (companies, people, etc.)\nthat match your criteria. The API converts your natural language objective into structured\nmatch conditions and returns matched candidates with details, reasoning, and citations.\n\nPricing: Total cost = fixed cost + (cost per match \u00d7 number of matches)\n- preview: $0.15 fixed + $0.00/match (testing only, ~10 candidates)\n- base: $0.25 fixed + $0.03/match (broad queries, many matches expected)\n- core: $2.00 fixed + $0.15/match (specific queries, moderate matches) [DEFAULT]\n- pro: $10.00 fixed + $1.00/match (highly specific, rare matches)\n\nExample: \"Find all portfolio companies of Khosla Ventures founded after 2020\"",
+            "properties": {
+              "tool": {
+                "const": "find_all",
+                "title": "Tool",
+                "type": "string"
+              },
+              "objective": {
+                "description": "Natural language description of entities to find. Be specific about criteria, sources, and context. Examples: 'Find all portfolio companies of Khosla Ventures founded after 2020', 'Find all AI startups in San Francisco that raised Series A in 2024'. Maximum 5000 characters. TIP: Start with 'preview' generator to test your query and estimate match count before running full search.",
+                "maxLength": 5000,
+                "title": "Objective",
+                "type": "string"
+              },
+              "generator": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeneratorEnum"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": "core",
+                "description": "Generator type determining quality and cost. Choose based on query specificity and expected match count:\n- 'preview' ($0.15 fixed, $0/match): Testing queries with ~10 candidates. Always test here first.\n- 'base' ($0.25 fixed, $0.03/match): Broad queries expecting many matches (e.g., 'companies in healthcare'). Best for <20 matches where low fixed cost matters.\n- 'core' ($2.00 fixed, $0.15/match) [DEFAULT]: Specific queries with moderate matches (e.g., 'healthcare companies using AI for diagnostics'). Best for 20-50 matches.\n- 'pro' ($10.00 fixed, $1.00/match): Highly specific queries with rare matches (e.g., 'Series A healthcare AI companies with FDA-approved products'). Best when you need the most thorough search.\nNote: For >50 matches, per-match cost dominates. Consider generator choice carefully."
+              },
+              "match_limit": {
+                "anyOf": [
+                  {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": 10,
+                "description": "Maximum number of matched entities to return. Range: 1-100. Default: 10. Cost impact: Higher limits increase total cost (fixed cost + per-match cost \u00d7 matches found). Example costs for 50 matches: base=$1.75, core=$9.50, pro=$60.00. Consider using 'preview' generator first to estimate match count.",
+                "title": "Match Limit"
+              }
+            },
+            "required": [
+              "tool",
+              "objective",
+              "generator",
+              "match_limit"
+            ],
+            "title": "FindAllTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "GeneratorEnum": {
+            "description": "Generator types for Find All operations with pricing.",
+            "enum": [
+              "preview",
+              "base",
+              "core",
+              "pro"
+            ],
+            "title": "GeneratorEnum",
+            "type": "string"
+          },
+          "ProgressToAutonomousExecutionPhaseTool": {
+            "description": "Request to transition from planning to autonomous execution. The user will be prompted to approve the plan.",
+            "properties": {
+              "tool": {
+                "const": "progress_to_autonomous_execution_phase",
+                "title": "Tool",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool"
+            ],
+            "title": "ProgressToAutonomousExecutionPhaseTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "ReadMessageHistoryTool": {
+            "description": "Read message history with a person. Use this to retrieve past conversations before sending a new message. You MUST call this tool before using message_person to send any message.",
+            "properties": {
+              "tool": {
+                "const": "read_message_history_with_person",
+                "title": "Tool",
+                "type": "string"
+              },
+              "phone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Phone number in E.164 format (e.g., +19729777432)",
+                "title": "Phone"
+              },
+              "email": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Email address of the person",
+                "title": "Email"
+              },
+              "first_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "First name of the person (use with last_name)",
+                "title": "First Name"
+              },
+              "last_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Last name of the person (use with first_name)",
+                "title": "Last Name"
+              }
+            },
+            "required": [
+              "tool",
+              "phone",
+              "email",
+              "first_name",
+              "last_name"
+            ],
+            "title": "ReadMessageHistoryTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "SearchUserNetworkTool": {
+            "description": "Search the user's personal network for people matching specific criteria. Performs semantic search across contacts. All fields are optional - search by name, profession, skills, relationship, or any combination of criteria.",
+            "properties": {
+              "tool": {
+                "const": "search_user_network_for_people",
+                "title": "Tool",
+                "type": "string"
+              },
+              "first_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "First name of person to search for",
+                "title": "First Name"
+              },
+              "last_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Last name of person to search for",
+                "title": "Last Name"
+              },
+              "age": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Age of person (e.g., 35, 50)",
+                "title": "Age"
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Location (e.g., 'San Francisco, CA', 'New York')",
+                "title": "Location"
+              },
+              "profession": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Profession (e.g., 'venture capitalist', 'software engineer')",
+                "title": "Profession"
+              },
+              "company": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Company name (e.g., 'Google', 'Sequoia Capital')",
+                "title": "Company"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Job title (e.g., 'CEO', 'Partner', 'VP Engineering')",
+                "title": "Title"
+              },
+              "industry": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Industry (e.g., 'venture capital', 'technology', 'healthcare')",
+                "title": "Industry"
+              },
+              "relation": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Relationship type (e.g., 'best_friend', 'colleague', 'mentor', 'family')",
+                "title": "Relation"
+              },
+              "communication_frequency": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "How often you communicate: 'daily', 'weekly', 'monthly', 'yearly', 'rarely'",
+                "title": "Communication Frequency"
+              },
+              "relationship_quality": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Relationship quality: 'strong', 'moderate', 'weak', 'strained'",
+                "title": "Relationship Quality"
+              },
+              "skills": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Skills they possess (e.g., ['fundraising', 'product management', 'marketing'])",
+                "title": "Skills"
+              },
+              "interests": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Their interests (e.g., ['AI', 'sustainability', 'art'])",
+                "title": "Interests"
+              },
+              "total_online_reach": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Minimum social media reach/followers",
+                "title": "Total Online Reach"
+              },
+              "estimated_net_worth_usd": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Minimum estimated net worth in USD (e.g., 1500000 for $1.5M)",
+                "title": "Estimated Net Worth Usd"
+              },
+              "estimated_world_power_ranking": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "World power ranking 1-10 (1=most powerful)",
+                "title": "Estimated World Power Ranking"
+              },
+              "current_bandwidth": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Their availability: 'totally_free', 'light', 'moderate', 'busy', 'totally_swamped'",
+                "title": "Current Bandwidth"
+              },
+              "contact_status": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Contact status: 'active', 'dormant', 'lost_contact'",
+                "title": "Contact Status"
+              },
+              "network_orientation": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "How they network: 'giver', 'taker', 'matcher'",
+                "title": "Network Orientation"
+              },
+              "notes": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Additional context or notes about the person you're looking for",
+                "title": "Notes"
+              }
+            },
+            "required": [
+              "tool",
+              "first_name",
+              "last_name",
+              "age",
+              "location",
+              "profession",
+              "company",
+              "title",
+              "industry",
+              "relation",
+              "communication_frequency",
+              "relationship_quality",
+              "skills",
+              "interests",
+              "total_online_reach",
+              "estimated_net_worth_usd",
+              "estimated_world_power_ranking",
+              "current_bandwidth",
+              "contact_status",
+              "network_orientation",
+              "notes"
+            ],
+            "title": "SearchUserNetworkTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "SearchX402BazaarTool": {
+            "description": "Search the x402 Bazaar for available paid API services.\n\nThe x402 Bazaar is a discovery layer for paid APIs using the x402 protocol.\nReturns a list of available services with their pricing, capabilities, and schemas.\nUse this to find services that can help accomplish tasks, then use pay_for_x402_bazaar_service to call them.\n\nNOTE: Our own services are automatically filtered out to prevent self-calls.",
+            "properties": {
+              "tool": {
+                "const": "search_x402_bazaar",
+                "title": "Tool",
+                "type": "string"
+              },
+              "max_price_cents": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Maximum price in cents willing to pay per API call. Services costing more than this will be filtered out. Example: 100 = $1.00, 50 = $0.50, 10 = $0.10",
+                "title": "Max Price Cents"
+              },
+              "keyword": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional keyword to filter services by description or resource URL. Examples: 'weather', 'price', 'news', 'data'",
+                "title": "Keyword"
+              }
+            },
+            "required": [
+              "tool",
+              "max_price_cents",
+              "keyword"
+            ],
+            "title": "SearchX402BazaarTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "SendMessageToUserTool": {
+            "description": "Tool for messaging the user during PLAN phase. Use is_question=true to block for clarifications, or false to broadcast plan/intention while continuing to work.",
+            "properties": {
+              "tool": {
+                "const": "send_message_to_user",
+                "title": "Tool",
+                "type": "string"
+              },
+              "message": {
+                "description": "User-visible markdown text explaining the question, blocker, or FYI.",
+                "title": "Message",
+                "type": "string"
+              },
+              "is_question": {
+                "default": true,
+                "description": "True to block workflow until the user responds (clarification/approval). False to send a non-blocking FYI (e.g., sharing the plan).",
+                "title": "Is Question",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "tool",
+              "message",
+              "is_question"
+            ],
+            "title": "SendMessageToUserTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "SetPlanTool": {
+            "description": "Set or update the execution plan using the two-axis planning framework.\n\nPlanning operates on two orthogonal axes:\n1. Reducing uncertainty (ambiguity, unknown constraints, unknown strategy)\n2. Reducing remaining work (executing known steps once the world is understood)\n\nUse explicit dependency graph to define execution order.",
+            "properties": {
+              "tool": {
+                "const": "set_plan",
+                "title": "Tool",
+                "type": "string"
+              },
+              "title": {
+                "description": "Short title for the plan.",
+                "title": "Title",
+                "type": "string"
+              },
+              "content": {
+                "description": "Plan content as markdown text.",
+                "title": "Content",
+                "type": "string"
+              },
+              "tasks": {
+                "description": "List of task descriptions. Index position defines task ID (0, 1, 2...).",
+                "items": {
+                  "type": "string"
+                },
+                "title": "Tasks",
+                "type": "array"
+              },
+              "dependencies": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "REQUIRED for sequential/causally-dependent tasks. Task dependency graph where keys are task indices (as strings) and values are predecessor indices that must complete first. ONLY use null/{} for truly independent parallel tasks. Sequential chain: {'1': ['0'], '2': ['1'], '3': ['2']}. Fan-in: {'3': ['0', '1', '2']}.",
+                "title": "Dependencies"
+              },
+              "join": {
+                "description": "How to combine task results:\n- 'all' (AND): All tasks must complete; results are merged.\n- 'any' (OR): First successful task satisfies the goal.\nUse 'any' when uncertainty > decomposability (hypotheses). Use 'all' when decomposability >= uncertainty.",
+                "enum": [
+                  "all",
+                  "any"
+                ],
+                "title": "Join",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool",
+              "title",
+              "content",
+              "tasks",
+              "dependencies",
+              "join"
+            ],
+            "title": "SetPlanTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "WebSearchTool": {
+            "description": "Tool call for searching the web with real-time information.",
+            "properties": {
+              "tool": {
+                "const": "web_search",
+                "title": "Tool",
+                "type": "string"
+              },
+              "query": {
+                "description": "Search query or question about current/recent information",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool",
+              "query"
+            ],
+            "title": "WebSearchTool",
+            "type": "object",
+            "additionalProperties": false
+          }
+        },
+        "properties": {
+          "response": {
+            "description": "Message to user. Plain professional language only - NEVER mention seeds, nurturing, fruition, or internal concepts. Use markdown.",
+            "title": "Response",
+            "type": "string"
+          },
+          "tool_calls": {
+            "description": "List of tools to call in sequence",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SendMessageToUserTool"
+                },
+                {
+                  "$ref": "#/$defs/FindAllTool"
+                },
+                {
+                  "$ref": "#/$defs/SearchUserNetworkTool"
+                },
+                {
+                  "$ref": "#/$defs/ReadMessageHistoryTool"
+                },
+                {
+                  "$ref": "#/$defs/WebSearchTool"
+                },
+                {
+                  "$ref": "#/$defs/SearchX402BazaarTool"
+                },
+                {
+                  "$ref": "#/$defs/SetPlanTool"
+                },
+                {
+                  "$ref": "#/$defs/ProgressToAutonomousExecutionPhaseTool"
+                }
+              ]
+            },
+            "title": "Tool Calls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "response",
+          "tool_calls"
+        ],
+        "title": "AgentAction",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  },
+  "reasoning": {
+    "max_tokens": 256
+  }
+}

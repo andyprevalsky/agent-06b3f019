@@ -1,0 +1,684 @@
+{
+  "model": "rose-labs/rose-1-lite",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return a JSON with response field saying hello"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 4096,
+  "stream": true,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "AgentAction",
+      "schema": {
+        "$defs": {
+          "FindAllTool": {
+            "description": "Tool for discovering entities on the open internet matching specific criteria using natural language queries.\n\nThis tool uses Parallel AI's Find All API to search for entities (companies, people, etc.)\nthat match your criteria. The API converts your natural language objective into structured\nmatch conditions and returns matched candidates with details, reasoning, and citations.\n\nPricing: Total cost = fixed cost + (cost per match \u00d7 number of matches)\n- preview: $0.15 fixed + $0.00/match (testing only, ~10 candidates)\n- base: $0.25 fixed + $0.03/match (broad queries, many matches expected)\n- core: $2.00 fixed + $0.15/match (specific queries, moderate matches) [DEFAULT]\n- pro: $10.00 fixed + $1.00/match (highly specific, rare matches)\n\nExample: \"Find all portfolio companies of Khosla Ventures founded after 2020\"",
+            "properties": {
+              "tool": {
+                "const": "find_all",
+                "title": "Tool",
+                "type": "string"
+              },
+              "objective": {
+                "description": "Natural language description of entities to find. Be specific about criteria, sources, and context. Examples: 'Find all portfolio companies of Khosla Ventures founded after 2020', 'Find all AI startups in San Francisco that raised Series A in 2024'. Maximum 5000 characters. TIP: Start with 'preview' generator to test your query and estimate match count before running full search.",
+                "maxLength": 5000,
+                "title": "Objective",
+                "type": "string"
+              },
+              "generator": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeneratorEnum"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": "core",
+                "description": "Generator type determining quality and cost. Choose based on query specificity and expected match count:\n- 'preview' ($0.15 fixed, $0/match): Testing queries with ~10 candidates. Always test here first.\n- 'base' ($0.25 fixed, $0.03/match): Broad queries expecting many matches (e.g., 'companies in healthcare'). Best for <20 matches where low fixed cost matters.\n- 'core' ($2.00 fixed, $0.15/match) [DEFAULT]: Specific queries with moderate matches (e.g., 'healthcare companies using AI for diagnostics'). Best for 20-50 matches.\n- 'pro' ($10.00 fixed, $1.00/match): Highly specific queries with rare matches (e.g., 'Series A healthcare AI companies with FDA-approved products'). Best when you need the most thorough search.\nNote: For >50 matches, per-match cost dominates. Consider generator choice carefully."
+              },
+              "match_limit": {
+                "anyOf": [
+                  {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": 10,
+                "description": "Maximum number of matched entities to return. Range: 1-100. Default: 10. Cost impact: Higher limits increase total cost (fixed cost + per-match cost \u00d7 matches found). Example costs for 50 matches: base=$1.75, core=$9.50, pro=$60.00. Consider using 'preview' generator first to estimate match count.",
+                "title": "Match Limit"
+              }
+            },
+            "required": [
+              "tool",
+              "objective",
+              "generator",
+              "match_limit"
+            ],
+            "title": "FindAllTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "GeneratorEnum": {
+            "description": "Generator types for Find All operations with pricing.",
+            "enum": [
+              "preview",
+              "base",
+              "core",
+              "pro"
+            ],
+            "title": "GeneratorEnum",
+            "type": "string"
+          },
+          "ProgressToAutonomousExecutionPhaseTool": {
+            "description": "Request to transition from planning to autonomous execution. The user will be prompted to approve the plan.",
+            "properties": {
+              "tool": {
+                "const": "progress_to_autonomous_execution_phase",
+                "title": "Tool",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool"
+            ],
+            "title": "ProgressToAutonomousExecutionPhaseTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "ReadMessageHistoryTool": {
+            "description": "Read message history with a person. Use this to retrieve past conversations before sending a new message. You MUST call this tool before using message_person to send any message.",
+            "properties": {
+              "tool": {
+                "const": "read_message_history_with_person",
+                "title": "Tool",
+                "type": "string"
+              },
+              "phone": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Phone number in E.164 format (e.g., +19729777432)",
+                "title": "Phone"
+              },
+              "email": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Email address of the person",
+                "title": "Email"
+              },
+              "first_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "First name of the person (use with last_name)",
+                "title": "First Name"
+              },
+              "last_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Last name of the person (use with first_name)",
+                "title": "Last Name"
+              }
+            },
+            "required": [
+              "tool",
+              "phone",
+              "email",
+              "first_name",
+              "last_name"
+            ],
+            "title": "ReadMessageHistoryTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "SearchUserNetworkTool": {
+            "description": "Search the user's personal network for people matching specific criteria. Performs semantic search across contacts. All fields are optional - search by name, profession, skills, relationship, or any combination of criteria.",
+            "properties": {
+              "tool": {
+                "const": "search_user_network_for_people",
+                "title": "Tool",
+                "type": "string"
+              },
+              "first_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "First name of person to search for",
+                "title": "First Name"
+              },
+              "last_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Last name of person to search for",
+                "title": "Last Name"
+              },
+              "age": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Age of person (e.g., 35, 50)",
+                "title": "Age"
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Location (e.g., 'San Francisco, CA', 'New York')",
+                "title": "Location"
+              },
+              "profession": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Profession (e.g., 'venture capitalist', 'software engineer')",
+                "title": "Profession"
+              },
+              "company": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Company name (e.g., 'Google', 'Sequoia Capital')",
+                "title": "Company"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Job title (e.g., 'CEO', 'Partner', 'VP Engineering')",
+                "title": "Title"
+              },
+              "industry": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Industry (e.g., 'venture capital', 'technology', 'healthcare')",
+                "title": "Industry"
+              },
+              "relation": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Relationship type (e.g., 'best_friend', 'colleague', 'mentor', 'family')",
+                "title": "Relation"
+              },
+              "communication_frequency": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "How often you communicate: 'daily', 'weekly', 'monthly', 'yearly', 'rarely'",
+                "title": "Communication Frequency"
+              },
+              "relationship_quality": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Relationship quality: 'strong', 'moderate', 'weak', 'strained'",
+                "title": "Relationship Quality"
+              },
+              "skills": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Skills they possess (e.g., ['fundraising', 'product management', 'marketing'])",
+                "title": "Skills"
+              },
+              "interests": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Their interests (e.g., ['AI', 'sustainability', 'art'])",
+                "title": "Interests"
+              },
+              "total_online_reach": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Minimum social media reach/followers",
+                "title": "Total Online Reach"
+              },
+              "estimated_net_worth_usd": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Minimum estimated net worth in USD (e.g., 1500000 for $1.5M)",
+                "title": "Estimated Net Worth Usd"
+              },
+              "estimated_world_power_ranking": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "World power ranking 1-10 (1=most powerful)",
+                "title": "Estimated World Power Ranking"
+              },
+              "current_bandwidth": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Their availability: 'totally_free', 'light', 'moderate', 'busy', 'totally_swamped'",
+                "title": "Current Bandwidth"
+              },
+              "contact_status": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Contact status: 'active', 'dormant', 'lost_contact'",
+                "title": "Contact Status"
+              },
+              "network_orientation": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "How they network: 'giver', 'taker', 'matcher'",
+                "title": "Network Orientation"
+              },
+              "notes": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Additional context or notes about the person you're looking for",
+                "title": "Notes"
+              }
+            },
+            "required": [
+              "tool",
+              "first_name",
+              "last_name",
+              "age",
+              "location",
+              "profession",
+              "company",
+              "title",
+              "industry",
+              "relation",
+              "communication_frequency",
+              "relationship_quality",
+              "skills",
+              "interests",
+              "total_online_reach",
+              "estimated_net_worth_usd",
+              "estimated_world_power_ranking",
+              "current_bandwidth",
+              "contact_status",
+              "network_orientation",
+              "notes"
+            ],
+            "title": "SearchUserNetworkTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "SearchX402BazaarTool": {
+            "description": "Search the x402 Bazaar for available paid API services.\n\nThe x402 Bazaar is a discovery layer for paid APIs using the x402 protocol.\nReturns a list of available services with their pricing, capabilities, and schemas.\nUse this to find services that can help accomplish tasks, then use pay_for_x402_bazaar_service to call them.\n\nNOTE: Our own services are automatically filtered out to prevent self-calls.",
+            "properties": {
+              "tool": {
+                "const": "search_x402_bazaar",
+                "title": "Tool",
+                "type": "string"
+              },
+              "max_price_cents": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Maximum price in cents willing to pay per API call. Services costing more than this will be filtered out. Example: 100 = $1.00, 50 = $0.50, 10 = $0.10",
+                "title": "Max Price Cents"
+              },
+              "keyword": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional keyword to filter services by description or resource URL. Examples: 'weather', 'price', 'news', 'data'",
+                "title": "Keyword"
+              }
+            },
+            "required": [
+              "tool",
+              "max_price_cents",
+              "keyword"
+            ],
+            "title": "SearchX402BazaarTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "SendMessageToUserTool": {
+            "description": "Tool for messaging the user during PLAN phase. Use is_question=true to block for clarifications, or false to broadcast plan/intention while continuing to work.",
+            "properties": {
+              "tool": {
+                "const": "send_message_to_user",
+                "title": "Tool",
+                "type": "string"
+              },
+              "message": {
+                "description": "User-visible markdown text explaining the question, blocker, or FYI.",
+                "title": "Message",
+                "type": "string"
+              },
+              "is_question": {
+                "default": true,
+                "description": "True to block workflow until the user responds (clarification/approval). False to send a non-blocking FYI (e.g., sharing the plan).",
+                "title": "Is Question",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "tool",
+              "message",
+              "is_question"
+            ],
+            "title": "SendMessageToUserTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "SetPlanTool": {
+            "description": "Set or update the execution plan using the two-axis planning framework.\n\nPlanning operates on two orthogonal axes:\n1. Reducing uncertainty (ambiguity, unknown constraints, unknown strategy)\n2. Reducing remaining work (executing known steps once the world is understood)\n\nUse explicit dependency graph to define execution order.",
+            "properties": {
+              "tool": {
+                "const": "set_plan",
+                "title": "Tool",
+                "type": "string"
+              },
+              "title": {
+                "description": "Short title for the plan.",
+                "title": "Title",
+                "type": "string"
+              },
+              "content": {
+                "description": "Plan content as markdown text.",
+                "title": "Content",
+                "type": "string"
+              },
+              "tasks": {
+                "description": "List of task descriptions. Index position defines task ID (0, 1, 2...).",
+                "items": {
+                  "type": "string"
+                },
+                "title": "Tasks",
+                "type": "array"
+              },
+              "dependencies": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "REQUIRED for sequential/causally-dependent tasks. Task dependency graph where keys are task indices (as strings) and values are predecessor indices that must complete first. ONLY use null/{} for truly independent parallel tasks. Sequential chain: {'1': ['0'], '2': ['1'], '3': ['2']}. Fan-in: {'3': ['0', '1', '2']}.",
+                "title": "Dependencies"
+              },
+              "join": {
+                "description": "How to combine task results:\n- 'all' (AND): All tasks must complete; results are merged.\n- 'any' (OR): First successful task satisfies the goal.\nUse 'any' when uncertainty > decomposability (hypotheses). Use 'all' when decomposability >= uncertainty.",
+                "enum": [
+                  "all",
+                  "any"
+                ],
+                "title": "Join",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool",
+              "title",
+              "content",
+              "tasks",
+              "dependencies",
+              "join"
+            ],
+            "title": "SetPlanTool",
+            "type": "object",
+            "additionalProperties": false
+          },
+          "WebSearchTool": {
+            "description": "Tool call for searching the web with real-time information.",
+            "properties": {
+              "tool": {
+                "const": "web_search",
+                "title": "Tool",
+                "type": "string"
+              },
+              "query": {
+                "description": "Search query or question about current/recent information",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool",
+              "query"
+            ],
+            "title": "WebSearchTool",
+            "type": "object",
+            "additionalProperties": false
+          }
+        },
+        "properties": {
+          "response": {
+            "description": "Message to user. Plain professional language only - NEVER mention seeds, nurturing, fruition, or internal concepts. Use markdown.",
+            "title": "Response",
+            "type": "string"
+          },
+          "tool_calls": {
+            "description": "List of tools to call in sequence",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SendMessageToUserTool"
+                },
+                {
+                  "$ref": "#/$defs/FindAllTool"
+                },
+                {
+                  "$ref": "#/$defs/SearchUserNetworkTool"
+                },
+                {
+                  "$ref": "#/$defs/ReadMessageHistoryTool"
+                },
+                {
+                  "$ref": "#/$defs/WebSearchTool"
+                },
+                {
+                  "$ref": "#/$defs/SearchX402BazaarTool"
+                },
+                {
+                  "$ref": "#/$defs/SetPlanTool"
+                },
+                {
+                  "$ref": "#/$defs/ProgressToAutonomousExecutionPhaseTool"
+                }
+              ]
+            },
+            "title": "Tool Calls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "response",
+          "tool_calls"
+        ],
+        "title": "AgentAction",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  },
+  "reasoning": {
+    "max_tokens": 256
+  },
+  "model_seed": 3
+}

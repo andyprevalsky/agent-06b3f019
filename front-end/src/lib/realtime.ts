@@ -23,6 +23,19 @@ export interface PlanStreamPayload {
 }
 
 /**
+ * Attention message streaming payload from ATTENTION_STREAM events
+ * Used for streaming send_message_to_user content progressively
+ */
+export interface AttentionStreamPayload {
+  stream_id: string;
+  tool_call_id: string;
+  message: string;  // Accumulated message content (not delta)
+  is_question: boolean;
+  done: boolean;
+  sequence: number;
+}
+
+/**
  * Handlers for agent channel events
  */
 export interface AgentHandlers {
@@ -31,6 +44,7 @@ export interface AgentHandlers {
   onDelete?: (payload: any) => void;
   onAssistantStream?: (payload: StreamChunkPayload) => void;
   onPlanStream?: (payload: PlanStreamPayload) => void;
+  onAttentionStream?: (payload: AttentionStreamPayload) => void;
 }
 
 /**
@@ -98,6 +112,20 @@ export async function subscribeToAgent(
           stream_id: record.stream_id,
           tool_call_id: record.tool_call_id,
           title: record.title,
+        });
+      }
+    })
+    .on('broadcast', { event: 'ATTENTION_STREAM' }, (payload) => {
+      // Extract attention message streaming data
+      const record = payload?.payload?.record;
+      if (record && handlers?.onAttentionStream) {
+        handlers.onAttentionStream({
+          stream_id: record.stream_id,
+          tool_call_id: record.tool_call_id,
+          message: record.message,
+          is_question: record.is_question,
+          done: record.done,
+          sequence: record.sequence,
         });
       }
     });

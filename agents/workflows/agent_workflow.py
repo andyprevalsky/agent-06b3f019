@@ -87,14 +87,13 @@ EVENT_DRIVEN_TOOLS = {
     "pay_for_x402_bazaar_service": pay_for_x402_bazaar_service,
 }
 
-# Read-only tools available during RESEARCH phase
+# Read-only tools available during PLAN phase
+# NOTE: find_all, check_monitor_events, and deep_research are NOT read-only
+# (they have side effects or are temporarily disabled)
 READ_ONLY_TOOL_NAMES = {
     "web_search",
-    "deep_research",
     "search_user_network_for_people",
     "read_message_history_with_person",
-    "find_all",
-    "check_monitor_events",
     "send_message_to_user",
     "search_x402_bazaar",
 }
@@ -133,8 +132,8 @@ SYSTEM_TOOLS = [
     {
         "id": "system-find-all",
         "name": "find_all",
-        "description": "Discover all entities matching specific criteria using natural language queries. Returns matched candidates with names, details, reasoning, and citations. Generators: 'preview' (cheapest, ~10 candidates for testing), 'base' (broad queries, many matches), 'core' (specific queries, moderate matches), 'pro' (highly specific/rare matches). Pricing: Fixed cost + per-match fee. Core generator: $2.00 fixed + $0.15/match. Use 'preview' first to test queries before scaling to other generators.",
-        "read_only": True
+        "description": "Discover all entities matching specific criteria using natural language queries. Returns matched candidates with names, details, reasoning, and citations. Generators: 'preview' (cheapest, ~10 candidates for testing), 'base' (broad queries, many matches), 'core' (specific queries, moderate matches), 'pro' (highly specific/rare matches). Pricing: Fixed cost + per-match fee. Core generator: $2.00 fixed + $0.15/match. Use 'preview' first to test queries before scaling to other generators."
+        # NOT read_only - has side effects (creates searches, costs money)
     },
     {
         "id": "system-enrich",
@@ -149,8 +148,8 @@ SYSTEM_TOOLS = [
     {
         "id": "system-check-monitor-events",
         "name": "check_monitor_events",
-        "description": "Check for new events detected by a previously created monitor. Returns list of events with details about what changed on the web. Requires monitor_id from a previous monitor call. Use this periodically to retrieve updates - monitors run on their schedule but you must check for events to see results.",
-        "read_only": True
+        "description": "Check for new events detected by a previously created monitor. Returns list of events with details about what changed on the web. Requires monitor_id from a previous monitor call. Use this periodically to retrieve updates - monitors run on their schedule but you must check for events to see results."
+        # NOT read_only - requires an existing monitor_id from monitor tool
     },
     {
         "id": "system-search-user-network",
@@ -180,12 +179,12 @@ SYSTEM_TOOLS = [
         "description": "Search the web for information using Perplexity AI. Returns comprehensive answers with citations. Use for factual questions, current events, research, and any information gathering that doesn't require browsing interactively.",
         "read_only": True
     },
-    {
-        "id": "system-deep-research",
-        "name": "deep_research",
-        "description": "Conduct deep, comprehensive research on a topic using multiple sources and extended reasoning. More thorough than web_search but takes longer and costs more. Use for complex research questions requiring synthesis of multiple sources.",
-        "read_only": True
-    },
+    # deep_research is TEMPORARILY DISABLED
+    # {
+    #     "id": "system-deep-research",
+    #     "name": "deep_research",
+    #     "description": "Conduct deep, comprehensive research on a topic using multiple sources and extended reasoning. More thorough than web_search but takes longer and costs more. Use for complex research questions requiring synthesis of multiple sources.",
+    # },
     {
         "id": "system-search-x402-bazaar",
         "name": "search_x402_bazaar",
@@ -302,9 +301,11 @@ def get_phase_tools_and_config(
         
     elif phase == "PLAN":
         # PLAN phase: read-only tools + plan-only tools
+        # Temporarily exclude search_user_network_for_people (Anthropic 7-tool limit)
+        excluded_from_plan = {"search_user_network_for_people"}
         enabled_tools = [
             t for t in all_tools 
-            if t.get("read_only")
+            if t.get("read_only") and t["name"] not in excluded_from_plan
         ]
         
         # Add plan-only tools
@@ -1413,9 +1414,9 @@ class AgentWorkflow:
                 heartbeat_timeout=timedelta(seconds=10),  # Required for cancellation to work
                 retry_policy=RetryPolicy(
                     maximum_attempts=6,
-                    backoff_coefficient=4.0,
-                    initial_interval=timedelta(seconds=2),
-                    maximum_interval=timedelta(seconds=64)
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(milliseconds=100),
+                    maximum_interval=timedelta(seconds=4)
                 )
             )
             

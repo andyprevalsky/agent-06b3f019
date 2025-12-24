@@ -43,6 +43,13 @@ const MODEL_PREFERENCES: Record<ModelPreference, { model: string; isCerebras: bo
 // Cerebras API base URL (OpenAI-compatible)
 const CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions';
 
+// Anthropic API for direct Claude calls (structured outputs require beta header)
+const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const ANTHROPIC_BETA_HEADER = 'structured-outputs-2025-11-13';
+
+// Max anyOf branches Anthropic structured outputs supports
+const ANTHROPIC_MAX_ANYOF_BRANCHES = 8;
+
 // ============================================
 // LATENCY CACHE FUNCTIONS
 // ============================================
@@ -117,22 +124,51 @@ async function fireLatencyProbes(
     const controller = new AbortController(); // To kill the request immediately
     
     try {
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openRouterKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': supabaseUrl,
-          'X-Title': 'Rose AI - Latency Probe'
-        },
-        body: JSON.stringify({
-          model,
-          messages: LATENCY_PROBE_MESSAGES,
-          max_tokens: LATENCY_PROBE_MAX_TOKENS,
-          stream: true
-        }),
-        signal: controller.signal  // Enable abort
-      });
+      let response: globalThis.Response;
+      
+      // Call Anthropic directly for Claude models (same as race)
+      if (isAnthropicModel(model)) {
+        const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+        if (!anthropicKey) {
+          console.error(`❌ Probe skipped for ${model}: no ANTHROPIC_API_KEY`);
+          return;
+        }
+        
+        const anthropicModel = getAnthropicModelName(model);
+        response = await fetch(ANTHROPIC_API_URL, {
+          method: 'POST',
+          headers: {
+            'x-api-key': anthropicKey,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: anthropicModel,
+            messages: [{ role: 'user', content: "Reply with just 'ok'" }],
+            max_tokens: LATENCY_PROBE_MAX_TOKENS,
+            stream: true
+          }),
+          signal: controller.signal
+        });
+      } else {
+        // OpenRouter for other models
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${openRouterKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': supabaseUrl,
+            'X-Title': 'Rose AI - Latency Probe'
+          },
+          body: JSON.stringify({
+            model,
+            messages: LATENCY_PROBE_MESSAGES,
+            max_tokens: LATENCY_PROBE_MAX_TOKENS,
+            stream: true
+          }),
+          signal: controller.signal  // Enable abort
+        });
+      }
       
       if (!response.ok) {
         console.error(`❌ Probe failed for ${model}: ${response.status}`);
@@ -165,8 +201,17 @@ async function fireLatencyProbes(
             if (!jsonStr) continue;
             
             const parsed = JSON.parse(jsonStr);
-            const delta = parsed.choices?.[0]?.delta || {};
-            const hasContent = delta.content || delta.reasoning;
+            
+            // Handle both OpenRouter and Anthropic streaming formats
+            let hasContent = false;
+            if (parsed.choices?.[0]?.delta) {
+              // OpenRouter format
+              const delta = parsed.choices[0].delta;
+              hasContent = delta.content || delta.reasoning;
+            } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+              // Anthropic format
+              hasContent = true;
+            }
             
             if (hasContent) {
               const ttftMs = Date.now() - startTime;
@@ -474,35 +519,86 @@ async function raceModels(
       timings[`${modelKey}_fire`] = Date.now() - raceInternalStart;
       console.log(`🚀 ${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
       
-      const body: any = {
-        model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-        seed,
-        tools,
-        tool_choice: toolChoice,
-        stream: true
-      };
+      let response: globalThis.Response;
       
-      if (responseFormat) {
-        body.response_format = responseFormat;
+      // Call Anthropic directly for Claude models (structured outputs require beta header)
+      if (isAnthropicModel(model)) {
+        const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+        if (!anthropicKey) {
+          console.error(`❌ ${model} requires ANTHROPIC_API_KEY`);
+          return null;
+        }
+        
+        const anthropicModel = getAnthropicModelName(model);
+        const { system, messages: anthropicMessages } = transformMessagesForAnthropic(messages);
+        
+        const anthropicBody: any = {
+          model: anthropicModel,
+          messages: anthropicMessages,
+          max_tokens: maxTokens || 4096,
+          stream: true
+        };
+        
+        if (system) {
+          anthropicBody.system = system;
+        }
+        if (temperature !== undefined) {
+          anthropicBody.temperature = temperature;
+        }
+        
+        // Transform response_format to Anthropic's output_format
+        if (responseFormat?.json_schema?.schema) {
+          const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
+          anthropicBody.output_format = {
+            type: 'json_schema',
+            schema: transformedSchema
+          };
+        }
+        
+        console.log(`🔮 Calling Anthropic directly for ${anthropicModel}`);
+        response = await fetch(ANTHROPIC_API_URL, {
+          method: 'POST',
+          headers: {
+            'x-api-key': anthropicKey,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': ANTHROPIC_BETA_HEADER,
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify(anthropicBody),
+          signal: controllers[index].signal
+        });
+      } else {
+        // Call OpenRouter for other models
+        const body: any = {
+          model,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+          seed,
+          tools,
+          tool_choice: toolChoice,
+          stream: true
+        };
+        
+        if (responseFormat) {
+          body.response_format = responseFormat;
+        }
+        if (reasoning) {
+          body.reasoning = reasoning;
+        }
+        
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${openRouterKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': supabaseUrl,
+            'X-Title': 'Rose AI - Trio Racing'
+          },
+          body: JSON.stringify(body),
+          signal: controllers[index].signal  // Enable abort
+        });
       }
-      if (reasoning) {
-        body.reasoning = reasoning;
-      }
-      
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openRouterKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': supabaseUrl,
-          'X-Title': 'Rose AI - Trio Racing'
-        },
-        body: JSON.stringify(body),
-        signal: controllers[index].signal  // Enable abort
-      });
       
       const headersTime = Date.now() - startTime;
       timings[`${modelKey}_headers`] = Date.now() - raceInternalStart;
@@ -550,9 +646,18 @@ async function raceModels(
               const jsonStr = line.slice(5).trim(); // Remove "data:" prefix
               if (jsonStr) {
                 const parsed = JSON.parse(jsonStr);
-                const delta = parsed.choices?.[0]?.delta || {};
-                // Only count as winner if we have actual content or reasoning
-                const hasContent = delta.content || delta.reasoning;
+                
+                // Handle both OpenRouter/OpenAI format and Anthropic format
+                let hasContent = false;
+                if (parsed.choices?.[0]?.delta) {
+                  // OpenRouter/OpenAI format
+                  const delta = parsed.choices[0].delta;
+                  hasContent = delta.content || delta.reasoning;
+                } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+                  // Anthropic streaming format
+                  hasContent = true;
+                }
+                
                 if (hasContent) {
                   const ttftMs = Date.now() - startTime;
                   timings[`${modelKey}_ttft`] = ttftMs;
@@ -685,6 +790,125 @@ function transformSchemaForCerebras(schema: any): any {
   }
 
   return transformed;
+}
+
+// ============================================
+// ANTHROPIC HELPERS
+// ============================================
+
+// Check if a model is an Anthropic Claude model
+function isAnthropicModel(model: string): boolean {
+  return model.toLowerCase().includes('anthropic/') || model.toLowerCase().includes('claude');
+}
+
+// Count tool types in a response_format schema
+// Anthropic limits anyOf branches to 8 (for tool unions)
+// Our schema has tool_calls.items.anyOf = [tool1, tool2, ...] OR uses $defs with anyOf $refs
+function countToolTypes(responseFormat: any): number {
+  if (!responseFormat?.json_schema?.schema) return 0;
+  
+  const schema = responseFormat.json_schema.schema;
+  
+  // Check tool_calls.items.anyOf directly
+  const toolCallsItems = schema.properties?.tool_calls?.items;
+  if (toolCallsItems?.anyOf) {
+    return toolCallsItems.anyOf.length;
+  }
+  
+  // Check $defs for tool definitions (our schema uses $defs)
+  if (schema.$defs) {
+    // Count definitions that look like tool schemas (have 'tool' property with const)
+    let toolCount = 0;
+    for (const def of Object.values(schema.$defs) as any[]) {
+      if (def.properties?.tool?.const) {
+        toolCount++;
+      }
+    }
+    if (toolCount > 0) return toolCount;
+  }
+  
+  return 0;
+}
+
+// Transform OpenAI messages format to Anthropic format
+// - System messages go to top-level 'system' param
+// - Remove trailing assistant messages (prefill not allowed with output_format)
+function transformMessagesForAnthropic(messages: any[]): { system: string; messages: any[] } {
+  const systemParts: string[] = [];
+  const anthropicMessages: any[] = [];
+  
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      systemParts.push(msg.content);
+    } else {
+      anthropicMessages.push(msg);
+    }
+  }
+  
+  // Remove trailing assistant messages (not allowed with output_format)
+  while (anthropicMessages.length > 0 && anthropicMessages[anthropicMessages.length - 1].role === 'assistant') {
+    anthropicMessages.pop();
+  }
+  
+  return {
+    system: systemParts.join('\n\n'),
+    messages: anthropicMessages
+  };
+}
+
+// Strip unsupported constraints from schema for Anthropic
+// Anthropic doesn't support: minimum, maximum, minLength, maxLength, etc.
+function transformSchemaForAnthropic(schema: any): any {
+  if (!schema || typeof schema !== 'object') return schema;
+  
+  const transformed = { ...schema };
+  
+  // Remove unsupported constraints
+  const unsupported = ['minimum', 'maximum', 'minLength', 'maxLength', 'multipleOf', 'minItems', 'maxItems'];
+  for (const key of unsupported) {
+    delete transformed[key];
+  }
+  
+  // Recurse into properties
+  if (transformed.properties) {
+    transformed.properties = { ...transformed.properties };
+    for (const key of Object.keys(transformed.properties)) {
+      transformed.properties[key] = transformSchemaForAnthropic(transformed.properties[key]);
+    }
+  }
+  
+  // Recurse into array items
+  if (transformed.items) {
+    transformed.items = transformSchemaForAnthropic(transformed.items);
+  }
+  
+  // Recurse into $defs
+  if (transformed.$defs) {
+    transformed.$defs = { ...transformed.$defs };
+    for (const key of Object.keys(transformed.$defs)) {
+      transformed.$defs[key] = transformSchemaForAnthropic(transformed.$defs[key]);
+    }
+  }
+  
+  // Recurse into anyOf/oneOf/allOf
+  for (const keyword of ['anyOf', 'oneOf', 'allOf']) {
+    if (transformed[keyword] && Array.isArray(transformed[keyword])) {
+      transformed[keyword] = transformed[keyword].map((item: any) => transformSchemaForAnthropic(item));
+    }
+  }
+  
+  return transformed;
+}
+
+// Map OpenRouter model names to Anthropic model names
+function getAnthropicModelName(openRouterModel: string): string {
+  const mapping: Record<string, string> = {
+    'anthropic/claude-haiku-4.5': 'claude-haiku-4-5',
+    'anthropic/claude-sonnet-4.5': 'claude-sonnet-4-5',
+    'anthropic/claude-sonnet-4': 'claude-sonnet-4-20250514',
+    'anthropic/claude-opus-4': 'claude-opus-4-20250514',
+  };
+  return mapping[openRouterModel] || openRouterModel.replace('anthropic/', '');
 }
 
 // Select a model from the pool (by preference, seed index, or random)
@@ -852,6 +1076,51 @@ async function handleStreaming(
             },
             body: JSON.stringify(cerebrasStreamBody)
           });
+        } else if (isAnthropicModel(actualModel)) {
+          // Call Anthropic API directly for Claude models (structured outputs require beta header)
+          const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+          if (!anthropicKey) {
+            throw new Error(`ANTHROPIC_API_KEY required for ${actualModel}`);
+          }
+          
+          const anthropicModel = getAnthropicModelName(actualModel);
+          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(messages);
+          
+          console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}`);
+          
+          const anthropicBody: any = {
+            model: anthropicModel,
+            messages: anthropicMessages,
+            max_tokens: maxTokens || 4096,
+            stream: true
+          };
+          
+          if (system) {
+            anthropicBody.system = system;
+          }
+          if (temperature !== undefined) {
+            anthropicBody.temperature = temperature;
+          }
+          
+          // Transform response_format to Anthropic's output_format
+          if (responseFormat?.json_schema?.schema) {
+            const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
+            anthropicBody.output_format = {
+              type: 'json_schema',
+              schema: transformedSchema
+            };
+          }
+          
+          response = await fetch(ANTHROPIC_API_URL, {
+            method: 'POST',
+            headers: {
+              'x-api-key': anthropicKey,
+              'anthropic-version': '2023-06-01',
+              'anthropic-beta': ANTHROPIC_BETA_HEADER,
+              'content-type': 'application/json'
+            },
+            body: JSON.stringify(anthropicBody)
+          });
         } else {
           // Call OpenRouter API for other Rose models
           const openRouterBody: any = {
@@ -889,7 +1158,7 @@ async function handleStreaming(
         }
 
         if (!response.ok) {
-          const provider = isCerebras ? 'Cerebras' : 'OpenRouter';
+          const provider = isCerebras ? 'Cerebras' : isAnthropicModel(actualModel) ? 'Anthropic' : 'OpenRouter';
           // Read error body for better debugging
           const errorText = await response.text();
           console.error(`${provider} streaming error:`, response.status, errorText);
@@ -926,15 +1195,42 @@ async function handleStreaming(
               
               try {
                 const parsed = JSON.parse(data);
-                // Include metadata for debugging
-                parsed.requested_model = requestedModel;
-                parsed.actual_model = actualModel;
-                parsed.pool_name = poolName;
-                parsed.pool_size = poolSize;
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
+                
+                // Transform Anthropic streaming events to OpenAI format
+                if (isAnthropicModel(actualModel)) {
+                  // Skip non-content events
+                  if (parsed.type !== 'content_block_delta') {
+                    continue;
+                  }
+                  
+                  // Transform to OpenAI format
+                  const openAIFormat = {
+                    choices: [{
+                      index: 0,
+                      delta: {
+                        content: parsed.delta?.text || ''
+                      }
+                    }],
+                    requested_model: requestedModel,
+                    actual_model: actualModel,
+                    pool_name: poolName,
+                    pool_size: poolSize
+                  };
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(openAIFormat)}\n\n`));
+                } else {
+                  // OpenRouter/Cerebras - pass through with metadata
+                  parsed.requested_model = requestedModel;
+                  parsed.actual_model = actualModel;
+                  parsed.pool_name = poolName;
+                  parsed.pool_size = poolSize;
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
+                }
               } catch (e) {
                 console.error('Error parsing streaming data:', e);
               }
+            } else if (line.startsWith('event: ')) {
+              // Anthropic uses separate event lines - skip them (data follows)
+              continue;
             }
           }
         }
@@ -1180,9 +1476,22 @@ serve(async (req) => {
         timings.probes_fired = 0;
       }
       
+      // Filter out Anthropic models if schema has 9+ tool types (Anthropic limit is 8 anyOf branches)
+      let effectivePool = pool;
+      if (response_format) {
+        const toolCount = countToolTypes(response_format);
+        if (toolCount >= ANTHROPIC_MAX_ANYOF_BRANCHES + 1) {
+          const anthropicModels = pool.filter(m => isAnthropicModel(m));
+          if (anthropicModels.length > 0) {
+            console.log(`⚠️ Schema has ${toolCount} tool types (limit: ${ANTHROPIC_MAX_ANYOF_BRANCHES}), excluding Anthropic models: ${anthropicModels.join(', ')}`);
+            effectivePool = pool.filter(m => !isAnthropicModel(m));
+          }
+        }
+      }
+      
       // Select racing trio with delays (using current cached values, even if stale)
       const trioSelectStart = Date.now();
-      const racingTrio = selectRacingTrio(pool, cachedLatencies);
+      const racingTrio = selectRacingTrio(effectivePool, cachedLatencies);
       timings.trio_select_ms = Date.now() - trioSelectStart;
       console.log(`⏱️ TIMING: trio_select=${timings.trio_select_ms}ms`);
       
