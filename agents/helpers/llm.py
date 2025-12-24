@@ -658,16 +658,16 @@ async def call_llm_structured_streaming(
                             # NOTE: For structured streaming, reasoning is logged but NOT added to accumulated_content
                             # because accumulated_content must be valid JSON for parsing at the end
                             reasoning_delta = delta.get("reasoning") or ""
-                            content_only = delta.get("content") or ""
+                            content = delta.get("content") or ""
                             fin = chunk_data.get("choices", [{}])[0].get("finish_reason") or ""
                             
                             # DEBUG: Log chunk content (reasoning + content)
-                            if reasoning_delta or content_only or fin:
-                                logger.info(f"🔍 C{chunk_count} r={reasoning_delta[:50] if reasoning_delta else ''} c={content_only[:100] if content_only else ''} fin={fin}")
+                            if reasoning_delta or content or fin:
+                                logger.info(f"🔍 C{chunk_count} r={reasoning_delta[:50] if reasoning_delta else ''} c={content[:100] if content else ''} fin={fin}")
                             
                             # Only accumulate content (JSON) - reasoning is for logging/debugging only
                             # The JSON response is what gets parsed into AgentAction
-                            content_delta = content_only
+                            content_delta = reasoning_delta + content
                             
                             if content_delta:
                                 accumulated_content += content_delta

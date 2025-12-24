@@ -20,7 +20,7 @@ const MODEL_POOLS: Record<string, string[]> = {
     'moonshotai/kimi-k2-0905',
     'openai/gpt-5.2',
     'google/gemini-2.5-flash',
-    'x-ai/grok-4-fast'
+    'anthropic/claude-haiku-4.5'
   ],
   'rose-1-ultra': [
     'openai/gpt-5.2',
@@ -114,6 +114,7 @@ async function fireLatencyProbes(
   
   const probePromises = models.map(async (model) => {
     const startTime = Date.now();
+    const controller = new AbortController(); // To kill the request immediately
     
     try {
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -129,7 +130,8 @@ async function fireLatencyProbes(
           messages: LATENCY_PROBE_MESSAGES,
           max_tokens: LATENCY_PROBE_MAX_TOKENS,
           stream: true
-        })
+        }),
+        signal: controller.signal  // Enable abort
       });
       
       if (!response.ok) {
@@ -137,7 +139,6 @@ async function fireLatencyProbes(
         return;
       }
       
-      // Wait for FIRST DATA line, not just headers (matches racing behavior)
       const reader = response.body?.getReader();
       if (!reader) {
         console.error(`❌ Probe no body for ${model}`);
@@ -147,30 +148,51 @@ async function fireLatencyProbes(
       const decoder = new TextDecoder();
       let buffer = '';
       
+      // Read chunks until we get first contentful token
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         
         buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
         
-        // Check for actual data line (not just ": OPENROUTER PROCESSING" comment)
-        if (buffer.includes('data:') && !buffer.includes('[DONE]')) {
-          const lines = buffer.split('\n');
-          for (const line of lines) {
-            if (line.startsWith('data:')) {
+        // Check each line for contentful data
+        for (const line of lines) {
+          if (!line.startsWith('data:') || line.includes('[DONE]')) continue;
+          
+          try {
+            const jsonStr = line.slice(5).trim();
+            if (!jsonStr) continue;
+            
+            const parsed = JSON.parse(jsonStr);
+            const delta = parsed.choices?.[0]?.delta || {};
+            const hasContent = delta.content || delta.reasoning;
+            
+            if (hasContent) {
               const ttftMs = Date.now() - startTime;
-              console.log(`🔬 Probe result: ${model} = ${ttftMs}ms (first data)`);
-              reader.cancel(); // Don't need the rest
-              await updateLatencyCache(supabase, model, pool, ttftMs);
+              console.log(`🔬 Probe result: ${model} = ${ttftMs}ms (first contentful token)`);
+              
+              // IMMEDIATELY kill the entire HTTP connection
+              controller.abort();
+              
+              // Fire-and-forget cache update
+              updateLatencyCache(supabase, model, pool, ttftMs).catch(() => {});
               return;
             }
+          } catch (e) {
+            // Skip unparseable lines
           }
         }
+        
+        // Keep only the last incomplete line in buffer
+        buffer = lines[lines.length - 1] || '';
       }
       
-      console.error(`❌ Probe no data for ${model}`);
+      console.error(`❌ Probe no contentful data for ${model}`);
       
     } catch (error) {
+      // Ignore abort errors (expected when we kill the request)
+      if (error instanceof DOMException && error.name === 'AbortError') return;
       console.error(`❌ Probe error for ${model}:`, error);
     }
   });
@@ -522,16 +544,38 @@ async function raceModels(
         const lines = buffer.split('\n');
         
         for (const line of lines) {
-          // Look for actual data line (not processing comments)
+          // Look for actual data line with CONTENTFUL tokens (not just heartbeats)
           if (line.startsWith('data:') && !line.includes('[DONE]')) {
-            const ttftMs = Date.now() - startTime;
-            timings[`${modelKey}_ttft`] = ttftMs;
-            timings[`${modelKey}_first_data`] = Date.now() - raceInternalStart;
-            console.log(`✅ ${model} FIRST DATA in ${ttftMs}ms at t=${timings[`${modelKey}_first_data`]}ms`);
-            
-            // Return the reader (not response) since we've already started reading
-            // Also return the buffer with data we've read so far
-            return { model, reader, ttftMs, index, firstData: buffer };
+            try {
+              const jsonStr = line.slice(5).trim(); // Remove "data:" prefix
+              if (jsonStr) {
+                const parsed = JSON.parse(jsonStr);
+                const delta = parsed.choices?.[0]?.delta || {};
+                // Only count as winner if we have actual content or reasoning
+                const hasContent = delta.content || delta.reasoning;
+                if (hasContent) {
+                  const ttftMs = Date.now() - startTime;
+                  timings[`${modelKey}_ttft`] = ttftMs;
+                  timings[`${modelKey}_first_data`] = Date.now() - raceInternalStart;
+                  console.log(`✅ ${model} FIRST CONTENTFUL TOKEN in ${ttftMs}ms at t=${timings[`${modelKey}_first_data`]}ms`);
+                  
+                  // IMMEDIATELY abort all other racing models to save API costs
+                  // Don't wait for promise resolution - kill them NOW
+                  controllers.forEach((controller, i) => {
+                    if (i !== index) {
+                      console.log(`🛑 Immediately aborting loser: ${racingModels[i].model}`);
+                      controller.abort();
+                    }
+                  });
+                  
+                  // Return the reader (not response) since we've already started reading
+                  // Also return the buffer with data we've read so far
+                  return { model, reader, ttftMs, index, firstData: buffer };
+                }
+              }
+            } catch (e) {
+              // Skip unparseable lines
+            }
           }
         }
         
@@ -565,13 +609,10 @@ async function raceModels(
           winnerIndex = result.index;
           console.log(`🏆 Winner: ${result.model} (TTFT: ${result.ttftMs}ms)`);
           
-          // ABORT ALL OTHER REQUESTS to save API costs!
-          // Also increment losers' cached latency (fire-and-forget, doesn't block response)
+          // Losers already aborted inline when winner found contentful token
+          // Just update loser latencies (fire-and-forget)
           controllers.forEach((controller, i) => {
             if (i !== winnerIndex) {
-              console.log(`🛑 Aborting loser: ${racingModels[i].model}`);
-              controller.abort();
-              
               // Increment loser's latency by 10ms (reduces sandbagging, gives them better chance next race)
               incrementLoserLatency(supabase, racingModels[i].model, pool)
                 .catch(e => console.error(`⚠️ Failed to increment loser latency:`, e));
