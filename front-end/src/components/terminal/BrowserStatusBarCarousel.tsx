@@ -2,20 +2,9 @@ import { memo, useState, useCallback, useEffect } from 'react';
 import { ChevronUp, ChevronDown } from 'lucide-react';
 import BrowserStatusBar from './BrowserStatusBar';
 
-interface BrowserAction {
-  id: string;
-  title: string;
-  message: string;
-  status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
-  timestamp: string;
-  action_type?: string;
-  auxiliary?: { current_step?: string; total_steps?: string; };
-}
-
 interface BrowserSession {
   taskId: string;
   browserUrl: string;
-  actions: BrowserAction[];
 }
 
 interface BrowserStatusBarCarouselProps {
@@ -53,7 +42,6 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
         <BrowserStatusBar
           taskId={browser.taskId}
           browserUrl={browser.browserUrl}
-          actions={browser.actions}
         />
       </div>
     );
@@ -113,7 +101,6 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
               <BrowserStatusBar
                 taskId={browser.taskId}
                 browserUrl={browser.browserUrl}
-                actions={browser.actions}
                 forceMinimized={!isActive}
               />
             </div>

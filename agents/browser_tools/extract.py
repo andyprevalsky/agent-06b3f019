@@ -81,16 +81,14 @@ async def extract_tool(
         )
         
         # For Python Stagehand, we'll pass the instruction and let it handle extraction
-        # The schema conversion is complex, so we'll use a simpler approach
-        extract_options = {
-            "instruction": instruction
-        }
+        # Pass as kwargs (Stagehand expects string, ExtractOptions, or kwargs - not dict)
+        extract_kwargs = {"instruction": instruction}
         
         if execution_model:
-            extract_options["modelName"] = execution_model
+            extract_kwargs["model_name"] = execution_model  # snake_case for Python SDK
         
         # Call stagehand.page.extract()
-        result = await stagehand.page.extract(extract_options)
+        result = await stagehand.page.extract(**extract_kwargs)
         
         return {
             "success": True,

@@ -1,119 +1,78 @@
-"""Act tool - Perform an action on the page (click, type)."""
+"""Act tool - Perform an action on the page (click, type).
+
+This tool wraps Stagehand's act() method which internally:
+1. Calls observe() with the proper prompt and supported methods
+2. Finds the matching element
+3. Executes the Playwright action
+
+IMPORTANT: We call stagehand.page.act(action_string) directly instead of manually
+calling observe() then act(observe_result). The reason is that Stagehand's act()
+uses its own internal prompt builder (build_act_observe_prompt) that includes the
+correct list of supported methods from method_handler_map. If we call observe()
+ourselves with a different list of methods, the LLM may return method='not-supported'
+because it can't find a matching method.
+"""
 
 from typing import Any, Dict
-
-
-# Supported Playwright actions (from TypeScript implementation)
-SUPPORTED_PLAYWRIGHT_ACTIONS = [
-    "click", "fill", "select_option", "hover", "check", "uncheck",
-    "focus", "clear", "press", "type", "scroll_into_view"
-]
-
-
-def build_act_observe_prompt(action: str, supported_actions: list) -> str:
-    """Build the prompt for observe when acting."""
-    return f"{action}. Supported actions: {', '.join(supported_actions)}"
 
 
 async def act_tool(stagehand: Any, args: Dict[str, Any], logger: Any, execution_model: str = None) -> Dict[str, Any]:
     """
     Perform an action on the page (click, type).
     
-    Internally calls observe() to find the element, then act() to execute.
+    Calls stagehand.page.act(action) directly, which handles observe internally.
     
     Args:
         stagehand: Stagehand instance
         args: Dictionary with 'action' key
         logger: Logger instance
-        execution_model: Optional model to use for observe
+        execution_model: Optional model to use for the action (currently not supported by act string mode)
         
     Returns:
         Result dictionary with success status and action details
     """
     action = args.get("action", "")
     
+    if not action:
+        return {
+            "success": False,
+            "error": "No action provided. Please specify what action to perform.",
+            "message": "No action provided. Please specify what action to perform."
+        }
+    
     try:
         logger.info(f"Agent calling tool: act", category="agent", auxiliary={
             "arguments": {"value": action, "type": "string"}
         })
         
-        # Build prompt for observe
-        built_prompt = build_act_observe_prompt(action, SUPPORTED_PLAYWRIGHT_ACTIONS)
+        # Call Stagehand's act() directly with the action string.
+        # Stagehand will internally:
+        # 1. Build the proper observe prompt with correct supported methods
+        # 2. Call observe() to find the element
+        # 3. Execute the Playwright action
+        result = await stagehand.page.act(action)
         
-        # Call observe to find the element
-        observe_options = {
-            "instruction": built_prompt
-        }
-        if execution_model:
-            observe_options["modelName"] = execution_model
-            
-        observe_results = await stagehand.page.observe(observe_options)
-        
-        if not observe_results or len(observe_results) == 0:
-            return {
-                "success": False,
-                "error": "No observable actions found for the given instruction",
-                "isIframe": False
-            }
-        
-        observe_result = observe_results[0]
-        
-        # Check if it's an iframe action
-        is_iframe_action = observe_result.description == "an iframe"
-        
-        if is_iframe_action:
-            # Handle iframe case
-            iframe_observe_options = {
-                "instruction": built_prompt,
-                "iframes": True
-            }
-            if execution_model:
-                iframe_observe_options["modelName"] = execution_model
-                
-            iframe_observe_results = await stagehand.page.observe(iframe_observe_options)
-            
-            if not iframe_observe_results or len(iframe_observe_results) == 0:
-                return {
-                    "success": False,
-                    "error": "No observable actions found within iframe context",
-                    "isIframe": True
-                }
-            
-            iframe_observe_result = iframe_observe_results[0]
-            fallback = await stagehand.page.act(iframe_observe_result)
-            
-            return {
-                "success": fallback.success,
-                "action": fallback.action,
-                "isIframe": True,
-                "playwrightArguments": {
-                    "description": iframe_observe_result.description,
-                    "method": iframe_observe_result.method,
-                    "arguments": iframe_observe_result.arguments,
-                    "selector": iframe_observe_result.selector
-                }
-            }
-        
-        # Execute the action
-        result = await stagehand.page.act(observe_result)
-        
-        playwright_arguments = {
-            "description": observe_result.description,
-            "method": observe_result.method,
-            "arguments": observe_result.arguments,
-            "selector": observe_result.selector
-        }
-        
-        return {
+        response = {
             "success": result.success,
             "action": result.action,
-            "isIframe": False,
-            "playwrightArguments": playwright_arguments
+            "isIframe": False
         }
         
+        # Include error message if action failed - no message for success (title is sufficient)
+        if not result.success:
+            error_msg = getattr(result, 'message', None) or getattr(result, 'error', None)
+            if not error_msg:
+                error_msg = f"Action failed: {action}. The element may not exist, may not be interactable, or the action may not be supported."
+            response["error"] = error_msg
+            response["message"] = error_msg
+        
+        return response
+        
     except Exception as e:
+        error_str = str(e)
         return {
             "success": False,
-            "error": str(e)
+            "error": error_str,
+            "message": error_str
         }
 

@@ -31,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.deep_research import deep_research
     from tools.wait_seconds import wait_seconds
     from tools.send_message_to_user import send_message_to_user
+    from tools.enable_write_permissions import enable_write_permissions
     from tools.request_user_approval import request_user_approval_direct
     from tools.knowledge_base import query_blueprints, save_blueprint
     from tools.web_search import web_search
@@ -65,6 +66,7 @@ EVENT_DRIVEN_TOOLS = {
     "deep_research": deep_research,
     "wait_seconds": wait_seconds,
     "send_message_to_user": send_message_to_user,
+    "enable_write_permissions": enable_write_permissions,
     "query_blueprints": query_blueprints,
     "save_blueprint": save_blueprint,
     "web_search": web_search,
@@ -128,6 +130,12 @@ SYSTEM_TOOLS = [
         "name": "send_message_to_user",
         "description": "Communicate directly with the user from the PLAN phase. Use is_question=true when you must block for their clarification/approval, and is_question=false to send FYIs (like the plan you intend to execute) without waiting for a reply.",
         "read_only": True  # Available during research to ask clarifying questions
+    },
+    {
+        "id": "system-enable-write-permissions",
+        "name": "enable_write_permissions",
+        "description": "Request write permissions before performing a hard write to an internet database. MUST be called before: (1) Transferring value (clicking pay buttons), (2) Publishing content (submitting posts), (3) Transmitting messages (sending emails/SMS). WARNING: Proceeding without permission will result in termination. Permission is SINGLE-USE for the immediate next action only. Ensure state is fully prepared before calling (all fields filled, page ready).",
+        "read_only": True  # Available during plan phase for permission requests
     },
     {
         "id": "system-find-all",

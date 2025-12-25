@@ -1,77 +1,24 @@
-import { memo, useState, useRef, useCallback, useEffect, useMemo, type MouseEvent } from 'react';
+import { memo, useState, useCallback, useMemo, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronUp, ChevronDown, Maximize2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getToolIcon } from '@/lib/toolIcons';
 import { getStoredSession } from '@/lib/supabase';
+import { MessageList } from './MessageList';
+import { useAgentContext } from '@/contexts/AgentContext';
 
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
-interface BrowserAction {
-  id: string;
-  title: string;
-  message: string;
-  status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
-  timestamp: string;
-  action_type?: string;
-  auxiliary?: { current_step?: string; total_steps?: string; };
-}
-
 interface BrowserStatusBarProps {
   taskId: string;
   browserUrl: string;
-  actions: BrowserAction[];
   forceMinimized?: boolean;
 }
 
-function getActionIcon(actionType?: string) {
-  switch (actionType) {
-    case 'task_started': return getToolIcon('target');
-    case 'progress': return getToolIcon('pin');
-    case 'navigation': return getToolIcon('compass');
-    case 'click': return getToolIcon('mouse');
-    case 'type': return getToolIcon('keyboard');
-    case 'keypress': return getToolIcon('keyboard');
-    case 'scroll': return getToolIcon('scroll');
-    case 'scroll_down': return getToolIcon('arrow-down');
-    case 'scroll_up': return getToolIcon('arrow-up');
-    case 'thinking': return getToolIcon('lightbulb');
-    case 'screenshot': return getToolIcon('camera');
-    case 'system': return getToolIcon('settings');
-    case 'task_complete': return getToolIcon('check');
-    case 'action': return getToolIcon('settings');
-    default: return getToolIcon('default');
-  }
-}
-
-function ActionItem({ action }: { action: BrowserAction }) {
-  const Icon = getActionIcon(action.action_type);
-  const hasMessage = action.message && action.message.trim().length > 0;
+function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: BrowserStatusBarProps) {
+  const { messages } = useAgentContext();
   
-  return (
-    <div className="space-y-0.5 py-1.5">
-      <div className="flex items-center gap-2">
-        <Icon className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-        <span className={cn(
-          "text-sm",
-          action.status === 'ERROR' && "text-red-600 dark:text-red-400",
-          action.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
-          action.status === 'FINISHED' && "text-muted-foreground"
-        )}>
-          {action.title}
-        </span>
-      </div>
-      {hasMessage && (
-        <div className="pl-6 text-xs text-muted-foreground/70 border-l-2 border-muted ml-2">
-          <p className="pl-2">{action.message}</p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function BrowserStatusBarImpl({ taskId, browserUrl, actions, forceMinimized = false }: BrowserStatusBarProps) {
   // UI state only - no derived state from props
   const [isExpandedState, setIsExpanded] = useState(false);
   const [isFullscreenState, setIsFullscreen] = useState(false);
@@ -81,30 +28,21 @@ function BrowserStatusBarImpl({ taskId, browserUrl, actions, forceMinimized = fa
   const isFullscreen = forceMinimized ? false : isFullscreenState;
   const [isResuming, setIsResuming] = useState(false);
   
-  // Refs for DOM elements
-  const actionsContainerRef = useRef<HTMLDivElement>(null);
-  const fullscreenActionsRef = useRef<HTMLDivElement>(null);
-  const visibleActions = useMemo(
-    () => actions.filter((a) => a.action_type !== 'progress'),
-    [actions]
+  // Get browser messages from context filtered by taskId
+  const browserMessages = useMemo(
+    () => messages.filter((m) => m.metadata?.task_id === taskId),
+    [messages, taskId]
   );
-
-  // Auto-scroll actions list to bottom when new actions appear
-  useEffect(() => {
-    if (isExpanded && actionsContainerRef.current) {
-      actionsContainerRef.current.scrollTop = actionsContainerRef.current.scrollHeight;
-    }
-    if (isFullscreen && fullscreenActionsRef.current) {
-      fullscreenActionsRef.current.scrollTop = fullscreenActionsRef.current.scrollHeight;
-    }
-  }, [visibleActions.length, isExpanded, isFullscreen]);
-
-  // Derived values computed during render (no useEffect needed)
-  const lastAction = visibleActions[visibleActions.length - 1];
-  const LastActionIcon = lastAction ? getActionIcon(lastAction.action_type) : null;
+  
+  // Derived values from context messages
+  const lastMessage = browserMessages[browserMessages.length - 1];
+  const lastActionType = lastMessage?.metadata?.action_type;
+  const lastActionTitle = lastMessage?.metadata?.title || "Browser session active";
+  // Use getToolIcon directly - it has all action_type mappings
+  const LastActionIcon = lastActionType ? getToolIcon(lastActionType) : getToolIcon('default');
   const isDisconnected = useMemo(
-    () => actions.some((a) => a.action_type === 'session_paused'),
-    [actions]
+    () => browserMessages.some((m) => m.metadata?.action_type === 'session_paused'),
+    [browserMessages]
   );
 
   // Event handlers
@@ -145,27 +83,20 @@ function BrowserStatusBarImpl({ taskId, browserUrl, actions, forceMinimized = fa
   if (isFullscreen) {
     return createPortal(
       <div className="fixed inset-0 z-50 bg-background flex flex-row">
-        {/* Actions panel on left */}
+        {/* Actions panel on left - uses MessageList */}
         <div className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col"
           style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}>
           <div className="p-3 border-b border-border">
             <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Task progress</h4>
           </div>
-          <div ref={fullscreenActionsRef} className="flex-1 overflow-y-auto">
-            <div className="p-3 space-y-0.5">
-              {visibleActions.length === 0 ? (
-                <p className="text-sm text-muted-foreground italic">No actions yet...</p>
-              ) : (
-                visibleActions.map(action => <ActionItem key={action.id} action={action} />)
-              )}
-              {!isDisconnected && (
-                <div className="flex items-center gap-1 text-muted-foreground py-1.5">
-                  <span className="animate-pulse">.</span>
-                  <span className="animate-pulse" style={{ animationDelay: '0.2s' }}>.</span>
-                  <span className="animate-pulse" style={{ animationDelay: '0.4s' }}>.</span>
-                </div>
-              )}
-            </div>
+          <div className="flex-1 overflow-y-auto p-3">
+            <MessageList
+              subAgentId={taskId}
+              containerClassName="flex flex-col gap-1.5"
+              showStatusBanners={false}
+              showThinkingIndicator={!isDisconnected}
+              compact
+            />
           </div>
         </div>
         
@@ -228,7 +159,7 @@ function BrowserStatusBarImpl({ taskId, browserUrl, actions, forceMinimized = fa
           <div className="flex-1 flex items-center gap-2 min-w-0 ml-2">
             {LastActionIcon && <LastActionIcon className="h-4 w-4 flex-shrink-0 text-muted-foreground" />}
             <span className="text-sm truncate animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
-              {lastAction?.title || "Browser session active"}
+              {lastActionTitle}
             </span>
           </div>
           <div className="p-1.5 rounded hover:bg-muted transition-colors flex-shrink-0 mr-1">
@@ -280,19 +211,14 @@ function BrowserStatusBarImpl({ taskId, browserUrl, actions, forceMinimized = fa
         </div>
         <div className="p-3">
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Task progress</h4>
-          <div ref={actionsContainerRef} className="max-h-48 overflow-y-auto">
-            {visibleActions.length === 0 ? (
-              <p className="text-sm text-muted-foreground italic">No actions yet...</p>
-            ) : (
-              visibleActions.map(action => <ActionItem key={action.id} action={action} />)
-            )}
-            {!isDisconnected && (
-              <div className="flex items-center gap-1 text-muted-foreground py-1.5">
-                <span className="animate-pulse">.</span>
-                <span className="animate-pulse" style={{ animationDelay: '0.2s' }}>.</span>
-                <span className="animate-pulse" style={{ animationDelay: '0.4s' }}>.</span>
-              </div>
-            )}
+          <div className="max-h-48 overflow-y-auto">
+            <MessageList
+              subAgentId={taskId}
+              containerClassName="flex flex-col gap-1.5"
+              showStatusBanners={false}
+              showThinkingIndicator={!isDisconnected}
+              compact
+            />
           </div>
         </div>
       </div>

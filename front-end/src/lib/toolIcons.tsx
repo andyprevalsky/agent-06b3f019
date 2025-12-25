@@ -28,6 +28,11 @@ import {
   Mail,
   Phone,
   Code,
+  Eye,
+  FileText,
+  Pause,
+  XCircle,
+  Cog,
   type LucideIcon
 } from 'lucide-react';
 
@@ -99,6 +104,19 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'keypress': Keyboard,
   'action': Settings,
   'default': Info,
+  
+  // Browser action_type mappings (from spawn_browser_agent)
+  'browser': Globe,  // For browser init messages
+  'system': Cog,
+  'task_started': Target,
+  'thinking': Lightbulb,
+  'session_paused': Pause,
+  'task_complete': CheckCircle,
+  'observation': Eye,
+  'extraction': FileText,
+  'navigation': Navigation,
+  'screenshot': Camera,
+  'error': XCircle,
 };
 
 /**

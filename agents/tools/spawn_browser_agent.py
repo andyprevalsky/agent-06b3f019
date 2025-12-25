@@ -15,10 +15,12 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
-from browser_tools import get_browser_tool_definitions, get_system_prompt, execute_browser_tool
+from browser_tools import get_system_prompt, execute_browser_tool
 from browser_tools.message_processing import transform_tool_result, compress_messages
+from browser_tools.schemas import create_browser_agent_action_model
 from helpers.model_pricing import get_model_pricing_with_fallback
-from helpers.llm import call_rose_streaming
+from helpers.llm import call_llm_structured_streaming
+from helpers.messages import stream_assistant_chunk
 
 with workflow.unsafe.imports_passed_through():
     from config import load_config
@@ -505,14 +507,18 @@ async def spawn_browser_agent_activity(
                 browser_url = session_data["debug_url"]
             
             # Browser ready message (now we have task_id!)
+            # This is the INIT message - it appears in main chat and triggers BrowserViewPanel rendering
+            # Uses same tool_call_id as the IN_PROGRESS message so they collapse on frontend
             await save_browser_action_message(
                 agent_id=agent_id,
                 title="Browser Ready",
                 task_id=task_id,
-                message="Browser session active",
+                message="",  # Empty - no useful content
                 status=MessageStatus.FINISHED,
                 browser_url=browser_url,
-                action_type="system"
+                action_type="browser",  # Maps to Globe icon
+                tool_call_id=tool_call_id,  # Same ID as IN_PROGRESS for deduplication
+                is_init_message=True  # No subAgentId, appears in main chat
             )
             
             # Task started message
@@ -575,15 +581,25 @@ async def spawn_browser_agent_activity(
                 callback_set=custom_logger_callback is not None
             )
         
-        # Configure Stagehand with Rose for internal observe/extract calls
+        # Configure Stagehand with Rose for internal observe/act/extract calls
+        # use_api=False makes LLM calls locally via litellm instead of through Stagehand server
+        # litellm uses openrouter/ provider which calls /chat/completions endpoint
+        # We deployed a /chat function that proxies to /completions (Rose API)
         stagehand_config = StagehandConfig(
             env="BROWSERBASE",
             api_key=config.browserbase.api_key,
             project_id=config.browserbase.project_id,
             browserbase_session_id=session_id,
-            model_name="rose-1-ultra",  # Rose for internal Stagehand calls
-            model_api_key=config.rose.api_key,
-            model_base_url=config.rose.api_url.replace("/completions", ""),  # Rose endpoint
+            model_name="openrouter/rose-1-ultra",  # Rose pool via openrouter/ provider
+            model_api_key=config.rose.api_key,  # Rose API key
+            model_client_options={
+                "baseURL": config.rose.api_url.replace("/completions", ""),  # Base URL (litellm adds /chat/completions)
+                "extra_headers": {
+                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                    "x-api-key": config.rose.api_key,
+                },
+            },
+            use_api=False,  # Bypass Stagehand server - use local litellm → Rose
             verbose=2,  # Debug level for detailed action logging
             logger=custom_logger_callback,
             use_rich_logging=False,  # We handle formatting ourselves
@@ -688,7 +704,7 @@ For ALL purchases, you MUST use send_message_to_user to get explicit approval be
             else:
                 logger.warning("Failed to decrypt payment info - payment features disabled for this session")
 
-        # === BUILD SYSTEM PROMPT AND TOOLS ===
+        # === BUILD SYSTEM PROMPT AND ACTION MODEL ===
         custom_instructions = """Your browser is in full screen mode. There is no search bar, navigation bar, or shortcut to control it. You can use browser actions to complete tasks.
 
 Browser cookies have been injected - assume the user is logged in until proven otherwise.""" + shipping_section + autopay_section + """
@@ -697,35 +713,13 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
 
         current_url = stagehand.page.url if stagehand.page else ""
         system_prompt = get_system_prompt(goal, current_url, custom_instructions)
-        browser_tools = get_browser_tool_definitions(current_url)
         
-        # Add send_message_to_user custom tool
-        custom_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "send_message_to_user",
-                    "description": "Request the user to complete an action that the agent cannot do (login, payment, CAPTCHA, etc.). Always used for blocking clarifications—host will wait for the user's response.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "message": {
-                                "type": "string",
-                                "description": "Explain what the user needs to do and why you cannot do it"
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "Category: login, payment, captcha, verification, blocked, other"
-                            }
-                        },
-                        "required": ["message", "reason"],
-                        "additionalProperties": False
-                    }
-                }
-            }
-        ]
+        # Create structured output model for browser agent (all browser tools + send_message_to_user)
+        BrowserAgentAction = create_browser_agent_action_model()
         
-        all_tools = browser_tools + custom_tools
+        # Generate a unique stream_id for this browser agent session
+        import uuid as uuid_mod
+        stream_id = str(uuid_mod.uuid4())
         
         # === INITIALIZE CONVERSATION ===
         messages = [
@@ -787,32 +781,71 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                 activity.heartbeat(f"Executing step {step + 1}/{max_steps}")
                 logger.info(f"🔄 Step {step + 1}/{max_steps}")
 
-                # ===== CALL ROSE API WITH RETRY LOGIC =====
-                response_data = None
+                # ===== CALL ROSE API WITH STRUCTURED STREAMING =====
+                result = None
+                usage = None
+                
+                # Setup streaming callback to send thinking to frontend via Realtime
+                sequence_counter = [0]
+                last_streamed_text = [""]
+                
+                async def on_chunk(text_so_far: str, token_count: int):
+                    """Stream thinking text to frontend via Realtime with subAgentId."""
+                    try:
+                        delta = text_so_far[len(last_streamed_text[0]):]
+                        if delta:
+                            await stream_assistant_chunk(
+                                agent_id=agent_id,
+                                stream_id=stream_id,
+                                delta=delta,
+                                done=False,
+                                sequence=sequence_counter[0],
+                                sub_agent_id=task_id  # Route to browser panel's MessageList
+                            )
+                            sequence_counter[0] += 1
+                            last_streamed_text[0] = text_so_far
+                    except Exception as e:
+                        logger.warning(f"Streaming chunk failed (non-fatal): {str(e)}")
+                
                 for retry_attempt in range(max_retries + 1):
                     try:
                         if retry_attempt > 0:
                             logger.info(f"🔄 Retry attempt {retry_attempt}/{max_retries}")
                         
-                        logger.info("🌹 Calling Rose API via unified streaming function...")
+                        logger.info("🌹 Calling Rose API via structured streaming...")
                         
                         # Compress old screenshots and aria trees to save tokens
                         compressed_messages = compress_messages(messages)
                         
-                        # Call unified Rose streaming function
-                        response_data = await call_rose_streaming(
+                        # Call structured streaming (same as main agent!)
+                        result, usage, _ = await call_llm_structured_streaming(
                             messages=compressed_messages,
-                            model="rose-1-ultra",
+                            model="rose-labs/rose-1-ultra",
                             temperature=1.0,
                             max_tokens=4096,
-                            tools=all_tools,
-                            tool_choice="auto",
+                            response_model=BrowserAgentAction,
+                            on_chunk=on_chunk,
                             reasoning_max_tokens=256,
-                            heartbeat_fn=activity.heartbeat,
+                            agent_id=agent_id,  # For cancellation checking
                         )
+                        
+                        # Send final done chunk
+                        try:
+                            final_delta = ""
+                            if hasattr(result, 'response') and result.response:
+                                final_delta = result.response[len(last_streamed_text[0]):]
+                            await stream_assistant_chunk(
+                                agent_id=agent_id,
+                                stream_id=stream_id,
+                                delta=final_delta,
+                                done=True,
+                                sequence=sequence_counter[0],
+                                sub_agent_id=task_id
+                            )
+                        except Exception as e:
+                            logger.warning(f"Final stream chunk failed (non-fatal): {str(e)}")
 
                         # Track token usage
-                        usage = response_data.get("usage", {})
                         total_input_tokens += usage.get("prompt_tokens", 0)
                         total_output_tokens += usage.get("completion_tokens", 0)
                         logger.info(f"📊 Tokens: {total_input_tokens} in, {total_output_tokens} out")
@@ -821,7 +854,6 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                         break
                         
                     except httpx.HTTPStatusError as api_error:
-                        # Try to get response body for better error details
                         error_body = ""
                         try:
                             error_body = api_error.response.text
@@ -854,56 +886,41 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                 if close_reasoning:
                     break
 
-                # ===== EXTRACT RESPONSE DATA =====
-                # Response from call_rose_streaming is already flat (content, tool_calls, reasoning_details)
-                content = response_data.get("content", "") or ""
-                tool_calls = response_data.get("tool_calls") or []
+                # ===== EXTRACT RESPONSE DATA FROM STRUCTURED OUTPUT =====
+                # result is a Pydantic model with .response and .tool_calls
+                content = result.response if result else ""
+                tool_calls = result.tool_calls if result else []
                 
-                # Extract reasoning_details for preservation in subsequent API calls
-                reasoning_details = response_data.get("reasoning_details")
-                if reasoning_details:
-                    logger.debug(f"📝 Extracted reasoning_details from Rose response", count=len(reasoning_details))
-                
-                # Sanitize and log tool_call IDs
+                # Log tool calls
                 if tool_calls:
-                    import re
-                    import uuid
                     for tc in tool_calls:
-                        original_id = tc.get("id", "")
-                        tool_name = tc.get("function", {}).get("name", "")
-                        
-                        # Sanitize tool_call ID to match Anthropic's pattern: ^[a-zA-Z0-9_-]+$
-                        if original_id:
-                            sanitized_id = re.sub(r'[^a-zA-Z0-9_-]', '_', original_id)
-                            # Ensure it's not empty after sanitization
-                            if not sanitized_id:
-                                sanitized_id = f"tool_{uuid.uuid4().hex[:16]}"
-                        else:
-                            sanitized_id = f"tool_{uuid.uuid4().hex[:16]}"
-                        
-                        # Update the ID if it was changed
-                        if sanitized_id != original_id:
-                            logger.warning(
-                                f"⚠️ Sanitized tool_call_id",
-                                tool_name=tool_name,
-                                original_id=original_id,
-                                sanitized_id=sanitized_id
-                            )
-                            tc["id"] = sanitized_id
-                        else:
-                            logger.info(
-                                f"📋 Received tool_call from LLM",
-                                tool_name=tool_name,
-                                tool_call_id=sanitized_id
-                            )
+                        tool_name = tc.tool if hasattr(tc, 'tool') else str(type(tc).__name__)
+                        logger.info(f"📋 Tool call from structured output: {tool_name}")
                 
                 # Add assistant message to conversation history
+                # For structured outputs, we store the response + tool_calls in a compatible format
                 assistant_message = {"role": "assistant", "content": content}
+                
+                # Pre-generate tool_call IDs so assistant message and tool responses match
+                tool_call_ids = []
                 if tool_calls:
-                    assistant_message["tool_calls"] = tool_calls
-                # Include reasoning_details for preservation in subsequent API calls
-                if reasoning_details:
-                    assistant_message["reasoning_details"] = reasoning_details
+                    import uuid
+                    openai_tool_calls = []
+                    for tc in tool_calls:
+                        tc_dict = tc.model_dump() if hasattr(tc, 'model_dump') else tc.dict()
+                        tool_name = tc_dict.pop("tool", "unknown")
+                        # Generate ID once and store for later use in tool responses
+                        tc_id = f"tool_{uuid.uuid4().hex[:16]}"
+                        tool_call_ids.append(tc_id)
+                        openai_tool_calls.append({
+                            "id": tc_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": json.dumps(tc_dict)
+                            }
+                        })
+                    assistant_message["tool_calls"] = openai_tool_calls
                 messages.append(assistant_message)
                 
                 # ===== LOG REASONING (if any content) =====
@@ -928,38 +945,18 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                     continue  # No tools - loop continues
                 
                 tool_responses = []
-                for tool_call in tool_calls:
-                    # Safely extract tool call data
-                    function_data = tool_call.get("function", {})
-                    tool_name = function_data.get("name", "")
-                    tool_id = tool_call.get("id", "")
+                for idx, tool_call in enumerate(tool_calls):
+                    # Tool calls are now Pydantic models - extract tool name and args
+                    tc_dict = tool_call.model_dump() if hasattr(tool_call, 'model_dump') else tool_call.dict()
+                    tool_name = tc_dict.pop("tool", "")
+                    tool_args = tc_dict  # Remaining fields are the arguments
+                    
+                    # Use the pre-generated tool_id from assistant message (IDs must match!)
+                    tool_id = tool_call_ids[idx] if idx < len(tool_call_ids) else f"tool_{uuid.uuid4().hex[:16]}"
                     
                     if not tool_name:
-                        logger.warning(f"⚠️ Skipping tool call with missing name", tool_call=tool_call)
+                        logger.warning(f"⚠️ Skipping tool call with missing name", tool_call=tc_dict)
                         continue
-                    
-                    # Safely get arguments
-                    arguments_str = function_data.get("arguments", "{}")
-                    try:
-                        tool_args = json.loads(arguments_str) if arguments_str else {}
-                    except json.JSONDecodeError as decode_error:
-                        logger.error(
-                            f"❌ Failed to parse tool arguments JSON for {tool_name}",
-                            tool_id=tool_id,
-                            arguments_str=arguments_str[:200] if arguments_str else "",
-                            error=str(decode_error)
-                        )
-                        tool_args = {}
-                    except (TypeError, ValueError) as parse_error:
-                        logger.error(
-                            f"❌ Invalid arguments format for {tool_name}",
-                            tool_id=tool_id,
-                            arguments_type=type(arguments_str).__name__,
-                            error=str(parse_error)
-                        )
-                        tool_args = {}
-                    
-                    logger.info(f"🔧 Executing tool: {tool_name}", args=tool_args)
                     
                     # === CUSTOM TOOL: send_message_to_user ===
                     if tool_name == "send_message_to_user":
@@ -1093,41 +1090,64 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                         }
                         action_type = action_type_map.get(tool_name, "action")
                         
-                        # Build action title for logging
+                        # Build action titles for IN_PROGRESS (present tense) and FINISHED (past tense)
                         if tool_name == "act":
-                            action_title = f"Action: {tool_args.get('action', '')[:50]}"
+                            action_arg = tool_args.get('action', '')
+                            if not action_arg:
+                                logger.warning(f"⚠️ act tool called with empty action!", tool_args=tool_args)
+                            action_title_progress = f"Action: {action_arg[:50]}"
+                            action_title_done = f"Action: {action_arg[:50]}"
                         elif tool_name == "goto":
-                            action_title = f"Navigate → {tool_args.get('url', '')[:50]}"
+                            url_arg = tool_args.get('url', '')
+                            if not url_arg:
+                                logger.warning(f"⚠️ goto tool called with empty URL!", tool_args=tool_args)
+                            action_title_progress = f"Navigating → {url_arg[:50] if url_arg else '(empty URL)'}"
+                            action_title_done = f"Navigated → {url_arg[:50] if url_arg else '(empty URL)'}"
                         elif tool_name == "fillForm":
                             field_count = len(tool_args.get('fields', []))
-                            action_title = f"Fill Form ({field_count} fields)"
+                            action_title_progress = f"Filling Form ({field_count} fields)"
+                            action_title_done = f"Filled Form ({field_count} fields)"
                         elif tool_name == "scroll":
                             direction = tool_args.get('direction', 'down')
                             pixels = tool_args.get('pixels', 0)
-                            action_title = f"Scroll {direction} {pixels}px"
+                            action_title_progress = f"Scrolling {direction} {pixels}px"
+                            action_title_done = f"Scrolled {direction} {pixels}px"
                         elif tool_name == "ariaTree":
-                            action_title = "Reading Page Content"
+                            action_title_progress = "Reading Page Content"
+                            action_title_done = "Read Page Content"
                         elif tool_name == "screenshot":
-                            action_title = "Taking Screenshot"
+                            action_title_progress = "Taking Screenshot"
+                            action_title_done = "Took Screenshot"
                         elif tool_name == "extract":
-                            action_title = f"Extracting: {tool_args.get('instruction', '')[:30]}"
+                            instruction = tool_args.get('instruction', '')[:30]
+                            action_title_progress = f"Extracting: {instruction}"
+                            action_title_done = f"Extracted: {instruction}"
                         elif tool_name == "navback":
-                            action_title = "Navigate Back"
+                            action_title_progress = "Navigating Back"
+                            action_title_done = "Navigated Back"
                         elif tool_name == "wait":
                             time_ms = tool_args.get('timeMs', 0)
-                            action_title = f"Wait ({time_ms}ms)"
+                            action_title_progress = f"Waiting ({time_ms}ms)"
+                            action_title_done = f"Waited ({time_ms}ms)"
                         else:
-                            action_title = tool_name
+                            action_title_progress = tool_name
+                            action_title_done = tool_name
+                        
+                        # Generate a stable tool_call_id for this action
+                        # Same ID used for IN_PROGRESS + FINISHED so they collapse on frontend
+                        import uuid as uuid_module
+                        action_tool_call_id = str(uuid_module.uuid4())
                         
                         # Log action start (IN_PROGRESS)
                         await save_browser_action_message(
                             agent_id=agent_id,
-                            title=action_title,
+                            title=action_title_progress,
                             message="",
                             status=MessageStatus.IN_PROGRESS,
                             task_id=task_id,
                             browser_url=browser_url,
-                            action_type=action_type
+                            action_type=action_type,
+                            tool_call_id=action_tool_call_id
                         )
                         
                         # Execute the tool
@@ -1140,17 +1160,29 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                                 execution_model="rose-1-ultra"
                             )
                             
-                            logger.info(f"✅ Tool {tool_name} executed", success=result.get("success", True))
+                            logger.info(
+                                f"✅ Tool {tool_name} executed", 
+                                success=result.get("success", True),
+                                error=result.get("error") if not result.get("success", True) else None
+                            )
                             
                             # Update to FINISHED after completion
+                            if result.get("success", True):
+                                finish_message = result.get("message", "")
+                                finish_status = MessageStatus.FINISHED
+                            else:
+                                finish_message = result.get("error") or result.get("message") or "Action failed"
+                                finish_status = MessageStatus.ERROR
+                            
                             await save_browser_action_message(
                                 agent_id=agent_id,
-                                title=action_title,
-                                message=result.get("message", "") or "Completed successfully",
-                                status=MessageStatus.FINISHED,
+                                title=action_title_done,
+                                message=finish_message,
+                                status=finish_status,
                                 task_id=task_id,
                                 browser_url=browser_url,
-                                action_type=action_type
+                                action_type=action_type,
+                                tool_call_id=action_tool_call_id  # Same ID for deduplication
                             )
                             
                             # Track URL changes for navigation tools
@@ -1173,15 +1205,16 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                         except Exception as tool_error:
                             logger.error(f"❌ Tool {tool_name} failed", error=str(tool_error))
                             
-                            # Log error to browser panel
+                            # Log error to browser panel (same ID to collapse with IN_PROGRESS)
                             await save_browser_action_message(
                                 agent_id=agent_id,
-                                title=action_title,
+                                title=action_title_done,
                                 message=str(tool_error),
                                 status=MessageStatus.ERROR,
                                 task_id=task_id,
                                 browser_url=browser_url,
-                                action_type="error"
+                                action_type="error",
+                                tool_call_id=action_tool_call_id  # Same ID for deduplication
                             )
                             
                             tool_responses.append({
@@ -1444,6 +1477,8 @@ async def save_browser_action_message(
     browser_url: str = "",  # Current debug URL (may change on resume)
     action_type: str = "default",
     auxiliary: dict = None,
+    tool_call_id: str = None,  # Pass same ID for IN_PROGRESS + FINISHED to enable deduplication
+    is_init_message: bool = False,  # If True, don't add subAgentId so it appears in main chat
 ):
     """
     Save browser sub-action message directly to DB for real-time display.
@@ -1458,14 +1493,19 @@ async def save_browser_action_message(
         action_type: Type of action for frontend icon rendering
             - task_started, progress, navigation, click, type, thinking, screenshot
         auxiliary: Extra data (e.g., step counts for progress bar)
+        tool_call_id: Optional ID for deduplication. If provided, IN_PROGRESS and FINISHED
+                      messages with the same ID will collapse on the frontend.
+        is_init_message: If True, this is the init message that appears in main chat
+                        and triggers BrowserViewPanel rendering. Subsequent messages
+                        have subAgentId and appear in the panel's MessageList.
     """
     import uuid
     
     try:
         config = load_config()
         
-        # Each browser action gets a unique ID (important for frontend deduplication)
-        unique_tool_call_id = str(uuid.uuid4())
+        # Use provided ID or generate new one (for backward compatibility)
+        unique_tool_call_id = tool_call_id or str(uuid.uuid4())
         
         metadata = {
             "toolCallId": unique_tool_call_id,
@@ -1477,6 +1517,10 @@ async def save_browser_action_message(
             "action_type": action_type,  # Frontend uses this for icon selection
             "auxiliary": auxiliary or {}  # Extra data like step counts
         }
+        
+        # Only add subAgentId for non-init messages (so they route to browser panel's MessageList)
+        if not is_init_message:
+            metadata["subAgentId"] = task_id
         
         # Set error flag for frontend icon display
         if status == MessageStatus.ERROR:

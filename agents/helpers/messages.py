@@ -30,7 +30,8 @@ async def stream_assistant_chunk(
     stream_id: str,
     delta: str,
     done: bool = False,
-    sequence: int = 0
+    sequence: int = 0,
+    sub_agent_id: str = None
 ) -> None:
     """
     Send a streaming delta DIRECTLY to Supabase Realtime (bypasses backend).
@@ -44,6 +45,7 @@ async def stream_assistant_chunk(
         delta: The NEW text chunk (not accumulated - just the delta)
         done: Whether this is the final chunk
         sequence: Sequence number for ordering
+        sub_agent_id: Optional sub-agent ID (e.g., browser task_id) for routing to specific MessageList
     """
     try:
         from config import load_config
@@ -54,17 +56,23 @@ async def stream_assistant_chunk(
         # https://supabase.com/docs/guides/realtime/broadcast#send-messages-using-rest-api
         broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
         
+        record = {
+            "stream_id": stream_id,
+            "delta": delta,  # Send delta, not accumulated text
+            "done": done,
+            "sequence": sequence,
+        }
+        
+        # Include sub_agent_id if provided (for routing to browser panel's MessageList)
+        if sub_agent_id:
+            record["subAgentId"] = sub_agent_id
+        
         payload = {
             "messages": [{
                 "topic": f"agent:{agent_id}",
                 "event": "ASSISTANT_STREAM",
                 "payload": {
-                    "record": {
-                        "stream_id": stream_id,
-                        "delta": delta,  # Send delta, not accumulated text
-                        "done": done,
-                        "sequence": sequence,
-                    }
+                    "record": record
                 },
                 "private": True  # Required for broadcasting to private channels
             }]

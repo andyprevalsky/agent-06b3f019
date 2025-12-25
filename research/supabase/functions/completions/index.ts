@@ -51,6 +51,108 @@ const ANTHROPIC_BETA_HEADER = 'structured-outputs-2025-11-13';
 const ANTHROPIC_MAX_ANYOF_BRANCHES = 8;
 
 // ============================================
+// VISION-CAPABLE MODELS
+// ============================================
+// Models that can process image_url content in messages
+const VISION_CAPABLE_MODELS = new Set([
+  // OpenAI
+  'openai/gpt-4o',
+  'openai/gpt-4o-mini',
+  'openai/gpt-5.2',
+  // Google
+  'google/gemini-2.5-flash',
+  'google/gemini-2.5-pro',
+  'google/gemini-3-pro-preview',
+  // Anthropic
+  'anthropic/claude-sonnet-4',
+  'anthropic/claude-sonnet-4.5',
+  'anthropic/claude-haiku-4.5',
+  'anthropic/claude-opus-4',
+  // X.AI
+  'x-ai/grok-4.1-fast',
+  'x-ai/grok-4.1',
+]);
+
+// Check if a model supports vision (image inputs)
+function isVisionCapable(model: string): boolean {
+  return VISION_CAPABLE_MODELS.has(model);
+}
+
+// Detect if messages contain __screenshot_base64__ markers in tool messages
+function hasScreenshotMarkers(messages: any[]): boolean {
+  for (const msg of messages) {
+    if (msg.role === 'tool' && typeof msg.content === 'string') {
+      if (msg.content.includes('__screenshot_base64__')) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Transform messages for vision-capable models
+// Converts __screenshot_base64__ markers in tool messages to proper multimodal format
+// NOTE: OpenAI/OpenRouter don't support image_url in tool messages, so we inject
+// a user message with the image right after the tool message
+function transformMessagesForVision(messages: any[]): any[] {
+  const transformed: any[] = [];
+  
+  for (const msg of messages) {
+    if (msg.role === 'tool' && typeof msg.content === 'string' && msg.content.includes('__screenshot_base64__')) {
+      try {
+        const parsed = JSON.parse(msg.content);
+        const base64Data = parsed.__screenshot_base64__;
+        
+        if (base64Data) {
+          // Remove base64 from JSON, add flag
+          const toolContent = { ...parsed };
+          delete toolContent.__screenshot_base64__;
+          toolContent.screenshot_attached = true;
+          
+          // Keep tool message with cleaned content
+          transformed.push({
+            ...msg,
+            content: JSON.stringify(toolContent)
+          });
+          
+          // Inject user message with the image right after
+          transformed.push({
+            role: 'user',
+            content: [
+              { type: 'text', text: '[Screenshot from browser]' },
+              { 
+                type: 'image_url', 
+                image_url: { 
+                  url: `data:image/png;base64,${base64Data}` 
+                } 
+              }
+            ]
+          });
+        } else {
+          transformed.push(msg);
+        }
+      } catch (e) {
+        // If JSON parsing fails, keep original message
+        transformed.push(msg);
+      }
+    } else {
+      transformed.push(msg);
+    }
+  }
+  
+  return transformed;
+}
+
+// Get messages appropriate for a model based on vision capability
+function getMessagesForModel(messages: any[], model: string): any[] {
+  if (isVisionCapable(model) && hasScreenshotMarkers(messages)) {
+    return transformMessagesForVision(messages);
+  }
+  // Non-vision models get the raw messages (base64 stays as string in tool content)
+  return messages;
+}
+
+// ============================================
 // LATENCY CACHE FUNCTIONS
 // ============================================
 
@@ -519,6 +621,9 @@ async function raceModels(
       timings[`${modelKey}_fire`] = Date.now() - raceInternalStart;
       console.log(`🚀 ${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
       
+      // Get model-specific messages (transforms screenshots for vision models)
+      const modelMessages = getMessagesForModel(messages, model);
+      
       let response: globalThis.Response;
       
       // Call Anthropic directly for Claude models (structured outputs require beta header)
@@ -530,7 +635,7 @@ async function raceModels(
         }
         
         const anthropicModel = getAnthropicModelName(model);
-        const { system, messages: anthropicMessages } = transformMessagesForAnthropic(messages);
+        const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
         
         const anthropicBody: any = {
           model: anthropicModel,
@@ -571,7 +676,7 @@ async function raceModels(
         // Call OpenRouter for other models
         const body: any = {
           model,
-          messages,
+          messages: modelMessages,  // Use model-specific messages (vision transform)
           temperature,
           max_tokens: maxTokens,
           seed,
@@ -1023,6 +1128,9 @@ async function handleStreaming(
   poolName: string,     // Added: for debugging
   poolSize: number      // Added: for debugging
 ) {
+  // Get model-specific messages (transforms screenshots for vision models)
+  const modelMessages = getMessagesForModel(messages, actualModel);
+  
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -1037,7 +1145,7 @@ async function handleStreaming(
           // Build Cerebras streaming request - supports tools with gpt-oss-120b
           const cerebrasStreamBody: any = {
             model: actualModel,
-            messages,
+            messages: modelMessages,  // Use transformed messages
             temperature,
             max_tokens: maxTokens,
             stream: true
@@ -1084,7 +1192,7 @@ async function handleStreaming(
           }
           
           const anthropicModel = getAnthropicModelName(actualModel);
-          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(messages);
+          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
           
           console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}`);
           
@@ -1125,7 +1233,7 @@ async function handleStreaming(
           // Call OpenRouter API for other Rose models
           const openRouterBody: any = {
             model: actualModel,
-            messages,
+            messages: modelMessages,  // Use transformed messages
             temperature,
             max_tokens: maxTokens,
             seed,
@@ -1367,7 +1475,58 @@ serve(async (req) => {
           1
         );
       }
-      // Non-streaming direct passthrough handled below
+      // Non-streaming direct passthrough - handle here instead of falling through
+      // Transform messages for vision models
+      const modelMessages = getMessagesForModel(messages, model);
+      
+      const requestBody: any = {
+        model,
+        messages: modelMessages,
+        temperature,
+        max_tokens: maxTokens,
+        seed,
+        tools,
+        tool_choice,
+      };
+      
+      if (response_format) {
+        requestBody.response_format = response_format;
+      }
+      
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': supabaseUrl,
+          'X-Title': 'Rose Direct Passthrough'
+        },
+        body: JSON.stringify(requestBody)
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('OpenRouter API error:', response.status, errorText);
+        return new Response(JSON.stringify({ 
+          error: 'OpenRouter API error',
+          status: response.status,
+          details: errorText 
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: response.status,
+        });
+      }
+      
+      const finalResponse = await response.json();
+      finalResponse.requested_model = model;
+      finalResponse.actual_model = model;
+      finalResponse.pool_name = 'direct';
+      finalResponse.pool_size = 1;
+      
+      return new Response(JSON.stringify(finalResponse), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 200,
+      });
     }
 
     // Track selected model for non-streaming fallback
@@ -1779,9 +1938,12 @@ serve(async (req) => {
 
     if (cotSteps === 1) {
       // Direct answer (no CoT)
+      // Transform messages for vision models (handles __screenshot_base64__)
+      const modelMessages = getMessagesForModel(messages, actualModel);
+      
       const requestBody: any = {
         model: actualModel,
-        messages,
+        messages: modelMessages,
         temperature,
         max_tokens: maxTokens,
         seed,
@@ -1833,7 +1995,9 @@ serve(async (req) => {
 
     } else {
       // Multi-step CoT (tool calls not supported with CoT currently)
-      const thinkingMessages = [...messages];
+      // Transform messages for vision models (handles __screenshot_base64__)
+      const modelMessages = getMessagesForModel(messages, actualModel);
+      const thinkingMessages = [...modelMessages];
       const intermediateResponses = [];
       const provider = isCerebras ? 'Cerebras' : 'OpenRouter';
 

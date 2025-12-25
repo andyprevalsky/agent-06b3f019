@@ -10,6 +10,7 @@ export interface StreamChunkPayload {
   delta: string;  // The new text chunk (delta, not accumulated)
   done: boolean;
   sequence: number;
+  subAgentId?: string;  // For routing to browser panel's MessageList
 }
 
 /**
@@ -101,6 +102,7 @@ export async function subscribeToAgent(
           delta: record.delta,
           done: record.done,
           sequence: record.sequence,
+          subAgentId: record.subAgentId,  // For routing to browser panel's MessageList
         });
       }
     })

@@ -22,6 +22,8 @@ interface MessageBubbleProps {
   agentId?: string;
   /** Callback to send a message */
   onSendMessage?: (message: string) => void;
+  /** Compact mode - removes left spacers for tighter layouts */
+  compact?: boolean;
 }
 
 interface ToolMessageData {
@@ -37,6 +39,8 @@ interface ToolMessageData {
   timeout?: number; // Duration in seconds (e.g., 60)
   startTime?: string; // ISO timestamp when timer started
   simulated?: boolean; // True if response was auto-generated
+  // Browser action type (for icon selection)
+  actionType?: string;
 }
 
 // Extract emoji from start of text and return {emoji, text}
@@ -134,8 +138,10 @@ const ToolMessage = memo(function ToolMessage({
     return () => clearInterval(interval);
   }, [data.status, data.timeout, data.startTime]);
   
-  // Get tool icon based on toolName
-  const ToolIcon = data.toolName ? getToolIcon(data.toolName) : Wrench;
+  // Get tool icon - prefer actionType for browser actions, fall back to toolName
+  const ToolIcon = data.actionType 
+    ? getToolIcon(data.actionType) 
+    : (data.toolName ? getToolIcon(data.toolName) : Wrench);
   const isThought = data.toolName === 'thought';
   const [forceExpanded, setForceExpanded] = useState(
     isThought && data.status === 'IN_PROGRESS'
@@ -502,7 +508,7 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -513,8 +519,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // Check if this is a send_message_to_user message (render as raw text, not tool card)
   const isUserAttentionMessage = isTool && message.metadata?.isUserAttentionMessage;
 
-  // Check if this is a sub-agent tool message (ones that link to an agent_id)
-  const isSubAgentTool = !!message.metadata?.subAgentId;
+  // Check if this is a sub-agent tool message (actual spawn_sub_agents calls, not browser actions)
+  const isSubAgentTool = message.metadata?.toolName === 'spawn_sub_agents';
 
   // Check if this is a set_plan tool message (render as PlanChip)
   const isSetPlanTool = isTool && message.metadata?.toolName === 'set_plan';
@@ -560,6 +566,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       timeout: message.metadata.timeout || attentionMeta.timeout,
       startTime: message.metadata.startTime || attentionMeta.startTime,
       simulated: message.metadata.simulated || attentionMeta.simulated,
+      // Browser action type for icon selection
+      actionType: message.metadata.action_type,
     } as ToolMessageData;
   }, [isAssistant, shouldType, isTool, message, isStreaming]);
 
@@ -668,8 +676,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   if (toolData) {
     return (
-      <div className="flex gap-3 animate-in fade-in duration-300">
-        <div className="flex-shrink-0 w-8" />
+      <div className={cn("flex animate-in fade-in duration-300", !compact && "gap-3")}>
+        {!compact && <div className="flex-shrink-0 w-8" />}
         
         <div className="flex-1">
           <ToolMessage 

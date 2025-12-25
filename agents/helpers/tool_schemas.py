@@ -67,6 +67,35 @@ class SendMessageToUserTool(BaseModel):
     )
 
 
+class EnableWritePermissionsTool(BaseModel):
+    """Request write permissions before performing a hard write to an internet database.
+    
+    You MUST call this tool before:
+    1. Transferring value (e.g., clicking a pay button, confirming a purchase)
+    2. Publishing content (e.g., submitting a social media post, creating a listing)
+    3. Transmitting messages (e.g., sending an email, SMS, or chat message)
+    
+    ⚠️ WARNING: If you perform any of these actions WITHOUT first calling this tool,
+    you will be terminated. We don't want to terminate you!
+    
+    Permission is SINGLE-USE: only the immediate next action is authorized.
+    Before calling this tool, ensure the state is fully prepared (all fields filled,
+    page ready) so no other action is needed between permission and execution.
+    
+    This tool is resource-intensive - use it only when truly needed.
+    """
+
+    tool: Literal["enable_write_permissions"]
+    reason: str = Field(
+        description="Why write permission is needed. Be specific about what will be written/sent/paid."
+    )
+    action_description: str = Field(
+        description="Exact description of the action that will be performed immediately after permission is granted. "
+        "E.g., 'Click the Pay Now button to complete $42.99 purchase on Amazon', "
+        "'Submit tweet: Hello world!', 'Send email to john@example.com with subject: Meeting tomorrow'"
+    )
+
+
 class SendSmsTool(BaseModel):
     """Tool call for sending SMS to a person."""
 
@@ -543,6 +572,7 @@ TOOL_MODELS = {
     "web_search": WebSearchTool,
     "deep_research": DeepResearchTool,
     "send_message_to_user": SendMessageToUserTool,
+    "enable_write_permissions": EnableWritePermissionsTool,
     "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
     "search_user_network_for_people": SearchUserNetworkTool,
@@ -653,6 +683,7 @@ __all__ = [
     "WebSearchTool",
     "DeepResearchTool",
     "SendMessageToUserTool",
+    "EnableWritePermissionsTool",
     "SendSmsTool",
     "SendSmsAsUserTool",
     "SendEmailTool",

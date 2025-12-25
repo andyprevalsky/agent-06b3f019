@@ -8,7 +8,7 @@ import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bo
 import AppSidebar from '@/components/terminal/AppSidebar';
 import { supabase, signOut, initializeRealtime, clearStoredSession } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
-import { subscribeToAgent, unsubscribe, StreamChunkPayload, PlanStreamPayload, AttentionStreamPayload } from '@/lib/realtime';
+// Realtime subscription now handled by AgentContext
 import {
   getAllAgents,
   getAgent,
@@ -44,10 +44,12 @@ import PhoneAuthModal from '@/components/auth/PhoneAuthModal';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData, Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
-import { RealtimeChannel } from '@supabase/supabase-js';
+// RealtimeChannel now in AgentContext
 import { colorPalette, frameSequence, getTileColorsForFrame } from '@/lib/tileAnimation';
 import SmallTileAnimationCanvas from '@/components/terminal/SmallTileAnimationCanvas';
 import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
+import { AgentProvider, useAgentContext } from '@/contexts/AgentContext';
+import { MessageList } from '@/components/terminal/MessageList';
 
 const BrowserStatusBarCarousel = lazy(() => import('@/components/terminal/BrowserStatusBarCarousel'));
 
@@ -165,101 +167,8 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
   return deduplicatedMessages;
 }
 
-// Group browser messages into panels with their sub-actions
-function groupBrowserMessages(messages: Message[]): { messages: Message[]; browserPanels: Map<string, { initMessage: Message; actions: Message[]; currentBrowserUrl: string }> } {
-  const browserPanels = new Map<string, { initMessage: Message; actions: Message[]; currentBrowserUrl: string }>();
-  const nonBrowserMessages: Message[] = [];
-  
-  // Debug: Count browser messages (have task_id)
-  const browserMessages = messages.filter(m => m.metadata?.task_id);
-  const nonScreenshotBrowser = browserMessages.filter(m => !m.metadata?.title?.includes('Screenshot'));
-  if (nonScreenshotBrowser.length > 0) {
-    console.log('🟢 [Group] Grouping browser messages:', {
-      totalMessages: messages.length,
-      browserMessages: browserMessages.length,
-      nonScreenshot: nonScreenshotBrowser.length,
-      titles: nonScreenshotBrowser.map(m => m.metadata?.title),
-      messageIds: nonScreenshotBrowser.map(m => m.message_id.slice(0, 12)),
-      uniqueTaskIds: [...new Set(browserMessages.map(m => m.metadata?.task_id))].length
-    });
-  }
-
-  messages.forEach((message) => {
-    const taskId = message.metadata?.task_id;
-    const browserUrl = message.metadata?.browser_url || '';
-
-    // Only treat as browser message if task_id is present
-    if (taskId) {
-      // This is a browser-related message (has task_id metadata)
-      const existing = browserPanels.get(taskId);
-      
-      if (existing) {
-        // Already have a panel for this task - add as action (create new array to trigger React re-render)
-        const newActions = [...existing.actions, message];
-        // Update currentBrowserUrl if this message has a new one (for resume)
-        const latestBrowserUrl = browserUrl || existing.currentBrowserUrl;
-        browserPanels.set(taskId, {
-          initMessage: existing.initMessage,
-          actions: newActions,
-          currentBrowserUrl: latestBrowserUrl
-        });
-        console.log('🔵 [Group] Added action to existing panel:', {
-          taskId: taskId.slice(0, 20),
-          title: message.metadata?.title,
-          messageId: message.message_id.slice(0, 12),
-          totalActions: newActions.length,
-          actionTitles: newActions.map(a => a.metadata?.title)
-        });
-      } else {
-        // First message with this task_id - create panel
-        browserPanels.set(taskId, {
-          initMessage: message,
-          actions: [],
-          currentBrowserUrl: browserUrl
-        });
-        console.log('🟢 [Group] Created new panel:', {
-          taskId: taskId.slice(0, 20),
-          title: message.metadata?.title,
-          messageId: message.message_id.slice(0, 12)
-        });
-      }
-    } else {
-      // Regular message (not browser-related)
-      nonBrowserMessages.push(message);
-    }
-  });
-
-  // Combine browser panels into the message stream
-  // Insert each panel at the position of its init message
-  const combinedMessages: Message[] = [];
-  const processedTaskIds = new Set<string>();
-
-  messages.forEach((message) => {
-    const taskId = message.metadata?.task_id;
-
-    // If this is the first browser message with this task_id
-    if (taskId && !processedTaskIds.has(taskId)) {
-      processedTaskIds.add(taskId);
-      // Add a special marker message for the browser panel
-      combinedMessages.push({
-        ...message,
-        metadata: {
-          ...message.metadata,
-          _browserPanel: true, // Special flag to render BrowserViewPanel
-          _taskId: taskId
-        }
-      });
-    } else if (!taskId) {
-      // Regular non-browser message
-      combinedMessages.push(message);
-    }
-    // Skip subsequent browser action messages (they're rendered inside the panel)
-  });
-
-  return { messages: combinedMessages, browserPanels };
-}
-
 // Collapse consecutive "Starting up a browser" messages into a single message with count
+// NOTE: This function is kept for potential future use but is currently unused
 function collapseBrowserStartupMessages(messages: Message[]): Message[] {
   const result: Message[] = [];
   let browserStartupGroup: Message[] = [];
@@ -445,7 +354,8 @@ function mapShadowSlider(slider: number): number {
   return 35 + ((slider - 40) / 60) * 65;
 }
 
-export default function Terminal() {
+// Inner component that uses the AgentContext
+function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefObject<(() => void) | null> }) {
   const navigate = useNavigate();
   const { toast } = useToast();
   
@@ -454,6 +364,21 @@ export default function Terminal() {
   
   // User is only considered "logged in" for Terminal features when fully signed in
   const user = isFullySignedIn ? authUser : null;
+  
+  // Get context values - agent state comes from context
+  const {
+    agent: agentDetail,
+    setAgent: setAgentDetail,
+    selectedAgentId,
+    setSelectedAgentId: setSelectedAgentIdContext,
+    messages,
+    setMessages,
+    streamingBubbles: contextStreamingBubbles,
+    streamingPlan: contextStreamingPlan,
+    streamingAttention: contextStreamingAttention,
+    isLoadingAgent,
+    forceResubscribe: forceResubscribeContext,
+  } = useAgentContext();
 
   // View state - which pane to show
   const [currentView, setCurrentView] = useState<'agents' | 'integrations' | 'settings' | 'usage' | 'network'>('agents');
@@ -471,14 +396,11 @@ export default function Terminal() {
   const [inviteModalPosition, setInviteModalPosition] = useState({ top: 0, right: 0 });
   const clientSource = useMemo(() => getClientSource(), []);
   
-  // Selected agent state
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [agentDetail, setAgentDetail] = useState<AgentDetail | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isLoadingAgent, setIsLoadingAgent] = useState(false);
-  
   // Pause state
   const [isPausing, setIsPausing] = useState(false);
+  
+  // Browser fullscreen state
+  const [isAnyBrowserFullscreen, setIsAnyBrowserFullscreen] = useState(false);
   
   // Message input state
   const [messageInput, setMessageInput] = useState(
@@ -492,12 +414,8 @@ export default function Terminal() {
   // Models and tools from cached context
   const { models, modelsLoading } = useAppData();
   
-  // Refs
+  // Refs (realtime refs removed - now handled by AgentContext)
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const channelRef = useRef<RealtimeChannel | null>(null);
-  const reconnectAttemptRef = useRef<number>(0);
-  const reconnectTimeoutRef = useRef<number | null>(null);
-  const isReconnectingRef = useRef<boolean>(false);
   const loginButtonRef = useRef<HTMLButtonElement>(null);
   const queryInputRef = useRef<HTMLDivElement>(null);
   const giftButtonRef = useRef<HTMLButtonElement>(null);
@@ -505,42 +423,22 @@ export default function Terminal() {
   const autoSubmitInFlightRef = useRef<boolean>(false);
   const messageInputRef = useRef<string>('');
   
-  // Message buffer queue - messages wait here before being displayed
-  const [messageBuffer, setMessageBuffer] = useState<Message[]>([]);
-  const [isAnimating, setIsAnimating] = useState(false);
-  const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
+  // Buffer state is now in MessageList, streaming state is in AgentContext
+  // These refs are kept for scroll behavior
   const isInitialLoadRef = useRef<boolean>(false);
-  const [forceResubscribe, setForceResubscribe] = useState<number>(0);
   
-  // Streaming state - tracks in-progress streaming bubbles
-  // Map: stream_id -> { text: string, sequence: number, done: boolean, timeoutId?: number }
-  const [streamingBubbles, setStreamingBubbles] = useState<Map<string, {
-    text: string;
-    sequence: number;
-    done: boolean;
-    timeoutId?: number;
-  }>>(new Map());
-  const STREAM_TIMEOUT_MS = 15000; // 15 seconds timeout fallback
-  
-  // Track text that was already shown via streaming - don't re-animate on INSERT
-  const streamedTextsRef = useRef<Set<string>>(new Set());
-  
-  // Streaming plan state - ephemeral (not persisted) plan chip shown during LLM streaming
-  // Cleared when the real set_plan FINISHED message arrives via DB INSERT
-  const [streamingPlan, setStreamingPlan] = useState<{
-    stream_id: string;
-    tool_call_id: string;
-    title: string;
-  } | null>(null);
-  
-  // Streaming attention message state - ephemeral attention card shown during LLM streaming
-  // Cleared when the real send_message_to_user TOOL message arrives via DB INSERT
-  const [streamingAttention, setStreamingAttention] = useState<{
-    stream_id: string;
-    tool_call_id: string;
-    message: string;
-    is_question: boolean;
-  } | null>(null);
+  // Use streaming state from context
+  const streamingBubbles = contextStreamingBubbles;
+  const streamingPlan = contextStreamingPlan;
+  const streamingAttention = contextStreamingAttention;
+
+  // Sync selectedModel when agent detail changes (loaded from context)
+  useEffect(() => {
+    if (agentDetail?.model) {
+      setSelectedModel(agentDetail.model);
+      isInitialLoadRef.current = true;
+    }
+  }, [agentDetail?.model]);
 
   // Opening messages reveal animation
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
@@ -871,280 +769,7 @@ export default function Terminal() {
     };
   }, [user]);
 
-  // Subscribe to realtime updates when agent is selected
-  useEffect(() => {
-    // Cleanup function - always defined, always returned to React
-    const cleanup = () => {
-      console.log('🧹 useEffect cleanup running');
-      isReconnectingRef.current = false;
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
-      if (channelRef.current) {
-        unsubscribe(channelRef.current);
-        channelRef.current = null;
-      }
-      // Clear streaming bubbles and their timeouts when cleaning up
-      setStreamingBubbles(prev => {
-        for (const [_, bubble] of prev) {
-          if (bubble.timeoutId) {
-            window.clearTimeout(bubble.timeoutId);
-          }
-        }
-        return new Map();
-      });
-      // Clear ephemeral streaming states
-      setStreamingPlan(null);
-      setStreamingAttention(null);
-    };
-
-    // Early return but STILL return cleanup function
-    if (!selectedAgentId || !user) {
-      cleanup(); // Clean up any existing connection when going to null
-      return cleanup; // Return cleanup for React to call on unmount
-    }
-
-    // Prevent concurrent reconnection attempts
-    if (isReconnectingRef.current) {
-      console.log('⏳ Reconnection already in progress, skipping...');
-      return cleanup;
-    }
-
-    isReconnectingRef.current = true;
-
-    // Clean up previous channel before setting up new one
-    if (channelRef.current) {
-      console.log('🧹 Unsubscribing from previous channel');
-      channelRef.current.unsubscribe();
-      channelRef.current = null;
-    }
-
-    // Clear any pending reconnection timeout
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-
-    // Helper function to schedule reconnection with exponential backoff
-    const scheduleReconnect = () => {
-      // Don't reconnect if we've switched agents or logged out
-      if (!selectedAgentId || !user) return;
-
-      // Clear any existing timeout
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-
-      // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-      const attempt = reconnectAttemptRef.current;
-      const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
-      
-      reconnectAttemptRef.current += 1;
-
-      reconnectTimeoutRef.current = window.setTimeout(() => {
-        // Trigger re-subscription by updating the force counter
-        setForceResubscribe(prev => prev + 1);
-      }, delay);
-    };
-
-    // Async setup for realtime with auth
-    const setupRealtime = async () => {
-      try {
-        // Subscribe to agent channel using clean subscription pattern
-        const channel = await subscribeToAgent(selectedAgentId, {
-          onInsert: (payload) => {
-            // Log raw payload for debugging
-            console.log(`🔔 RAW INSERT PAYLOAD:`, JSON.stringify(payload, null, 2));
-            
-            // Handle message inserts - data is in payload.record
-            const data = payload.payload?.record;
-            if (!data) {
-              console.warn(`⚠️ INSERT payload missing record:`, payload);
-              return;
-            }
-            
-            const message: Message = {
-              message_id: data.id,
-              timestamp: data.timestamp,
-              text: data.text,
-              role: data.role,
-              metadata: data.metadata,
-            };
-            
-            // Log ALL insert events
-            console.log(`📥 INSERT EVENT:`, {
-              role: message.role,
-              message_id: message.message_id,
-              text_length: message.text.length,
-              text_preview: message.text.slice(0, 100) + (message.text.length > 100 ? '...' : ''),
-              metadata: message.metadata,
-            });
-            
-            // When a real ASSISTANT INSERT arrives, clear any streaming bubbles
-            // (the streaming bubble was a preview; now we have the real message)
-            if (message.role === 'ASSISTANT') {
-              console.log(`🎯 ASSISTANT INSERT - clearing streaming bubbles`);
-              setStreamingBubbles(prev => {
-                const newMap = new Map(prev);
-                console.log(`   Clearing ${newMap.size} streaming bubble(s)`);
-                for (const [streamId, bubble] of newMap) {
-                  console.log(`   - Removing stream: ${streamId.slice(0,8)}`);
-                  if (bubble.timeoutId) {
-                    window.clearTimeout(bubble.timeoutId);
-                  }
-                }
-                newMap.clear();
-                return newMap;
-              });
-            }
-            
-            // Clear ephemeral streaming plan when real set_plan FINISHED arrives
-            if (message.role === 'TOOL' && 
-                message.metadata?.toolName === 'set_plan' && 
-                message.metadata?.toolStatus === 'FINISHED') {
-              console.log(`📋 set_plan FINISHED - clearing streaming plan`);
-              setStreamingPlan(null);
-            }
-            
-            // Clear ephemeral streaming attention when real send_message_to_user arrives
-            if (message.role === 'TOOL' && 
-                message.metadata?.toolName === 'send_message_to_user') {
-              console.log(`📢 send_message_to_user arrived - clearing streaming attention`);
-              setStreamingAttention(null);
-            }
-            
-            // Add to buffer queue - it will be displayed when ready
-            setMessageBuffer((prev) => [...prev, message]);
-          },
-          onUpdate: (payload) => {
-            // Handle agent updates - data is in payload.record
-            const updated = payload.record || payload.payload?.record;
-            if (!updated) return;
-            
-            // Update agent detail in state directly (no refetch = no flicker)
-            setAgentDetail((prev) => {
-              if (!prev) return prev;
-              return {
-                ...prev,
-                progress: updated.progress ?? prev.progress,
-                status: updated.status ?? prev.status,
-                status_message: updated.statusMessage ?? prev.status_message,
-                model: updated.model ?? prev.model,
-                token_count: updated.tokenCount ?? prev.token_count,
-                tokens_in: updated.tokensIn ?? prev.tokens_in,
-                tokens_out: updated.tokensOut ?? prev.tokens_out,
-                context_size: updated.contextSize ?? prev.context_size,
-                message_count: updated.messageCount ?? prev.message_count,
-                updated_at: updated.updatedAt ?? prev.updated_at,
-              };
-            });
-            // Also refresh agents list to update sidebar
-            loadAgents();
-          },
-          onAssistantStream: (chunk: StreamChunkPayload) => {
-            // Log stream events for debugging
-            console.log(`📡 STREAM EVENT:`, {
-              stream_id: chunk.stream_id,
-              sequence: chunk.sequence,
-              done: chunk.done,
-              delta_length: chunk.delta.length,
-              delta: chunk.delta,
-            });
-            
-            setStreamingBubbles(prev => {
-              const newMap = new Map(prev);
-              const existing = newMap.get(chunk.stream_id);
-              
-              // Only update if this is a newer sequence or we don't have this stream yet
-              if (!existing || chunk.sequence >= existing.sequence) {
-                // Clear existing timeout if any
-                if (existing?.timeoutId) {
-                  window.clearTimeout(existing.timeoutId);
-                }
-                
-                // Accumulate delta onto existing text
-                const accumulatedText = (existing?.text || '') + chunk.delta;
-                
-                // Set timeout fallback for when final INSERT doesn't arrive
-                let timeoutId: number | undefined;
-                if (chunk.done) {
-                  // Stream complete - remember this text so we don't re-animate on INSERT
-                  if (accumulatedText.trim()) {
-                    streamedTextsRef.current.add(accumulatedText.trim());
-                    console.log(`📝 Stored streamed text for skip-animation: "${accumulatedText.slice(0, 50)}..."`);
-                  }
-                  
-                  timeoutId = window.setTimeout(() => {
-                    // Timeout reached - the real INSERT never arrived
-                    console.warn(`Stream ${chunk.stream_id} timeout - final INSERT not received`);
-                    setStreamingBubbles(p => {
-                      const m = new Map(p);
-                      m.delete(chunk.stream_id);
-                      return m;
-                    });
-                  }, STREAM_TIMEOUT_MS);
-                }
-                
-                newMap.set(chunk.stream_id, {
-                  text: accumulatedText,
-                  sequence: chunk.sequence,
-                  done: chunk.done,
-                  timeoutId,
-                });
-              }
-              
-              return newMap;
-            });
-          },
-          onPlanStream: (plan: PlanStreamPayload) => {
-            // Ephemeral plan streaming - show PlanChip with shimmer during LLM streaming
-            console.log(`📋 PLAN STREAM EVENT:`, plan);
-            setStreamingPlan({
-              stream_id: plan.stream_id,
-              tool_call_id: plan.tool_call_id,
-              title: plan.title,
-            });
-          },
-          onAttentionStream: (attention: AttentionStreamPayload) => {
-            // Ephemeral attention message streaming - show attention card during LLM streaming
-            console.log(`📢 ATTENTION STREAM EVENT:`, attention);
-            setStreamingAttention({
-              stream_id: attention.stream_id,
-              tool_call_id: attention.tool_call_id,
-              message: attention.message,
-              is_question: false, // Force to false for streaming attention messages
-            });
-          },
-        });
-
-        channelRef.current = channel;
-        
-        // Reset reconnection state on successful subscription
-        reconnectAttemptRef.current = 0;
-        isReconnectingRef.current = false;
-        
-        // Refetch messages to catch any that were created before subscription
-        try {
-          const data = await getAgent(selectedAgentId);
-          setMessages(data.messages);
-          setAgentDetail(data.agent);
-        } catch (error) {
-          console.error('Failed to refetch messages after subscription:', error);
-        }
-      } catch (error) {
-        console.error('Failed to subscribe to agent channel:', error);
-        isReconnectingRef.current = false;
-        scheduleReconnect();
-      }
-    };
-
-    // Call the async setup function
-    setupRealtime();
-
-    // Return cleanup function to React
-    return cleanup;
-  }, [selectedAgentId, user, forceResubscribe]);
+  // Realtime subscription is now handled by AgentContext
 
   // Derive hasActiveAttentionRequest from messages - when a message has isUserAttentionMessage + IN_PROGRESS
   const hasActiveAttentionRequest = useMemo(() => {
@@ -1154,17 +779,15 @@ export default function Terminal() {
   }, [messages]);
 
   // Handle tab visibility changes - reconnect when tab becomes visible
+  // Now uses context's forceResubscribe function
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (!document.hidden && selectedAgentId) {
-        // Tab became visible
         console.log('👀 Tab became visible, ensuring fresh connection...');
-        
-        // Wait a bit to ensure browser has resumed network activity
         setTimeout(() => {
           if (selectedAgentId) {
             console.log('🔄 Forcing reconnection after tab visibility change');
-            setForceResubscribe(prev => prev + 1);
+            forceResubscribeContext();
           }
         }, 1000);
       } else if (document.hidden) {
@@ -1175,16 +798,14 @@ export default function Terminal() {
     const handleFocus = () => {
       if (selectedAgentId) {
         console.log('🎯 Window focused, ensuring connection is alive...');
-        // Check connection health when window gets focus
         setTimeout(() => {
           if (selectedAgentId) {
-            setForceResubscribe(prev => prev + 1);
+            forceResubscribeContext();
           }
         }, 500);
       }
     };
 
-    // Listen for visibility changes and focus events
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('focus', handleFocus);
 
@@ -1192,7 +813,7 @@ export default function Terminal() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [selectedAgentId]);
+  }, [selectedAgentId, forceResubscribeContext]);
 
   // Snap to bottom when messages change (only if user was already near bottom)
   // BUT: Don't scroll for browser action messages - those only scroll their own panel
@@ -1260,147 +881,9 @@ export default function Terminal() {
     }
   }, [messages]);
 
-  // Handler for when animation completes
-  const handleAnimationComplete = () => {
-    setIsAnimating(false);
-    setCurrentAnimatingId(null);
-  };
-
-  // Process message buffer - pull one message at a time and display it
-  useEffect(() => {
-    // Only process if: buffer has messages AND we're not currently animating
-    if (messageBuffer.length > 0 && !isAnimating) {
-      const nextMessage = messageBuffer[0];
-      
-      // Add to displayed messages
-      setMessages((prev) => [...prev, nextMessage]);
-      
-      // Remove from buffer
-      setMessageBuffer((prev) => prev.slice(1));
-      
-      // Check if this message should animate
-      let shouldAnimate = false;
-      
-      // ASSISTANT messages animate UNLESS they were already shown via streaming
-      if (nextMessage.role === 'ASSISTANT') {
-        const textKey = (nextMessage.text || '').trim();
-        if (streamedTextsRef.current.has(textKey)) {
-          // This text was already streamed - don't re-animate
-          console.log(`⏭️ Skipping animation for already-streamed text: "${textKey.slice(0, 50)}..."`);
-          streamedTextsRef.current.delete(textKey); // Clean up
-          shouldAnimate = false;
-        } else {
-          shouldAnimate = true;
-        }
-      }
-      
-      // TOOL messages animate if they are FINISHED or ERROR, have a message, AND are NOT sub-agent tools
-      // Browser actions also animate - just inside their panel instead of main chat
-      if (nextMessage.role === 'TOOL') {
-        const isSubAgentTool = !!nextMessage.metadata?.subAgentId;
-        const isBrowserAction = !!nextMessage.metadata?.browser_url;
-        const isAttention = !!nextMessage.metadata?.isUserAttentionMessage;
-        const status = nextMessage.metadata?.toolStatus;
-        const message = nextMessage.text || '';
-        
-        // Attention messages manage their own animation; don't block the queue here
-        if (isAttention) {
-          shouldAnimate = false;
-        } else if (!isSubAgentTool && (status === 'FINISHED' || status === 'ERROR') && message.trim().length > 0) {
-          // All other tool messages (including browser actions) animate and block the buffer
-          shouldAnimate = true;
-        }
-      }
-      
-      if (shouldAnimate) {
-        setIsAnimating(true);
-        setCurrentAnimatingId(nextMessage.message_id);
-      }
-    }
-  }, [messageBuffer, isAnimating]);
-
-  // Check if we should show the loader (agent is thinking)
-  const [showThinkingLoader, setShowThinkingLoader] = useState(false);
-  
-  useEffect(() => {
-    // Don't show loader if:
-    // - No agent detail
-    // - Agent is not active (paused, completed, failed)
-    // - We have messages in the buffer waiting to display
-    // - We're currently animating a message
-    // NOTE: We DO show thinking loader when streaming - streaming text appears below it
-    if (!agentDetail || 
-        agentDetail.status === 'COMPLETED' || 
-        agentDetail.status === 'FAILED' || 
-        agentDetail.status === 'PAUSED' ||
-        agentDetail.status === 'OUT_OF_CREDITS' ||
-        messageBuffer.length > 0 ||
-        isAnimating) {
-      setShowThinkingLoader(false);
-      return;
-    }
-
-    const lastMessage = messages[messages.length - 1];
-    if (!lastMessage) {
-      setShowThinkingLoader(false);
-      return;
-    }
-
-    // Check if last message is a tool with IN_PROGRESS status
-    if (lastMessage.role === 'TOOL') {
-      const status = lastMessage.metadata?.toolStatus;
-      if (status === 'IN_PROGRESS') {
-        setShowThinkingLoader(false);
-        return;
-      }
-    }
-
-    // Track when we last saw this message (use local time to avoid clock sync issues)
-    let lastSeenTime = Date.now();
-
-    // Check every 100ms to ensure we don't miss the threshold
-    const checkThreshold = () => {
-      const timeSinceWeFirstSawMessage = Date.now() - lastSeenTime;
-      const shouldShow = timeSinceWeFirstSawMessage > 500;
-      setShowThinkingLoader(shouldShow);
-    };
-
-    // Check immediately
-    checkThreshold();
-
-    // Then check every 100ms
-    const interval = setInterval(checkThreshold, 100);
-    
-    return () => clearInterval(interval);
-  }, [messages.length, agentDetail?.status, isAnimating, messageBuffer.length]);
-  
-  // Get the display text for thinking
-  const thinkingText = 'Thinking';
-
-  // Debug logging for thinking bubble visibility
-  useEffect(() => {
-    const shouldShowThinking = (showThinkingLoader || streamingBubbles.size > 0) && agentDetail?.status !== 'PAUSED';
-    console.log('🧠 Thinking Bubble Debug:', {
-      // Input props
-      'showThinkingLoader': showThinkingLoader,
-      'streamingBubblesSize': streamingBubbles.size,
-      'agentStatus': agentDetail?.status,
-      'messageBufferLength': messageBuffer.length,
-      'isAnimating': isAnimating,
-      'lastMessageRole': messages[messages.length - 1]?.role,
-      'lastMessageToolStatus': messages[messages.length - 1]?.metadata?.toolStatus,
-      // Computed result
-      'shouldShowThinking': shouldShowThinking,
-    });
-  }, [showThinkingLoader, streamingBubbles.size, agentDetail?.status, messageBuffer.length, isAnimating, messages]);
-
-  // Clear streaming bubbles and plan when agent is paused (mid-stream cancellation)
-  useEffect(() => {
-    if (agentDetail?.status === 'PAUSED') {
-      setStreamingBubbles(new Map());
-      setStreamingPlan(null);
-    }
-  }, [agentDetail?.status]);
+  // Animation handling and buffer processing is now in MessageList
+  // Thinking indicator is now in MessageList
+  // Streaming state clearing on pause is now in AgentContext
 
   const loadAgents = async () => {
     try {
@@ -1424,66 +907,28 @@ export default function Terminal() {
     }
   };
 
-  const loadAgentDetail = async (agentId: string) => {
+  // Helper to refresh agent details (for resume/pause where we need fresh data)
+  const refreshAgentDetail = useCallback(async (agentId: string) => {
     try {
-      setIsLoadingAgent(true);
       const data = await getAgent(agentId);
       setAgentDetail(data.agent);
-      setMessages(data.messages); // Already in chronological order (oldest first)
-      setSelectedModel(data.agent.model); // Sync UI model with agent's actual model
-      
-      // Mark this as an initial load so we can scroll to bottom
-      isInitialLoadRef.current = true;
-      
-      // Clear animation state and buffer when loading a different agent
-      setIsAnimating(false);
-      setCurrentAnimatingId(null);
-      setMessageBuffer([]);
-      
-      // Reset reconnection state when switching agents
-      reconnectAttemptRef.current = 0;
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
+      setMessages(data.messages);
+      setSelectedModel(data.agent.model);
     } catch (error) {
-      toast({
-        title: 'Error',
-        description: 'Failed to load agent details',
-        variant: 'destructive',
-      });
-    } finally {
-      setIsLoadingAgent(false);
+      console.error('Failed to refresh agent details:', error);
     }
-  };
+  }, [setAgentDetail, setMessages]);
 
-  // Cleanup agent-specific state and websocket
+  // Cleanup agent-specific state - websocket cleanup is now in AgentContext
   const cleanupAgentState = useCallback(() => {
-    // Websocket cleanup
-    if (channelRef.current) {
-      console.log('🧹 Cleaning up agent websocket channel');
-      unsubscribe(channelRef.current);
-      channelRef.current = null;
-    }
-    isReconnectingRef.current = false;
-    reconnectAttemptRef.current = 0;
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
+    // Clear agent selection via context (this also clears messages and streaming state)
+    setSelectedAgentIdContext(null);
     
-    // Agent state
-    setSelectedAgentId(null);
-    setAgentDetail(null);
-    setMessages([]);
-    setMessageBuffer([]);
-    setIsAnimating(false);
-    setCurrentAnimatingId(null);
+    // Clear local UI state
     isInitialLoadRef.current = false;
-    setIsLoadingAgent(false);
     setIsSendingMessage(false);
     setMessageInput('');
-  }, []);
+  }, [setSelectedAgentIdContext]);
 
   // Reset landing page animation state
   const resetAnimationState = useCallback(() => {
@@ -1501,13 +946,11 @@ export default function Terminal() {
     // Only switch to agents view if selecting an actual agent
     if (agentId) {
       setCurrentView('agents');
-      setSelectedAgentId(agentId);
-      loadAgentDetail(agentId);
+      // Context handles loading agent detail and messages
+      setSelectedAgentIdContext(agentId);
     } else {
       // Just clear the selection without changing view
-      setSelectedAgentId(null);
-      setAgentDetail(null);
-      setMessages([]);
+      setSelectedAgentIdContext(null);
     }
   };
 
@@ -1515,8 +958,8 @@ export default function Terminal() {
     const newAgent = await createAgentAPI({ ...data, source: clientSource });
     await loadAgents();
     setCurrentView('agents');
-    setSelectedAgentId(newAgent.agent_id);
-    loadAgentDetail(newAgent.agent_id);
+    // Context handles loading agent detail and messages
+    setSelectedAgentIdContext(newAgent.agent_id);
   };
 
   const handleResumeAgent = async (agentId: string) => {
@@ -1526,7 +969,7 @@ export default function Terminal() {
       
       // If this is the currently selected agent, reload its details
       if (agentId === selectedAgentId) {
-        await loadAgentDetail(agentId);
+        await refreshAgentDetail(agentId);
       }
       
       // Refresh the agents list to show updated status
@@ -1555,7 +998,7 @@ export default function Terminal() {
       await pauseAgent(selectedAgentId);
       
       // Reload agent details to get updated status
-      await loadAgentDetail(selectedAgentId);
+      await refreshAgentDetail(selectedAgentId);
       
       toast({
         title: 'Agent pausing',
@@ -1613,8 +1056,7 @@ export default function Terminal() {
         
         await loadAgents();
         setCurrentView('agents');
-        setSelectedAgentId(newAgent.agent_id);
-        await loadAgentDetail(newAgent.agent_id);
+        setSelectedAgentIdContext(newAgent.agent_id);
         setMessageInput(''); // Clear input after agent is loaded
         toast({
           title: 'Agent created',
@@ -1682,9 +1124,7 @@ export default function Terminal() {
       console.log('[Auth] refreshAuthState finished after logout');
       // Clear all local state (user state is handled by useAuth hook)
       setAgents([]);
-      setSelectedAgentId(null);
-      setAgentDetail(null);
-      setMessages([]);
+      setSelectedAgentIdContext(null); // This also clears messages and agent detail
       setMessageInput('');
       setCurrentView('agents');
       
@@ -1759,8 +1199,7 @@ export default function Terminal() {
         
         await loadAgents();
         setCurrentView('agents');
-        setSelectedAgentId(newAgent.agent_id);
-        await loadAgentDetail(newAgent.agent_id);
+        setSelectedAgentIdContext(newAgent.agent_id);
         setMessageInput(''); // Clear input after agent is loaded
         toast({
           title: 'Agent created',
@@ -1794,7 +1233,7 @@ export default function Terminal() {
     } finally {
       setIsSendingMessage(false);
     }
-  }, [user, selectedAgentId, selectedModel, toast, loadAgents, loadAgentDetail]);
+  }, [user, selectedAgentId, selectedModel, toast, loadAgents, setSelectedAgentIdContext]);
 
   // Listen for quick query events (from Electron launcher)
   useEffect(() => {
@@ -1825,75 +1264,48 @@ export default function Terminal() {
     return b.progress - a.progress;
   });
 
-  // Memoize deduplicated messages to prevent unnecessary re-renders
-  const { displayedMessages, activeBrowserPanels } = useMemo(() => {
-    // Filter out SYSTEM messages only
-    const filteredMessages = messages.filter((m) => m.role !== 'SYSTEM');
-    const deduplicated = deduplicateToolMessages(filteredMessages);
-    const grouped = groupBrowserMessages(deduplicated);
-    
-    // Collapse consecutive "Starting up a browser" messages
-    grouped.messages = collapseBrowserStartupMessages(grouped.messages);
-
-    // Collect ALL active (incomplete) browser panels for carousel display
+  // Memoize browser panels for the status bar carousel
+  // MessageList handles action rendering via subAgentId, we just need taskId and browserUrl
+  const activeBrowserPanels = useMemo(() => {
     type BrowserPanelData = {
       taskId: string;
       browserUrl: string;
-      goal?: string;
-      actions: {
-        id: string;
-        title: string;
-        message: string;
-        status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
-        timestamp: string;
-        action_type?: string;
-        auxiliary?: { current_step?: string; total_steps?: string };
-      }[];
     };
     
-    const activeBrowserPanels: BrowserPanelData[] = [];
-
-    if (grouped.browserPanels.size > 0) {
-      const entries = Array.from(grouped.browserPanels.entries());
-      for (const [taskId, panelData] of entries) {
-        const lastAction = panelData.actions[panelData.actions.length - 1];
-        const isComplete =
-          lastAction?.metadata?.action_type === 'task_complete' ||
-          lastAction?.metadata?.action_type === 'error';
-        
-        // Include all active (non-complete) browser panels
-        if (!isComplete) {
-          const mappedActions = panelData.actions.map((action) => ({
-            id: action.message_id,
-            title: action.metadata?.title || 'Browser action',
-            message: action.text,
-            status: (action.metadata?.toolStatus || 'FINISHED') as
-              | 'IN_PROGRESS'
-              | 'FINISHED'
-              | 'ERROR',
-            timestamp: action.timestamp,
-            action_type: action.metadata?.action_type,
-            auxiliary: action.metadata?.auxiliary,
-          }));
-          
-          // Extract goal from init message if available
-          const goal = panelData.initMessage.metadata?.goal;
-          
-          activeBrowserPanels.push({
+    const panels: BrowserPanelData[] = [];
+    const browserTaskIds = new Set<string>();
+    
+    // Find all unique browser task IDs
+    messages.forEach(m => {
+      const taskId = m.metadata?.task_id;
+      if (taskId && m.metadata?.toolName === 'spawn_browser_agent') {
+        browserTaskIds.add(taskId);
+      }
+    });
+    
+    // For each task, check completion status
+    browserTaskIds.forEach(taskId => {
+      const taskMessages = messages.filter(m => m.metadata?.task_id === taskId);
+      // Init message can be 'browser' (new) or 'system' (legacy)
+      const initMessage = taskMessages.find(m => 
+        m.metadata?.action_type === 'browser' || m.metadata?.action_type === 'system'
+      );
+      const lastMessage = taskMessages[taskMessages.length - 1];
+      
+      const isComplete = 
+        lastMessage?.metadata?.action_type === 'task_complete' ||
+        lastMessage?.metadata?.action_type === 'error';
+      
+      // Only include active (non-complete) browser panels
+      if (!isComplete && initMessage) {
+        panels.push({
             taskId,
-            browserUrl:
-              panelData.currentBrowserUrl || panelData.initMessage.metadata?.browser_url || '',
-            goal,
-            actions: mappedActions,
+          browserUrl: initMessage.metadata?.browser_url || '',
           });
         }
-      }
-    }
+    });
 
-    return {
-      displayedMessages: grouped.messages,
-      activeBrowserPanels,
-    };
+    return panels;
   }, [messages]);
 
   // Stable props for BrowserStatusBar to avoid unnecessary re-renders
@@ -2100,7 +1512,7 @@ export default function Terminal() {
         </button>
         
         {/* Attention Inbox */}
-        <AttentionInbox onSelectAgent={setSelectedAgentId} />
+        <AttentionInbox onSelectAgent={setSelectedAgentIdContext} />
       </header>
 
 
@@ -2312,15 +1724,15 @@ export default function Terminal() {
               <div 
                 className="absolute inset-0 flex items-center justify-center pointer-events-none transition-all duration-700 ease-in-out"
                 style={{
-                  opacity: (!selectedAgentId || displayedMessages.length === 0) ? 1 : 0.2,
-                  transform: (!selectedAgentId || displayedMessages.length === 0) ? 'translateY(0)' : 'translateY(8px)',
+                  opacity: (!selectedAgentId || messages.length === 0) ? 1 : 0.2,
+                  transform: (!selectedAgentId || messages.length === 0) ? 'translateY(0)' : 'translateY(8px)',
                   zIndex: 18,
                   height: '100dvh',
                 }}
               >
                 <div className="text-center space-y-6" style={{ marginBottom: '20vh' }}>
                   <AsciiLoader showWarmingUp={false} size="large" variant="engine" />
-                  {(!selectedAgentId || displayedMessages.length === 0) && (
+                  {(!selectedAgentId || messages.length === 0) && (
                     <div className="-mt-3">
                       {!selectedAgentId || isLoadingAgent || (selectedAgentId && agentDetail?.status === 'STARTING_UP') ? (
                         // No agent selected states OR loading agent OR agent starting up
@@ -2370,172 +1782,18 @@ export default function Terminal() {
                 </div>
               </div>
               
-              {/* Messages - Always rendered */}
+              {/* Messages - Using MessageList component */}
               <div 
-                className="max-w-4xl mx-auto flex flex-col gap-1.5 pb-32 relative z-20 transition-opacity duration-700 ease-in-out"
+                className="transition-opacity duration-700 ease-in-out relative"
                 style={{
-                  opacity: displayedMessages.length > 0 ? 1 : 0,
+                  opacity: messages.length > 0 ? 1 : 0,
+                  zIndex: 20, // Above blur overlay (15) and ASCII loader (18)
                 }}
               >
-                {displayedMessages.map((message) => {
-                  // Skip browser panel marker messages - browser shows in fixed bar
-                  if (message.metadata?._browserPanel) {
-                    return null;
-                  }
-
-                  return (
-                    <MessageBubble 
-                      key={message.message_id} 
-                      message={message}
-                      shouldType={message.message_id === currentAnimatingId}
-                      onTypingComplete={handleAnimationComplete}
-                      onNavigateToAgent={handleSelectAgent}
-                      agentId={selectedAgentId || undefined}
-                      onSendMessage={selectedAgentId ? async (msg) => {
-                        try {
-                          await postMessageAPI(selectedAgentId, msg);
-                        } catch (error) {
-                          console.error('Failed to send message:', error);
-                        }
-                      } : undefined}
-                    />
-                  );
-                })}
-                
-                {/* Show paused banner when agent is paused */}
-                {agentDetail?.status === 'PAUSED' && (
-                  <div className="flex gap-3">
-                    <div className="flex-shrink-0 w-8" />
-                    <div 
-                      className="flex items-center gap-2 py-1.5 px-3 rounded-full border border-border"
-                      style={{
-                        backdropFilter: 'blur(12px)',
-                        WebkitBackdropFilter: 'blur(12px)',
-                        backgroundColor: 'rgba(255, 255, 255, 0.1)',
-                      }}
-                    >
-                      <div className="flex items-center justify-center w-5 h-5 rounded-full border-[1.5px] border-muted-foreground">
-                        <svg className="w-2 h-2 text-muted-foreground" fill="currentColor" viewBox="0 0 24 24">
-                          <rect x="6" y="5" width="4" height="14" rx="1" />
-                          <rect x="14" y="5" width="4" height="14" rx="1" />
-                        </svg>
-                      </div>
-                      <span className="text-muted-foreground font-medium text-sm">
-                        Rose has stopped, send a new message to continue
-                      </span>
-                    </div>
-                  </div>
-                )}
-                
-                {/* Show out of credits message with upgrade button */}
-                {agentDetail?.status === 'OUT_OF_CREDITS' && (
-                  <div className="flex gap-3 items-center">
-                    <div className="flex-shrink-0 w-8" />
-                    <div className="flex items-center gap-3">
-                      <p className="text-sm text-red-500 dark:text-red-400 font-medium">
-                        agent ran out of credits
-                      </p>
-                      <Button 
-                        size="sm" 
-                        variant="default"
-                        onClick={() => setShowCreditModal(true)}
-                        className="h-7 text-xs"
-                      >
-                        Add Credits
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                
-                {/* Show completed text when agent is complete */}
-                {agentDetail?.status === 'COMPLETED' && (
-                  <div className="flex gap-3">
-                    <div className="flex-shrink-0 w-8" />
-                    <p className="text-sm text-muted-foreground">your goal is complete</p>
-                  </div>
-                )}
-                
-                {/* Thinking indicator with streaming text below */}
-                {(showThinkingLoader || streamingBubbles.size > 0) && agentDetail?.status !== 'PAUSED' && (
-                  <div className="flex gap-3">
-                    <div className="flex-shrink-0 w-8" />
-                    <div className="flex flex-col gap-2">
-                      {/* Thinking header */}
-                      <div className="flex items-center gap-2">
-                        <ThinkingAnimation
-                          dataUrl="/thinking_animations.txt"
-                          autoplay
-                          loop
-                          className="w-4 h-4 flex-shrink-0"
-                          style={{ width: '16px', height: '16px' }}
-                        />
-                        <span className="text-sm font-medium animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
-                          {thinkingText}
-                        </span>
-                      </div>
-                      
-                      {/* Streaming text - render directly with ReactMarkdown + fade-in on mount */}
-                      {streamingBubbles.size > 0 && (
-                        <div className="pl-6">
-                          {Array.from(streamingBubbles.entries()).map(([streamId, bubble]) => (
-                            <StreamingMarkdown key={streamId} text={bubble.text} />
-                          ))}
-                        </div>
-                      )}
-                      
-                      {/* Ephemeral streaming plan - shown during LLM generation */}
-                      {streamingPlan && (
-                        <div className="pl-6 mt-2">
-                          <PlanChip
-                            plan={{
-                              title: streamingPlan.title,
-                              content: '',
-                              tasks: [],
-                              dependencies: null,
-                              join: 'all',
-                              status: 'planning',
-                            }}
-                            toolStatus="IN_PROGRESS"
-                          />
-                        </div>
-                      )}
-
-                    </div>
-                  </div>
-                )}
-
-                {/* Streaming attention message - appears below thinking bubble */}
-                {streamingAttention && (showThinkingLoader || streamingBubbles.size > 0) && (
-                  <div className="flex gap-3 mt-4">
-                    <div className="flex-shrink-0 w-8" />
-                    <MessageBubble
-                      key={`streaming-attention-${streamingAttention.tool_call_id}`}
-                      message={{
-                        message_id: `streaming-${streamingAttention.tool_call_id}`,
-                        role: 'TOOL',
-                        text: streamingAttention.message,
-                        timestamp: new Date().toISOString(),
-                        metadata: {
-                          toolCallId: streamingAttention.tool_call_id,
-                          toolName: 'send_message_to_user',
-                          toolStatus: 'IN_PROGRESS',
-                          isUserAttentionMessage: true,
-                          attentionMessage: streamingAttention.message,
-                          sendMessageToUser: {
-                            isQuestion: false, // Default to false instead of streamingAttention.is_question
-                            attentionKind: 'info', // Default to info instead of question
-                            isWaitingForUser: false, // Default to false instead of streamingAttention.is_question
-                          },
-                        },
-                      }}
-                      shouldType={false}
-                      onTypingComplete={() => {}}
-                      onSendMessage={handleSendMessage}
-                      isStreaming={true}
-                    />
-                  </div>
-                )}
-                
+                <MessageList 
+                  onAddCredits={() => setShowCreditModal(true)}
+                  onNavigateToAgent={handleSelectAgent}
+                />
                 <div ref={messagesEndRef} />
               </div>
           </ScrollArea>
@@ -2613,7 +1871,7 @@ export default function Terminal() {
               dripStyles={dripStyles}
               drippiness={blur}
               agentDetail={agentDetail}
-              onAgentUpdate={() => selectedAgentId && loadAgentDetail(selectedAgentId)}
+              onAgentUpdate={() => selectedAgentId && refreshAgentDetail(selectedAgentId)}
               onAgentDelete={() => {
                 cleanupAgentState();
                 resetAnimationState();
@@ -2658,5 +1916,28 @@ export default function Terminal() {
       />
     </div>
   );
+}
+
+// Main Terminal component - wraps content in AgentProvider
+export default function Terminal() {
+  const { user: authUser, isFullySignedIn } = useAuth();
+  const user = isFullySignedIn ? authUser : null;
+  
+  // loadAgents callback will be set by TerminalContent via ref
+  const loadAgentsRef = useRef<(() => void) | null>(null);
+  
+  return (
+    <AgentProvider 
+      user={user} 
+      onLoadAgents={() => loadAgentsRef.current?.()}
+    >
+      <TerminalContentWithRef loadAgentsRef={loadAgentsRef} />
+    </AgentProvider>
+  );
+}
+
+// Helper to pass ref into TerminalContent
+function TerminalContentWithRef({ loadAgentsRef }: { loadAgentsRef: React.MutableRefObject<(() => void) | null> }) {
+  return <TerminalContent loadAgentsRef={loadAgentsRef} />;
 }
 

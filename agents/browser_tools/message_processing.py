@@ -13,10 +13,11 @@ def transform_tool_result(tool_name: str, result: dict) -> str:
     """
     Transform tool result to correct format for OpenAI API.
     
-    NOTE: Tool result content MUST be a string. Multimodal image_url format
-    only works for user messages, not tool results.
+    NOTE: Tool result content MUST be a string. However, we include base64
+    screenshot data in the JSON so the Rose API can transform it to multimodal
+    format for models that support vision.
     
-    - Screenshots: Return as JSON with base64 data (model can reference it)
+    - Screenshots: Return as JSON with base64 data (Rose API will transform to multimodal)
     - AriaTree: Format with "Accessibility Tree:" prefix
     - Others: JSON stringify
     
@@ -28,14 +29,14 @@ def transform_tool_result(tool_name: str, result: dict) -> str:
         Formatted content as string
     """
     if tool_name == "screenshot":
-        # Tool results must be strings - return JSON with metadata
-        # The model will understand this is a screenshot result
+        # Include base64 data so Rose API can transform to multimodal format
+        # The Rose function will detect __screenshot_base64__ and inject as image_url
         return json.dumps({
             "success": True,
             "screenshot_taken": True,
+            "__screenshot_base64__": result.get("base64", ""),  # Rose API transforms this
             "timestamp": result.get("timestamp"),
             "pageUrl": result.get("pageUrl"),
-            "note": "Screenshot captured successfully. Use ariaTree for detailed page content."
         })
     elif tool_name == "ariaTree":
         content = result.get("content", "")
@@ -73,8 +74,8 @@ def compress_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not isinstance(content, str):
             continue
         
-        # Check for screenshot (contains screenshot_taken indicator)
-        if "screenshot_taken" in content or '"screenshot_taken": true' in content.lower():
+        # Check for screenshot (contains screenshot_taken or __screenshot_base64__ indicator)
+        if "screenshot_taken" in content or '"screenshot_taken": true' in content.lower() or "__screenshot_base64__" in content:
             screenshot_indices.append(i)
         
         # Check for aria tree (text starting with "Accessibility Tree")
@@ -98,10 +99,23 @@ def compress_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     compressed = []
     for i, msg in enumerate(messages):
         if i in screenshots_to_compress:
-            # Replace screenshot with placeholder text
+            # Replace screenshot with placeholder text (strip base64 data)
+            content = msg.get("content", "")
+            # Try to preserve pageUrl if available
+            page_url = ""
+            try:
+                parsed = json.loads(content)
+                page_url = parsed.get("pageUrl", "")
+            except:
+                pass
             compressed.append({
                 **msg,
-                "content": "screenshot taken"
+                "content": json.dumps({
+                    "success": True,
+                    "screenshot_taken": True,
+                    "pageUrl": page_url,
+                    "note": "[Old screenshot compressed to save tokens]"
+                })
             })
         elif i in aria_trees_to_compress:
             # Replace aria tree with summary
