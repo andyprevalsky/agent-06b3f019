@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } from 'react';
 import { motion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { useAgentContext, StreamingBubble } from '@/contexts/AgentContext';
@@ -362,11 +362,38 @@ export function MessageList({
   }, [sendMessage]);
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // AUTOSCROLL for streaming content (browser panel)
+  // ═══════════════════════════════════════════════════════════════════════════
+  
+  const containerRef = useRef<HTMLDivElement>(null);
+  const scrollEndRef = useRef<HTMLDivElement>(null);
+  
+  // Auto-scroll when streaming content changes (for sub-agent panels)
+  useLayoutEffect(() => {
+    // Only auto-scroll for sub-agent panels (browser, code, etc.)
+    if (subAgentId === undefined) return;
+    
+    // Auto-scroll when streaming bubbles have content
+    if (filteredStreamingBubbles.size > 0 && scrollEndRef.current) {
+      scrollEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+  }, [subAgentId, filteredStreamingBubbles]);
+  
+  // Also scroll when new messages arrive
+  useLayoutEffect(() => {
+    if (subAgentId === undefined) return;
+    
+    if (filteredMessages.length > 0 && scrollEndRef.current) {
+      scrollEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+  }, [subAgentId, filteredMessages.length]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // RENDER
   // ═══════════════════════════════════════════════════════════════════════════
 
   return (
-    <div className={containerClassName}>
+    <div ref={containerRef} className={containerClassName}>
       {/* Messages */}
       {filteredMessages.map((message) => (
         <MessageBubble 
@@ -467,9 +494,9 @@ export function MessageList({
                 </span>
               </div>
               
-              {/* Streaming text */}
+              {/* Streaming text with max-height and auto-scroll */}
               {filteredStreamingBubbles.size > 0 && (
-                <div className="pl-6">
+                <div className="pl-6 max-h-[200px] overflow-y-auto scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
                   {Array.from(filteredStreamingBubbles.entries()).map(([streamId, bubble]) => (
                     <StreamingMarkdown key={streamId} text={bubble.text} />
                   ))}
@@ -523,6 +550,9 @@ export function MessageList({
           />
         </div>
       )}
+      
+      {/* Scroll anchor for auto-scroll */}
+      <div ref={scrollEndRef} />
     </div>
   );
 }

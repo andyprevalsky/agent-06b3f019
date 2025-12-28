@@ -87,10 +87,11 @@ class SpawnSubAgentsManager(ToolManager):
                 )
                 return
             
-            # 2. Execute spawn activity
+            # 2. Execute spawn activity (inherit model from parent)
+            parent_model = getattr(workflow_instance, 'model', 'rose-labs/rose-1-lite')
             result = await workflow.execute_activity(
                 spawn_sub_agents_activity,
-                args=[user_id, sub_agents, parent_agent_id, parent_workflow_id, depth, parent_is_paused],
+                args=[user_id, sub_agents, parent_agent_id, parent_workflow_id, depth, parent_is_paused, parent_model],
                 start_to_close_timeout=timedelta(seconds=60),
             )
             
@@ -183,7 +184,8 @@ async def spawn_sub_agents_activity(
     parent_agent_id: str,
     parent_workflow_id: str,
     depth: int,
-    parent_is_paused: bool
+    parent_is_paused: bool,
+    parent_model: str = "rose-labs/rose-1-lite"
 ) -> Dict[str, Any]:
     """
     Activity: Spawn multiple sub-agents to work on parallel subtasks.
@@ -192,12 +194,12 @@ async def spawn_sub_agents_activity(
         user_id: User ID (agents will be created for this user)
         sub_agents: List of agent configs, each with:
             - goal (str): The subtask goal
-            - model (str, optional): LLM model to use (defaults to rose-1-lite)
             - verifier (dict): {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "..."}
         parent_agent_id: Parent agent ID (for hierarchy)
         parent_workflow_id: Parent workflow ID (for signaling)
         depth: Nesting depth for children
         parent_is_paused: Whether parent is currently paused (children inherit this state)
+        parent_model: Model from parent agent (inherited by all sub-agents)
         
     Returns:
         Dict with summary: {"spawned": int, "completed": int, "failed": int, "agents": [...]}
@@ -229,9 +231,8 @@ async def spawn_sub_agents_activity(
                     "pause_state": parent_is_paused  # Inherit parent's pause state
                 }
                 
-                # Default to rose-1-lite if no model specified
-                model = agent.get("model") or "rose-labs/rose-1-lite"
-                payload["model"] = model
+                # Always inherit model from parent
+                payload["model"] = parent_model
                 # Note: reasoning_max_tokens not passed - sub-agents use backend default (256)
                 
                 logger.info("Spawning sub-agent", payload=payload)

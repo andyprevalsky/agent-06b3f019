@@ -637,6 +637,37 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
   }
 });
 
+// GET /api/agents/:id/status - Get agent status (for browser agent pause check)
+router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const agentId = req.params.id;
+
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        status: true,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    res.json({
+      agent_id: agent.id,
+      status: agent.status,
+    });
+  } catch (error) {
+    console.error('Get agent status error:', error);
+    res.status(500).json({ error: 'Failed to get agent status' });
+  }
+});
+
 // PATCH /api/agents/:id/status - Update agent status (internal/worker only)
 router.patch('/:id/status', authenticate, async (req: AuthRequest, res) => {
   try {

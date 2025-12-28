@@ -189,7 +189,7 @@ def format_time_elapsed(seconds: float) -> str:
 
 
 def format_params(params: Dict[str, Any]) -> str:
-    """Format tool parameters for display in markdown."""
+    """Format tool parameters for display in markdown. NO TRUNCATION."""
     if not params:
         return "None"
     
@@ -199,16 +199,11 @@ def format_params(params: Dict[str, Any]) -> str:
         if key in ['tool', 'tool_call_id']:
             continue
         
-        # Format value nicely
+        # Format value nicely - NO TRUNCATION
         if isinstance(value, dict):
             value_str = json.dumps(value, indent=2)
         elif isinstance(value, (list, tuple)):
-            if len(value) > 3:
-                value_str = f"[{', '.join(str(v) for v in value[:3])}, ... ({len(value)} total)]"
-            else:
-                value_str = str(value)
-        elif isinstance(value, str) and len(value) > 100:
-            value_str = value[:97] + "..."
+            value_str = json.dumps(value, indent=2, default=str)
         else:
             value_str = str(value)
         
@@ -218,38 +213,31 @@ def format_params(params: Dict[str, Any]) -> str:
 
 
 def format_result(result: Dict[str, Any]) -> str:
-    """Format tool result for display in markdown."""
+    """Format tool result for display in markdown. NO TRUNCATION - show full results."""
     if not result:
         return "No result data"
     
     # Extract key fields
     lines = []
     
-    # Common result fields
+    # Common result fields - NO TRUNCATION
     if "answer" in result:
-        answer = result["answer"]
-        if isinstance(answer, str) and len(answer) > 500:
-            answer = answer[:497] + "..."
-        lines.append(f"{answer}")
+        lines.append(f"{result['answer']}")
     
     if "candidates" in result:
         candidates = result["candidates"]
         if isinstance(candidates, list):
             lines.append(f"\n**Found {len(candidates)} candidates**")
-            for i, candidate in enumerate(candidates[:5], 1):
+            for i, candidate in enumerate(candidates, 1):
                 name = candidate.get("name", "Unknown")
                 lines.append(f"{i}. {name}")
-            if len(candidates) > 5:
-                lines.append(f"...and {len(candidates) - 5} more")
     
     if "sources" in result:
         sources = result.get("sources", [])
         if sources:
             lines.append(f"\n**Sources:**")
-            for src in sources[:5]:
+            for src in sources:
                 lines.append(f"- {src}")
-            if len(sources) > 5:
-                lines.append(f"- ...and {len(sources) - 5} more")
     
     if "findall_id" in result:
         lines.append(f"\nFind All ID: {result['findall_id']}")
@@ -263,9 +251,7 @@ def format_result(result: Dict[str, Any]) -> str:
             content = output["content"]
             if isinstance(content, dict):
                 lines.append(f"\n**Extracted Data:**")
-                for key, value in list(content.items())[:5]:
-                    if isinstance(value, str) and len(value) > 100:
-                        value = value[:97] + "..."
+                for key, value in content.items():
                     lines.append(f"- {key}: {value}")
     
     # Handle message history results (read_message_history_with_person)
@@ -284,16 +270,16 @@ def format_result(result: Dict[str, Any]) -> str:
         
         lines.append(f"**Message Count:** {result['message_count']}")
         
-        # Include full message text - this is already formatted nicely
+        # Include full message text
         messages_text = result["messages"]
         if messages_text:
             lines.append(f"\n**Messages:**\n\n{messages_text}")
     
-    # Handle x402 bazaar search results
+    # Handle x402 bazaar search results - NO TRUNCATION
     if "services" in result and "service_count" in result:
         services = result.get("services", [])
         if services:
-            for i, svc in enumerate(services[:10], 1):
+            for i, svc in enumerate(services, 1):
                 resource = svc.get("resource", "Unknown URL")
                 price_display = svc.get("price_display", f"${svc.get('price_cents', 0)/100:.4f}")
                 method = svc.get("method", "GET")
@@ -302,16 +288,15 @@ def format_result(result: Dict[str, Any]) -> str:
                 lines.append(f"\n**{i}. {resource}**")
                 lines.append(f"   - Price: {price_display} | Method: {method} | Network: {network}")
                 
-                # Show input schema params if available (with more detail for LLM)
+                # Show input schema params if available
                 input_schema = svc.get("input_schema")
                 if input_schema and isinstance(input_schema, dict):
                     query_params = input_schema.get("queryParams")
                     if query_params and isinstance(query_params, dict):
                         param_details = []
-                        for name, info in list(query_params.items())[:5]:
+                        for name, info in query_params.items():
                             if isinstance(info, dict):
                                 required = info.get("required", False)
-                                desc = info.get("description", "")[:50] if info.get("description") else ""
                                 if required:
                                     param_details.append(f"{name} (required)")
                                 else:
@@ -324,21 +309,13 @@ def format_result(result: Dict[str, Any]) -> str:
                 # Show metadata description if available
                 metadata = svc.get("metadata")
                 if metadata and isinstance(metadata, dict) and metadata.get("description"):
-                    desc = metadata["description"]
-                    if len(desc) > 100:
-                        desc = desc[:97] + "..."
-                    lines.append(f"   - Description: {desc}")
-            
-            if result["service_count"] > 10:
-                lines.append(f"\n...and {result['service_count'] - 10} more services")
+                    lines.append(f"   - Description: {metadata['description']}")
         else:
             lines.append("No services found matching your criteria.")
     
-    # If no specific formatting, show summary
+    # If no specific formatting, show full JSON - NO TRUNCATION
     if not lines:
-        result_str = json.dumps(result, indent=2)
-        if len(result_str) > 500:
-            result_str = result_str[:497] + "..."
+        result_str = json.dumps(result, indent=2, default=str)
         lines.append(result_str)
     
     return "\n".join(lines)

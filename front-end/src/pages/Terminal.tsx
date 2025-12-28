@@ -773,11 +773,42 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
   // Realtime subscription is now handled by AgentContext
 
   // Derive hasActiveAttentionRequest from messages - when a message has isUserAttentionMessage + IN_PROGRESS
+  // Must deduplicate by toolCallId first (keep latest) since FINISHED messages may exist alongside IN_PROGRESS
   const hasActiveAttentionRequest = useMemo(() => {
-    return messages.some(
-      (m) => m.metadata?.isUserAttentionMessage && m.metadata?.toolStatus === 'IN_PROGRESS'
+    // Deduplicate attention messages by toolCallId, keeping the latest one
+    const attentionByToolCallId = new Map<string, typeof messages[0]>();
+    
+    for (const m of messages) {
+      if (!m.metadata?.isUserAttentionMessage) continue;
+      const toolCallId = m.metadata?.toolCallId;
+      if (!toolCallId) continue;
+      
+      const existing = attentionByToolCallId.get(toolCallId);
+      if (!existing || new Date(m.timestamp) > new Date(existing.timestamp)) {
+        attentionByToolCallId.set(toolCallId, m);
+      }
+    }
+    
+    // Check if any deduplicated attention message is still IN_PROGRESS
+    const result = Array.from(attentionByToolCallId.values()).some(
+      (m) => m.metadata?.toolStatus === 'IN_PROGRESS'
     );
+    
+    return result;
   }, [messages]);
+
+  // Debug: Log canSubmit state
+  useEffect(() => {
+    const canSubmit = !selectedAgentId || hasActiveAttentionRequest || agentDetail?.status === 'PAUSED';
+    console.log('🎯 canSubmit debug:', {
+      selectedAgentId: !!selectedAgentId,
+      hasActiveAttentionRequest,
+      agentStatus: agentDetail?.status,
+      canSubmit,
+      showsArrow: canSubmit,
+      showsStop: !canSubmit
+    });
+  }, [selectedAgentId, hasActiveAttentionRequest, agentDetail?.status]);
 
   // Handle tab visibility changes - reconnect when tab becomes visible
   // Now uses context's forceResubscribe function

@@ -118,6 +118,9 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'navigation': Navigation,
   'screenshot': Camera,
   'error': XCircle,
+  'click_coordinates': MousePointer,
+  'type_text': Keyboard,
+  'press_key': Keyboard,
   
   // Code agent action_type mappings (from spawn_code_agent)
   'code_started': Code,

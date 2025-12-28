@@ -26,7 +26,7 @@ class SubAgentConfig(BaseModel):
     """Configuration for a single sub-agent."""
 
     goal: str = Field(description="Goal/task for this sub-agent")
-    model: Optional[str] = Field(None, description="LLM model to use (inherits from parent if not specified)")
+    # model removed - always inherits from parent agent
     read_only: bool = Field(
         default=False,
         description="True if this sub-agent must stay read-only (plan-phase spawn), False for normal execution.",

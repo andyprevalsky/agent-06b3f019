@@ -193,19 +193,21 @@ export default function BrowserViewPanel({
   // Fullscreen actions panel (left side) - uses MessageList
   const fullscreenActionsPanel = isThisFullscreen && (
     <div 
-      className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col"
+      className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
       style={{
         backdropFilter: 'blur(8px)',
         WebkitBackdropFilter: 'blur(8px)',
       }}
     >
-      <div className="flex-1 overflow-y-auto p-3">
-        <MessageList
-          subAgentId={taskId}
-          containerClassName="flex flex-col gap-1.5"
-          showStatusBanners={false}
-          showThinkingIndicator={true}
-        />
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
+        <div className="pb-[80vh]">
+          <MessageList
+            subAgentId={taskId}
+            containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
+            showStatusBanners={false}
+            showThinkingIndicator={true}
+          />
+        </div>
       </div>
     </div>
   );
@@ -230,20 +232,22 @@ export default function BrowserViewPanel({
       
       {/* Actions panel with MessageList */}
       <div 
-        className="w-full bg-muted/10 border-l border-b border-border rounded-bl-lg flex flex-col"
+        className="w-full bg-muted/10 border-l border-b border-border rounded-bl-lg flex flex-col overflow-hidden"
         style={{
           height: 'calc(100% - 52px)',
           backdropFilter: 'blur(8px)',
           WebkitBackdropFilter: 'blur(8px)',
         }}
       >
-        <div className="flex-1 overflow-y-auto p-3">
-          <MessageList
-            subAgentId={taskId}
-            containerClassName="flex flex-col gap-1.5"
-            showStatusBanners={false}
-            showThinkingIndicator={true}
-          />
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
+          <div className="pb-[60vh]">
+            <MessageList
+              subAgentId={taskId}
+              containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
+              showStatusBanners={false}
+              showThinkingIndicator={true}
+            />
+          </div>
         </div>
       </div>
     </div>

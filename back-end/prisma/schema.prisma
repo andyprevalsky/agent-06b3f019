@@ -9,31 +9,31 @@ datasource db {
 }
 
 model Agent {
-  id                        String          @id @default(uuid())
+  id                        String      @id @default(uuid())
   userId                    String
   goal                      String
-  progress                  Float           @default(0.0)
-  status                    AgentStatus     @default(STARTING_UP)
+  progress                  Float       @default(0.0)
+  status                    AgentStatus @default(STARTING_UP)
   statusMessage             String?
   deletedAt                 DateTime?
-  createdAt                 DateTime        @default(now())
-  updatedAt                 DateTime        @updatedAt
+  createdAt                 DateTime    @default(now())
+  updatedAt                 DateTime    @updatedAt
   temporalWorkflowId        String?
-  model                     String          @default("rose-labs/rose-1-lite")
-  source                    AgentSource     @default(WEB)
-  contextSize               Int             @default(0)
-  messageCount              Int             @default(0)
-  tokenCount                Int             @default(0)
-  reasoningMaxTokens        Int             @default(256)
-  tokensIn                  Int             @default(0)
-  tokensOut                 Int             @default(0)
+  model                     String      @default("rose-labs/rose-1-lite")
+  contextSize               Int         @default(0)
+  messageCount              Int         @default(0)
+  tokenCount                Int         @default(0)
+  tokensIn                  Int         @default(0)
+  tokensOut                 Int         @default(0)
   parentAgentId             String?
-  parentWorkflowId          String?
-  depth                     Int             @default(0)
   tokenInPriceMicrodollars  Int?
   tokenOutPriceMicrodollars Int?
-  parent                    Agent?          @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
-  children                  Agent[]         @relation("AgentHierarchy")
+  source                    AgentSource @default(WEB)
+  depth                     Int         @default(0)
+  parentWorkflowId          String?
+  reasoningMaxTokens        Int         @default(2048)
+  parent                    Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
+  children                  Agent[]     @relation("AgentHierarchy")
   tools                     AgentTool[]
   messages                  Message[]
   toolUsages                ToolUsage[]
@@ -161,19 +161,19 @@ model User {
   id                          String        @id @default(uuid())
   userId                      String        @unique
   name                        String?
-  phone                       String?       // User's phone number (E.164 format)
   addressLine1                String?
   addressLine2                String?
   city                        String?
   state                       String?
   postalCode                  String?
   country                     String?       @default("United States")
-  encryptedPaymentInformation String?
   createdAt                   DateTime      @default(now())
   updatedAt                   DateTime      @updatedAt
   inviteCode                  Int?          @unique
   inviteCodeUses              Int           @default(0)
   usedInviteCode              Int?
+  encryptedPaymentInformation String?
+  phone                       String?
   credits                     Credit[]
   subscriptions               Subscription?
 
@@ -305,19 +305,19 @@ model Person {
 }
 
 model Integration {
-  id                   String            @id @default(uuid())
+  id                   String                       @id @default(uuid())
   userId               String
   type                 IntegrationType
   name                 String
-  status               IntegrationStatus @default(NOT_CONNECTED)
-  isActive             Boolean           @default(false)
+  status               IntegrationStatus            @default(NOT_CONNECTED)
+  isActive             Boolean                      @default(false)
   lastSyncAt           DateTime?
   lastSuccessfulSyncAt DateTime?
   lastFailedSyncAt     DateTime?
   failureReason        String?
   config               Json?
-  createdAt            DateTime          @default(now())
-  updatedAt            DateTime          @updatedAt
+  createdAt            DateTime                     @default(now())
+  updatedAt            DateTime                     @updatedAt
   emailCredentials     EmailIntegrationCredential[]
 
   @@unique([userId, name])
@@ -327,7 +327,7 @@ model Integration {
 }
 
 model EmailIntegrationCredential {
-  id            String          @id @default(uuid())
+  id            String        @id @default(uuid())
   userId        String
   integrationId String
   provider      EmailProvider
@@ -336,12 +336,11 @@ model EmailIntegrationCredential {
   accessToken   String?
   refreshToken  String?
   expiresAt     DateTime?
-  scopes        String[]        @default([])
+  scopes        String[]      @default([])
   metadata      Json?
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
-
-  integration   Integration     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  integration   Integration   @relation(fields: [integrationId], references: [id], onDelete: Cascade)
 
   @@unique([userId, provider])
   @@index([integrationId])
@@ -392,25 +391,22 @@ model BenchmarkRun {
   @@index([createdAt])
 }
 
-// Rose model latency cache - stores TTFT measurements per model
-// TTL is enforced at query time (filter by measuredAt > now() - 1 min)
 model RoseModelLatency {
   id         String   @id @default(uuid())
-  model      String   // e.g., "openai/gpt-5.2"
-  pool       String   // e.g., "rose-1-lite"
-  latencyMs  Int      // time to first token in ms
+  model      String
+  pool       String
+  latencyMs  Int
   measuredAt DateTime @default(now())
 
   @@unique([model, pool])
   @@index([pool, measuredAt])
 }
 
-// Rose conversation model tracking - ensures same model per conversation
 model RoseConversationModel {
   id             String   @id @default(uuid())
   conversationId String   @unique
-  model          String   // selected model for this conversation
-  pool           String   // which pool was used
+  model          String
+  pool           String
   createdAt      DateTime @default(now())
 
   @@index([conversationId])
@@ -420,16 +416,15 @@ enum AgentStatus {
   STARTING_UP
   ACTIVE
   PAUSED
-  OUT_OF_CREDITS
   COMPLETED
   FAILED
+  OUT_OF_CREDITS
 }
 
 enum AgentSource {
   WEB
   MAC_APP
 }
-
 
 enum VerifierType {
   FLOAT_LLM_JUDGE

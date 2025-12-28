@@ -306,7 +306,8 @@ async def test_spawn_agents_activity_http_success():
                 parent_agent_id="parent-123",
                 parent_workflow_id="workflow-456",
                 depth=1,
-                parent_is_paused=False
+                parent_is_paused=False,
+                parent_model="rose-labs/rose-1-lite"
             )
             
             # Verify result structure
@@ -363,7 +364,8 @@ async def test_spawn_agents_activity_http_partial_failure():
                     parent_agent_id="parent-123",
                     parent_workflow_id="workflow-456",
                     depth=1,
-                    parent_is_paused=False
+                    parent_is_paused=False,
+                    parent_model="rose-labs/rose-1-lite"
                 )
                 
                 # Should have 1 success and 1 failure

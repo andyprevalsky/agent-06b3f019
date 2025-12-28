@@ -1,7 +1,9 @@
 """Scroll tool - Scroll the page."""
 
-import json
+import time
 from typing import Any, Dict
+
+from tools.base import format_tool_message, format_error_message
 
 
 async def scroll_tool(stagehand: Any, args: Dict[str, Any], logger: Any) -> Dict[str, Any]:
@@ -16,6 +18,7 @@ async def scroll_tool(stagehand: Any, args: Dict[str, Any], logger: Any) -> Dict
     Returns:
         Result dictionary with success status and pixels scrolled
     """
+    start_time = time.time()
     pixels = args.get("pixels", 0)
     direction = args.get("direction", "down")
     
@@ -24,10 +27,8 @@ async def scroll_tool(stagehand: Any, args: Dict[str, Any], logger: Any) -> Dict
             f"Agent calling tool: scroll",
             category="agent",
             auxiliary={
-                "arguments": {
-                    "value": json.dumps({"pixels": pixels, "direction": direction}),
-                    "type": "object"
-                }
+                "pixels": {"value": str(pixels), "type": "number"},
+                "direction": {"value": direction, "type": "string"}
             }
         )
         
@@ -35,8 +36,34 @@ async def scroll_tool(stagehand: Any, args: Dict[str, Any], logger: Any) -> Dict
         delta_y = -pixels if direction == "up" else pixels
         await stagehand.page.mouse.wheel(0, delta_y)
         
-        return {"success": True, "pixels": pixels}
+        elapsed = time.time() - start_time
+        
+        return {
+            "success": True,
+            "pixels": pixels,
+            "direction": direction,
+            "message": format_tool_message(
+                params=args,
+                result={"scrolled": f"{direction} {pixels}px", "status": "success"},
+                time_elapsed=elapsed,
+                cost_cents=0
+            )
+        }
         
     except Exception as e:
-        return {"success": False, "error": str(e)}
-
+        elapsed = time.time() - start_time
+        error_str = str(e)
+        
+        class ScrollError(Exception):
+            pass
+        
+        return {
+            "success": False,
+            "error": error_str,
+            "message": format_error_message(
+                params=args,
+                error=ScrollError(error_str),
+                time_elapsed=elapsed,
+                cost_cents=0
+            )
+        }

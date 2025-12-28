@@ -84,19 +84,21 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
     return createPortal(
       <div className="fixed inset-0 z-50 bg-background flex flex-row">
         {/* Actions panel on left - uses MessageList */}
-        <div className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col"
+        <div className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
           style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}>
           <div className="p-3 border-b border-border">
             <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Task progress</h4>
           </div>
-          <div className="flex-1 overflow-y-auto p-3">
-            <MessageList
-              subAgentId={taskId}
-              containerClassName="flex flex-col gap-1.5"
-              showStatusBanners={false}
-              showThinkingIndicator={!isDisconnected}
-              compact
-            />
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
+            <div className="pb-[80vh]">
+              <MessageList
+                subAgentId={taskId}
+                containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
+                showStatusBanners={false}
+                showThinkingIndicator={!isDisconnected}
+                compact
+              />
+            </div>
           </div>
         </div>
         
@@ -211,10 +213,10 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
         </div>
         <div className="p-3">
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Task progress</h4>
-          <div className="max-h-48 overflow-y-auto">
+          <div className="h-48 overflow-y-auto overflow-x-hidden">
             <MessageList
               subAgentId={taskId}
-              containerClassName="flex flex-col gap-1.5"
+              containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
               showStatusBanners={false}
               showThinkingIndicator={!isDisconnected}
               compact

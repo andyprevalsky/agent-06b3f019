@@ -306,6 +306,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
             });
             
             // Clear streaming bubbles on ASSISTANT INSERT
+            // Both main agent and browser agent now send thinking as ASSISTANT messages
             if (message.role === 'ASSISTANT') {
               const subAgentId = message.metadata?.subAgentId ?? null;
               setStreamingBubbles(prev => {

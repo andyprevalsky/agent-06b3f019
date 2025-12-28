@@ -2,6 +2,9 @@
 
 These Pydantic models mirror the OpenAI function definitions for browser tools,
 allowing the browser agent to use call_llm_structured_streaming like the main agent.
+
+HYBRID APPROACH: We use Stagehand's observe() for element finding but give the agent
+direct Playwright tools (click, fill, type) with explicit selectors.
 """
 
 from typing import List, Literal, Optional, Union, Type
@@ -9,18 +12,20 @@ from pydantic import BaseModel, Field, create_model
 
 
 # ============================================================================
-# Individual Browser Tool Pydantic Models
+# OBSERVATION TOOLS
 # ============================================================================
 
 
-class ActTool(BaseModel):
-    """Perform an action on the page (click, type, fill)."""
+class ObserveTool(BaseModel):
+    """Find actionable elements on the page and get their selectors."""
     
-    tool: Literal["act"]
-    action: str = Field(
-        description='Describe the click, type, fill, scroll action in a short, specific phrase. '
-                    'Examples: "click the Login button", "type \'John\' into the first name input", '
-                    '"fill the email field with test@example.com"'
+    tool: Literal["observe"]
+    instruction: str = Field(
+        description="Describe what element(s) you're looking for"
+    )
+    iframes: Optional[bool] = Field(
+        default=None,
+        description="Set to true to search inside iframes as well"
     )
 
 
@@ -30,12 +35,10 @@ class AriaTreeTool(BaseModel):
     tool: Literal["ariaTree"]
 
 
-class CloseTool(BaseModel):
-    """Complete the task and close the browser session."""
+class ScreenshotTool(BaseModel):
+    """Take a screenshot of the current page."""
     
-    tool: Literal["close"]
-    reasoning: str = Field(description="Summary of what was accomplished")
-    success: bool = Field(description="Whether the full goal of the task was achieved")
+    tool: Literal["screenshot"]
 
 
 class ExtractTool(BaseModel):
@@ -46,21 +49,56 @@ class ExtractTool(BaseModel):
     schema: str = Field(description='Zod schema as a string (e.g., "z.object({ price: z.number() })")')
 
 
-class FillFormField(BaseModel):
-    """A single field in a form fill operation."""
-    
-    action: str = Field(description='Description of the typing action, e.g. "type foo into the bar field"')
-    value: str = Field(description="Text to type into the target field")
+# ============================================================================
+# ACTION TOOLS (Direct Playwright with Selectors)
+# ============================================================================
 
 
-class FillFormTool(BaseModel):
-    """Fill multiple form fields efficiently."""
+class ClickTool(BaseModel):
+    """Click an element by CSS or XPath selector."""
     
-    tool: Literal["fillForm"]
-    fields: List[FillFormField] = Field(
-        min_length=1,
-        description="List of fields to fill, each with action description and value"
+    tool: Literal["click"]
+    selector: str = Field(
+        description="CSS selector or XPath (prefix with //) to identify the element"
     )
+
+
+class FillTool(BaseModel):
+    """Fill a form field by selector. Clears existing value first."""
+    
+    tool: Literal["fill"]
+    selector: str = Field(description="CSS selector or XPath for the input element")
+    value: str = Field(description="Text to fill into the field")
+
+
+class TypeTool(BaseModel):
+    """Type text into an element (does not clear existing value)."""
+    
+    tool: Literal["type"]
+    selector: str = Field(description="CSS selector or XPath for the element")
+    text: str = Field(description="Text to type")
+    delay: int = Field(default=50, description="Delay between keystrokes in ms")
+
+
+class PressKeyTool(BaseModel):
+    """Press a keyboard key."""
+    
+    tool: Literal["pressKey"]
+    key: str = Field(description="Key to press (e.g., 'Enter', 'Tab', 'Escape', 'Control+a')")
+
+
+class ClickAtCoordinatesTool(BaseModel):
+    """Fallback: Click at specific X,Y pixel coordinates."""
+    
+    tool: Literal["clickAtCoordinates"]
+    x: int = Field(description="X coordinate in pixels from left edge of viewport")
+    y: int = Field(description="Y coordinate in pixels from top edge of viewport")
+    button: Literal["left", "right", "middle"] = Field(default="left", description="Mouse button to click")
+
+
+# ============================================================================
+# NAVIGATION TOOLS
+# ============================================================================
 
 
 class GotoTool(BaseModel):
@@ -75,12 +113,6 @@ class NavbackTool(BaseModel):
     
     tool: Literal["navback"]
     reasoning: str = Field(description="Why you're going back")
-
-
-class ScreenshotTool(BaseModel):
-    """Take a screenshot of the current page."""
-    
-    tool: Literal["screenshot"]
 
 
 class ScrollTool(BaseModel):
@@ -98,6 +130,19 @@ class WaitTool(BaseModel):
     timeMs: int = Field(description="Time to wait in milliseconds")
 
 
+# ============================================================================
+# COMPLETION & USER INTERACTION TOOLS
+# ============================================================================
+
+
+class CloseTool(BaseModel):
+    """Complete the task and close the browser session."""
+    
+    tool: Literal["close"]
+    reasoning: str = Field(description="Summary of what was accomplished")
+    success: bool = Field(description="Whether the full goal of the task was achieved")
+
+
 class SendMessageToUserBrowserTool(BaseModel):
     """Request the user to complete an action (login, payment, CAPTCHA, etc.)."""
     
@@ -106,18 +151,31 @@ class SendMessageToUserBrowserTool(BaseModel):
     reason: str = Field(description="Category: login, payment, captcha, verification, blocked, other")
 
 
+# ============================================================================
+# Tool Registry
+# ============================================================================
+
+
 # Map browser tool names to their Pydantic models
 BROWSER_TOOL_MODELS = {
-    "act": ActTool,
+    # Observation
+    "observe": ObserveTool,
     "ariaTree": AriaTreeTool,
-    "close": CloseTool,
+    "screenshot": ScreenshotTool,
     "extract": ExtractTool,
-    "fillForm": FillFormTool,
+    # Actions
+    "click": ClickTool,
+    "fill": FillTool,
+    "type": TypeTool,
+    "pressKey": PressKeyTool,
+    "clickAtCoordinates": ClickAtCoordinatesTool,
+    # Navigation
     "goto": GotoTool,
     "navback": NavbackTool,
-    "screenshot": ScreenshotTool,
     "scroll": ScrollTool,
     "wait": WaitTool,
+    # Completion
+    "close": CloseTool,
     "send_message_to_user": SendMessageToUserBrowserTool,
 }
 
@@ -180,19 +238,26 @@ def create_browser_agent_action_model(
 
 
 __all__ = [
-    "ActTool",
+    # Observation
+    "ObserveTool",
     "AriaTreeTool", 
-    "CloseTool",
+    "ScreenshotTool",
     "ExtractTool",
-    "FillFormTool",
-    "FillFormField",
+    # Actions
+    "ClickTool",
+    "FillTool",
+    "TypeTool",
+    "PressKeyTool",
+    "ClickAtCoordinatesTool",
+    # Navigation
     "GotoTool",
     "NavbackTool",
-    "ScreenshotTool",
     "ScrollTool",
     "WaitTool",
+    # Completion
+    "CloseTool",
     "SendMessageToUserBrowserTool",
+    # Registry & Factory
     "BROWSER_TOOL_MODELS",
     "create_browser_agent_action_model",
 ]
-

@@ -371,10 +371,10 @@ const ToolMessage = memo(function ToolMessage({
         </div>
       )}
 
-      {/* Expandable message content */}
+      {/* Expandable message content with max-height and scroll */}
       {hasMessage && shouldBeExpanded && (
         <div className="overflow-hidden transition-all duration-200">
-          <div className="pr-2 pl-4 border-l-2 border-border">
+          <div className="pr-2 pl-4 border-l-2 border-border max-h-[300px] overflow-y-auto scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
             <MarkdownText
               text={data.message}
               shouldAnimate={(shouldType && !hasAnimated) || forceExpanded}

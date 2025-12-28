@@ -1,7 +1,9 @@
 """
 Tool definitions in OpenAI function calling format.
 
-These match the TypeScript Stagehand implementation exactly.
+HYBRID APPROACH: We expose Stagehand's observe() for element finding
+(handles shadow DOM, iframes) but give the agent LLM direct Playwright
+tools (click, fill, type) with explicit selectors.
 """
 
 from datetime import datetime
@@ -18,26 +20,36 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
         List of tool definitions
     """
     return [
+        # ========== OBSERVATION TOOLS ==========
         {
             "type": "function",
             "function": {
-                "name": "act",
-                "description": "Perform an action on the page (click, type)",
+                "name": "observe",
+                "description": """Find actionable elements on the page matching your instruction.
+
+Returns a list of elements with their CSS/XPath SELECTORS that you can use with click/fill/type tools.
+
+IMPORTANT: Always call observe() first to get selectors before using click/fill/type.
+
+Examples:
+- observe(instruction="find the login button") → returns [{selector: "button#login", method: "click", ...}]
+- observe(instruction="find all input fields") → returns multiple elements with their selectors
+- observe(instruction="find the search box") → returns [{selector: "input[type='search']", ...}]
+
+This tool handles shadow DOM traversal automatically. Set iframes=true to also search inside iframes.""",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "action": {
+                        "instruction": {
                             "type": "string",
-                            "description": """Describe the click, type, fill, scroll action within in a short, specific phrase that mentions the element type. 
-          Examples:
-          - "click the Login button"
-          - "click the language dropdown"
-          - type "John" into the first name input
-          - type "Doe" into the last name input.
-          When attempting to fill a field you can say 'fill the field x with the value y'."""
+                            "description": "Describe what element(s) you're looking for"
+                        },
+                        "iframes": {
+                            "type": "boolean",
+                            "description": "Set to true to search inside iframes as well"
                         }
                     },
-                    "required": ["action"],
+                    "required": ["instruction"],
                     "additionalProperties": False
                 }
             }
@@ -46,7 +58,7 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
             "type": "function",
             "function": {
                 "name": "ariaTree",
-                "description": "gets the accessibility (ARIA) tree from the current page. this is useful for understanding the page structure and accessibility features. it should provide full context of what is on the page",
+                "description": "Get the accessibility (ARIA) tree from the current page. This provides full context of what is on the page including text content and element structure. Use this to understand the page before taking actions.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -57,21 +69,11 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
         {
             "type": "function",
             "function": {
-                "name": "close",
-                "description": "Complete the task and close",
+                "name": "screenshot",
+                "description": "Take a screenshot of the current page. Use this for visual confirmation of page state.",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "reasoning": {
-                            "type": "string",
-                            "description": "Summary of what was accomplished"
-                        },
-                        "success": {
-                            "type": "boolean",
-                            "description": "Whether the full goal of the task was a success or not"
-                        }
-                    },
-                    "required": ["reasoning", "success"],
+                    "properties": {},
                     "additionalProperties": False
                 }
             }
@@ -81,29 +83,27 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
             "function": {
                 "name": "extract",
                 "description": """Extract structured data from the current page based on a provided schema.
-    
-    USAGE GUIDELINES:
-    - Keep schemas MINIMAL - only include fields essential for the task
-    - IMPORANT: only use this if explicitly asked for structured output. In most scenarios, you should use the aria tree tool over this. 
-    - If you need to extract a link, make sure the type defintion follows the format of z.string().url()
-    EXAMPLES:
-    1. Extract a single value:
-       instruction: "extract the product price"
-       schema: "z.object({ price: z.number()})"
-    
-    2. Extract multiple fields:
-       instruction: "extract product name and price"
-       schema: "z.object({ name: z.string(), price: z.number() })"
-    
-    3. Extract arrays:
-       instruction: "extract all product names and prices"
-       schema: "z.object({ products: z.array(z.object({ name: z.string(), price: z.number() })) })" """,
+
+USAGE GUIDELINES:
+- Keep schemas MINIMAL - only include fields essential for the task
+- Only use this if explicitly asked for structured output
+- For general page understanding, use ariaTree instead
+
+EXAMPLES:
+1. Extract a single value:
+   instruction: "extract the product price"
+   schema: "z.object({ price: z.number()})"
+
+2. Extract multiple fields:
+   instruction: "extract product name and price"
+   schema: "z.object({ name: z.string(), price: z.number() })"
+""",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "instruction": {
                             "type": "string",
-                            "description": "Clear instruction describing what data to extract from the page"
+                            "description": "Clear instruction describing what data to extract"
                         },
                         "schema": {
                             "type": "string",
@@ -115,60 +115,34 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
                 }
             }
         },
+        
+        # ========== ACTION TOOLS (Direct Playwright with Selectors) ==========
         {
             "type": "function",
             "function": {
-                "name": "fillForm",
-                "description": """📝 FORM FILL - SPECIALIZED MULTI-FIELD INPUT TOOL
+                "name": "click",
+                "description": """Click an element by CSS or XPath selector.
 
-     CRITICAL: Use this for ANY form with 2+ input fields (text inputs, textareas, etc.)
+IMPORTANT: Use observe() first to find the element and get its selector.
 
-    WHY THIS TOOL EXISTS:
-    • Forms are the #1 use case for multi-field input
-    • Optimized specifically for input/textarea elements
-    • 4-6x faster than individual typing actions
+Selector formats:
+- CSS: "button#login", ".submit-btn", "[data-testid='submit']"
+- XPath: "//button[@id='login']", "//a[contains(text(), 'Sign in')]"
 
-    Use fillForm: Pure form filling (inputs, textareas only)
-
-
-    MANDATORY USE CASES (always use fillForm for these):
-    Registration forms: name, email, password fields
-    Contact forms: name, email, message fields  
-    Checkout forms: address, payment info fields
-    Profile updates: multiple user data fields
-    Search filters: multiple criteria inputs
-
-
-
-    PARAMETER DETAILS:
-    • fields: Array of { action, value } objects.
-      – action: short description of where to type (e.g. "type 'john@example.com' into the email input").
-      – value: the exact text to enter.
- """,
+Examples:
+- click(selector="button#login")
+- click(selector="[data-testid='submit']")
+- click(selector="//button[contains(text(), 'Login')]")
+""",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "fields": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "action": {
-                                        "type": "string",
-                                        "description": 'Description of the typing action, e.g. "type foo into the bar field"'
-                                    },
-                                    "value": {
-                                        "type": "string",
-                                        "description": "Text to type into the target field"
-                                    }
-                                },
-                                "required": ["action", "value"]
-                            },
-                            "minItems": 1,
-                            "description": "Provide at least one field to fill"
+                        "selector": {
+                            "type": "string",
+                            "description": "CSS selector or XPath (prefix XPath with //) to identify the element"
                         }
                     },
-                    "required": ["fields"],
+                    "required": ["selector"],
                     "additionalProperties": False
                 }
             }
@@ -176,14 +150,158 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "fill",
+                "description": """Fill a form field by selector. CLEARS existing value first, then types the new value.
+
+IMPORTANT: Use observe() first to find the input element and get its selector.
+
+Use this for:
+- Login forms (username, password)
+- Search boxes (if you want to replace existing text)
+- Any text input where you want to replace content
+
+Examples:
+- fill(selector="input[name='email']", value="user@example.com")
+- fill(selector="#password", value="secret123")
+- fill(selector="//input[@placeholder='Search']", value="query")
+""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "selector": {
+                            "type": "string",
+                            "description": "CSS selector or XPath for the input element"
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "Text to fill into the field"
+                        }
+                    },
+                    "required": ["selector", "value"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "type",
+                "description": """Type text into an element character by character (does NOT clear existing text).
+
+IMPORTANT: Use observe() first to find the element and get its selector.
+
+Use this for:
+- Search boxes that trigger autocomplete on each keystroke
+- When you want to APPEND text to existing content
+- When you need keypress events to fire
+
+Examples:
+- type(selector="input[type='search']", text="python tutorials")
+- type(selector="#message", text=" - additional text")
+""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "selector": {
+                            "type": "string",
+                            "description": "CSS selector or XPath for the element"
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "Text to type"
+                        },
+                        "delay": {
+                            "type": "number",
+                            "description": "Delay between keystrokes in ms. Default: 50"
+                        }
+                    },
+                    "required": ["selector", "text"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "pressKey",
+                "description": """Press a keyboard key.
+
+Use this to press special keys like Enter, Tab, Escape, or keyboard shortcuts.
+
+Common keys: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown
+
+For key combinations, use format like 'Control+a' or 'Shift+Tab'.
+
+Examples:
+- pressKey(key="Enter") - Submit a form
+- pressKey(key="Tab") - Move to next field
+- pressKey(key="Control+a") - Select all
+""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Key to press (e.g., 'Enter', 'Tab', 'Escape', 'Control+a')"
+                        }
+                    },
+                    "required": ["key"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "clickAtCoordinates",
+                "description": """FALLBACK: Click at specific X,Y pixel coordinates on the page.
+
+Use this ONLY when:
+- Selector-based click() fails
+- You have exact coordinates from a screenshot
+- The element cannot be found with observe()
+
+Coordinates are relative to the top-left corner of the viewport.
+
+Examples:
+- clickAtCoordinates(x=500, y=300)
+- clickAtCoordinates(x=100, y=200, button="right")
+""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "x": {
+                            "type": "number",
+                            "description": "X coordinate in pixels from left edge of viewport"
+                        },
+                        "y": {
+                            "type": "number",
+                            "description": "Y coordinate in pixels from top edge of viewport"
+                        },
+                        "button": {
+                            "type": "string",
+                            "enum": ["left", "right", "middle"],
+                            "description": "Mouse button to click. Default: left"
+                        }
+                    },
+                    "required": ["x", "y"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        
+        # ========== NAVIGATION TOOLS ==========
+        {
+            "type": "function",
+            "function": {
                 "name": "goto",
-                "description": "Navigate to a specific URL",
+                "description": "Navigate to a URL in the browser. You MUST provide the FULL URL including the protocol (https://).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
-                            "description": "The URL to navigate to"
+                            "description": "The FULL URL to navigate to, including protocol (e.g., 'https://www.example.com'). Do NOT use partial URLs like 'example.com'."
                         }
                     },
                     "required": ["url"],
@@ -212,18 +330,6 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
         {
             "type": "function",
             "function": {
-                "name": "screenshot",
-                "description": "Takes a screenshot of the current page. Use this tool to learn where you are on the page, or to get context of elements on the page",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "scroll",
                 "description": "Scroll the page",
                 "parameters": {
@@ -231,7 +337,7 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
                     "properties": {
                         "pixels": {
                             "type": "number",
-                            "description": "Number of pixels to scroll up or down"
+                            "description": "Number of pixels to scroll"
                         },
                         "direction": {
                             "type": "string",
@@ -261,6 +367,30 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
                     "additionalProperties": False
                 }
             }
+        },
+        
+        # ========== COMPLETION TOOL ==========
+        {
+            "type": "function",
+            "function": {
+                "name": "close",
+                "description": "Complete the task and close",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reasoning": {
+                            "type": "string",
+                            "description": "Summary of what was accomplished"
+                        },
+                        "success": {
+                            "type": "boolean",
+                            "description": "Whether the full goal of the task was achieved"
+                        }
+                    },
+                    "required": ["reasoning", "success"],
+                    "additionalProperties": False
+                }
+            }
         }
     ]
 
@@ -268,8 +398,6 @@ def get_browser_tool_definitions(current_url: str = "") -> list[dict]:
 def get_system_prompt(task_instruction: str, current_url: str, custom_instructions: str = None) -> str:
     """
     Build the system prompt for the browser agent.
-    
-    This matches the TypeScript implementation exactly.
     
     Args:
         task_instruction: The user's task
@@ -289,28 +417,37 @@ Your current goal: {task_instruction}"""
 
 Your task: {task_instruction}
 
-You have access to various browser automation tools. Use them step by step to complete the task.
-
-IMPORTANT GUIDELINES:
-1. Always start by understanding the current page state
-2. Use the screenshot tool to verify page state when needed
-3. Use appropriate tools for each action
-4. When the task is complete, use the "close" tool with success: true
-5. If the task cannot be completed, use "close" with success: false
+WORKFLOW - OBSERVE THEN ACT:
+1. Use observe() to find elements and get their selectors
+2. Use click/fill/type with the selector from observe()
+3. Verify results with screenshot or ariaTree
 
 TOOLS OVERVIEW:
-- screenshot: Take a compressed JPEG screenshot for quick visual context (use sparingly)
-- ariaTree: Get an accessibility (ARIA) hybrid tree for full page context (preferred for understanding layout and elements)
-- act: Perform a specific atomic action (click, type, etc.). For filling a field, you can say 'fill the field x with the value y'.
-- extract: Extract structured data
-- goto: Navigate to a URL
-- wait/navback/refresh: Control timing and navigation
-- scroll: Scroll the page x pixels up or down
+OBSERVATION:
+- observe(instruction) → Find elements, returns selectors. ALWAYS USE FIRST.
+- ariaTree() → Get full page content/structure
+- screenshot() → Visual confirmation
 
-STRATEGY:
-- Prefer ariaTree to understand the page before acting; use screenshot for quick confirmation.
-- Keep actions atomic and verify outcomes before proceeding.
+ACTIONS (require selector from observe):
+- click(selector) → Click an element
+- fill(selector, value) → Clear field and type (for forms)
+- type(selector, text) → Type without clearing (for search boxes)
+- pressKey(key) → Press keyboard keys (Enter, Tab, etc.)
 
-For each action, provide clear reasoning about why you're taking that step.
-Today's date is {current_date}. You're currently on the website: {current_url}."""
+NAVIGATION:
+- goto(url) → Navigate to FULL URL (must include https://)
+- navback() → Go back
+- scroll(pixels, direction) → Scroll page
+- wait(timeMs) → Wait
 
+COMPLETION:
+- close(reasoning, success) → End task
+
+IMPORTANT RULES:
+1. ALWAYS call observe() first to get a selector before clicking/typing
+2. Use fill() for login/forms (clears existing text)
+3. Use type() for search boxes (doesn't clear, triggers autocomplete)
+4. Verify actions worked with screenshot or ariaTree
+5. When done, call close() with success: true/false
+
+Today's date is {current_date}. You're currently on: {current_url}"""

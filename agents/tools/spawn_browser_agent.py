@@ -10,6 +10,7 @@ import time
 import asyncio
 import base64
 import json
+import litellm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -583,21 +584,30 @@ async def spawn_browser_agent_activity(
         
         # Configure Stagehand with Rose for internal observe/act/extract calls
         # use_api=False makes LLM calls locally via litellm instead of through Stagehand server
-        # litellm uses openrouter/ provider which calls /chat/completions endpoint
-        # We deployed a /chat function that proxies to /completions (Rose API)
+        #
+        # KEY FIX: Must use openai/ provider (not openrouter/) because:
+        # - openrouter/ overwrites our Authorization header with its own api_key
+        # - openai/ passes through extra_headers correctly
+        #
+        # Also must set litellm.headers globally because:
+        # - Stagehand's LLMClient ignores extra_headers in model_client_options
+        # - litellm.headers gets included in every litellm.acompletion call
+        litellm.headers = {
+            "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+            "x-api-key": config.rose.api_key,
+        }
+        
         stagehand_config = StagehandConfig(
             env="BROWSERBASE",
             api_key=config.browserbase.api_key,
             project_id=config.browserbase.project_id,
             browserbase_session_id=session_id,
-            model_name="openrouter/rose-1-ultra",  # Rose pool via openrouter/ provider
-            model_api_key=config.rose.api_key,  # Rose API key
+            model_name="openai/rose-1-ultra",  # Use openai/ provider (NOT openrouter/)
+            model_api_key="unused",  # Not used - auth via litellm.headers
             model_client_options={
                 "baseURL": config.rose.api_url.replace("/completions", ""),  # Base URL (litellm adds /chat/completions)
-                "extra_headers": {
-                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
-                    "x-api-key": config.rose.api_key,
-                },
+                # Note: extra_headers here is ignored by Stagehand's LLMClient
+                # Auth headers are set via litellm.headers above
             },
             use_api=False,  # Bypass Stagehand server - use local litellm → Rose
             verbose=2,  # Debug level for detailed action logging
@@ -616,6 +626,49 @@ async def spawn_browser_agent_activity(
         
         # 5. ROSE AGENT LOOP: Use browser tools with Rose
         # This gives us full control over execution and token usage tracking
+        
+        # Inject visual cursor for better user experience
+        # This shows a red dot that follows the agent's actions
+        try:
+            await stagehand.page.evaluate("""
+                (() => {
+                    // Remove existing cursor if present
+                    const existing = document.getElementById('rose-agent-cursor');
+                    if (existing) existing.remove();
+                    
+                    // Create cursor element
+                    const cursor = document.createElement('div');
+                    cursor.id = 'rose-agent-cursor';
+                    cursor.style.cssText = `
+                        position: fixed;
+                        width: 20px;
+                        height: 20px;
+                        background: radial-gradient(circle, rgba(239,68,68,0.9) 0%, rgba(239,68,68,0.4) 50%, transparent 70%);
+                        border-radius: 50%;
+                        pointer-events: none;
+                        z-index: 999999;
+                        transform: translate(-50%, -50%);
+                        transition: left 0.15s ease-out, top 0.15s ease-out;
+                        box-shadow: 0 0 10px rgba(239,68,68,0.5);
+                        display: none;
+                    `;
+                    document.body.appendChild(cursor);
+                    
+                    // Track cursor position globally
+                    window.__roseAgentCursor = cursor;
+                    window.__moveRoseCursor = (x, y) => {
+                        cursor.style.left = x + 'px';
+                        cursor.style.top = y + 'px';
+                        cursor.style.display = 'block';
+                    };
+                    window.__hideRoseCursor = () => {
+                        cursor.style.display = 'none';
+                    };
+                })();
+            """)
+            logger.info("✨ Injected visual cursor for agent actions")
+        except Exception as cursor_error:
+            logger.warning(f"Failed to inject cursor (non-fatal): {cursor_error}")
         
         # Capture initial URL
         try:
@@ -778,6 +831,31 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
         #
         for step in range(max_steps):
             try:
+                # Check if parent agent is paused - poll agent status from DB
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        status_response = await client.get(
+                            f"{config.backend.api_url}/api/agents/{agent_id}/status",
+                            headers={"x-api-key": config.backend.api_key or ""}
+                        )
+                        if status_response.status_code == 200:
+                            agent_status = status_response.json().get("status", "ACTIVE")
+                            if agent_status == "PAUSED":
+                                logger.info("⏸️ Parent agent is paused - waiting for resume...")
+                                # Keep heartbeating while paused so Temporal doesn't kill us
+                                while agent_status == "PAUSED":
+                                    activity.heartbeat("Waiting for resume...")
+                                    await asyncio.sleep(1)  # Check every 1 second
+                                    status_response = await client.get(
+                                        f"{config.backend.api_url}/api/agents/{agent_id}/status",
+                                        headers={"x-api-key": config.backend.api_key or ""}
+                                    )
+                                    if status_response.status_code == 200:
+                                        agent_status = status_response.json().get("status", "ACTIVE")
+                                logger.info("▶️ Parent agent resumed - continuing browser agent")
+                except Exception as status_error:
+                    logger.warning(f"Failed to check pause status (non-fatal): {status_error}")
+                
                 activity.heartbeat(f"Executing step {step + 1}/{max_steps}")
                 logger.info(f"🔄 Step {step + 1}/{max_steps}")
 
@@ -816,6 +894,23 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                         
                         # Compress old screenshots and aria trees to save tokens
                         compressed_messages = compress_messages(messages)
+                        
+                        # Debug: Log entire message content to file for inspection
+                        import json as json_debug
+                        debug_file_path = "/Users/andyprevalsky/Desktop/projects/navi-whisper-lux/agents/browser_agent_messages.json"
+                        try:
+                            with open(debug_file_path, "w") as debug_file:
+                                # Write both raw messages and compressed messages
+                                debug_data = {
+                                    "step": step,
+                                    "raw_message_count": len(messages),
+                                    "compressed_message_count": len(compressed_messages),
+                                    "compressed_messages": compressed_messages
+                                }
+                                json_debug.dump(debug_data, debug_file, indent=2, default=str)
+                            logger.info(f"📝 Wrote {len(compressed_messages)} messages to {debug_file_path}")
+                        except Exception as debug_err:
+                            logger.warning(f"Failed to write debug file: {debug_err}")
                         
                         # Call structured streaming (same as main agent!)
                         result, usage, _ = await call_llm_structured_streaming(
@@ -924,20 +1019,19 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                 messages.append(assistant_message)
                 
                 # ===== LOG REASONING (if any content) =====
+                # Save reasoning as ASSISTANT message (like main agent does)
+                # This clears streaming bubbles and matches the main agent's pattern
                 reasoning_text = content.strip()
                 if reasoning_text:
                     reasoning_messages.append(reasoning_text)
                     if len(reasoning_messages) > 5:
                         reasoning_messages = reasoning_messages[-5:]
                     
-                    await save_browser_action_message(
+                    # Use ASSISTANT role (like main agent) - not TOOL with action_type="thinking"
+                    await save_browser_assistant_message(
                         agent_id=agent_id,
-                        title="Thinking",
                         message=reasoning_text,
-                        status=MessageStatus.FINISHED,
-                        task_id=task_id,
-                        browser_url=browser_url,
-                        action_type="thinking"
+                        task_id=task_id
                     )
                 
                 # ===== EXECUTE TOOL CALLS =====
@@ -1076,37 +1170,49 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                     # === BROWSER TOOLS ===
                     else:
                         # Map tool names to frontend action types
-                        # NEW action types: "observation" and "extraction"
+                        # HYBRID APPROACH: observe for element finding, direct Playwright for actions
                         action_type_map = {
-                            "act": "action",           # Generic action (click, type, etc.)
-                            "ariaTree": "observation", # NEW: Observing page state
-                            "screenshot": "observation",  # NEW: Visual observation
-                            "extract": "extraction",   # NEW: Extracting structured data
+                            # Observation tools
+                            "observe": "observation",
+                            "ariaTree": "observation",
+                            "screenshot": "observation",
+                            "extract": "extraction",
+                            # Action tools (direct Playwright)
+                            "click": "action",
+                            "fill": "action",
+                            "type": "action",
+                            "pressKey": "action",
+                            "clickAtCoordinates": "action",
+                            # Navigation tools
                             "goto": "navigation",
                             "navback": "navigation",
                             "scroll": "scroll",
                             "wait": "action",
-                            "fillForm": "action"
                         }
                         action_type = action_type_map.get(tool_name, "action")
                         
                         # Build action titles for IN_PROGRESS (present tense) and FINISHED (past tense)
-                        if tool_name == "act":
-                            action_arg = tool_args.get('action', '')
-                            if not action_arg:
-                                logger.warning(f"⚠️ act tool called with empty action!", tool_args=tool_args)
-                            action_title_progress = f"Action: {action_arg}"
-                            action_title_done = f"Action: {action_arg}"
+                        if tool_name == "observe":
+                            instruction = tool_args.get('instruction', '')
+                            action_title_progress = f"Finding: {instruction}"
+                            action_title_done = f"Found: {instruction}"
+                        elif tool_name == "click":
+                            selector = tool_args.get('selector', '')
+                            action_title_progress = f"Clicking: {selector}"
+                            action_title_done = f"Clicked: {selector}"
+                        elif tool_name == "fill":
+                            selector = tool_args.get('selector', '')
+                            action_title_progress = f"Filling: {selector}"
+                            action_title_done = f"Filled: {selector}"
+                        elif tool_name == "type":
+                            selector = tool_args.get('selector', '')
+                            text = tool_args.get('text', '')
+                            action_title_progress = f"Typing into: {selector}"
+                            action_title_done = f"Typed into: {selector}"
                         elif tool_name == "goto":
                             url_arg = tool_args.get('url', '')
-                            if not url_arg:
-                                logger.warning(f"⚠️ goto tool called with empty URL!", tool_args=tool_args)
-                            action_title_progress = f"Navigating → {url_arg if url_arg else '(empty URL)'}"
-                            action_title_done = f"Navigated → {url_arg if url_arg else '(empty URL)'}"
-                        elif tool_name == "fillForm":
-                            field_count = len(tool_args.get('fields', []))
-                            action_title_progress = f"Filling Form ({field_count} fields)"
-                            action_title_done = f"Filled Form ({field_count} fields)"
+                            action_title_progress = f"Navigating → {url_arg}"
+                            action_title_done = f"Navigated → {url_arg}"
                         elif tool_name == "scroll":
                             direction = tool_args.get('direction', 'down')
                             pixels = tool_args.get('pixels', 0)
@@ -1119,7 +1225,7 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             action_title_progress = "Taking Screenshot"
                             action_title_done = "Took Screenshot"
                         elif tool_name == "extract":
-                            instruction = tool_args.get('instruction', '')[:30]
+                            instruction = tool_args.get('instruction', '')
                             action_title_progress = f"Extracting: {instruction}"
                             action_title_done = f"Extracted: {instruction}"
                         elif tool_name == "navback":
@@ -1129,6 +1235,15 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             time_ms = tool_args.get('timeMs', 0)
                             action_title_progress = f"Waiting ({time_ms}ms)"
                             action_title_done = f"Waited ({time_ms}ms)"
+                        elif tool_name == "pressKey":
+                            key = tool_args.get('key', '')
+                            action_title_progress = f"Pressing Key: {key}"
+                            action_title_done = f"Pressed Key: {key}"
+                        elif tool_name == "clickAtCoordinates":
+                            x = tool_args.get('x', 0)
+                            y = tool_args.get('y', 0)
+                            action_title_progress = f"Clicking at ({x}, {y})"
+                            action_title_done = f"Clicked at ({x}, {y})"
                         else:
                             action_title_progress = tool_name
                             action_title_done = tool_name
@@ -1190,7 +1305,7 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                                 track_url_change()
                             
                             # Track action for context summary
-                            action_summary.append(f"{tool_name}: {str(tool_args)[:50]}")
+                            action_summary.append(f"{tool_name}: {str(tool_args)}")
                             if len(action_summary) > 10:
                                 action_summary = action_summary[-10:]
                             
@@ -1454,9 +1569,7 @@ def build_context_summary(
         last_reasoning = reasoning_messages[-3:]  # Last 3 reasoning messages
         summary_parts.append(f"\n**Agent Reasoning** (last {len(last_reasoning)}):")
         for i, reasoning in enumerate(last_reasoning, 1):
-            # Truncate long reasoning
-            truncated = reasoning[:150] + "..." if len(reasoning) > 150 else reasoning
-            summary_parts.append(f"  {i}. {truncated}")
+            summary_parts.append(f"  {i}. {reasoning}")
     
     # Actions taken
     if action_summary:
@@ -1466,6 +1579,46 @@ def build_context_summary(
             summary_parts.append(f"  • {action}")
     
     return "\n".join(summary_parts)
+
+
+async def save_browser_assistant_message(
+    agent_id: str,
+    message: str,
+    task_id: str,  # Stable task ID for routing to browser panel
+):
+    """
+    Save browser ASSISTANT message directly to DB.
+    
+    This matches how the main agent posts ASSISTANT messages - streaming bubbles
+    get cleared when this message arrives because it's an ASSISTANT role message.
+    
+    Args:
+        agent_id: The agent ID
+        message: The message content
+        task_id: Stable task ID for routing to browser panel's MessageList
+    """
+    try:
+        config = load_config()
+        
+        metadata = {
+            "subAgentId": task_id  # Routes to browser panel's MessageList
+        }
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "message": message,
+                    "role": "ASSISTANT",
+                    "metadata": metadata
+                }
+            )
+    except Exception as e:
+        logger.error("Failed to save browser assistant message", error=str(e))
 
 
 async def save_browser_action_message(

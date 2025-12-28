@@ -1,4 +1,8 @@
-"""Browser automation tools for Stagehand agent."""
+"""Browser automation tools for Stagehand agent.
+
+HYBRID APPROACH: We use Stagehand's observe() for element finding
+(handles shadow DOM, iframes) but direct Playwright for actions.
+"""
 
 from .tool_definitions import get_browser_tool_definitions, get_system_prompt
 from .tool_executor import execute_browser_tool
@@ -6,16 +10,24 @@ from .message_processing import transform_tool_result, compress_messages
 from .schemas import (
     BROWSER_TOOL_MODELS,
     create_browser_agent_action_model,
-    ActTool,
+    # Observation
+    ObserveTool,
     AriaTreeTool,
-    CloseTool,
+    ScreenshotTool,
     ExtractTool,
-    FillFormTool,
+    # Actions
+    ClickTool,
+    FillTool,
+    TypeTool,
+    PressKeyTool,
+    ClickAtCoordinatesTool,
+    # Navigation
     GotoTool,
     NavbackTool,
-    ScreenshotTool,
     ScrollTool,
     WaitTool,
+    # Completion
+    CloseTool,
     SendMessageToUserBrowserTool,
 )
 
@@ -28,16 +40,23 @@ __all__ = [
     # Schemas for structured outputs
     "BROWSER_TOOL_MODELS",
     "create_browser_agent_action_model",
-    "ActTool",
+    # Observation
+    "ObserveTool",
     "AriaTreeTool",
-    "CloseTool",
+    "ScreenshotTool",
     "ExtractTool",
-    "FillFormTool",
+    # Actions
+    "ClickTool",
+    "FillTool",
+    "TypeTool",
+    "PressKeyTool",
+    "ClickAtCoordinatesTool",
+    # Navigation
     "GotoTool",
     "NavbackTool",
-    "ScreenshotTool",
     "ScrollTool",
     "WaitTool",
+    # Completion
+    "CloseTool",
     "SendMessageToUserBrowserTool",
 ]
-

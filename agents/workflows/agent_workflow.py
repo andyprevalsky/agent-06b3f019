@@ -125,7 +125,7 @@ SYSTEM_TOOLS = [
     {
         "id": "system-spawn-sub-agents",
         "name": "spawn_sub_agents",
-        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Use sub-agents to parallelize work: evaluate multiple hypotheses at once, execute context-independent tasks in parallel, and/or decompose the current goal into context-independent subgoals for faster and more accurate completion. Each sub-agent runs independently with its own goal and verifier. Provide a list of sub-agent configs with: goal (required), model (optional), reasoning_max_tokens (optional), and verifier (required with type and llm_judge_prompt). The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
+        "description": "Spawn multiple sub-agents to work on parallel subtasks concurrently. Use sub-agents to parallelize work: evaluate multiple hypotheses at once, execute context-independent tasks in parallel, and/or decompose the current goal into context-independent subgoals for faster and more accurate completion. Each sub-agent runs independently with its own goal and verifier. Provide a list of sub-agent configs with: goal (required) and verifier (required with type and llm_judge_prompt). Sub-agents inherit the model from the parent. The parent agent will wait for all sub-agents to complete before continuing. NOTE: Maximum nesting depth is 1 - sub-agents cannot spawn their own sub-agents."
     },
     {
         "id": "system-send-message-to-user",
