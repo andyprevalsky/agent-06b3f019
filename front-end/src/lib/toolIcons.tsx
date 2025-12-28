@@ -54,6 +54,7 @@ export function isX402Tool(toolName: string): boolean {
 export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
   'spawn_browser_agent': Globe,
+  'spawn_code_agent': Code,
   'send_sms': MessageSquare,
   'send_sms_as_user': MessageSquare,
   'send_email': Mail,
@@ -117,6 +118,17 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'navigation': Navigation,
   'screenshot': Camera,
   'error': XCircle,
+  
+  // Code agent action_type mappings (from spawn_code_agent)
+  'code_started': Code,
+  'vercel_setup': Settings,
+  'cursor_working': Code,
+  'cursor_status': Code,
+  'code_written': FileText,
+  'vercel_deploying': Globe,
+  'code_deployed': CheckCircle,
+  'code_complete': CheckCircle,
+  'code_error': XCircle,
 };
 
 /**

@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.spawn_sub_agents import spawn_sub_agents
     from tools.send_sms_as_user import send_sms_as_user
     from tools.spawn_browser_agent import spawn_browser_agent
+    # from tools.spawn_code_agent import spawn_code_agent  # DISABLED - needs VERCEL_TOKEN setup
     from tools.search_user_network import search_user_network_for_people
     from tools.find_all import find_all
     from tools.enrich import enrich
@@ -63,6 +64,7 @@ CONTEXT_THRESHOLD_PERCENTAGE = 0.8
 # Maps tool names to their workflow helper functions
 EVENT_DRIVEN_TOOLS = {
     "spawn_browser_agent": spawn_browser_agent,
+    # "spawn_code_agent": spawn_code_agent,  # DISABLED - needs VERCEL_TOKEN setup
     "deep_research": deep_research,
     "wait_seconds": wait_seconds,
     "send_message_to_user": send_message_to_user,
@@ -181,6 +183,12 @@ SYSTEM_TOOLS = [
         "name": "spawn_browser_agent",
         "description": "Spawn an autonomous browser agent to complete web tasks including purchases, checkouts, and e-commerce transactions. The agent can navigate websites, fill forms, click buttons, add items to cart, complete checkout flows, and interact with any web page. Use this for any task that requires browsing the web interactively. Browser cookies have been injected - assume the user is logged in and payment methods are saved until proven otherwise."
     },
+    # DISABLED - needs VERCEL_TOKEN setup
+    # {
+    #     "id": "system-spawn-code-agent",
+    #     "name": "spawn_code_agent",
+    #     "description": "Spawn an autonomous code agent to write and deploy code using Cursor Cloud Agents. The agent can create React apps, Python scripts, visualizations, and any code-based projects. Code is automatically pushed to GitHub and deployed via Vercel for instant preview. Provide a complete goal - the agent will autonomously write, test, and deploy the code. Use this for any task that requires generating or modifying code."
+    # },
     {
         "id": "system-web-search",
         "name": "web_search",

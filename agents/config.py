@@ -126,6 +126,22 @@ class X402Config:
 
 
 @dataclass
+class CursorConfig:
+    """Cursor Cloud Agent API configuration."""
+    
+    api_key: str = ""  # Cursor API key for spawning cloud agents
+    base_url: str = "https://api.cursor.com/v1"
+
+
+@dataclass
+class VercelConfig:
+    """Vercel API configuration for preview deployments."""
+    
+    token: str = ""  # Vercel API token for creating projects and fetching deployments
+    team_id: Optional[str] = None  # Optional team ID for team-owned projects
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
     
@@ -141,6 +157,8 @@ class AppConfig:
     supabase: SupabaseConfig
     payment: PaymentConfig
     x402: X402Config
+    cursor: CursorConfig
+    vercel: VercelConfig
     
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -229,6 +247,16 @@ def load_config() -> AppConfig:
         wallet_secret=os.getenv("CDP_WALLET_SECRET", ""),
     )
     
+    cursor = CursorConfig(
+        api_key=os.getenv("CURSOR_API_KEY", ""),
+        base_url=os.getenv("CURSOR_API_BASE_URL", "https://api.cursor.com/v1"),
+    )
+    
+    vercel = VercelConfig(
+        token=os.getenv("VERCEL_TOKEN", ""),
+        team_id=os.getenv("VERCEL_TEAM_ID"),
+    )
+    
     return AppConfig(
         temporal=temporal,
         backend=backend,
@@ -242,6 +270,8 @@ def load_config() -> AppConfig:
         supabase=supabase,
         payment=payment,
         x402=x402,
+        cursor=cursor,
+        vercel=vercel,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

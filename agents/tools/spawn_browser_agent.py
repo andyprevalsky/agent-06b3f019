@@ -1095,14 +1095,14 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             action_arg = tool_args.get('action', '')
                             if not action_arg:
                                 logger.warning(f"⚠️ act tool called with empty action!", tool_args=tool_args)
-                            action_title_progress = f"Action: {action_arg[:50]}"
-                            action_title_done = f"Action: {action_arg[:50]}"
+                            action_title_progress = f"Action: {action_arg}"
+                            action_title_done = f"Action: {action_arg}"
                         elif tool_name == "goto":
                             url_arg = tool_args.get('url', '')
                             if not url_arg:
                                 logger.warning(f"⚠️ goto tool called with empty URL!", tool_args=tool_args)
-                            action_title_progress = f"Navigating → {url_arg[:50] if url_arg else '(empty URL)'}"
-                            action_title_done = f"Navigated → {url_arg[:50] if url_arg else '(empty URL)'}"
+                            action_title_progress = f"Navigating → {url_arg if url_arg else '(empty URL)'}"
+                            action_title_done = f"Navigated → {url_arg if url_arg else '(empty URL)'}"
                         elif tool_name == "fillForm":
                             field_count = len(tool_args.get('fields', []))
                             action_title_progress = f"Filling Form ({field_count} fields)"

@@ -52,6 +52,7 @@ import { AgentProvider, useAgentContext } from '@/contexts/AgentContext';
 import { MessageList } from '@/components/terminal/MessageList';
 
 const BrowserStatusBarCarousel = lazy(() => import('@/components/terminal/BrowserStatusBarCarousel'));
+const CodeAgentPanel = lazy(() => import('@/components/terminal/CodeAgentPanel'));
 
 /**
  * StreamingMarkdown - Renders text with fade-in animation for each chunk
@@ -1316,6 +1317,57 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     };
   }, [activeBrowserPanels]);
 
+  // Memoize code agent panels for the code agent panel display
+  const activeCodeAgentPanels = useMemo(() => {
+    type CodeAgentPanelData = {
+      taskId: string;
+      previewUrl?: string;
+    };
+    
+    const panels: CodeAgentPanelData[] = [];
+    const codeTaskIds = new Set<string>();
+    
+    // Find all unique code agent task IDs
+    messages.forEach(m => {
+      const taskId = m.metadata?.task_id;
+      if (taskId && m.metadata?.toolName === 'spawn_code_agent') {
+        codeTaskIds.add(taskId);
+      }
+    });
+    
+    // For each task, check completion status
+    codeTaskIds.forEach(taskId => {
+      const taskMessages = messages.filter(m => m.metadata?.task_id === taskId);
+      const lastMessage = taskMessages[taskMessages.length - 1];
+      
+      const isComplete = 
+        lastMessage?.metadata?.action_type === 'code_complete' ||
+        lastMessage?.metadata?.action_type === 'code_error';
+      
+      // Get preview URL if available
+      const deployedMessage = taskMessages.find(m => m.metadata?.preview_url);
+      const previewUrl = deployedMessage?.metadata?.preview_url;
+      
+      // Only include active (non-complete) code agent panels
+      if (!isComplete) {
+        panels.push({
+          taskId,
+          previewUrl,
+        });
+      }
+    });
+
+    return panels;
+  }, [messages]);
+
+  // Stable props for CodeAgentPanel to avoid unnecessary re-renders
+  const codeAgentProps = useMemo(() => {
+    if (activeCodeAgentPanels.length === 0) return null;
+    return {
+      panels: activeCodeAgentPanels,
+    };
+  }, [activeCodeAgentPanels]);
+
   // Get system messages
   const systemMessages = messages.filter((m) => m.role === 'SYSTEM');
 
@@ -1805,6 +1857,21 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
                 <BrowserStatusBarCarousel
                   browsers={browserStatusProps.browsers}
                 />
+              </div>
+            </Suspense>
+          )}
+
+          {/* Code Agent Panels - fixed section above query input */}
+          {codeAgentProps && (
+            <Suspense fallback={null}>
+              <div className="px-2 md:px-0 flex flex-col gap-2">
+                {codeAgentProps.panels.map((panel) => (
+                  <CodeAgentPanel
+                    key={panel.taskId}
+                    taskId={panel.taskId}
+                    previewUrl={panel.previewUrl}
+                  />
+                ))}
               </div>
             </Suspense>
           )}

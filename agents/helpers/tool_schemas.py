@@ -156,6 +156,15 @@ class SpawnBrowserAgentTool(BaseModel):
     )
 
 
+class SpawnCodeAgentTool(BaseModel):
+    """Spawn an autonomous code agent to write and deploy code using Cursor Cloud Agents. The code agent can create React apps, Python scripts, visualizations, and any other code-based projects. Code is automatically pushed to GitHub and deployed via Vercel for instant preview. Provide a complete, high-level goal - the code agent will autonomously write, test, and deploy the code."""
+
+    tool: Literal["spawn_code_agent"]
+    goal: str = Field(
+        description="Complete, high-level goal for the autonomous code agent to accomplish. Examples: 'Create a React dashboard showing real-time crypto prices with charts', 'Build a Python script that scrapes Hacker News and generates a summary', 'Create an interactive data visualization of US population by state', 'Build a landing page for a SaaS product with pricing tiers and email signup'"
+    )
+
+
 class SearchUserNetworkTool(BaseModel):
     """Search the user's personal network for people matching specific criteria. Performs semantic search across contacts. All fields are optional - search by name, profession, skills, relationship, or any combination of criteria."""
 
@@ -575,6 +584,7 @@ TOOL_MODELS = {
     "enable_write_permissions": EnableWritePermissionsTool,
     "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
+    "spawn_code_agent": SpawnCodeAgentTool,
     "search_user_network_for_people": SearchUserNetworkTool,
     "find_all": FindAllTool,
     "enrich": EnrichTool,
@@ -690,6 +700,7 @@ __all__ = [
     "ReadMessageHistoryTool",
     "MessagePersonTool",
     "SpawnBrowserAgentTool",
+    "SpawnCodeAgentTool",
     "SearchUserNetworkTool",
     "FindAllTool",
     "EnrichTool",
