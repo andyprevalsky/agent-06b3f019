@@ -27,7 +27,6 @@ from tools.spawn_sub_agents import spawn_sub_agents_activity
 from tools.request_user_approval import create_approval_request_activity
 from tools.send_sms import send_sms_activity
 from tools.send_email import send_email_activity
-from tools.spawn_browser_agent import spawn_browser_agent_activity
 from tools.spawn_browser_agent_v2 import spawn_browser_agent_activity_v2
 # New event-driven tools
 from tools.deep_research import deep_research_activity
@@ -147,8 +146,7 @@ async def main():
             spawn_sub_agents_activity,
             create_approval_request_activity,
             send_sms_activity,
-            spawn_browser_agent_activity,
-            spawn_browser_agent_activity_v2,  # Refactored version using run_agent loop
+            spawn_browser_agent_activity_v2,
             send_email_activity,
             # New event-driven tool activities
             deep_research_activity,

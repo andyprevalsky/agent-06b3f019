@@ -1019,3 +1019,42 @@ class SpawnBrowserAgentManagerV2(ToolManager):
             )
             raise
 
+
+# ========================================
+# SINGLETON
+# ========================================
+
+_manager: Optional[SpawnBrowserAgentManagerV2] = None
+
+
+def get_manager() -> SpawnBrowserAgentManagerV2:
+    """Get or create spawn_browser_agent manager singleton."""
+    global _manager
+    if _manager is None:
+        _manager = SpawnBrowserAgentManagerV2()
+    return _manager
+
+
+# ========================================
+# WORKFLOW HELPER
+# ========================================
+
+async def spawn_browser_agent(
+    workflow_instance,
+    tool_call: Dict[str, Any],
+    tool_call_id: str
+):
+    """
+    Workflow helper for spawn_browser_agent.
+    
+    Spawns an autonomous browser agent with a high-level goal.
+    
+    Args:
+        workflow_instance: The workflow instance
+        tool_call: Tool call dict with 'goal'
+        tool_call_id: Unique ID for this tool call
+    """
+    manager = get_manager()
+    
+    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
+        await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_browser_agent")
