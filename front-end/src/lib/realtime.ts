@@ -37,6 +37,18 @@ export interface AttentionStreamPayload {
 }
 
 /**
+ * Tool streaming payload from TOOL_STREAM events
+ * Ephemeral (not persisted to DB) - shows tool indicator during LLM streaming
+ * before actual tool execution starts
+ */
+export interface ToolStreamPayload {
+  stream_id: string;
+  tool_call_id: string;
+  tool_name: string;
+  title: string;
+}
+
+/**
  * Handlers for agent channel events
  */
 export interface AgentHandlers {
@@ -46,6 +58,7 @@ export interface AgentHandlers {
   onAssistantStream?: (payload: StreamChunkPayload) => void;
   onPlanStream?: (payload: PlanStreamPayload) => void;
   onAttentionStream?: (payload: AttentionStreamPayload) => void;
+  onToolStream?: (payload: ToolStreamPayload) => void;
 }
 
 /**
@@ -128,6 +141,18 @@ export async function subscribeToAgent(
           is_question: record.is_question,
           done: record.done,
           sequence: record.sequence,
+        });
+      }
+    })
+    .on('broadcast', { event: 'TOOL_STREAM' }, (payload) => {
+      // Extract tool stream data (ephemeral indicator during LLM streaming)
+      const record = payload?.payload?.record;
+      if (record && handlers?.onToolStream) {
+        handlers.onToolStream({
+          stream_id: record.stream_id,
+          tool_call_id: record.tool_call_id,
+          tool_name: record.tool_name,
+          title: record.title,
         });
       }
     });

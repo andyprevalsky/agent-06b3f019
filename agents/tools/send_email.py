@@ -1,7 +1,7 @@
 """Send email tool - event-driven architecture."""
 
-from typing import Dict, Any, Optional, AsyncGenerator
-from temporalio import activity, workflow
+from typing import Dict, Any, Optional, Callable, Awaitable
+from temporalio import activity
 from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
@@ -9,12 +9,23 @@ import httpx
 import time
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
+from helpers.handle_tool_event import handle_tool_event
 
-# Import config with safe imports to avoid sandbox restrictions
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
+
+# Type alias for execute_activity callable
+ExecuteActivityCallable = Callable[..., Awaitable[Any]]
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
 
 
 class SendEmailManager(ToolManager):
@@ -24,27 +35,32 @@ class SendEmailManager(ToolManager):
 
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity: ExecuteActivityCallable,
         tool_call: Dict[str, Any],
-        tool_call_id: str
-    ) -> AsyncGenerator[ToolEvent, None]:
+        tool_call_id: str,
+        agent_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Execute email send and yield events.
+        Execute email send and post events via handle_tool_event.
 
-        Yields:
-            - Pre-execution status with email preview
-            - Post-execution status with success/error
+        Args:
+            execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+            tool_call: Tool call dict with 'to', 'subject', 'body', optional 'cc'
+            tool_call_id: Unique ID for this tool call
+            agent_id: Agent ID for event routing
+            user_id: User ID for usage tracking and email sending
+
+        Returns:
+            Result dict with messageId, threadId, etc.
         """
         to = tool_call.get("to", "")
         subject = tool_call.get("subject", "")
         body = tool_call.get("body", "")
         cc = tool_call.get("cc")
 
-        # Get user_id from workflow instance
-        user_id = workflow_instance.user_id
-
         # Track start time for elapsed time calculation
-        start_time = time.time()
+        start_time = _safe_time()
 
         # Truncate long subjects for display
         display_subject = subject if len(subject) <= 50 else subject[:47] + "..."
@@ -54,16 +70,23 @@ class SendEmailManager(ToolManager):
         if cc:
             pre_message = f"**To:** {to}\n**Cc:** {cc}\n**Subject:** {display_subject}"
 
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="📧 Sending Email",
-            message=pre_message,
-            status=MessageStatus.IN_PROGRESS
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="📧 Sending Email",
+                message=pre_message,
+                status=MessageStatus.IN_PROGRESS
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="send_email",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
 
         # 2. Execute email send activity
         try:
-            result = await workflow.execute_activity(
+            result = await execute_activity(
                 send_email_activity,
                 args=[user_id, to, subject, body, cc],
                 start_to_close_timeout=timedelta(seconds=30),
@@ -76,7 +99,7 @@ class SendEmailManager(ToolManager):
             )
 
             # 3. Calculate elapsed time
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Format success message using standardized format
             message = format_tool_message(
@@ -87,16 +110,25 @@ class SendEmailManager(ToolManager):
             )
 
             # Post-execution success
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="✅ Email sent successfully",
-                message=message,
-                status=MessageStatus.FINISHED
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="✅ Email sent successfully",
+                    message=message,
+                    status=MessageStatus.FINISHED
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="send_email",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
+
+            return result
 
         except Exception as e:
             # Calculate elapsed time even on error
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Format error message using standardized format
             error_message = format_error_message(
@@ -107,13 +139,21 @@ class SendEmailManager(ToolManager):
             )
 
             # Error status
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="Email send failed",
-                message=error_message,
-                status=MessageStatus.ERROR
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Email send failed",
+                    message=error_message,
+                    status=MessageStatus.ERROR
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="send_email",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
-            # Don't raise - error event already posted the formatted message
+
+            return {"error": str(e), "to": to, "subject": subject}
 
 
 # ========================================
@@ -132,26 +172,37 @@ def get_manager() -> SendEmailManager:
 
 
 # ========================================
-# WORKFLOW HELPER
+# TOOL ENTRY POINT
 # ========================================
 
 async def send_email(
-    workflow_instance,
+    execute_activity: ExecuteActivityCallable,
     tool_call: Dict[str, Any],
-    tool_call_id: str
-):
+    tool_call_id: str,
+    agent_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Workflow helper for send_email (event-driven system).
+    Execute send_email tool.
 
     Args:
-        workflow_instance: The workflow instance
+        execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
         tool_call: Tool call dict with 'to', 'subject', 'body', optional 'cc'
         tool_call_id: Unique ID for this tool call
+        agent_id: Agent ID for event routing
+        user_id: User ID for usage tracking
+
+    Returns:
+        Result dict with messageId, threadId, etc.
     """
     manager = get_manager()
-
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "send_email")
+    return await manager.execute_tool(
+        execute_activity=execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )
 
 
 # ========================================

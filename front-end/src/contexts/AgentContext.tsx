@@ -5,7 +5,8 @@ import {
   unsubscribe, 
   StreamChunkPayload, 
   PlanStreamPayload, 
-  AttentionStreamPayload 
+  AttentionStreamPayload,
+  ToolStreamPayload,
 } from '@/lib/realtime';
 import { 
   getAgent, 
@@ -41,6 +42,14 @@ export interface StreamingAttention {
   subAgentId?: string;
 }
 
+export interface StreamingTool {
+  stream_id: string;
+  tool_call_id: string;
+  tool_name: string;
+  title: string;
+  subAgentId?: string;
+}
+
 type MessageHandler = (message: Message) => void;
 
 export interface AgentContextValue {
@@ -58,6 +67,7 @@ export interface AgentContextValue {
   streamingBubbles: Map<string, StreamingBubble>;
   streamingPlan: StreamingPlan | null;
   streamingAttention: StreamingAttention | null;
+  streamingTools: Map<string, StreamingTool>;  // tool_call_id -> streaming tool
   
   // Streamed texts - used by MessageList to skip animation for already-streamed content
   streamedTextsRef: React.MutableRefObject<Set<string>>;
@@ -98,6 +108,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
   const [streamingBubbles, setStreamingBubbles] = useState<Map<string, StreamingBubble>>(new Map());
   const [streamingPlan, setStreamingPlan] = useState<StreamingPlan | null>(null);
   const [streamingAttention, setStreamingAttention] = useState<StreamingAttention | null>(null);
+  const [streamingTools, setStreamingTools] = useState<Map<string, StreamingTool>>(new Map());
   
   // Realtime refs
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -337,6 +348,18 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
               setStreamingAttention(null);
             }
             
+            // Clear streaming tool when real TOOL message arrives with same toolCallId
+            if (message.role === 'TOOL' && message.metadata?.toolCallId) {
+              setStreamingTools(prev => {
+                if (prev.has(message.metadata!.toolCallId)) {
+                  const newMap = new Map(prev);
+                  newMap.delete(message.metadata!.toolCallId);
+                  return newMap;
+                }
+                return prev;
+              });
+            }
+            
             // Add to messages history
             setMessages(prev => [...prev, message]);
             
@@ -434,6 +457,20 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
               is_question: false,
             });
           },
+          
+          onToolStream: (tool: ToolStreamPayload) => {
+            console.log(`🔧 AgentContext TOOL STREAM:`, tool);
+            setStreamingTools(prev => {
+              const newMap = new Map(prev);
+              newMap.set(tool.tool_call_id, {
+                stream_id: tool.stream_id,
+                tool_call_id: tool.tool_call_id,
+                tool_name: tool.tool_name,
+                title: tool.title,
+              });
+              return newMap;
+            });
+          },
         });
 
         channelRef.current = channel;
@@ -505,6 +542,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
     if (agent?.status === 'PAUSED') {
       setStreamingBubbles(new Map());
       setStreamingPlan(null);
+      setStreamingTools(new Map());
     }
   }, [agent?.status]);
 
@@ -522,6 +560,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
     streamingBubbles,
     streamingPlan,
     streamingAttention,
+    streamingTools,
     streamedTextsRef,
     registerMessageHandler,
     sendMessage,

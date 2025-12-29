@@ -28,6 +28,7 @@ from tools.request_user_approval import create_approval_request_activity
 from tools.send_sms import send_sms_activity
 from tools.send_email import send_email_activity
 from tools.spawn_browser_agent import spawn_browser_agent_activity
+from tools.spawn_browser_agent_v2 import spawn_browser_agent_activity_v2
 # New event-driven tools
 from tools.deep_research import deep_research_activity
 from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
@@ -53,8 +54,8 @@ from helpers import (
     poll_new_messages,
     post_agent_message,
     call_llm,
-    decide_next_action,
     check_progress,
+    call_llm_activity,
     update_agent_status,
     compress_context,
     generate_completion_summary,
@@ -63,8 +64,10 @@ from helpers import (
     mark_finished,
     fetch_agent_config,
     check_user_usage,
+    get_user_context,
 )
 from helpers.save_tool_usage import save_tool_usage
+from helpers.update_tokens import update_agent_tokens_activity
 from health_server import run_health_server, set_worker_status
 
 # Configure structured logging
@@ -145,6 +148,7 @@ async def main():
             create_approval_request_activity,
             send_sms_activity,
             spawn_browser_agent_activity,
+            spawn_browser_agent_activity_v2,  # Refactored version using run_agent loop
             send_email_activity,
             # New event-driven tool activities
             deep_research_activity,
@@ -170,8 +174,8 @@ async def main():
             poll_new_messages,
             post_agent_message,
             call_llm,
-            decide_next_action,
             check_progress,
+            call_llm_activity,
             update_agent_status,
             compress_context,
             generate_completion_summary,
@@ -181,7 +185,9 @@ async def main():
             save_blueprint_activity,
             mark_finished,
             fetch_agent_config,
-            check_user_usage
+            check_user_usage,
+            get_user_context,
+            update_agent_tokens_activity,
         ],
         max_concurrent_activities=config.temporal.max_concurrent_activities,
         max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,

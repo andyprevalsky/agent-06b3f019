@@ -56,7 +56,9 @@ class ToolSchema(TypedDict, total=False):
 class EventType(str, Enum):
     """Types of events that tools can emit."""
     POST_MESSAGE = "post_message"          # Post a message to UI and DB
+    STREAM_MESSAGE = "stream_message"      # Stream chunks to Realtime (no DB write)
     USAGE = "usage"                        # Track tool usage/cost
+    # Deprecated - not used by any tools:
     ADD_TO_CONTEXT = "add_to_context"      # Add message to workflow context (no UI)
     WAIT_FOR_SIGNAL = "wait_for_signal"    # Wait for a workflow signal
 
@@ -97,6 +99,8 @@ class UsageItem:
     # Token-based fields (only for type='llm')
     number_of_tokens: Optional[int] = None
     token_price_per_million_cents: Optional[int] = None  # Price in cents per million tokens
+    tokens_in: Optional[int] = None   # Input/prompt tokens (for split tracking)
+    tokens_out: Optional[int] = None  # Output/completion tokens (for split tracking)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for serialization."""
@@ -106,6 +110,8 @@ class UsageItem:
             "provider": self.provider,
             "number_of_tokens": self.number_of_tokens,
             "token_price_per_million_cents": self.token_price_per_million_cents,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
         }
 
 
@@ -115,7 +121,7 @@ class ToolEvent:
     Event emitted by tool during execution.
     
     Tools are async generators that yield events to communicate with the workflow.
-    The workflow handles these events (post messages, track usage, etc.).
+    All FE state changes flow through ToolEvents → handle_tool_event().
     """
     
     type: EventType
@@ -125,16 +131,23 @@ class ToolEvent:
     message: Optional[str] = None
     status: Optional[MessageStatus] = None  # Status for POST_MESSAGE events
     
+    # For STREAM_MESSAGE events (LLM streaming chunks)
+    stream_id: Optional[str] = None
+    delta: Optional[str] = None          # Incremental text chunk
+    sequence: Optional[int] = None       # Ordering for chunks
+    done: Optional[bool] = None          # True if final chunk
+    sub_agent_id: Optional[str] = None   # For routing (browser agent)
+    
     # For USAGE events - list of usage items
     tool_name: Optional[str] = None
     usage_items: Optional[List[UsageItem]] = None
     
-    # For ADD_TO_CONTEXT events
+    # For ADD_TO_CONTEXT events (deprecated - not used)
     role: Optional[str] = None  # "SYSTEM", "USER", "ASSISTANT", "TOOL"
     text: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     
-    # For WAIT_FOR_SIGNAL events
+    # For WAIT_FOR_SIGNAL events (deprecated - not used)
     signal_key: Optional[str] = None
     
     # For structured data (e.g., plan artifacts)

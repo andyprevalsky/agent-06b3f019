@@ -1,10 +1,13 @@
 """Send SMS as user tool - routes through user's iMessage client."""
 
-from typing import Dict, Any, Optional, AsyncGenerator
+from typing import Dict, Any, Optional, Callable, Awaitable
 import structlog
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
-from tools.request_user_approval import request_user_approval_direct
+from helpers.handle_tool_event import handle_tool_event
+
+# Type alias for execute_activity callable
+ExecuteActivityCallable = Callable[..., Awaitable[Any]]
 
 logger = structlog.get_logger()
 
@@ -22,15 +25,6 @@ def _format_preview(phone_number: str, message: str) -> str:
 {clipped_message}"""
 
 
-def _build_question(phone_number: str, message: str) -> str:
-    """Build the question shown in the attention request."""
-    return f"""Rose wants to send a iMessage through your account
-
-## To: {phone_number}
-
-## Message: {message}"""
-
-
 class SendSmsAsUserManager(ToolManager):
     """Manager for send_sms_as_user tool."""
 
@@ -38,93 +32,41 @@ class SendSmsAsUserManager(ToolManager):
 
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity: ExecuteActivityCallable,
         tool_call: Dict[str, Any],
-        tool_call_id: str
-    ) -> AsyncGenerator[ToolEvent, None]:
-        # Tool is currently disabled - requires Mac app integration
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="📵 send_sms_as_user disabled",
-            message="This tool is currently disabled. It requires the Rose Mac app to send messages through the user's iMessage. Use 'message_person' tool instead to send messages via SMS or email.",
-            status=MessageStatus.FINISHED,
-        )
-        return
+        tool_call_id: str,
+        agent_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute send_sms_as_user (currently disabled).
         
-        # Original implementation below (disabled)
-        phone_number = tool_call.get("phone_number")
-        message = tool_call.get("message")
-
-        if not phone_number or not isinstance(phone_number, str):
-            yield ToolEvent(
+        Args:
+            execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+            tool_call: Tool call dict with 'phone_number', 'message'
+            tool_call_id: Unique ID for this tool call
+            agent_id: Agent ID for event routing
+            user_id: User ID for usage tracking
+            
+        Returns:
+            Result dict indicating tool is disabled
+        """
+        # Tool is currently disabled - requires Mac app integration
+        await handle_tool_event(
+            event=ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="❌ Missing phone number",
-                message="Please provide a `phone_number` in E.164 format.",
-                status=MessageStatus.ERROR,
-            )
-            return
-
-        if not message or not isinstance(message, str):
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Missing message",
-                message="Please provide a `message` to send via iMessage.",
-                status=MessageStatus.ERROR,
-            )
-            return
-
-        preview = _format_preview(phone_number, message)
-
-        attention_metadata = {
-            "onSuccess": "sendSmsThroughIMessage",
-            "to": phone_number,
-            "message": message,
-        }
-        request_metadata = {"sendMessageToUser": dict(attention_metadata)}
-
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="📲 Requesting approval to send SMS via your Mac",
-            message=preview,
-            status=MessageStatus.IN_PROGRESS,
-            metadata=request_metadata,
+                title="📵 send_sms_as_user disabled",
+                message="This tool is currently disabled. It requires the Rose Mac app to send messages through the user's iMessage. Use 'message_person' tool instead to send messages via SMS or email.",
+                status=MessageStatus.FINISHED,
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="send_sms_as_user",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
-
-        question = _build_question(phone_number, message)
-
-        try:
-            logger.info(
-                "Creating send_sms_as_user attention request",
-                phone_number=phone_number,
-            )
-            result = await request_user_approval_direct(
-                workflow_instance,
-                question,
-                metadata=attention_metadata,
-            )
-            if result.get("attention_request_id"):
-                request_metadata["sendMessageToUser"]["attentionRequestId"] = result["attention_request_id"]
-        except Exception as exc:
-            logger.error(
-                "Failed to request user attention for send_sms_as_user",
-                error=str(exc),
-            )
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Failed to request approval",
-                message=str(exc),
-                status=MessageStatus.ERROR,
-                metadata=request_metadata,
-            )
-            raise
-
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="✅ Waiting for user approval",
-            message="Once you confirm in the Mac app, I'll continue.",
-            status=MessageStatus.FINISHED,
-            metadata=request_metadata,
-        )
+        
+        return {"disabled": True, "message": "Tool is currently disabled. Use message_person instead."}
 
 
 _manager: Optional[SendSmsAsUserManager] = None
@@ -138,11 +80,30 @@ def get_manager() -> SendSmsAsUserManager:
 
 
 async def send_sms_as_user(
-    workflow_instance,
+    execute_activity: ExecuteActivityCallable,
     tool_call: Dict[str, Any],
-    tool_call_id: str
-):
+    tool_call_id: str,
+    agent_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Execute send_sms_as_user tool (currently disabled).
+    
+    Args:
+        execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+        tool_call: Tool call dict with 'phone_number', 'message'
+        tool_call_id: Unique ID for this tool call
+        agent_id: Agent ID for event routing
+        user_id: User ID for usage tracking
+        
+    Returns:
+        Result dict indicating tool is disabled
+    """
     manager = get_manager()
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "send_sms_as_user")
-
+    return await manager.execute_tool(
+        execute_activity=execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )

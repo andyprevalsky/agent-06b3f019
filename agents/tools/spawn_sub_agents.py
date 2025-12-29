@@ -10,8 +10,7 @@ import structlog
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 from config import load_config
 
-with workflow.unsafe.imports_passed_through():
-    pass
+# No dangerous imports needed
 
 logger = structlog.get_logger()
 

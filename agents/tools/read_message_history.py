@@ -1,7 +1,7 @@
 """Read message history with person tool - event-driven architecture."""
 
-from typing import Dict, Any, Optional, AsyncGenerator
-from temporalio import activity, workflow
+from typing import Dict, Any, Optional, Callable, Awaitable
+from temporalio import activity
 from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
@@ -9,12 +9,23 @@ import httpx
 import time
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
+from helpers.handle_tool_event import handle_tool_event
 
-# Import config with safe imports to avoid sandbox restrictions
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
+
+# Type alias for execute_activity callable
+ExecuteActivityCallable = Callable[..., Awaitable[Any]]
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
 
 
 class ReadMessageHistoryManager(ToolManager):
@@ -25,27 +36,32 @@ class ReadMessageHistoryManager(ToolManager):
 
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity: ExecuteActivityCallable,
         tool_call: Dict[str, Any],
-        tool_call_id: str
-    ) -> AsyncGenerator[ToolEvent, None]:
+        tool_call_id: str,
+        agent_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Execute message history read and yield events.
+        Execute message history read and post events via handle_tool_event.
 
-        Yields:
-            - Pre-execution status with person identifier
-            - Post-execution status with message history or no messages message
+        Args:
+            execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+            tool_call: Tool call dict with 'phone', 'email', 'first_name', 'last_name'
+            tool_call_id: Unique ID for this tool call
+            agent_id: Agent ID for event routing
+            user_id: User ID for data access
+
+        Returns:
+            Result dict with person info and messages
         """
         phone = tool_call.get("phone")
         email = tool_call.get("email")
         first_name = tool_call.get("first_name")
         last_name = tool_call.get("last_name")
 
-        # Get user_id from workflow instance
-        user_id = workflow_instance.user_id
-
         # Track start time for elapsed time calculation
-        start_time = time.time()
+        start_time = _safe_time()
 
         # Validate at least one identifier is provided
         has_phone = phone and str(phone).strip()
@@ -53,13 +69,20 @@ class ReadMessageHistoryManager(ToolManager):
         has_name = first_name and last_name and str(first_name).strip() and str(last_name).strip()
         
         if not has_phone and not has_email and not has_name:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="Read message history failed: Missing identifier",
-                message="At least one identifier is required: phone, email, or first_name + last_name.",
-                status=MessageStatus.ERROR
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Read message history failed: Missing identifier",
+                    message="At least one identifier is required: phone, email, or first_name + last_name.",
+                    status=MessageStatus.ERROR
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="read_message_history_with_person",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
-            return
+            return {"error": "Missing identifier", "messages": [], "person": None}
 
         # Build person identifier for display
         if has_name:
@@ -72,16 +95,23 @@ class ReadMessageHistoryManager(ToolManager):
             person_identifier = "Unknown"
 
         # 1. Pre-execution status
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="Reading message history",
-            message=f"Looking up messages with **{person_identifier}**...",
-            status=MessageStatus.IN_PROGRESS
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Reading message history",
+                message=f"Looking up messages with **{person_identifier}**...",
+                status=MessageStatus.IN_PROGRESS
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="read_message_history_with_person",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
 
         # 2. Execute activity
         try:
-            result = await workflow.execute_activity(
+            result = await execute_activity(
                 read_message_history_activity,
                 args=[user_id, phone, email, first_name, last_name],
                 start_to_close_timeout=timedelta(seconds=30),
@@ -94,7 +124,7 @@ class ReadMessageHistoryManager(ToolManager):
             )
 
             # 3. Calculate elapsed time
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Check if person was found and has messages
             messages = result.get("messages", [])
@@ -122,12 +152,19 @@ class ReadMessageHistoryManager(ToolManager):
                     time_elapsed=elapsed_time,
                     cost_cents=0
                 )
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=f"Read message history failed for: {person_identifier}",
-                    message=message,
-                    status=MessageStatus.FINISHED,
-                    metadata=read_metadata
+                await handle_tool_event(
+                    event=ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=f"Read message history failed for: {person_identifier}",
+                        message=message,
+                        status=MessageStatus.FINISHED,
+                        metadata=read_metadata
+                    ),
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    tool_name="read_message_history_with_person",
+                    execute_activity=execute_activity,
+                    user_id=user_id,
                 )
             elif len(messages) == 0:
                 # Person found but no messages
@@ -138,12 +175,19 @@ class ReadMessageHistoryManager(ToolManager):
                     time_elapsed=elapsed_time,
                     cost_cents=0
                 )
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=f"No messages with {person_name}",
-                    message=message,
-                    status=MessageStatus.FINISHED,
-                    metadata=read_metadata
+                await handle_tool_event(
+                    event=ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=f"No messages with {person_name}",
+                        message=message,
+                        status=MessageStatus.FINISHED,
+                        metadata=read_metadata
+                    ),
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    tool_name="read_message_history_with_person",
+                    execute_activity=execute_activity,
+                    user_id=user_id,
                 )
             else:
                 # Person found with messages
@@ -179,17 +223,26 @@ class ReadMessageHistoryManager(ToolManager):
                     cost_cents=0
                 )
                 
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=f"Found {len(messages)} messages with {person_name}",
-                    message=message,
-                    status=MessageStatus.FINISHED,
-                    metadata=read_metadata
+                await handle_tool_event(
+                    event=ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=f"Found {len(messages)} messages with {person_name}",
+                        message=message,
+                        status=MessageStatus.FINISHED,
+                        metadata=read_metadata
+                    ),
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    tool_name="read_message_history_with_person",
+                    execute_activity=execute_activity,
+                    user_id=user_id,
                 )
+
+            return result
 
         except Exception as e:
             # Calculate elapsed time even on error
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Format error message using standardized format
             error_message = format_error_message(
@@ -200,12 +253,21 @@ class ReadMessageHistoryManager(ToolManager):
             )
 
             # Error status
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="Failed to read message history",
-                message=error_message,
-                status=MessageStatus.ERROR
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Failed to read message history",
+                    message=error_message,
+                    status=MessageStatus.ERROR
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="read_message_history_with_person",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
+            
+            return {"error": str(e), "messages": [], "person": None}
 
 
 # ========================================
@@ -224,26 +286,37 @@ def get_manager() -> ReadMessageHistoryManager:
 
 
 # ========================================
-# WORKFLOW HELPER
+# TOOL ENTRY POINT
 # ========================================
 
 async def read_message_history_with_person(
-    workflow_instance,
+    execute_activity: ExecuteActivityCallable,
     tool_call: Dict[str, Any],
-    tool_call_id: str
-):
+    tool_call_id: str,
+    agent_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Workflow helper for read_message_history_with_person (event-driven system).
+    Execute read_message_history_with_person tool.
 
     Args:
-        workflow_instance: The workflow instance
+        execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
         tool_call: Tool call dict with 'phone', 'email', 'first_name', 'last_name'
         tool_call_id: Unique ID for this tool call
+        agent_id: Agent ID for event routing
+        user_id: User ID for data access
+
+    Returns:
+        Result dict with person info and messages
     """
     manager = get_manager()
-
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "read_message_history_with_person")
+    return await manager.execute_tool(
+        execute_activity=execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )
 
 
 # ========================================
@@ -324,4 +397,3 @@ async def read_message_history_activity(
     except Exception as e:
         logger.error("Read message history failed", error=str(e))
         raise
-

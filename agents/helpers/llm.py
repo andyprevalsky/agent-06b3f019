@@ -3,12 +3,16 @@
 import asyncio
 import re
 import uuid
+import time  # Import at module level for Temporal workflow sandbox compatibility
+from datetime import datetime
 from typing import List, Dict, Optional, Any, TypeVar, Type, AsyncIterator, Tuple, Callable, Awaitable
 from temporalio import activity
 import structlog
 import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+import instructor  # Import at module level for Temporal workflow sandbox compatibility
+import httpx  # Used with instructor
 
 from config import load_config
 from helpers.get_user_context import fetch_user_context
@@ -17,9 +21,26 @@ from helpers.tool_schemas import (
     ProgressScore,
     create_agent_action_model,
 )
+from helpers.messages import stream_assistant_chunk, stream_tool_event, stream_attention_event
 from tools.base import ToolSchema
 
 logger = structlog.get_logger()
+
+
+def _safe_heartbeat(message: str) -> None:
+    """Call activity.heartbeat() if we're in an activity context, otherwise silently skip."""
+    try:
+        activity.heartbeat(message)
+    except Exception:
+        pass  # Not in activity context - running from workflow
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0  # Workflow sandbox - TTFT logging will show 0ms
 
 T = TypeVar('T', bound=BaseModel)
 def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:
@@ -105,8 +126,6 @@ def convert_context_to_messages(
     
     # Sort context by timestamp to ensure chronological order
     # This is critical after polling for new user messages or continue-as-new
-    from datetime import datetime
-    
     def parse_timestamp(ts: str) -> datetime:
         """Parse ISO timestamp, defaulting to epoch if missing/invalid."""
         if not ts:
@@ -160,7 +179,7 @@ def convert_context_to_messages(
     for msg in sorted_context:
         role = msg.get('role', 'ASSISTANT')
         content = msg.get('text', '')
-        metadata = msg.get('metadata', {})
+        metadata = msg.get('metadata', {}) or {}  # Handle explicit None values
         
         if role == 'SYSTEM':
             if include_system:
@@ -174,7 +193,6 @@ def convert_context_to_messages(
             assistant_msg = {"role": "assistant", "content": content}
             if metadata.get('tool_calls'):
                 # Convert our tool call format to OpenAI format
-                import uuid
                 tool_calls = []
                 for tc in metadata['tool_calls']:
                     # Get or generate tool_call_id
@@ -268,9 +286,6 @@ async def call_llm_structured_streaming(
         Usage dict includes 'cancelled': True if streaming was stopped early
         detected_tools_ordered: List of (tool_name, tool_call_id, timestamp) tuples in detection order
     """
-    import instructor
-    import httpx
-    
     config = load_config()
     
     # Check if this is a Rose model - route to Supabase edge function with streaming
@@ -324,6 +339,11 @@ async def call_llm_structured_streaming(
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
         detected_tool_positions: Dict[str, int] = {}  # tool_name -> count detected (for tracking multiple same-name tools)
         
+        # State transition tracking for debugging
+        first_reasoning_chunk: Optional[int] = None
+        first_response_chunk: Optional[int] = None
+        first_tool_calls_chunk: Optional[int] = None
+        
         # Attention message streaming tracking (for send_message_to_user)
         attention_tool_call_id: Optional[str] = None
         last_attention_message = ""
@@ -358,7 +378,6 @@ async def call_llm_structured_streaming(
             )
             
             # Log FULL request for replay/debugging slow requests
-            import json
             logger.info(
                 "📋 Rose structured request FULL (for replay)",
                 url=config.rose.api_url,
@@ -366,10 +385,9 @@ async def call_llm_structured_streaming(
             )
             
             # Heartbeat before starting - catches cancellation if pause was already clicked
-            activity.heartbeat("Starting Rose LLM stream...")
+            _safe_heartbeat("Starting Rose LLM stream...")
             
-            import time
-            request_start_time = time.time()
+            request_start_time = _safe_time()
             ttft_logged = False
             
             async with httpx.AsyncClient(timeout=60.0) as http_client:
@@ -386,7 +404,7 @@ async def call_llm_structured_streaming(
                     stream_response.raise_for_status()
                     
                     # Heartbeat after connection established - catches cancellation during initial request
-                    activity.heartbeat("Rose stream connected, waiting for chunks...")
+                    _safe_heartbeat("Rose stream connected, waiting for chunks...")
                     logger.info(f"🔄 Rose streaming response started, status={stream_response.status_code}")
                     
                     async for line in stream_response.aiter_lines():
@@ -394,13 +412,11 @@ async def call_llm_structured_streaming(
                         
                         # Log TTFT on first chunk
                         if not ttft_logged:
-                            ttft_ms = int((time.time() - request_start_time) * 1000)
+                            ttft_ms = int((_safe_time() - request_start_time) * 1000)
                             logger.info(f"⏱️ Rose structured TTFT: {ttft_ms}ms")
                             ttft_logged = True
                         
-                        # Heartbeat every 5 chunks - when activity is cancelled, this raises CancelledError
-                        if chunk_count % 5 == 0:
-                            activity.heartbeat(f"Streaming chunk {chunk_count}")
+                        # Heartbeat moved to after content processing (see below)
                         
                         if chunk_count == 1:
                             logger.info(f"📦 First streaming line received")
@@ -434,15 +450,29 @@ async def call_llm_structured_streaming(
                             content = delta.get("content") or ""
                             fin = chunk_data.get("choices", [{}])[0].get("finish_reason") or ""
                             
-                            # DEBUG: Log chunk content (reasoning + content)
-                            if reasoning_delta or content or fin:
-                                logger.info(f"🔍 C{chunk_count} r={reasoning_delta[:50] if reasoning_delta else ''} c={content[:100] if content else ''} fin={fin}")
+                            # DEBUG: Log every 50 chunks with state info
+                            if chunk_count % 50 == 0 or fin:
+                                # Determine current state based on content
+                                has_tool_calls = '"tool_calls"' in accumulated_json
+                                has_response = '"response"' in accumulated_json
+                                state = "reasoning" if reasoning_delta else ("tool_call" if has_tool_calls else ("response" if has_response else "json"))
+                                logger.info(f"🔍 C{chunk_count} state={state} r_len={len(accumulated_reasoning)} json_len={len(accumulated_json)} has_tools={has_tool_calls} fin={fin}")
                             
                             # Accumulate reasoning and JSON separately
                             if reasoning_delta:
+                                if first_reasoning_chunk is None:
+                                    first_reasoning_chunk = chunk_count
+                                    logger.info(f"🧠 C{chunk_count} REASONING started")
                                 accumulated_reasoning += reasoning_delta
                             if content:
                                 accumulated_json += content
+                                # Track state transitions
+                                if first_response_chunk is None and '"response"' in accumulated_json:
+                                    first_response_chunk = chunk_count
+                                    logger.info(f"💬 C{chunk_count} RESPONSE started")
+                                if first_tool_calls_chunk is None and '"tool_calls"' in accumulated_json:
+                                    first_tool_calls_chunk = chunk_count
+                                    logger.info(f"🔧 C{chunk_count} TOOL_CALLS started")
                             
                             # Estimate tokens (rough: ~4 chars per token)
                             token_count = (len(accumulated_reasoning) + len(accumulated_json)) // 4
@@ -466,9 +496,8 @@ async def call_llm_structured_streaming(
                                     
                                     # Only detect if this is a new occurrence
                                     if existing_count < tool_matches.count(tool_name) and existing_count == current_position:
-                                        import time
                                         tool_call_id = str(uuid.uuid4())
-                                        detected_tools_ordered.append((tool_name, tool_call_id, time.time()))
+                                        detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
                                         detected_tool_positions[tool_name] = current_position + 1
                                         logger.info(f"🔧 Tool detected: {tool_name} #{current_position + 1}, tool_call_id={tool_call_id}")
                                         await on_tool_detected(tool_name, tool_call_id)
@@ -477,9 +506,8 @@ async def call_llm_structured_streaming(
                             if on_attention_stream and '"send_message_to_user"' in accumulated_json:
                                 # Assign tool_call_id if not yet assigned
                                 if not attention_tool_call_id:
-                                    import time
                                     attention_tool_call_id = str(uuid.uuid4())
-                                    detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, time.time()))
+                                    detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, _safe_time()))
                                     logger.info(f"📢 Attention message detected, tool_call_id={attention_tool_call_id}")
                                 
                                 # Extract message content
@@ -512,6 +540,21 @@ async def call_llm_structured_streaming(
                                     # logger.info(f"📤 Emitting to on_chunk: delta={pending_delta} chars, total_response_len={len(response_text)}")
                                     await on_chunk(response_text, token_count)
                                     last_emitted_for_chunk = response_text
+                            
+                            # Heartbeat every 5 chunks with state info
+                            if chunk_count % 5 == 0:
+                                # Determine current phase
+                                if reasoning_delta:
+                                    phase = "reasoning"
+                                elif detected_tools_ordered:
+                                    # Get the most recently detected tool
+                                    last_tool = detected_tools_ordered[-1][0]
+                                    phase = f"tool:{last_tool}"
+                                elif '"response"' in accumulated_json:
+                                    phase = "response"
+                                else:
+                                    phase = "json"
+                                _safe_heartbeat(f"C{chunk_count} [{phase}] r={len(accumulated_reasoning)} j={len(accumulated_json)}")
                         except json.JSONDecodeError:
                             logger.error(f"Failed to parse chunk: {data_str}")
                             continue
@@ -550,7 +593,15 @@ async def call_llm_structured_streaming(
         # We need to extract the JSON from within the markdown code block
         try:
             if not accumulated_json:
-                raise ValueError("No JSON content received in response")
+                # Log diagnostic info to help debug this intermittent issue
+                logger.error(
+                    "❌ No JSON content received in Rose response",
+                    chunk_count=chunk_count,
+                    accumulated_reasoning_len=len(accumulated_reasoning),
+                    actual_model=actual_model,
+                    pool_name=pool_name,
+                )
+                raise ValueError(f"No JSON content received in response (chunks={chunk_count}, model={actual_model})")
             
             # Extract JSON from markdown code block if present
             # Look for ```json ... ``` pattern, or just raw JSON
@@ -639,7 +690,7 @@ async def call_llm_structured_streaming(
             
             # Heartbeat every 5 chunks - when activity is cancelled, this raises CancelledError
             if chunk_count % 5 == 0:
-                activity.heartbeat(f"OpenRouter streaming chunk {chunk_count}")
+                _safe_heartbeat(f"OpenRouter streaming chunk {chunk_count}")
             
             # Extract response text from partial object
             if hasattr(partial, 'response') and partial.response:
@@ -717,8 +768,6 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
     Returns:
         Combined text: "explanation\n\nresponse" (whichever parts exist)
     """
-    import re
-    
     reasoning = reasoning.strip() if reasoning else ""
     
     # No content yet, just return reasoning
@@ -778,7 +827,7 @@ async def call_llm(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
     temperature: float = 0.7,
-    max_tokens: int = 4000,
+    max_tokens: int = 4096,
     response_format: Optional[Dict] = None
 ) -> Dict[str, Any]:
     """
@@ -795,7 +844,7 @@ async def call_llm(
         Dict with 'content', 'model', 'usage', etc.
     """
     try:
-        activity.heartbeat(f"Calling LLM with {len(messages)} messages")
+        _safe_heartbeat(f"Calling LLM with {len(messages)} messages")
         
         config = load_config()
         model = model or config.openrouter.model
@@ -805,8 +854,6 @@ async def call_llm(
         
         if is_rose_model:
             # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
-            import httpx
-            
             logger.info(f"🌹 Routing Rose model to Supabase: {model} → {config.rose.api_url}")
             
             request_body = {
@@ -846,7 +893,6 @@ async def call_llm(
             )
             
             # Log FULL request for replay/debugging slow requests
-            import json
             logger.info(
                 "📋 Rose non-streaming request FULL (for replay)",
                 url=config.rose.api_url,
@@ -940,280 +986,8 @@ async def call_llm(
         raise
 
 
-@activity.defn
-async def decide_next_action(
-    context: List[Dict[str, Any]],
-    enabled_tools: List[ToolSchema],
-    enabled_tool_names: List[str],
-    disabled_tools: List[Dict[str, Any]],
-    iteration: int,
-    model: str = "anthropic/claude-sonnet-4.5",
-    reasoning_max_tokens: int = 256,
-    user_id: Optional[str] = None,
-    phase: str = "EXECUTE",
-    model_preference: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    stream_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Use LLM to decide what action to take next.
-    
-    Simplified 2-Phase Flow: PLAN → EXECUTE
-    Phase is detected statelessly from user messages containing "execute".
-    
-    Args:
-        context: Message history (first USER message is the goal)
-        enabled_tools: List of tools available in current phase
-        enabled_tool_names: Names of enabled tools
-        disabled_tools: List of tools not available yet (shown in prompt for visibility)
-        iteration: Current iteration number
-        model: LLM model to use
-        reasoning_max_tokens: Max tokens for reasoning (0 disables reasoning)
-        user_id: Optional Supabase user ID
-        phase: Current workflow phase (PLAN or EXECUTE)
-        model_preference: Optional Rose model preference (SMART, FAST, CHEAP)
-        agent_id: Optional agent ID for streaming (enables streaming when provided with stream_id)
-        stream_id: Optional stream ID for streaming (enables streaming when provided with agent_id)
-        
-    Returns:
-        Dict with 'tool', 'args'
-    """
-    try:
-        activity.heartbeat(f"Deciding next action (iteration {iteration}, phase={phase})")
-        
-        # Fetch user context (authenticated sites, recent messages, contacts, phone)
-        user_context_section = ""
-        if user_id:
-            try:
-                user_context_section = await fetch_user_context(user_id)
-                if user_context_section:
-                    user_context_section = "\n" + user_context_section + "\n"
-            except Exception as e:
-                logger.warning("Failed to fetch user context", user_id=user_id[:8], error=str(e))
-        
-        # Detect if this is the first call (no enabled tools = thinking phase)
-        is_first_call = len(enabled_tools) == 0
-        
-        # Build unified system prompt with phase-specific instructions and tool status
-        system_prompt = build_system_prompt(
-            phase=phase,
-            enabled_tools=enabled_tools,
-            disabled_tools=disabled_tools,
-            user_context_section=user_context_section,
-            is_first_call=is_first_call
-        )
-        
-        # Convert full context to OpenAI message format (no truncation)
-        # NOTE: SYSTEM messages (like blueprints) ARE included for decide_next_action
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(convert_context_to_messages(context, include_system=True))
-        
-        # Create custom AgentAction model based on enabled tools
-        AgentActionModel = create_agent_action_model(enabled_tool_names)
-        
-        # Use structured output with Pydantic schema
-        # Use the reasoning_max_tokens from agent settings (0 disables reasoning)
-        effective_reasoning_tokens = reasoning_max_tokens if reasoning_max_tokens > 0 else None
-        if effective_reasoning_tokens:
-            logger.info(f"🧠 Using {effective_reasoning_tokens} max reasoning tokens for {model}")
-        else:
-            logger.info(f"💭 Reasoning disabled for {model}")
-        
-        # Track plan_tool_call_id for injecting into set_plan tool call
-        plan_tool_call_id = None
-        
-        # Use streaming if agent_id and stream_id are provided
-        if agent_id and stream_id:
-            from helpers.messages import stream_assistant_chunk, stream_tool_event, stream_attention_event
-            
-            sequence_counter = [0]  # Use list to allow mutation in closure
-            last_streamed_text = [""]  # Track what we've already sent to compute delta
-            
-            async def on_chunk(text_so_far: str, token_count: int):
-                """Callback for streaming chunks - sends DELTA to frontend."""
-                try:
-                    # Compute delta (only the new text)
-                    delta = text_so_far[len(last_streamed_text[0]):]
-                    if delta:  # Only send if there's new content
-                        await stream_assistant_chunk(
-                            agent_id=agent_id,
-                            stream_id=stream_id,
-                            delta=delta,
-                            done=False,
-                            sequence=sequence_counter[0]
-                        )
-                        sequence_counter[0] += 1
-                        last_streamed_text[0] = text_so_far
-                except Exception as e:
-                    # Don't fail on streaming errors - it's best-effort
-                    logger.warning(f"Streaming chunk failed (non-fatal): {str(e)}")
-            
-            async def on_tool_detected_callback(tool_name: str, tool_call_id: str):
-                """Broadcast tool start via Realtime (no DB insert)."""
-                try:
-                    # Use friendlier title for set_plan
-                    if tool_name == "set_plan":
-                        title = "Generating Plan..."
-                    else:
-                        title = f"Starting {tool_name}..."
-                    
-                    await stream_tool_event(
-                        agent_id=agent_id,
-                        stream_id=stream_id,
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
-                        title=title,
-                    )
-                except Exception as e:
-                    logger.warning(f"Tool detection notification failed (non-fatal): {str(e)}")
-            
-            attention_sequence = [0]  # Track attention message sequence
-            
-            async def on_attention_stream_callback(tool_call_id: str, message: str, is_question: bool):
-                """Stream attention message content via Realtime."""
-                try:
-                    # Temporarily disabled attention streaming
-                    # await stream_attention_event(
-                    #     agent_id=agent_id,
-                    #     stream_id=stream_id,
-                    #     tool_call_id=tool_call_id,
-                    #     message=message,
-                    #     is_question=is_question,
-                    #     done=False,
-                    #     sequence=attention_sequence[0],
-                    # )
-                    # attention_sequence[0] += 1
-                    pass  # Do nothing
-                except Exception as e:
-                    logger.warning(f"Attention stream failed (non-fatal): {str(e)}")
-            
-            logger.info(f"📡 Using streaming LLM call for agent {agent_id}")
-            result, usage, detected_tools_ordered = await call_llm_structured_streaming(
-                messages=messages,
-                model=model,
-                temperature=0.7,
-                max_tokens=4096,
-                response_model=AgentActionModel,
-                on_chunk=on_chunk,
-                reasoning_max_tokens=effective_reasoning_tokens,
-                model_preference=model_preference,
-                agent_id=agent_id,  # For cancellation checking
-                on_tool_detected=on_tool_detected_callback,
-                on_attention_stream=on_attention_stream_callback,
-            )
-            
-            # Send final "done" chunk (delta may be empty if all content already streamed)
-            try:
-                final_delta = ""
-                if hasattr(result, 'response') and result.response:
-                    final_delta = result.response[len(last_streamed_text[0]):]
-                await stream_assistant_chunk(
-                    agent_id=agent_id,
-                    stream_id=stream_id,
-                    delta=final_delta,
-                    done=True,
-                    sequence=sequence_counter[0]
-                )
-            except Exception as e:
-                logger.warning(f"Final stream chunk failed (non-fatal): {str(e)}")
-        else:
-            # Streaming is required - agent_id and stream_id must be provided
-            raise ValueError("decide_next_action requires agent_id and stream_id for streaming")
-        
-        # Validate result - STRICT: no silent failures
-        if result is None:
-            raise ValueError(f"call_llm_structured returned None result (model={model})")
-        
-        # Note: reasoning field is optional/removed from schema - don't check for it
-        
-        if not hasattr(result, 'response'):
-            raise ValueError(f"LLM result missing 'response' field (model={model}, result_type={type(result)})")
-        
-        if not hasattr(result, 'tool_calls'):
-            raise ValueError(f"LLM result missing 'tool_calls' field (model={model}, result_type={type(result)})")
-        
-        if usage is None:
-            raise ValueError(f"call_llm_structured returned None usage (model={model})")
-        
-        logger.info(
-            "Action decided",
-            reasoning=getattr(result, 'reasoning', None),
-            response=result.response,
-            tool_calls_count=len(result.tool_calls) if result.tool_calls else 0,
-            tokens=usage.get("total_tokens", 0),
-            actual_model=usage.get("actual_model"),  # Which model from pool was used
-            pool_name=usage.get("pool_name")
-        )
-        
-        # Convert tool calls to dict format for workflow
-        # Each tool model has different fields, so we serialize to dict
-        tool_calls_dict = []
-        if result.tool_calls:
-            for i, tc in enumerate(result.tool_calls):
-                if tc is None:
-                    logger.warning(f"Skipping None tool call at index {i}")
-                    continue
-                try:
-                    # Convert Pydantic model to dict
-                    tc_dict = tc.model_dump() if hasattr(tc, 'model_dump') else tc.dict()
-                    tool_calls_dict.append(tc_dict)
-                except Exception as e:
-                    logger.error(f"Failed to serialize tool call {i}: {str(e)}, tc_type={type(tc)}")
-                    raise ValueError(f"Failed to serialize tool call {i}: {str(e)}")
-        
-        # Match detected tools to tool_calls by position (for each tool_name)
-        # This ensures early IN_PROGRESS messages use the same tool_call_id as later execution
-        if detected_tools_ordered:
-            tool_name_counters: Dict[str, int] = {}  # tool_name -> count matched
-            for tc_dict in tool_calls_dict:
-                tool_name = tc_dict.get("tool")
-                if not tool_name:
-                    continue
-                
-                # Get count for this tool_name (how many of this name we've matched so far)
-                count = tool_name_counters.get(tool_name, 0)
-                
-                # Find the (count+1)th occurrence of this tool_name in detected_tools_ordered
-                matched_id = None
-                matched_count = 0
-                for detected_name, detected_id, _ts in detected_tools_ordered:
-                    if detected_name == tool_name:
-                        if matched_count == count:
-                            matched_id = detected_id
-                            break
-                        matched_count += 1
-                
-                if matched_id:
-                    tc_dict['tool_call_id'] = matched_id
-                    tool_name_counters[tool_name] = count + 1
-                    logger.info(f"🔗 Matched {tool_name} #{count + 1} to pre-detected tool_call_id: {matched_id}")
-                else:
-                    # Fallback: generate new ID if no match found
-                    if 'tool_call_id' not in tc_dict:
-                        tc_dict['tool_call_id'] = str(uuid.uuid4())
-                        logger.warning(f"⚠️ No pre-detected ID for {tool_name} #{count + 1}, generated new one: {tc_dict['tool_call_id']}")
-        
-        # Inject pre-generated plan_tool_call_id into set_plan tool call
-        # This ensures the IN_PROGRESS messages match the FINISHED message
-        if plan_tool_call_id:
-            for tc in tool_calls_dict:
-                if tc.get("tool") == "set_plan":
-                    tc["tool_call_id"] = plan_tool_call_id
-                    logger.info(f"📋 Injected plan_tool_call_id={plan_tool_call_id} into set_plan tool call")
-        
-        # Return as dict with usage for token tracking
-        # Allow empty strings/lists, but not None values
-        # Note: reasoning field may not exist if schema removed it
-        return {
-            "reasoning": getattr(result, 'reasoning', None) or "",
-            "response": result.response if result.response is not None else "",
-            "tool_calls": tool_calls_dict,
-            "usage": usage  # Already validated to not be None above
-        }
-        
-    except Exception as e:
-        logger.error("Failed to decide action", error=str(e))
-        raise
+# NOTE: decide_next_action was removed - it was dead code (never called)
+# The run_agent loop handles LLM calls directly via call_llm_structured_streaming
 
 
 @activity.defn
@@ -1236,7 +1010,21 @@ async def check_progress(
         Dict with 'score' (float 0.0-1.0) and 'reasoning' (str)
     """
     try:
-        activity.heartbeat("Checking progress with LLM judge")
+        # DEBUG: Log what we received
+        logger.info(
+            "🔍 DEBUG: check_progress received",
+            context_type=type(context).__name__,
+            context_len=len(context) if context else 0,
+            none_count=sum(1 for m in context if m is None) if context else 0,
+        )
+        if context:
+            for i, m in enumerate(context):
+                if m is None:
+                    logger.error(f"❌ context[{i}] is None!")
+                elif not isinstance(m, dict):
+                    logger.error(f"❌ context[{i}] is {type(m).__name__}, not dict: {str(m)[:200]}")
+        
+        _safe_heartbeat("Checking progress with LLM judge")
         
         config = load_config()
         client = AsyncOpenAI(
@@ -1266,7 +1054,7 @@ async def check_progress(
         system_prompt = build_verifier_prompt(phase, verifier_prompt)
         
         # Convert full context to OpenAI message format (no truncation)
-        # NOTE: SYSTEM messages (like blueprints) are excluded from verifier - they're only for decide_next_action
+        # NOTE: SYSTEM messages (like blueprints) are excluded from verifier
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(convert_context_to_messages(context, include_system=False))
         messages.append({"role": "user", "content": "Evaluate the agent's progress as JSON."})
@@ -1278,6 +1066,34 @@ async def check_progress(
             agent_messages=len([m for m in context if m.get('role') == 'ASSISTANT']),
             system_messages_excluded=len([m for m in context if m.get('role') == 'SYSTEM']),
             context_summary=[f"{m.get('role')}: {m.get('text', '')[:50]}..." for m in context[-5:]]  # Last 5 messages
+        )
+        
+        # === RAW CONTEXT LOG: Full original context for debugging ===
+        logger.debug(
+            "📦 Verifier raw context (pre-conversion)",
+            raw_context_json=json.dumps(context, ensure_ascii=False, default=str)
+        )
+        
+        # === REPLAY LOG: Write full request to file for debugging failures ===
+        # This allows reproducing verifier errors by replaying the exact request
+        replay_payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "stream": True,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "ProgressScore",
+                    "schema": schema,
+                    "strict": True
+                }
+            }
+        }
+        logger.info(
+            "📋 Verifier request FULL (for replay)",
+            request_body_json=json.dumps(replay_payload, ensure_ascii=False)
         )
         
         # Use streaming LLM call (no-op callback since we don't stream verifier output)
@@ -1320,3 +1136,133 @@ async def check_progress(
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
 
+
+@activity.defn
+async def call_llm_activity(
+    messages: List[Dict[str, str]],
+    model: str,
+    tool_names: List[str],
+    reasoning_max_tokens: int = 256,
+    agent_id: Optional[str] = None,
+    stream_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Activity wrapper for LLM calls with structured output and streaming.
+    
+    Used by run_agent when called from workflow context (not inside activity).
+    Provides proper Temporal activity retries, heartbeating, and streaming to Supabase Realtime.
+    
+    Args:
+        messages: Pre-built messages list (system prompt + context)
+        model: Model to use
+        tool_names: List of tool names for dynamic AgentAction model
+        reasoning_max_tokens: Max reasoning tokens (0 disables)
+        agent_id: Agent ID for streaming (optional)
+        stream_id: Stream session ID for ordering (optional)
+        task_id: Sub-agent task ID for routing to browser panel (optional)
+        
+    Returns:
+        Dict with:
+        - response: Assistant response text
+        - tool_calls: List of tool call dicts
+        - usage: Token usage dict
+    """
+    try:
+        _safe_heartbeat("Calling LLM for structured output")
+        
+        # Create dynamic action model
+        AgentActionModel = create_agent_action_model(tool_names)
+        
+        # Streaming callback - posts directly to Supabase Realtime
+        sequence = [0]
+        last_text = [""]
+        
+        async def on_chunk(text_so_far: str, tokens: int):
+            _safe_heartbeat(f"LLM streaming... {len(text_so_far)} chars")
+            if agent_id and stream_id:
+                delta = text_so_far[len(last_text[0]):]
+                if delta:
+                    await stream_assistant_chunk(
+                        agent_id=agent_id,
+                        stream_id=stream_id,
+                        delta=delta,
+                        done=False,
+                        sequence=sequence[0],
+                        sub_agent_id=task_id,
+                    )
+                    sequence[0] += 1
+                last_text[0] = text_so_far
+        
+        # Callback for early tool detection IN_PROGRESS messages
+        async def on_tool_detected_callback(tool_name: str, tool_call_id: str):
+            if agent_id and stream_id:
+                await stream_tool_event(
+                    agent_id=agent_id,
+                    stream_id=stream_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    title=f"Starting {tool_name}...",
+                )
+        
+        result, usage, detected_tools_ordered = await call_llm_structured_streaming(
+            messages=messages,
+            model=model,
+            temperature=1.0,
+            max_tokens=4096,
+            response_model=AgentActionModel,
+            on_chunk=on_chunk,
+            reasoning_max_tokens=reasoning_max_tokens if reasoning_max_tokens > 0 else None,
+            agent_id=agent_id,
+            on_tool_detected=on_tool_detected_callback,
+        )
+        
+        # Send final done=True chunk
+        if agent_id and stream_id:
+            try:
+                final_delta = ""
+                if hasattr(result, 'response') and result.response:
+                    final_delta = result.response[len(last_text[0]):]
+                await stream_assistant_chunk(
+                    agent_id=agent_id,
+                    stream_id=stream_id,
+                    delta=final_delta,
+                    done=True,
+                    sequence=sequence[0],
+                    sub_agent_id=task_id,
+                )
+            except Exception as e:
+                logger.warning(f"Final stream chunk failed (non-fatal): {e}")
+        
+        # Validate result
+        if result is None:
+            raise ValueError(f"LLM returned None result (model={model})")
+        
+        if not hasattr(result, 'response') or not hasattr(result, 'tool_calls'):
+            raise ValueError(f"LLM result missing required fields (model={model})")
+        
+        # Convert tool calls to dicts
+        tool_calls_dict = []
+        if result.tool_calls:
+            for tc in result.tool_calls:
+                if tc is not None:
+                    tc_dict = tc.model_dump() if hasattr(tc, 'model_dump') else tc.dict()
+                    tool_calls_dict.append(tc_dict)
+        
+        logger.info(
+            "LLM activity completed",
+            response_len=len(result.response) if result.response else 0,
+            tool_calls=len(tool_calls_dict),
+            tokens=usage.get("total_tokens", 0)
+        )
+        
+        return {
+            "response": result.response if result.response else "",
+            "tool_calls": tool_calls_dict,
+            "usage": usage,
+            "detected_tools_ordered": detected_tools_ordered,  # [(tool_name, tool_call_id, timestamp), ...]
+        }
+        
+    except Exception as e:
+        logger.error("LLM activity failed", error=str(e))
+        raise

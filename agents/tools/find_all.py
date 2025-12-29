@@ -11,11 +11,18 @@ import time
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
 
-# Import config with safe imports to avoid sandbox restrictions
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
 
 
 class FindAllManager(ToolManager):
@@ -48,7 +55,7 @@ class FindAllManager(ToolManager):
         
         # Validate match_limit for preview generator
         if generator.lower() == "preview" and match_limit > 10:
-            start_time = time.time()
+            start_time = _safe_time()
             error_message = format_error_message(
                 params=tool_call,
                 error=ValueError("Match limit must be 10 or less for 'preview' generator. Preview is designed for testing queries with ~10 candidates. Use 'base', 'core', or 'pro' generators for more results."),
@@ -80,7 +87,7 @@ class FindAllManager(ToolManager):
             title_objective = title_objective[:47] + "..."
         
         # Track start time for elapsed time calculation
-        start_time = time.time()
+        start_time = _safe_time()
         
         # Track current progress
         current_progress = 0
@@ -151,7 +158,7 @@ class FindAllManager(ToolManager):
             # Track previous counts to detect changes
             prev_generated_count = 0
             prev_matched_count = 0
-            poll_start_time = time.time()
+            poll_start_time = _safe_time()
             max_poll_time = 1200  # 20 minutes max
             poll_interval = 2.0  # Start with 2 seconds
             
@@ -159,7 +166,7 @@ class FindAllManager(ToolManager):
             
             while True:
                 # Check timeout
-                elapsed_poll_time = time.time() - poll_start_time
+                elapsed_poll_time = _safe_time() - poll_start_time
                 if elapsed_poll_time >= max_poll_time:
                     raise TimeoutError(f"Find All run timed out after {max_poll_time} seconds")
                 
@@ -249,7 +256,7 @@ class FindAllManager(ToolManager):
             usage = results_data.get("usage")
             
             # Calculate elapsed time and cost
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
             
             # Calculate cost based on actual Parallel AI FindAll pricing
             # Source: https://parallel.ai/pricing
@@ -304,7 +311,7 @@ class FindAllManager(ToolManager):
             
         except Exception as e:
             # Calculate elapsed time even on error
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
             
             # Format error message using standardized format
             error_message = format_error_message(

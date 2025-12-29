@@ -1,11 +1,25 @@
-"""Configuration management for Temporal agents."""
+"""Configuration management for Temporal agents.
+
+IMPORTANT: This module must NOT have side effects at import time.
+load_dotenv() is called lazily on first load_config() call, not at import.
+This allows the module to be safely imported in Temporal workflow context.
+"""
 
 import os
 from typing import Optional
 from dataclasses import dataclass
-from dotenv import load_dotenv
 
-load_dotenv()
+# Lazy initialization - NO side effects at import time
+_dotenv_loaded = False
+
+
+def _ensure_dotenv_loaded():
+    """Load .env file lazily on first call. Safe to call multiple times."""
+    global _dotenv_loaded
+    if not _dotenv_loaded:
+        from dotenv import load_dotenv
+        load_dotenv()
+        _dotenv_loaded = True
 
 
 @dataclass
@@ -166,7 +180,12 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    """Load configuration from environment variables."""
+    """Load configuration from environment variables.
+    
+    Ensures .env file is loaded on first call (lazy initialization).
+    Safe to call from both workflow and activity contexts.
+    """
+    _ensure_dotenv_loaded()
     
     temporal = TemporalConfig(
         api_key=os.environ["TEMPORAL_API_KEY"],

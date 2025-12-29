@@ -1,65 +1,56 @@
 from textwrap import dedent
-from typing import Dict, List
+from typing import Dict, List, Union
 
 from tools.base import ToolSchema
 from helpers.tool_schemas import TOOL_MODELS
 
 
-TOOL_PHASE_AVAILABILITY = {
-    "web_search": "PLAN",
-    "deep_research": "PLAN",
-    "search_x402_bazaar": "PLAN",
-    "search_user_network_for_people": "PLAN",
-    "read_message_history_with_person": "PLAN",
-    "find_all": "PLAN",
-    "check_monitor_events": "PLAN",
-    "set_plan": "PLAN",
-    "progress_to_autonomous_execution_phase": "PLAN",
-    "mark_execution_complete": "EXECUTE",
-    "send_message_to_user": "PLAN",
-    "spawn_sub_agents": "EXECUTE",
-    "spawn_browser_agent": "EXECUTE",
-    "message_person": "EXECUTE",
-    "send_sms_as_user": "EXECUTE",
-    "enrich": "EXECUTE",
-    "monitor": "EXECUTE",
-    "pay_for_x402_bazaar_service": "EXECUTE",
-    "wait_seconds": "EXECUTE",
-    "query_blueprints": "EXECUTE",
-    "save_blueprint": "EXECUTE",
-}
-
-
 def build_system_prompt(
     phase: str,
-    enabled_tools: List[ToolSchema],
-    disabled_tools: List[ToolSchema],
+    enabled_tools: List[Union[str, Dict]],  # Tool names or dicts
+    disabled_tools: List[Union[str, Dict]] = None,
     user_context_section: str = "",
     is_first_call: bool = False,
 ) -> str:
+    """
+    Build system prompt for the LLM.
+    
+    Args:
+        phase: "PLAN" or "EXECUTE"
+        enabled_tools: List of tool names (str) or tool dicts
+        disabled_tools: List of tool names (str) or tool dicts
+        user_context_section: Optional user context to include
+        is_first_call: True for first iteration (no tools)
+    """
+    disabled_tools = disabled_tools or []
     system_prompt = ""
 
-    def _tool_name(tool: ToolSchema) -> str:
+    def _tool_name(tool: Union[str, Dict]) -> str:
+        if isinstance(tool, str):
+            return tool
         if isinstance(tool, dict):
             return tool.get("name", "<unnamed tool>")
         return getattr(tool, "name", "<unnamed tool>")
 
-    def _format_tool_with_schema(tool: ToolSchema) -> str:
-        """Format a tool with its full schema including parameters and descriptions."""
-        name = tool.get("name", "<unnamed>") if isinstance(tool, dict) else getattr(tool, "name", "<unnamed>")
-        desc = tool.get("description", "") if isinstance(tool, dict) else getattr(tool, "description", "")
-        note = tool.get("_disabled_note", "") if isinstance(tool, dict) else ""
+    def _format_tool_with_schema(tool: Union[str, Dict]) -> str:
+        """Format a tool with its full schema from Pydantic models."""
+        name = _tool_name(tool)
+        
+        # Get description from Pydantic model
+        desc = ""
+        if name in TOOL_MODELS:
+            model = TOOL_MODELS[name]
+            desc = model.__doc__ or ""
+        elif isinstance(tool, dict):
+            desc = tool.get("description", "")
         
         header = f"- **{name}**"
-        if note:
-            header += f" ({note})"
-        
         lines = [header]
         
         if desc:
             lines.append(f"  {desc}")
         
-        # Get full parameter schema from Pydantic model if available
+        # Get full parameter schema from Pydantic model
         if name in TOOL_MODELS:
             model = TOOL_MODELS[name]
             schema = model.model_json_schema()
@@ -79,14 +70,14 @@ def build_system_prompt(
         
         return "\n".join(lines)
 
-    def _format_tool_list(tools: List[ToolSchema], include_schema: bool = False) -> str:
+    def _format_tool_list(tools: List[Union[str, Dict]], include_schema: bool = False) -> str:
         if not tools:
             return "- None"
         
         if include_schema:
             return "\n\n".join(_format_tool_with_schema(t) for t in tools)
         
-        # Simple name-only format (existing behavior)
+        # Simple name-only format
         lines = []
         for tool in tools:
             name = _tool_name(tool)
@@ -167,8 +158,8 @@ def build_system_prompt(
     
     After finalizing the plan, send a concise summary to the user via `send_message_to_user({"message": "...", "is_question": false})` so they can see what will run. If you still need clarification/approval, set `is_question` to true so work pauses until they reply.
     
-    Call `progress_to_autonomous_execution_phase` only when:
-        1. You have called set_plan (REQUIRED - will error otherwise)
+    Call `attempt_completion` only when:
+        1. You have called set_plan (REQUIRED - the verifier will check for a plan)
         2. You no longer need clarifications
         3. You have a low-energy cost & elegant plan
     
@@ -210,7 +201,7 @@ def build_system_prompt(
         2. evaluate multiple context-independent hypotheses
         3. reduce complexity by decomposing the user goal into more proximate, context-independent sub-goals
     - spawn_browser_agent is ONLY for WRITING to the internet (payments, form submissions, social media posts, account actions). Do NOT use it for reading/getting data—use web_search or other retrieval tools instead.
-    - When the goal is completely accomplished with proof, call `mark_execution_complete`.
+    - When the goal is completely accomplished with proof, call `attempt_completion`.
             """
         ).strip()
 
@@ -306,7 +297,7 @@ def build_system_prompt(
     Reasoning is private. Response is internal log text (still professional, no seeds/nurturing/internal jargon) and may or may not be shown to the user.
     Output ONLY valid JSON—no markdown or extra text—and always include reasoning, response, and tool_calls every turn.
     tool_calls must match the registered tool schemas; if no tools run, return [].
-    Call `mark_execution_complete` only when you have verifiable proof the goal is finished.
+    Call `attempt_completion` only when you have verifiable proof the goal is finished.
         """
     ).strip()
 
@@ -392,8 +383,75 @@ Return JSON:
     return prompt.strip()
 
 
+def build_browser_system_prompt(
+    goal: str,
+    current_url: str = "",
+    custom_instructions: str = "",
+) -> str:
+    """
+    Build system prompt for browser agent.
+    
+    Args:
+        goal: The browser task goal
+        current_url: Current page URL for context
+        custom_instructions: Optional custom instructions (shipping, payment, etc.)
+        
+    Returns:
+        System prompt for browser agent
+    """
+    from datetime import datetime
+    current_date = datetime.now().strftime("%B %d, %Y")
+    
+    base_prompt = f"""You are a web automation assistant using browser automation tools to accomplish the user's goal.
+
+Your task: {goal}
+
+WORKFLOW - OBSERVE THEN ACT:
+1. Use observe() to find elements and get their selectors
+2. Use click/fill/type with the selector from observe()
+3. Verify results with screenshot or ariaTree
+
+TOOLS OVERVIEW:
+OBSERVATION:
+- observe(instruction) → Find elements, returns selectors. ALWAYS USE FIRST.
+- ariaTree() → Get full page content/structure
+- screenshot() → Visual confirmation
+
+ACTIONS (require selector from observe):
+- click(selector) → Click an element
+- fill(selector, value) → Clear field and type (for forms)
+- type(selector, text) → Type without clearing (for search boxes)
+- pressKey(key) → Press keyboard keys (Enter, Tab, etc.)
+
+NAVIGATION:
+- goto(url) → Navigate to FULL URL (must include https://)
+- navback() → Go back
+- scroll(pixels, direction) → Scroll page
+- wait(timeMs) → Wait
+
+COMPLETION:
+- attempt_completion(reasoning) → End task when goal is complete
+
+IMPORTANT RULES:
+1. ALWAYS call observe() first to get a selector before clicking/typing
+2. Use fill() for login/forms (clears existing text)
+3. Use type() for search boxes (doesn't clear, triggers autocomplete)
+4. Verify actions worked with screenshot or ariaTree
+5. When done, call attempt_completion with a summary of what was accomplished
+
+Today's date is {current_date}."""
+
+    if current_url:
+        base_prompt += f"\nYou're currently on: {current_url}"
+    
+    if custom_instructions:
+        base_prompt = f"{custom_instructions}\n\n{base_prompt}"
+    
+    return base_prompt
+
+
 __all__ = [
-    "TOOL_PHASE_AVAILABILITY",
     "build_system_prompt",
     "build_verifier_prompt",
+    "build_browser_system_prompt",
 ]

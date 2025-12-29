@@ -1312,11 +1312,12 @@ async function handleStreaming(
                   }
                   
                   // Transform to OpenAI format
+                  // Handle both delta.text (normal) and delta.partial_json (JSON schema output)
                   const openAIFormat = {
                     choices: [{
                       index: 0,
                       delta: {
-                        content: parsed.delta?.text || ''
+                        content: parsed.delta?.text || parsed.delta?.partial_json || ''
                       }
                     }],
                     requested_model: requestedModel,

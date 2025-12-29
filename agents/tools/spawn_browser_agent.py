@@ -23,10 +23,23 @@ from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.llm import call_llm_structured_streaming
 from helpers.messages import stream_assistant_chunk
 
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
+
+# Import v2 activity at module level to avoid lazy import issues in workflow sandbox
+# This must be done here (not inside execute_tool) because lazy imports of modules
+# that use os.environ.get will fail inside Temporal's workflow sandbox
+from tools.spawn_browser_agent_v2 import spawn_browser_agent_activity_v2
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
 
 
 # ========================================
@@ -147,7 +160,10 @@ PAYMENT RULES:
 
 
 class SpawnBrowserAgentManager(ToolManager):
-    """Manager for spawning autonomous browser agents via Stagehand/Browserbase."""
+    """Manager for spawning autonomous browser agents via Stagehand/Browserbase.
+    
+    Now uses the refactored run_agent-based activity (spawn_browser_agent_activity_v2).
+    """
     
     tool_name = "spawn_browser_agent"
     
@@ -160,6 +176,8 @@ class SpawnBrowserAgentManager(ToolManager):
         """
         Spawn an autonomous browser agent with a high-level goal.
         
+        Uses the refactored v2 activity which is based on run_agent loop.
+        
         Loops until task is complete, requesting user help when needed.
         
         Yields:
@@ -169,38 +187,41 @@ class SpawnBrowserAgentManager(ToolManager):
             - Usage tracking
             - Completion message (main context)
         """
+        # Note: spawn_browser_agent_activity_v2 is imported at module level to avoid
+        # workflow sandbox issues with lazy imports of modules using os.environ.get
+        
         original_goal = tool_call.get("goal", "")
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
         # State for resume flow
-        task_id = None  # Stable ID for grouping browser actions (set after first iteration)
-        session_id = None  # BrowserBase session ID (may change on resume)
-        current_goal = original_goal  # Goal may be updated with context on resume
+        task_id = None
+        session_id = None
+        current_goal = original_goal
         iteration = 0
 
-        logger.info("Browser agent starting", goal=original_goal, user_id=user_id, agent_id=agent_id)
+        logger.info("Browser agent starting (v2)", goal=original_goal, user_id=user_id, agent_id=agent_id)
         
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title=f"Starting up a browser",
+            title="Starting up a browser",
             message='',
             status=MessageStatus.IN_PROGRESS
         )
+        
         try:
             # Loop until task is complete
             while True:
                 iteration += 1
-                logger.info(f"🔄 WHILE LOOP ITERATION {iteration} STARTING", 
-                           goal=current_goal[:100] if current_goal else None, 
-                           session_id=session_id,
-                           has_session=session_id is not None,
-                           is_resume=iteration > 1)
+                is_resume = iteration > 1
+                
+                logger.info(f"🔄 Browser agent iteration {iteration}", 
+                           goal=current_goal[:100] if current_goal else None,
+                           is_resume=is_resume)
 
-                # 2. Execute activity (browser sub-actions saved directly to DB in real-time)
-                is_resume = iteration > 1  # True if this is a resumed iteration after user help
+                # Execute v2 activity (uses run_agent loop internally)
                 result = await workflow.execute_activity(
-                    spawn_browser_agent_activity,
+                    spawn_browser_agent_activity_v2,
                     args=[user_id, agent_id, current_goal, tool_call_id, task_id, session_id, is_resume],
                     start_to_close_timeout=timedelta(minutes=15),
                     heartbeat_timeout=timedelta(minutes=15),
@@ -211,7 +232,7 @@ class SpawnBrowserAgentManager(ToolManager):
                     )
                 )
                 
-                # 3. Report usage for this iteration
+                # Report usage for this iteration
                 if result.get("usage_items"):
                     yield ToolEvent(
                         type=EventType.USAGE,
@@ -219,27 +240,28 @@ class SpawnBrowserAgentManager(ToolManager):
                         usage_items=result["usage_items"]
                     )
                 
-                # 4. Check if agent needs user help
-                if result.get("status") == "NEEDS_USER_HELP":
-                    # Agent needs help - pause and wait for user action
-                    task_id = result["task_id"]  # Persist stable task ID
-                    session_id = result["session_id"]  # Persist session for next iteration
-                    browser_url = result["browser_url"]
-                    agent_message = result["message"]
+                # Check for special statuses from run_agent
+                status = result.get("status", "").lower()
+                
+                if status == "needs_user_help":
+                    # Agent needs user help - pause and wait
+                    task_id = result.get("task_id")
+                    session_id = result.get("session_id")
+                    browser_url = result.get("browser_url")
+                    agent_message = result.get("message", "")
 
                     logger.info("🔴 NEEDS_USER_HELP detected", 
                                session_id=session_id, 
                                iteration=iteration)
 
-                    # Use request_user_approval_direct
+                    # Request user attention
                     from tools.request_user_approval import request_user_approval_direct
-
-                    logger.info("🔴 About to call request_user_approval_direct")
                     attention_result = await request_user_approval_direct(
                         workflow_instance,
                         question=f"🌐 **Browser Agent Needs Help**\n\n{agent_message}\n\n_Please complete the required action in the browser, then click Continue below._",
                         image_url=None
                     )
+                    
                     logger.info("🟢 request_user_approval_direct returned", attention_result=attention_result)
 
                     # Notify user that browser session is resuming
@@ -255,27 +277,20 @@ class SpawnBrowserAgentManager(ToolManager):
                         }
                     )
 
+                    # Build resume goal
                     user_action = attention_result.get("response", "Continued")
-
-                    # Build enhanced goal with context for resume
                     current_goal = build_resume_goal(original_goal, user_action)
-
-                    logger.info("🟢 User completed browser action, about to continue loop", 
-                               user_action=user_action[:100] if user_action else "",
-                               new_goal=current_goal[:200],
-                               session_id=session_id[:20] if session_id else None,
-                               next_iteration=iteration + 1)
-
-                    # Continue loop with updated goal and new session
-                    logger.info("🔵 Executing continue statement - should loop back to iteration " + str(iteration + 1))
+                    
+                    logger.info("🟢 User completed browser action, continuing loop", 
+                               user_action=user_action[:100] if user_action else "")
                     continue
 
                 else:
-                    # Task complete!
-                    logger.info("Browser agent task complete", iterations=iteration)
+                    # Task complete or other status
+                    logger.info("Browser agent task complete", iterations=iteration, status=status)
                     break
 
-            # 5. Final completion message (goes to agent context)
+            # Final completion message
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",
@@ -793,7 +808,7 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
         total_output_tokens = 0
 
         # Execution state
-        start_time = time.time()
+        start_time = _safe_time()
         max_steps = 200
         is_closing = False
         close_success = False
@@ -812,6 +827,36 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
             input_cents_per_1k=model_pricing["input_cents_per_1k"],
             output_cents_per_1k=model_pricing["output_cents_per_1k"]
         )
+        
+        # === BLUEPRINT SEARCH (NEW - browser now gets blueprints like main agent) ===
+        # Only query on first run (not resume)
+        if not is_resume:
+            try:
+                from loop.activity_helper import call_temporal_activity_from_activity
+                from tools.knowledge_base import query_blueprints_activity
+                
+                # Activity expects: context (List[Dict]), user_id (str), limit (int)
+                # Construct minimal context with goal as USER message
+                goal_context = [{"role": "USER", "text": goal[:500]}]
+                blueprints = await call_temporal_activity_from_activity(
+                    query_blueprints_activity,
+                    args=[goal_context, user_id, 2],  # Fewer blueprints for browser agent
+                    timeout_seconds=30,
+                )
+                
+                if blueprints:
+                    # Add blueprints to system message
+                    blueprint_text = "\n\n### REFERENCE EXAMPLES FROM SIMILAR TASKS:\n"
+                    for idx, bp in enumerate(blueprints, 1):
+                        blueprint_text += f"\n**Example {idx}:** {bp.get('title', 'N/A')}\n"
+                        blueprint_text += f"{bp.get('blueprint', '')[:500]}...\n"
+                    
+                    # Append to system prompt
+                    messages[0]["content"] += blueprint_text
+                    logger.info(f"Added {len(blueprints)} blueprints to browser agent context")
+                    
+            except Exception as bp_error:
+                logger.warning(f"Blueprint query failed (non-fatal): {bp_error}")
 
         # ============================================
         # MAIN AGENT LOOP (Using Rose + Browser Tools)
@@ -1102,7 +1147,7 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             logger.error(f"⚠️ Failed to pause browser session: {pause_error}")
                         
                         # Calculate usage and return
-                        execution_time_ms = (time.time() - start_time) * 1000
+                        execution_time_ms = (_safe_time() - start_time) * 1000
                         
                         # Use dynamic pricing from Supabase cache
                         usage_items = [
@@ -1136,36 +1181,140 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                             "usage_items": usage_items
                         }
                     
-                    # === BROWSER TOOL: close ===
-                    elif tool_name == "close":
-                        close_success = tool_args.get("success", True)
+                    # === BROWSER TOOL: attempt_completion (or legacy close) ===
+                    elif tool_name in ("attempt_completion", "close"):
                         close_reasoning = tool_args.get("reasoning", "")
-                        is_closing = True
                         
-                        # Track action
-                        status_str = "success" if close_success else "failure"
-                        action_summary.append(f"close: {status_str}")
+                        # Track action  
+                        action_summary.append(f"attempt_completion: {close_reasoning[:50]}")
                         if len(action_summary) > 10:
                             action_summary = action_summary[-10:]
                         
-                        logger.info("Agent called close", success=close_success, reasoning=close_reasoning[:100])
+                        logger.info("Agent attempting completion", reasoning=close_reasoning[:100])
                         
+                        # Post "attempting" message
                         await save_browser_action_message(
                             agent_id=agent_id,
-                            title="Task Complete" if close_success else "Task Failed",
+                            title="✓ Attempting Completion",
                             message=close_reasoning,
-                            status=MessageStatus.FINISHED if close_success else MessageStatus.ERROR,
+                            status=MessageStatus.FINISHED,
                             task_id=task_id,
                             browser_url=browser_url,
                             action_type="task_complete"
                         )
                         
-                        tool_responses.append({
-                            "role": "tool",
-                            "tool_call_id": tool_id,
-                            "content": json.dumps({"success": True, "acknowledged": True})
-                        })
-                        break  # Exit tool loop
+                        # === RUN VERIFIER (NEW - browser now gets verification like main agent) ===
+                        verifier_call_id = str(uuid.uuid4())
+                        try:
+                            # Post verifier IN_PROGRESS
+                            await save_browser_action_message(
+                                agent_id=agent_id,
+                                title="⚖️ Verifying completion",
+                                message="",
+                                status=MessageStatus.IN_PROGRESS,
+                                task_id=task_id,
+                                browser_url=browser_url,
+                                action_type="system",
+                                tool_call_id=verifier_call_id
+                            )
+                            
+                            # Build verifier prompt
+                            from helpers.prompts import build_verifier_prompt
+                            verifier_prompt = build_verifier_prompt("EXECUTE", f"Goal: {goal}\n\nVerify that the browser agent has successfully completed the task.")
+                            
+                            # Build context from messages for verifier
+                            verifier_context = []
+                            for msg in messages:
+                                role = msg.get("role", "")
+                                content = msg.get("content", "")
+                                if role and content:
+                                    verifier_context.append({
+                                        "role": role.upper() if role in ("user", "assistant", "system") else "TOOL",
+                                        "text": content if isinstance(content, str) else str(content)[:500]
+                                    })
+                            
+                            # Call verifier using activity helper
+                            from loop.activity_helper import call_temporal_activity_from_activity
+                            from helpers.llm import check_progress
+                            
+                            progress_result = await call_temporal_activity_from_activity(
+                                check_progress,
+                                args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE"],
+                                timeout_seconds=60,
+                                heartbeat_callback=lambda msg: activity.heartbeat(msg)
+                            )
+                            
+                            # Track verifier tokens
+                            v_usage = progress_result.get("usage", {})
+                            total_input_tokens += v_usage.get("prompt_tokens", 0)
+                            total_output_tokens += v_usage.get("completion_tokens", 0)
+                            
+                            score = progress_result.get("score", 0.0)
+                            v_reasoning = progress_result.get("reasoning", "")
+                            
+                            logger.info(f"Verifier score: {score * 100:.1f}%", reasoning=v_reasoning[:100])
+                            
+                            # Post verifier result
+                            await save_browser_action_message(
+                                agent_id=agent_id,
+                                title=f"⚖️ Progress: {score * 100:.0f}%",
+                                message=v_reasoning,
+                                status=MessageStatus.FINISHED,
+                                task_id=task_id,
+                                browser_url=browser_url,
+                                action_type="system",
+                                tool_call_id=verifier_call_id
+                            )
+                            
+                            # If score >= 1.0, we're done!
+                            if score >= 1.0:
+                                close_success = True
+                                is_closing = True
+                                
+                                # Save blueprint (NEW - browser now saves blueprints like main agent)
+                                try:
+                                    from tools.knowledge_base import save_blueprint_activity
+                                    await call_temporal_activity_from_activity(
+                                        save_blueprint_activity,
+                                        args=[user_id, verifier_context],
+                                        timeout_seconds=60,
+                                    )
+                                    logger.info("Blueprint saved for browser task")
+                                except Exception as bp_error:
+                                    logger.warning(f"Blueprint save failed (non-fatal): {bp_error}")
+                                
+                                tool_responses.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_id,
+                                    "content": json.dumps({"success": True, "verified": True, "score": score})
+                                })
+                                break  # Exit tool loop - task complete!
+                            else:
+                                # Not complete - add feedback to context and continue
+                                close_success = False
+                                tool_responses.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_id,
+                                    "content": json.dumps({
+                                        "success": False, 
+                                        "verified": False, 
+                                        "score": score,
+                                        "feedback": f"Verifier: {score * 100:.0f}% complete. {v_reasoning}"
+                                    })
+                                })
+                                # Don't break - continue loop with feedback
+                                
+                        except Exception as verifier_error:
+                            logger.error(f"Verifier failed: {verifier_error}")
+                            # On verifier error, treat as incomplete and continue
+                            tool_responses.append({
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": json.dumps({
+                                    "success": False,
+                                    "error": f"Verifier failed: {str(verifier_error)}. Please continue working on the task."
+                                })
+                            })
                     
                     # === BROWSER TOOLS ===
                     else:
@@ -1379,7 +1528,7 @@ Use send_message_to_user when you need human help (login, CAPTCHA, or payments o
                     raise
 
 
-        execution_time_ms = (time.time() - start_time) * 1000
+        execution_time_ms = (_safe_time() - start_time) * 1000
 
         # Set closing flag to stop logger callback
         is_closing = True

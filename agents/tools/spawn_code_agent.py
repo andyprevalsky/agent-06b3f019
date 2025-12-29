@@ -25,10 +25,19 @@ from helpers.vercel_api import (
     VercelDeployment,
 )
 
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        import time
+        return time.time()
+    except Exception:
+        return 0.0
 
 
 class SpawnCodeAgentManager(ToolManager):
@@ -208,7 +217,7 @@ async def spawn_code_agent_activity(
     import time
     
     config = load_config()
-    start_time = time.time()
+    start_time = _safe_time()
     
     # Generate unique task ID for grouping messages
     task_id = str(uuid.uuid4())
@@ -405,7 +414,7 @@ async def spawn_code_agent_activity(
             metadata={"preview_url": preview_url}
         )
         
-        execution_time_ms = (time.time() - start_time) * 1000
+        execution_time_ms = (_safe_time() - start_time) * 1000
         
         # Calculate usage
         usage_items = [

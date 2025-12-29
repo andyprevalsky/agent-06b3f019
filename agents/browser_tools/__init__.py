@@ -27,7 +27,8 @@ from .schemas import (
     ScrollTool,
     WaitTool,
     # Completion
-    CloseTool,
+    AttemptCompletionBrowserTool,
+    CloseTool,  # Deprecated
     SendMessageToUserBrowserTool,
 )
 
@@ -57,6 +58,7 @@ __all__ = [
     "ScrollTool",
     "WaitTool",
     # Completion
-    "CloseTool",
+    "AttemptCompletionBrowserTool",
+    "CloseTool",  # Deprecated
     "SendMessageToUserBrowserTool",
 ]

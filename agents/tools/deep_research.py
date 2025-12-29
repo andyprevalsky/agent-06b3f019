@@ -3,13 +3,17 @@ Deep research tool using Perplexity's sonar-deep-research model.
 Migrated to new event-driven architecture.
 """
 
-from typing import Dict, Any, Optional, AsyncGenerator
-from temporalio import activity, workflow
+from typing import Dict, Any, Optional, Callable, Awaitable
+from temporalio import activity
 from datetime import timedelta
 import structlog
 
 from config import load_config
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType
+from helpers.handle_tool_event import handle_tool_event
+
+# Type alias for execute_activity callable
+ExecuteActivityCallable = Callable[..., Awaitable[Any]]
 
 logger = structlog.get_logger()
 
@@ -27,27 +31,41 @@ class DeepResearchManager(ToolManager):
     
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity: ExecuteActivityCallable,
         tool_call: Dict[str, Any],
-        tool_call_id: str
-    ) -> AsyncGenerator[ToolEvent, None]:
+        tool_call_id: str,
+        agent_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Execute deep research and yield events.
+        Execute deep research and post events via handle_tool_event.
         
-        Yields:
-            - Pre-execution status
-            - Usage tracking events
-            - Post-execution status
+        Args:
+            execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+            tool_call: Tool call dict with 'query', 'max_tokens'
+            tool_call_id: Unique ID for this tool call
+            agent_id: Agent ID for event routing
+            user_id: User ID for usage tracking
+            
+        Returns:
+            Result dict with report and citations
         """
         query = tool_call.get("query", "")
         max_tokens = tool_call.get("max_tokens", 8000)
         
         # 1. Pre-execution status
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="🔬 Conducting deep research",
-            message=f"Topic: {query}\n\n*This may take several minutes as I analyze hundreds of sources...*",
-            status=MessageStatus.IN_PROGRESS
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="🔬 Conducting deep research",
+                message=f"Topic: {query}\n\n*This may take several minutes as I analyze hundreds of sources...*",
+                status=MessageStatus.IN_PROGRESS
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="deep_research",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
         
         # 2. Execute research activity (MOCKED - deep research disabled)
@@ -69,20 +87,27 @@ class DeepResearchManager(ToolManager):
                 }
             }
             # Original activity call (commented out):
-            # result = await workflow.execute_activity(
+            # result = await execute_activity(
             #     deep_research_activity,
             #     args=[query, max_tokens],
             #     start_to_close_timeout=timedelta(seconds=480)  # 8 minutes max
             # )
         except Exception as e:
             # Error status
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Deep research failed",
-                message=str(e),
-                status=MessageStatus.ERROR
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Deep research failed",
+                    message=str(e),
+                    status=MessageStatus.ERROR
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="deep_research",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
-            return
+            return {"error": str(e)}
         
         # 3. Report usage (Perplexity's complex pricing)
         if result.get('usage'):
@@ -144,10 +169,17 @@ class DeepResearchManager(ToolManager):
             
             # Emit usage event
             if usage_items:
-                yield ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name=self.tool_name,
-                    usage_items=usage_items
+                await handle_tool_event(
+                    event=ToolEvent(
+                        type=EventType.USAGE,
+                        tool_name=self.tool_name,
+                        usage_items=usage_items
+                    ),
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    tool_name="deep_research",
+                    execute_activity=execute_activity,
+                    user_id=user_id,
                 )
         
         # 4. Success status with report
@@ -160,12 +192,21 @@ class DeepResearchManager(ToolManager):
         else:
             message = report
         
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="Deep research completed",
-            message=message,
-            status=MessageStatus.FINISHED
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Deep research completed",
+                message=message,
+                status=MessageStatus.FINISHED
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="deep_research",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
+        
+        return result
 
 
 # ========================================
@@ -277,17 +318,34 @@ def get_manager() -> DeepResearchManager:
 
 
 # ========================================
-# WORKFLOW HELPER
+# TOOL ENTRY POINT
 # ========================================
 
-async def deep_research(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str) -> None:
+async def deep_research(
+    execute_activity: ExecuteActivityCallable,
+    tool_call: Dict[str, Any],
+    tool_call_id: str,
+    agent_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Workflow helper for deep research (new event-driven system).
+    Execute deep_research tool.
     
-    This replaces the old deep_research function.
-    Yields events instead of returning a value.
+    Args:
+        execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+        tool_call: Tool call dict with 'query', 'max_tokens'
+        tool_call_id: Unique ID for this tool call
+        agent_id: Agent ID for event routing
+        user_id: User ID for usage tracking
+        
+    Returns:
+        Result dict with report and citations
     """
     manager = get_manager()
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "deep_research")
-
+    return await manager.execute_tool(
+        execute_activity=execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )

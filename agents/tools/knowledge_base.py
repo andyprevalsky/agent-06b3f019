@@ -92,7 +92,7 @@ class QueryBlueprintsManager(ToolManager):
     
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity,  # Callable to execute the activity (workflow.execute_activity or call_temporal_activity_from_activity)
         tool_call: Dict[str, Any],
         tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
@@ -120,7 +120,7 @@ class QueryBlueprintsManager(ToolManager):
         
         # 2. Execute query activity
         try:
-            blueprints = await workflow.execute_activity(
+            blueprints = await execute_activity(
                 query_blueprints_activity,
                 args=[context, user_id, limit],
                 start_to_close_timeout=timedelta(seconds=30),
@@ -266,13 +266,14 @@ def get_save_manager() -> SaveBlueprintManager:
 # ========================================
 
 async def query_blueprints(
-    workflow_instance,
+    handle_tool_event_callback,  # Callable[[ToolEvent, str, str], Awaitable[None]]
+    execute_activity,  # workflow.execute_activity or call_temporal_activity_from_activity
     context: List[Dict],
     user_id: str,
     limit: int = 3
 ) -> List[Dict]:
     """
-    Workflow helper for querying blueprints (new event-driven system).
+    Helper for querying blueprints (new event-driven system).
     
     Returns the list of blueprints (needed by workflow logic).
     
@@ -281,15 +282,16 @@ async def query_blueprints(
     """
     manager = get_query_manager()
     
+    import uuid
     tool_call = {
         "context": context,
         "user_id": user_id,
         "limit": limit
     }
-    tool_call_id = workflow.uuid4()
+    tool_call_id = 'query_blueprints_1234567890'
     
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "query_blueprints")
+    async for event in manager.execute_tool(execute_activity, tool_call, tool_call_id):
+        await handle_tool_event_callback(event, tool_call_id, "query_blueprints")
     
     # Return the blueprints data that workflow needs
     return manager._last_result

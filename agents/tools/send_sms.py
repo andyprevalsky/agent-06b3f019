@@ -1,17 +1,20 @@
 """Send SMS tool - event-driven architecture."""
 
-from typing import Dict, Any, Optional, AsyncGenerator
-from temporalio import activity, workflow
+from typing import Dict, Any, Optional, Callable, Awaitable
+from temporalio import activity
 from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
 import httpx
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
+from helpers.handle_tool_event import handle_tool_event
 
-# Import config with safe imports to avoid sandbox restrictions
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
+
+# Type alias for execute_activity callable
+ExecuteActivityCallable = Callable[..., Awaitable[Any]]
 
 logger = structlog.get_logger()
 
@@ -23,24 +26,32 @@ class SendSmsManager(ToolManager):
     
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity: ExecuteActivityCallable,
         tool_call: Dict[str, Any],
-        tool_call_id: str
-    ) -> AsyncGenerator[ToolEvent, None]:
+        tool_call_id: str,
+        agent_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Execute SMS send and yield events.
+        Execute SMS send and post events via handle_tool_event.
         
-        Yields:
-            - Pre-execution status with message preview
-            - Usage tracking event
-            - Post-execution status with success/error
+        Args:
+            execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+            tool_call: Tool call dict with 'phone_number', 'message'
+            tool_call_id: Unique ID for this tool call
+            agent_id: Agent ID for event routing
+            user_id: User ID for usage tracking
+            
+        Returns:
+            Result dict with success status, phone_number, message_id
         """
         phone_number = tool_call.get("phone_number", "")
         message = tool_call.get("message", "")
         
         # Truncate long messages for display
         display_message = message if len(message) <= 50 else message[:47] + "..."
-        # Mask phone for display
+        
+        # Format phone for display
         def format_phone_number(number: str) -> str:
             """Format phone number for display as +1 (972) 977-7432 or leave as-is on failure."""
             import re
@@ -53,19 +64,26 @@ class SendSmsManager(ToolManager):
         formatted_phone_number = format_phone_number(phone_number)
         
         # 1. Pre-execution status
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="📱 Sending SMS",
-            message=f"""**To:** `{formatted_phone_number}`
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="📱 Sending SMS",
+                message=f"""**To:** `{formatted_phone_number}`
 
 **Message:**  
 {display_message}""",
-            status=MessageStatus.IN_PROGRESS
+                status=MessageStatus.IN_PROGRESS
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="send_sms",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
         
         # 2. Execute SMS send activity
         try:
-            result = await workflow.execute_activity(
+            result = await execute_activity(
                 send_sms_activity,
                 args=[phone_number, message],
                 start_to_close_timeout=timedelta(seconds=30),
@@ -79,39 +97,62 @@ class SendSmsManager(ToolManager):
             
             # 3. Report usage (estimated cost: $0.015 per SMS)
             cost_cents = 2  # $0.015 = 1.5 cents, round to 2 cents
-            yield ToolEvent(
-                type=EventType.USAGE,
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.USAGE,
+                    tool_name="send_sms",
+                    usage_items=[
+                        UsageItem(
+                            type=UsageType.SERVICE,
+                            cost_cents=cost_cents,
+                            provider="MessageBird SMS"
+                        )
+                    ]
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
                 tool_name="send_sms",
-                usage_items=[
-                    UsageItem(
-                        type=UsageType.SERVICE,
-                        cost_cents=cost_cents,
-                        provider="MessageBird SMS"
-                    )
-                ]
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
             
             # 4. Post-execution success
-            phone_number = result.get("phone_number", "user")
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="✅ SMS sent successfully",
-                message=f"""**To:** {formatted_phone_number}
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="✅ SMS sent successfully",
+                    message=f"""**To:** {formatted_phone_number}
 **Message:**  
 {display_message}""",
-                status=MessageStatus.FINISHED
+                    status=MessageStatus.FINISHED
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="send_sms",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
+            
+            return result
             
         except Exception as e:
             # Error status
             error_msg = str(e)
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ SMS send failed",
-                message=f"Error: {error_msg}",
-                status=MessageStatus.ERROR
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ SMS send failed",
+                    message=f"Error: {error_msg}",
+                    status=MessageStatus.ERROR
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="send_sms",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
-            # Don't raise - error event already posted the formatted message
+            
+            return {"error": error_msg, "phone_number": phone_number}
 
 
 # ========================================
@@ -130,26 +171,37 @@ def get_manager() -> SendSmsManager:
 
 
 # ========================================
-# WORKFLOW HELPER
+# TOOL ENTRY POINT
 # ========================================
 
 async def send_sms(
-    workflow_instance,
+    execute_activity: ExecuteActivityCallable,
     tool_call: Dict[str, Any],
-    tool_call_id: str
-):
+    tool_call_id: str,
+    agent_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Workflow helper for send_sms (event-driven system).
+    Execute send_sms tool.
     
     Args:
-        workflow_instance: The workflow instance
-        tool_call: Tool call dict with 'message'
+        execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+        tool_call: Tool call dict with 'phone_number', 'message'
         tool_call_id: Unique ID for this tool call
+        agent_id: Agent ID for event routing
+        user_id: User ID for usage tracking
+        
+    Returns:
+        Result dict with success status, phone_number, message_id
     """
     manager = get_manager()
-    
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "send_sms")
+    return await manager.execute_tool(
+        execute_activity=execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )
 
 
 # ========================================
@@ -209,4 +261,3 @@ async def send_sms_activity(phone_number: str, message: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error("SMS send failed", error=str(e))
         raise
-

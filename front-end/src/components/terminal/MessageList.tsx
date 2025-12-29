@@ -91,7 +91,16 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
     timestamp: firstTimestamp
   }));
 
-  const deduplicatedMessages = [...nonToolMessages, ...deduplicatedToolMessages];
+  // Compress set_plan messages - only keep the latest one
+  const latestSetPlan = deduplicatedToolMessages
+    .filter(m => m.metadata?.toolName === 'set_plan')
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+  
+  const withCompressedPlans = deduplicatedToolMessages.filter(m => 
+    m.metadata?.toolName !== 'set_plan' || m.message_id === latestSetPlan?.message_id
+  );
+
+  const deduplicatedMessages = [...nonToolMessages, ...withCompressedPlans];
   deduplicatedMessages.sort((a, b) => 
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
@@ -139,6 +148,7 @@ export function MessageList({
     streamingBubbles,
     streamingPlan,
     streamingAttention,
+    streamingTools,
     streamedTextsRef,
     registerMessageHandler,
     sendMessage,
@@ -300,6 +310,15 @@ export function MessageList({
     }
     return null;
   }, [streamingAttention, subAgentId]);
+  
+  const filteredStreamingTools = useMemo(() => {
+    const targetSubAgentId = subAgentId ?? null;
+    return new Map(
+      [...streamingTools].filter(([_, tool]) => 
+        (tool.subAgentId ?? null) === targetSubAgentId
+      )
+    );
+  }, [streamingTools, subAgentId]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // THINKING LOADER state
@@ -523,6 +542,28 @@ export function MessageList({
           </div>
         )
       )}
+
+      {/* Streaming tools - early detection indicators (below thinking bubble) */}
+      {Array.from(filteredStreamingTools.values()).map((tool) => (
+        <MessageBubble
+          key={`streaming-tool-${tool.tool_call_id}`}
+          message={{
+            message_id: `streaming-${tool.tool_call_id}`,
+            role: 'TOOL',
+            text: '',
+            timestamp: new Date().toISOString(),
+            metadata: {
+              toolCallId: tool.tool_call_id,
+              toolName: tool.tool_name,
+              toolStatus: 'IN_PROGRESS',
+              title: tool.title,
+            },
+          }}
+          shouldType={false}
+          onTypingComplete={() => {}}
+          compact={compact}
+        />
+      ))}
 
       {/* Streaming attention message */}
       {filteredStreamingAttention && subAgentId === undefined && filteredStreamingBubbles.size > 0 && (

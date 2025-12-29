@@ -373,21 +373,17 @@ Examples:
         {
             "type": "function",
             "function": {
-                "name": "close",
-                "description": "Complete the task and close",
+                "name": "attempt_completion",
+                "description": "Signal that the task is complete and ready for verification. Call this when you believe the goal has been accomplished. A verifier will confirm - if it passes, the session closes. If not, you'll receive feedback and can continue.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "reasoning": {
                             "type": "string",
-                            "description": "Summary of what was accomplished"
-                        },
-                        "success": {
-                            "type": "boolean",
-                            "description": "Whether the full goal of the task was achieved"
+                            "description": "Summary of what was accomplished and why you believe the task is complete"
                         }
                     },
-                    "required": ["reasoning", "success"],
+                    "required": ["reasoning"],
                     "additionalProperties": False
                 }
             }
@@ -441,13 +437,13 @@ NAVIGATION:
 - wait(timeMs) → Wait
 
 COMPLETION:
-- close(reasoning, success) → End task
+- attempt_completion(reasoning) → Signal task complete for verification
 
 IMPORTANT RULES:
 1. ALWAYS call observe() first to get a selector before clicking/typing
 2. Use fill() for login/forms (clears existing text)
 3. Use type() for search boxes (doesn't clear, triggers autocomplete)
 4. Verify actions worked with screenshot or ariaTree
-5. When done, call close() with success: true/false
+5. When done, call attempt_completion with a summary - a verifier will confirm
 
 Today's date is {current_date}. You're currently on: {current_url}"""

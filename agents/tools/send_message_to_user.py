@@ -30,7 +30,7 @@ class SendMessageToUserManager(ToolManager):
         """
         Communicate with the user from the PLAN phase.
 
-        When is_question=True we pause until the next USER reply appears in context.
+        When is_question=True we pause until receive_user_response signal arrives.
         When is_question=False we simply surface the message for visibility.
         """
         message = tool_call.get("message")
@@ -81,14 +81,13 @@ class SendMessageToUserManager(ToolManager):
             # No blocking required - informative ping only.
             return
 
-        # 2. Wait for user message to appear in context
+        # 2. Wait for user message signal (flag set by receive_user_response signal)
         try:
             await workflow.wait_condition(
-                lambda: (
-                    len(workflow_instance.context) > 0 and
-                    workflow_instance.context[-1].get("role") == "USER"
-                )
+                lambda: workflow_instance._has_new_messages
             )
+            # Reset flag so subsequent waits work correctly
+            workflow_instance._has_new_messages = False
 
             logger.info(
                 "User responded to send_message_to_user request",

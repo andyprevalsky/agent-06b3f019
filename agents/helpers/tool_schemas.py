@@ -1,7 +1,7 @@
 """Tool schemas and dynamic models used by the LLM orchestration layer."""
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Type, Union, Literal
+from typing import Any, Dict, List, Optional, Type, Union, Literal, TYPE_CHECKING
 
 import structlog
 from pydantic import BaseModel, Field, create_model
@@ -488,14 +488,33 @@ class ProgressToAutonomousExecutionPhaseTool(BaseModel):
 
 
 # ============================================================================
-# Execute Phase Verification Tool
+# Universal Completion Tool (replaces mark_execution_complete and progress_to_autonomous_execution_phase)
 # ============================================================================
 
 
-class MarkExecutionCompleteTool(BaseModel):
-    """Signal that execution is complete and ready for verification. Call this when you believe the goal has been fully accomplished."""
+class AttemptCompletionTool(BaseModel):
+    """
+    Signal that you believe your current phase/task is complete.
+    
+    In PLAN phase: Call when plan is ready and you no longer need clarifications.
+    In EXECUTE phase: Call when you believe the goal has been fully accomplished.
+    
+    A verifier will run to confirm completion. If verification passes, the loop exits.
+    If not, you'll receive feedback and can continue working.
+    """
 
-    tool: Literal["mark_execution_complete"]
+    tool: Literal["attempt_completion"]
+    reasoning: Optional[str] = Field(
+        default=None,
+        description="Summary of what was accomplished or why you believe the phase is complete."
+    )
+
+
+class SpawnSubAgentsTool(BaseModel):
+    """Tool call for spawning multiple sub-agents to work on parallel subtasks."""
+
+    tool: Literal["spawn_sub_agents"]
+    sub_agents: List[SubAgentConfig] = Field(description="List of sub-agent configurations to spawn")
 
 
 # ============================================================================
@@ -575,7 +594,6 @@ class PayForX402BazaarServiceTool(BaseModel):
 
 
 # Map tool names to their Pydantic models
-# Note: spawn_sub_agents is NOT included here - it's generated dynamically in create_agent_action_model
 TOOL_MODELS = {
     "wait_seconds": WaitSecondsTool,
     "web_search": WebSearchTool,
@@ -585,6 +603,7 @@ TOOL_MODELS = {
     "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
     "spawn_code_agent": SpawnCodeAgentTool,
+    "spawn_sub_agents": SpawnSubAgentsTool,
     "search_user_network_for_people": SearchUserNetworkTool,
     "find_all": FindAllTool,
     "enrich": EnrichTool,
@@ -594,9 +613,8 @@ TOOL_MODELS = {
     "message_person": MessagePersonTool,
     # Plan phase tools
     "set_plan": SetPlanTool,
-    "progress_to_autonomous_execution_phase": ProgressToAutonomousExecutionPhaseTool,
-    # Execute phase verification
-    "mark_execution_complete": MarkExecutionCompleteTool,
+    # Universal completion tool (available in both phases)
+    "attempt_completion": AttemptCompletionTool,
     # x402 Bazaar tools
     "search_x402_bazaar": SearchX402BazaarTool,
     "pay_for_x402_bazaar_service": PayForX402BazaarServiceTool,
@@ -609,6 +627,7 @@ TOOL_MODELS = {
 
 def create_agent_action_model(
     available_tool_names: List[str],
+    tool_registry: Optional[Dict[str, Type[BaseModel]]] = None,
 ) -> Type[BaseModel]:
     """
     Dynamically create an AgentAction Pydantic model based on available tools.
@@ -624,27 +643,20 @@ def create_agent_action_model(
 
     Args:
         available_tool_names: List of tool names this agent can use
+        tool_registry: Optional custom registry (defaults to TOOL_MODELS)
 
     Returns:
         Pydantic model class for AgentAction with proper tool union
     """
+    registry = tool_registry or TOOL_MODELS
 
     # Build list of tool models for available tools
     tool_types = []
     for name in available_tool_names:
-        if name == "spawn_sub_agents":
-
-            class SpawnSubAgentsTool(BaseModel):
-                """Tool call for spawning multiple sub-agents to work on parallel subtasks."""
-
-                tool: Literal["spawn_sub_agents"]
-                sub_agents: List[SubAgentConfig] = Field(description="List of sub-agent configurations to spawn")
-
-            tool_types.append(SpawnSubAgentsTool)
-        elif name in TOOL_MODELS:
-            tool_types.append(TOOL_MODELS[name])
+        if name in registry:
+            tool_types.append(registry[name])
         else:
-            logger.warning(f"Tool '{name}' not found in TOOL_MODELS, skipping")
+            logger.warning(f"Tool '{name}' not found in registry, skipping")
 
     # Create union type for tool calls
     if not tool_types:
@@ -666,7 +678,10 @@ def create_agent_action_model(
         "AgentAction",
         response=(
             str,
-            Field(description="Message to user. Plain professional language only - NEVER mention seeds, nurturing, fruition, or internal concepts. Use markdown."),
+            Field(
+                description="Thinking/reasoning about what to do next. Explain your observations "
+                           "and strategy. This is shown to the user as 'Thinking...' text."
+            ),
         ),
         tool_calls=tool_calls_field,
         __base__=BaseModel,
@@ -689,6 +704,7 @@ class ProgressScore(BaseModel):
 
 __all__ = [
     "VerifierConfig",
+    "SubAgentConfig",
     "WaitSecondsTool",
     "WebSearchTool",
     "DeepResearchTool",
@@ -701,14 +717,16 @@ __all__ = [
     "MessagePersonTool",
     "SpawnBrowserAgentTool",
     "SpawnCodeAgentTool",
+    "SpawnSubAgentsTool",
     "SearchUserNetworkTool",
     "FindAllTool",
     "EnrichTool",
     "MonitorTool",
     "CheckMonitorEventsTool",
     "SetPlanTool",
+    "AttemptCompletionTool",
+    # Legacy (kept for backward compatibility, but deprecated)
     "ProgressToAutonomousExecutionPhaseTool",
-    "MarkExecutionCompleteTool",
     "SearchX402BazaarTool",
     "PayForX402BazaarServiceTool",
     "TOOL_MODELS",

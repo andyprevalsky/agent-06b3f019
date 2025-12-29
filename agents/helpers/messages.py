@@ -9,6 +9,7 @@ from datetime import datetime
 import structlog
 import httpx
 
+from config import load_config
 from helpers.fetch_config import _fetch_agent_data_impl
 
 logger = structlog.get_logger()
@@ -48,8 +49,6 @@ async def stream_assistant_chunk(
         sub_agent_id: Optional sub-agent ID (e.g., browser task_id) for routing to specific MessageList
     """
     try:
-        from config import load_config
-        
         config = load_config()
         
         # Broadcast directly to Supabase Realtime (skip backend for speed)
@@ -122,7 +121,6 @@ async def stream_plan_event(
         title: The plan title (or "Generating Plan..." initially)
     """
     try:
-        from config import load_config
         
         config = load_config()
         
@@ -172,11 +170,12 @@ async def stream_tool_event(
     title: str,
 ) -> None:
     """
-    Broadcast tool start event DIRECTLY to Supabase Realtime (no DB insert).
+    Broadcast early tool detection as TOOL_STREAM event (ephemeral, no DB insert).
     
-    This is used to show early IN_PROGRESS tool messages during LLM streaming,
-    before tool parameters are fully parsed. The actual IN_PROGRESS with params
-    comes later via normal tool execution, using the same tool_call_id to overwrite.
+    This is used to show early tool indicators during LLM streaming, before tool
+    parameters are fully parsed. Uses TOOL_STREAM event (like PLAN_STREAM) so the
+    frontend shows it as ephemeral state AFTER the streaming bubble, not as a
+    real message that would sort before the assistant message.
     
     Args:
         agent_id: The agent ID
@@ -186,16 +185,16 @@ async def stream_tool_event(
         title: The display title (e.g., "Starting web_search...")
     """
     try:
-        from config import load_config
-        
         config = load_config()
         
         broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
         
+        # Broadcast as TOOL_STREAM event (ephemeral, like PLAN_STREAM)
+        # Frontend will show this as streaming indicator after thinking bubble
         payload = {
             "messages": [{
                 "topic": f"agent:{agent_id}",
-                "event": "TOOL_START",
+                "event": "TOOL_STREAM",
                 "payload": {
                     "record": {
                         "stream_id": stream_id,
@@ -254,7 +253,6 @@ async def stream_attention_event(
         sequence: Sequence number for ordering
     """
     try:
-        from config import load_config
         
         config = load_config()
         
@@ -302,14 +300,17 @@ async def stream_attention_event(
 @activity.defn
 async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
     """
-    Poll for new user messages since last check.
+    Poll for ALL new messages (USER, ASSISTANT, TOOL) since last check.
+    
+    This allows the agent to rebuild context from DB, including tool messages
+    that were posted via handle_tool_event.
     
     Args:
         agent_id: The agent ID
-        last_checked: Timestamp of last check
+        last_checked: Timestamp of last check (use epoch 0 for first poll)
         
     Returns:
-        List of new messages with role=USER
+        List of new messages (all roles) after last_checked
     """
     try:
         activity.heartbeat(f"Polling messages for agent {agent_id}")
@@ -322,16 +323,15 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
         data = await _fetch_agent_data_impl(agent_id)
         messages = data.get('messages', [])
         
-        # Filter for USER messages after last_checked
+        # Filter for ALL messages after last_checked (not just USER)
         new_messages = [
             msg for msg in messages
-            if msg['role'] == 'USER' and 
-            datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00')) > last_checked
+            if datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00')) > last_checked
         ]
         
         if new_messages:
             logger.info(
-                f"New messages found: agent_id={agent_id}, count={len(new_messages)}"
+                f"New messages found: agent_id={agent_id}, count={len(new_messages)}, roles={set(m['role'] for m in new_messages)}"
             )
         
         return new_messages
@@ -364,9 +364,6 @@ async def post_agent_message(
     """
     try:
         activity.heartbeat(f"Posting message for agent {agent_id}")
-        
-        import httpx
-        from config import load_config
         
         config = load_config()
         

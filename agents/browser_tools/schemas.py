@@ -135,8 +135,22 @@ class WaitTool(BaseModel):
 # ============================================================================
 
 
+class AttemptCompletionBrowserTool(BaseModel):
+    """
+    Signal that the browser task is complete and ready for verification.
+    
+    Call this when you believe the goal has been accomplished.
+    A verifier will run to confirm - if verification passes, the session closes.
+    If not, you'll receive feedback and can continue working.
+    """
+    
+    tool: Literal["attempt_completion"]
+    reasoning: str = Field(description="Summary of what was accomplished and why you believe the task is complete")
+
+
+# DEPRECATED: Use attempt_completion instead
 class CloseTool(BaseModel):
-    """Complete the task and close the browser session."""
+    """DEPRECATED - Use attempt_completion instead. Complete the task and close the browser session."""
     
     tool: Literal["close"]
     reasoning: str = Field(description="Summary of what was accomplished")
@@ -174,8 +188,9 @@ BROWSER_TOOL_MODELS = {
     "navback": NavbackTool,
     "scroll": ScrollTool,
     "wait": WaitTool,
-    # Completion
-    "close": CloseTool,
+    # Completion (attempt_completion is the standard, close is deprecated)
+    "attempt_completion": AttemptCompletionBrowserTool,
+    "close": CloseTool,  # Kept for backward compatibility
     "send_message_to_user": SendMessageToUserBrowserTool,
 }
 
@@ -191,7 +206,8 @@ def create_browser_agent_action_model(
     """
     Dynamically create a BrowserAgentAction Pydantic model.
     
-    This mirrors the main agent's create_agent_action_model but for browser tools.
+    Uses the unified create_agent_action_model from helpers.tool_schemas with
+    the BROWSER_TOOL_MODELS registry.
     
     Args:
         available_tool_names: List of tool names (defaults to all browser tools)
@@ -199,42 +215,13 @@ def create_browser_agent_action_model(
     Returns:
         Pydantic model class for BrowserAgentAction with proper tool union
     """
+    from helpers.tool_schemas import create_agent_action_model
+    
     # Default to all browser tools
     if available_tool_names is None:
         available_tool_names = list(BROWSER_TOOL_MODELS.keys())
     
-    # Build list of tool models
-    tool_types = []
-    for name in available_tool_names:
-        if name in BROWSER_TOOL_MODELS:
-            tool_types.append(BROWSER_TOOL_MODELS[name])
-    
-    # Create union type for tool calls
-    if len(tool_types) == 1:
-        ToolCallUnion = tool_types[0]
-    else:
-        ToolCallUnion = Union[tuple(tool_types)]
-    
-    tool_calls_field = (
-        List[ToolCallUnion],
-        Field(default_factory=list, description="List of browser tools to call in sequence")
-    )
-    
-    # Create the BrowserAgentAction model
-    BrowserAgentAction = create_model(
-        "BrowserAgentAction",
-        response=(
-            str,
-            Field(
-                description="Thinking/reasoning about what to do next. Explain your observations "
-                           "and strategy. This is shown to the user as 'Thinking...' text."
-            ),
-        ),
-        tool_calls=tool_calls_field,
-        __base__=BaseModel,
-    )
-    
-    return BrowserAgentAction
+    return create_agent_action_model(available_tool_names, tool_registry=BROWSER_TOOL_MODELS)
 
 
 __all__ = [
@@ -255,7 +242,8 @@ __all__ = [
     "ScrollTool",
     "WaitTool",
     # Completion
-    "CloseTool",
+    "AttemptCompletionBrowserTool",
+    "CloseTool",  # Deprecated - kept for backward compatibility
     "SendMessageToUserBrowserTool",
     # Registry & Factory
     "BROWSER_TOOL_MODELS",

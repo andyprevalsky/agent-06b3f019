@@ -9,12 +9,19 @@ import time
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 
-# Import activities from existing tools
-with workflow.unsafe.imports_passed_through():
-    from tools.send_sms import send_sms_activity
-    from tools.send_email import send_email_activity
+# Import activities from existing tools (safe - no side effects at import time)
+from tools.send_sms import send_sms_activity
+from tools.send_email import send_email_activity
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
 
 
 def _normalize_phone(phone: Optional[str]) -> Optional[str]:
@@ -151,7 +158,7 @@ Reply to approve, or say "no" to cancel."""
         user_id = workflow_instance.user_id
 
         # Track start time for elapsed time calculation
-        start_time = time.time()
+        start_time = _safe_time()
 
         # Build person identifier for display
         if first_name and last_name:
@@ -279,7 +286,7 @@ Reply to approve, or say "no" to cancel."""
                 )
 
             # 3. Calculate elapsed time
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Format success message
             formatted_message = format_tool_message(
@@ -307,7 +314,7 @@ Reply to approve, or say "no" to cancel."""
 
         except Exception as e:
             # Calculate elapsed time even on error
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Format error message using standardized format
             error_message = format_error_message(

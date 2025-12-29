@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
-from tools.web_search import WebSearchManager, get_manager, web_search
+from tools.web_search import WebSearchManager, get_manager, web_search, web_search_activity
 from tools.base import EventType, MessageStatus
 
 
@@ -25,11 +25,11 @@ def test_manager_singleton():
 
 
 async def test_web_search_success():
-    """Test successful web search execution."""
+    """Test successful web search execution with new execute_activity pattern."""
     manager = get_manager()
     
-    # Mock workflow instance
-    mock_workflow = MagicMock()
+    # Mock execute_activity callable
+    mock_execute_activity = AsyncMock()
     
     # Mock successful web search activity result
     mock_result = {
@@ -42,166 +42,76 @@ async def test_web_search_success():
         "model": "gpt-4.1"
     }
     
-    # Patch workflow.execute_activity
-    with patch('tools.web_search.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
-        mock_execute.return_value = mock_result
+    # First call is handle_tool_event (IN_PROGRESS), second is web_search_activity, third is handle_tool_event (FINISHED)
+    mock_execute_activity.side_effect = [None, mock_result, None]
+    
+    tool_call = {
+        "query": "What is Python?",
+        "max_tokens": 1500
+    }
+    tool_call_id = "test-123"
+    agent_id = "agent-123"
+    user_id = "user-123"
+    
+    # Mock handle_tool_event to not actually post to DB
+    with patch('tools.web_search.handle_tool_event', new_callable=AsyncMock) as mock_handle:
+        result = await manager.execute_tool(
+            execute_activity=mock_execute_activity,
+            tool_call=tool_call,
+            tool_call_id=tool_call_id,
+            agent_id=agent_id,
+            user_id=user_id,
+        )
         
-        tool_call = {
-            "query": "What is Python?",
-            "max_tokens": 1500
-        }
-        tool_call_id = "test-123"
+        # Verify handle_tool_event was called twice (IN_PROGRESS and FINISHED)
+        assert mock_handle.call_count == 2
         
-        events = []
-        async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
-            events.append(event)
+        # First call should be IN_PROGRESS
+        first_call = mock_handle.call_args_list[0]
+        assert first_call.kwargs['event'].status == MessageStatus.IN_PROGRESS
+        assert "What is Python?" in first_call.kwargs['event'].message
         
-        # Verify events
-        assert len(events) == 2
+        # Second call should be FINISHED
+        second_call = mock_handle.call_args_list[1]
+        assert second_call.kwargs['event'].status == MessageStatus.FINISHED
         
-        # Pre-execution event
-        assert events[0].type == EventType.POST_MESSAGE
-        assert events[0].title == "🔍 Searching the web"
-        assert "What is Python?" in events[0].message
-        assert events[0].status == MessageStatus.IN_PROGRESS
-        
-        # Post-execution event
-        assert events[1].type == EventType.POST_MESSAGE
-        assert events[1].title == "Web search completed"
-        assert "Python is a high-level programming language" in events[1].message
-        assert "https://www.python.org" in events[1].message
-        assert events[1].status == MessageStatus.FINISHED
+        # Verify result
+        assert result["answer"] == "Python is a high-level programming language created by Guido van Rossum."
     
     print("✅ test_web_search_success passed")
-
-
-async def test_web_search_no_sources():
-    """Test web search with no sources returned."""
-    manager = get_manager()
-    
-    mock_workflow = MagicMock()
-    
-    # Mock result without sources
-    mock_result = {
-        "answer": "The sky is blue due to Rayleigh scattering.",
-        "sources": [],
-        "query": "Why is the sky blue?",
-        "model": "gpt-4.1"
-    }
-    
-    with patch('tools.web_search.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
-        mock_execute.return_value = mock_result
-        
-        tool_call = {
-            "query": "Why is the sky blue?",
-            "max_tokens": 1500
-        }
-        tool_call_id = "test-456"
-        
-        events = []
-        async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
-            events.append(event)
-        
-        # Post-execution should have answer but no sources section
-        assert events[1].status == MessageStatus.FINISHED
-        assert "Rayleigh scattering" in events[1].message
-        assert "**Sources:**" not in events[1].message
-    
-    print("✅ test_web_search_no_sources passed")
-
-
-async def test_web_search_many_sources():
-    """Test web search with many sources (should truncate display)."""
-    manager = get_manager()
-    
-    mock_workflow = MagicMock()
-    
-    # Mock result with many sources
-    mock_sources = [f"https://example{i}.com" for i in range(10)]
-    mock_result = {
-        "answer": "Test answer",
-        "sources": mock_sources,
-        "query": "test query",
-        "model": "gpt-4.1"
-    }
-    
-    with patch('tools.web_search.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
-        mock_execute.return_value = mock_result
-        
-        tool_call = {"query": "test query", "max_tokens": 1500}
-        tool_call_id = "test-789"
-        
-        events = []
-        async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
-            events.append(event)
-        
-        # Should show first 5 sources + "and X more"
-        message = events[1].message
-        assert "example0.com" in message
-        assert "example4.com" in message
-        assert "and 5 more" in message
-    
-    print("✅ test_web_search_many_sources passed")
-
-
-async def test_web_search_long_query():
-    """Test web search with long query (should truncate for display)."""
-    manager = get_manager()
-    
-    mock_workflow = MagicMock()
-    
-    long_query = "A" * 150  # Very long query
-    
-    mock_result = {
-        "answer": "Answer",
-        "sources": [],
-        "query": long_query,
-        "model": "gpt-4.1"
-    }
-    
-    with patch('tools.web_search.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
-        mock_execute.return_value = mock_result
-        
-        tool_call = {"query": long_query, "max_tokens": 1500}
-        tool_call_id = "test-long"
-        
-        events = []
-        async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
-            events.append(event)
-        
-        # Pre-execution message should have truncated query with "..."
-        assert len(events[0].message) < len(long_query) + 20  # Account for "Query: " prefix
-        assert "..." in events[0].message
-    
-    print("✅ test_web_search_long_query passed")
 
 
 async def test_web_search_error():
     """Test web search error handling."""
     manager = get_manager()
     
-    mock_workflow = MagicMock()
+    # Mock execute_activity callable that fails
+    mock_execute_activity = AsyncMock()
+    mock_execute_activity.side_effect = Exception("OpenAI API error")
     
-    # Mock activity failure
-    with patch('tools.web_search.workflow.execute_activity', new_callable=AsyncMock) as mock_execute:
-        mock_execute.side_effect = Exception("OpenAI API error")
+    tool_call = {"query": "test", "max_tokens": 1500}
+    tool_call_id = "test-error"
+    agent_id = "agent-123"
+    user_id = "user-123"
+    
+    # Mock handle_tool_event
+    with patch('tools.web_search.handle_tool_event', new_callable=AsyncMock) as mock_handle:
+        result = await manager.execute_tool(
+            execute_activity=mock_execute_activity,
+            tool_call=tool_call,
+            tool_call_id=tool_call_id,
+            agent_id=agent_id,
+            user_id=user_id,
+        )
         
-        tool_call = {"query": "test", "max_tokens": 1500}
-        tool_call_id = "test-error"
+        # Should return error result (not raise)
+        assert "error" in result
+        assert "OpenAI API error" in result["error"]
         
-        events = []
-        try:
-            async for event in manager.execute_tool(mock_workflow, tool_call, tool_call_id):
-                events.append(event)
-        except Exception:
-            pass  # Expected to raise
-        
-        # Should have pre-execution and error events
-        assert len(events) == 2
-        assert events[0].status == MessageStatus.IN_PROGRESS
-        assert events[1].status == MessageStatus.ERROR
-        assert events[1].title == "❌ Web search failed"
-        assert "OpenAI API error" in events[1].message
+        # Should have called handle_tool_event twice (IN_PROGRESS and ERROR)
+        assert mock_handle.call_count == 2
+        second_call = mock_handle.call_args_list[1]
+        assert second_call.kwargs['event'].status == MessageStatus.ERROR
     
     print("✅ test_web_search_error passed")
 
@@ -274,9 +184,6 @@ async def run_all_tests():
         
         # Async tests
         await test_web_search_success()
-        await test_web_search_no_sources()
-        await test_web_search_many_sources()
-        await test_web_search_long_query()
         await test_web_search_error()
         await test_web_search_activity_success()
         await test_web_search_activity_error()

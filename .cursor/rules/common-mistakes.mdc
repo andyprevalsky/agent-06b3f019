@@ -36,6 +36,7 @@ description: >
   - attempt-to-fix
   - deploy (if needed)
   - broken = test(code)
+  24. DEFENSIVE FIXES ARE A RED FLAG
 
 
 apply:

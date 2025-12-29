@@ -11,11 +11,18 @@ import time
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
 
-# Import config with safe imports to avoid sandbox restrictions
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
 
 
 class EnrichManager(ToolManager):
@@ -50,7 +57,7 @@ class EnrichManager(ToolManager):
         title_entity = entity_name if len(str(entity_name)) <= 50 else str(entity_name)[:47] + "..."
         
         # Track start time for elapsed time calculation
-        start_time = time.time()
+        start_time = _safe_time()
         
         # Track current progress
         current_progress = 0
@@ -106,7 +113,7 @@ class EnrichManager(ToolManager):
             
             # Step 2: Poll with time-based progress (30% → 80%)
             # Since enrich API doesn't expose granular metrics, use time-based estimation
-            poll_start_time = time.time()
+            poll_start_time = _safe_time()
             max_poll_time = 600  # 10 minutes max
             poll_interval = 2.0  # Start with 2 seconds
             last_progress_update = poll_start_time
@@ -115,7 +122,7 @@ class EnrichManager(ToolManager):
             
             while True:
                 # Check timeout
-                elapsed_poll_time = time.time() - poll_start_time
+                elapsed_poll_time = _safe_time() - poll_start_time
                 if elapsed_poll_time >= max_poll_time:
                     raise TimeoutError(f"Enrichment task timed out after {max_poll_time} seconds")
                 
@@ -158,14 +165,14 @@ class EnrichManager(ToolManager):
                 
                 # Time-based progress estimation: 30% → 80% (50% range)
                 # Update progress every 5 seconds
-                time_since_last_update = time.time() - last_progress_update
+                time_since_last_update = _safe_time() - last_progress_update
                 if time_since_last_update >= 5.0:
                     # Calculate progress based on elapsed time (cap at 80%)
                     progress_range = 50  # 30% to 80%
                     time_progress = min(1.0, elapsed_poll_time / max_poll_time)
                     current_progress = min(80, 30 + int(time_progress * progress_range))
                     
-                    last_progress_update = time.time()
+                    last_progress_update = _safe_time()
                     
                     # Yield progress event
                     yield ToolEvent(
@@ -206,7 +213,7 @@ class EnrichManager(ToolManager):
             usage = results_data.get("usage")
             
             # Calculate elapsed time and cost
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
             
             # Calculate cost based on actual Parallel AI Task API pricing
             # Source: https://parallel.ai/pricing & https://docs.parallel.ai/task-api/guides/choose-a-processor
@@ -262,7 +269,7 @@ class EnrichManager(ToolManager):
             
         except Exception as e:
             # Calculate elapsed time even on error
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
             
             # Format error message using standardized format
             error_message = format_error_message(

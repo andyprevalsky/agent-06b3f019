@@ -1,7 +1,7 @@
 """Monitor tool - migrated to event-driven architecture."""
 
-from typing import Dict, Any, Optional, AsyncGenerator
-from temporalio import activity, workflow
+from typing import Dict, Any, Optional, Callable, Awaitable
+from temporalio import activity
 from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
@@ -9,12 +9,23 @@ import httpx
 import time
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
+from helpers.handle_tool_event import handle_tool_event
 
-# Import config with safe imports to avoid sandbox restrictions
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
+
+# Type alias for execute_activity callable
+ExecuteActivityCallable = Callable[..., Awaitable[Any]]
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
 
 
 class MonitorManager(ToolManager):
@@ -24,16 +35,24 @@ class MonitorManager(ToolManager):
     
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity: ExecuteActivityCallable,
         tool_call: Dict[str, Any],
-        tool_call_id: str
-    ) -> AsyncGenerator[ToolEvent, None]:
+        tool_call_id: str,
+        agent_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Execute monitor creation and yield events.
+        Execute monitor creation and post events via handle_tool_event.
         
-        Yields:
-            - Pre-execution status
-            - Post-execution status with monitor_id
+        Args:
+            execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+            tool_call: Tool call dict with 'query', 'cadence', etc.
+            tool_call_id: Unique ID for this tool call
+            agent_id: Agent ID for event routing
+            user_id: User ID for usage tracking
+            
+        Returns:
+            Result dict with monitor_id
         """
         query = tool_call.get("query", "")
         cadence = tool_call.get("cadence", "daily")
@@ -47,23 +66,30 @@ class MonitorManager(ToolManager):
         title_query = query if len(query) <= 50 else query[:47] + "..."
         
         # Track start time for elapsed time calculation
-        start_time = time.time()
+        start_time = _safe_time()
         
         # Truncate long queries for display in message
         display_query = query if len(query) <= 100 else query[:97] + "..."
         
         # 1. Pre-execution status with verbose title
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title=f"📡 Creating monitor: {title_query}",
-            message=f"Query: {display_query}\nCadence: {cadence}",
-            status=MessageStatus.IN_PROGRESS
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"📡 Creating monitor: {title_query}",
+                message=f"Query: {display_query}\nCadence: {cadence}",
+                status=MessageStatus.IN_PROGRESS
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="monitor",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
         
         # 2. Execute monitor creation activity
         try:
             logger.info("Calling monitor_activity", query_len=len(query), cadence=cadence)
-            result = await workflow.execute_activity(
+            result = await execute_activity(
                 monitor_activity,
                 args=[query, cadence, webhook_url, metadata],
                 start_to_close_timeout=timedelta(seconds=60),
@@ -76,22 +102,29 @@ class MonitorManager(ToolManager):
             )
             
             # 3. Calculate elapsed time and cost
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
             # Monitor API pricing: $3 per 1,000 requests = $0.003 per request
             # Source: https://parallel.ai/pricing
             total_cost_cents = 0.3  # $0.003 per request
             
             # Report usage
-            yield ToolEvent(
-                type=EventType.USAGE,
-                tool_name=self.tool_name,
-                usage_items=[
-                    UsageItem(
-                        type=UsageType.SERVICE,
-                        cost_cents=total_cost_cents,
-                        provider="Parallel Monitor API"
-                    )
-                ]
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.USAGE,
+                    tool_name=self.tool_name,
+                    usage_items=[
+                        UsageItem(
+                            type=UsageType.SERVICE,
+                            cost_cents=total_cost_cents,
+                            provider="Parallel Monitor API"
+                        )
+                    ]
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="monitor",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
             
             # Format success message using standardized format
@@ -103,16 +136,25 @@ class MonitorManager(ToolManager):
             )
             
             # Post-execution success with verbose title
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"Monitor created: {title_query}",
-                message=message,
-                status=MessageStatus.FINISHED
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Monitor created: {title_query}",
+                    message=message,
+                    status=MessageStatus.FINISHED
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="monitor",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
+            
+            return result
             
         except Exception as e:
             # Calculate elapsed time even on error
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
             
             # Format error message using standardized format
             error_message = format_error_message(
@@ -123,13 +165,21 @@ class MonitorManager(ToolManager):
             )
             
             # Error status with verbose title
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"❌ Monitor creation failed: {title_query}",
-                message=error_message,
-                status=MessageStatus.ERROR
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"❌ Monitor creation failed: {title_query}",
+                    message=error_message,
+                    status=MessageStatus.ERROR
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="monitor",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
-            # Don't raise - error event already posted the formatted message
+            
+            return {"error": str(e)}
 
 
 # ========================================
@@ -148,26 +198,37 @@ def get_manager() -> MonitorManager:
 
 
 # ========================================
-# WORKFLOW HELPER
+# TOOL ENTRY POINT
 # ========================================
 
 async def monitor(
-    workflow_instance,
+    execute_activity: ExecuteActivityCallable,
     tool_call: Dict[str, Any],
-    tool_call_id: str
-):
+    tool_call_id: str,
+    agent_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Workflow helper for Monitor (new event-driven system).
+    Execute monitor tool.
     
     Args:
-        workflow_instance: The workflow instance
+        execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
         tool_call: Tool call dict with 'query', 'cadence', 'webhook_url', 'metadata'
         tool_call_id: Unique ID for this tool call
+        agent_id: Agent ID for event routing
+        user_id: User ID for usage tracking
+        
+    Returns:
+        Result dict with monitor_id
     """
     manager = get_manager()
-    
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "monitor")
+    return await manager.execute_tool(
+        execute_activity=execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )
 
 
 # ========================================
@@ -258,4 +319,3 @@ async def monitor_activity(
     except Exception as e:
         logger.error("Monitor creation failed", error=str(e), query=query)
         raise
-

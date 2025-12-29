@@ -3,8 +3,8 @@
 Uses Coinbase x402 protocol for paid API discovery and execution.
 """
 
-from typing import Dict, Any, Optional, AsyncGenerator, List
-from temporalio import activity, workflow
+from typing import Dict, Any, Optional, Callable, Awaitable
+from temporalio import activity
 from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
@@ -13,12 +13,23 @@ import time
 import base64
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
+from helpers.handle_tool_event import handle_tool_event
 
-# Import config with safe imports to avoid sandbox restrictions
-with workflow.unsafe.imports_passed_through():
-    from config import load_config
+# Config import is safe - no side effects at import time (load_dotenv is lazy)
+from config import load_config
+
+# Type alias for execute_activity callable
+ExecuteActivityCallable = Callable[..., Awaitable[Any]]
 
 logger = structlog.get_logger()
+
+
+def _safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
 
 # x402 Bazaar API endpoint
 X402_BAZAAR_API = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources"
@@ -36,22 +47,30 @@ class SearchX402BazaarManager(ToolManager):
 
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity: ExecuteActivityCallable,
         tool_call: Dict[str, Any],
-        tool_call_id: str
-    ) -> AsyncGenerator[ToolEvent, None]:
+        tool_call_id: str,
+        agent_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Execute x402 Bazaar search and yield events.
+        Execute x402 Bazaar search and post events via handle_tool_event.
 
-        Yields:
-            - Pre-execution status
-            - Post-execution status with discovered services
+        Args:
+            execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+            tool_call: Tool call dict with optional 'max_price_cents', 'keyword'
+            tool_call_id: Unique ID for this tool call
+            agent_id: Agent ID for event routing
+            user_id: User ID for usage tracking
+            
+        Returns:
+            Result dict with services found
         """
         max_price_cents = tool_call.get("max_price_cents")
         keyword = tool_call.get("keyword")
 
         # Track start time for elapsed time calculation
-        start_time = time.time()
+        start_time = _safe_time()
 
         # Build display message
         filters = []
@@ -62,16 +81,23 @@ class SearchX402BazaarManager(ToolManager):
         filter_str = ", ".join(filters) if filters else "no filters"
 
         # 1. Pre-execution status
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="🔍 Searching x402 Bazaar",
-            message=f"Discovering paid API services ({filter_str})",
-            status=MessageStatus.IN_PROGRESS
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="🔍 Searching x402 Bazaar",
+                message=f"Discovering paid API services ({filter_str})",
+                status=MessageStatus.IN_PROGRESS
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="search_x402_bazaar",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
 
         # 2. Execute search activity
         try:
-            result = await workflow.execute_activity(
+            result = await execute_activity(
                 search_x402_bazaar_activity,
                 args=[max_price_cents, keyword],
                 start_to_close_timeout=timedelta(seconds=30),
@@ -84,7 +110,7 @@ class SearchX402BazaarManager(ToolManager):
             )
 
             # 3. Calculate elapsed time
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Format success message using standardized format
             message = format_tool_message(
@@ -95,16 +121,25 @@ class SearchX402BazaarManager(ToolManager):
             )
 
             # Post-execution success
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"✅ Found {result.get('service_count', 0)} x402 services",
-                message=message,
-                status=MessageStatus.FINISHED
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"✅ Found {result.get('service_count', 0)} x402 services",
+                    message=message,
+                    status=MessageStatus.FINISHED
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="search_x402_bazaar",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
+
+            return result
 
         except Exception as e:
             # Calculate elapsed time even on error
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Format error message using standardized format
             error_message = format_error_message(
@@ -115,12 +150,21 @@ class SearchX402BazaarManager(ToolManager):
             )
 
             # Error status
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ x402 Bazaar search failed",
-                message=error_message,
-                status=MessageStatus.ERROR
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ x402 Bazaar search failed",
+                    message=error_message,
+                    status=MessageStatus.ERROR
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="search_x402_bazaar",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
+
+            return {"error": str(e), "services": [], "service_count": 0}
 
 
 # ========================================
@@ -135,16 +179,24 @@ class PayForX402BazaarServiceManager(ToolManager):
 
     async def execute_tool(
         self,
-        workflow_instance,
+        execute_activity: ExecuteActivityCallable,
         tool_call: Dict[str, Any],
-        tool_call_id: str
-    ) -> AsyncGenerator[ToolEvent, None]:
+        tool_call_id: str,
+        agent_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Execute a paid x402 service call and yield events.
+        Execute a paid x402 service call and post events via handle_tool_event.
 
-        Yields:
-            - Pre-execution status with service details
-            - Post-execution status with response and payment info
+        Args:
+            execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
+            tool_call: Tool call dict with 'resource_url', 'method', 'params', 'max_amount_cents'
+            tool_call_id: Unique ID for this tool call
+            agent_id: Agent ID for event routing
+            user_id: User ID for usage tracking
+            
+        Returns:
+            Result dict with response and payment info
         """
         resource_url = tool_call.get("resource_url", "")
         method = tool_call.get("method", "GET")
@@ -152,22 +204,29 @@ class PayForX402BazaarServiceManager(ToolManager):
         max_amount_cents = tool_call.get("max_amount_cents", 0)
 
         # Track start time for elapsed time calculation
-        start_time = time.time()
+        start_time = _safe_time()
 
         # Truncate URL for display
         display_url = resource_url if len(resource_url) <= 60 else resource_url[:57] + "..."
 
         # 1. Pre-execution status
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="💳 Calling x402 Service",
-            message=f"**URL:** {display_url}\n**Method:** {method}\n**Max Payment:** ${max_amount_cents/100:.2f}",
-            status=MessageStatus.IN_PROGRESS
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="💳 Calling x402 Service",
+                message=f"**URL:** {display_url}\n**Method:** {method}\n**Max Payment:** ${max_amount_cents/100:.2f}",
+                status=MessageStatus.IN_PROGRESS
+            ),
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="pay_for_x402_bazaar_service",
+            execute_activity=execute_activity,
+            user_id=user_id,
         )
 
         # 2. Execute payment and service call activity
         try:
-            result = await workflow.execute_activity(
+            result = await execute_activity(
                 pay_for_x402_service_activity,
                 args=[resource_url, method, params, max_amount_cents],
                 start_to_close_timeout=timedelta(seconds=60),
@@ -180,7 +239,7 @@ class PayForX402BazaarServiceManager(ToolManager):
             )
 
             # 3. Calculate elapsed time and cost
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
             cost_cents = result.get("amount_paid_cents", 0)
 
             # Format success message using standardized format
@@ -192,30 +251,46 @@ class PayForX402BazaarServiceManager(ToolManager):
             )
 
             # Post-execution success
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"✅ x402 Service completed (${cost_cents/100:.4f})",
-                message=message,
-                status=MessageStatus.FINISHED
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"✅ x402 Service completed (${cost_cents/100:.4f})",
+                    message=message,
+                    status=MessageStatus.FINISHED
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="pay_for_x402_bazaar_service",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
 
             # 4. Report usage for billing (only if payment was made)
             if cost_cents > 0:
-                yield ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name=self.tool_name,
-                    usage_items=[
-                        UsageItem(
-                            type=UsageType.SERVICE,
-                            cost_cents=cost_cents,
-                            provider=f"x402 Bazaar ({result.get('network', 'base')})"
-                        )
-                    ]
+                await handle_tool_event(
+                    event=ToolEvent(
+                        type=EventType.USAGE,
+                        tool_name=self.tool_name,
+                        usage_items=[
+                            UsageItem(
+                                type=UsageType.SERVICE,
+                                cost_cents=cost_cents,
+                                provider=f"x402 Bazaar ({result.get('network', 'base')})"
+                            )
+                        ]
+                    ),
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    tool_name="pay_for_x402_bazaar_service",
+                    execute_activity=execute_activity,
+                    user_id=user_id,
                 )
+
+            return result
 
         except Exception as e:
             # Calculate elapsed time even on error
-            elapsed_time = time.time() - start_time
+            elapsed_time = _safe_time() - start_time
 
             # Format error message using standardized format
             error_message = format_error_message(
@@ -226,12 +301,21 @@ class PayForX402BazaarServiceManager(ToolManager):
             )
 
             # Error status
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ x402 Service call failed",
-                message=error_message,
-                status=MessageStatus.ERROR
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ x402 Service call failed",
+                    message=error_message,
+                    status=MessageStatus.ERROR
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="pay_for_x402_bazaar_service",
+                execute_activity=execute_activity,
+                user_id=user_id,
             )
+
+            return {"error": str(e)}
 
 
 # ========================================
@@ -259,45 +343,67 @@ def get_pay_manager() -> PayForX402BazaarServiceManager:
 
 
 # ========================================
-# WORKFLOW HELPERS
+# TOOL ENTRY POINTS
 # ========================================
 
 async def search_x402_bazaar(
-    workflow_instance,
+    execute_activity: ExecuteActivityCallable,
     tool_call: Dict[str, Any],
-    tool_call_id: str
-):
+    tool_call_id: str,
+    agent_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Workflow helper for search_x402_bazaar (event-driven system).
+    Execute search_x402_bazaar tool.
 
     Args:
-        workflow_instance: The workflow instance
+        execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
         tool_call: Tool call dict with optional 'max_price_cents', 'keyword'
         tool_call_id: Unique ID for this tool call
+        agent_id: Agent ID for event routing
+        user_id: User ID for usage tracking
+        
+    Returns:
+        Result dict with services found
     """
     manager = get_search_manager()
-
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "search_x402_bazaar")
+    return await manager.execute_tool(
+        execute_activity=execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )
 
 
 async def pay_for_x402_bazaar_service(
-    workflow_instance,
+    execute_activity: ExecuteActivityCallable,
     tool_call: Dict[str, Any],
-    tool_call_id: str
-):
+    tool_call_id: str,
+    agent_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Workflow helper for pay_for_x402_bazaar_service (event-driven system).
+    Execute pay_for_x402_bazaar_service tool.
 
     Args:
-        workflow_instance: The workflow instance
+        execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
         tool_call: Tool call dict with 'resource_url', 'method', 'params', 'max_amount_cents'
         tool_call_id: Unique ID for this tool call
+        agent_id: Agent ID for event routing
+        user_id: User ID for usage tracking
+        
+    Returns:
+        Result dict with response and payment info
     """
     manager = get_pay_manager()
-
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "pay_for_x402_bazaar_service")
+    return await manager.execute_tool(
+        execute_activity=execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )
 
 
 # ========================================
@@ -696,4 +802,3 @@ async def pay_for_x402_service_activity(
     except Exception as e:
         logger.error("x402 service call failed", error=str(e), resource=resource_url[:50])
         raise
-
