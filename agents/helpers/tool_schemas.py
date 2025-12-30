@@ -699,7 +699,7 @@ class ProgressScore(BaseModel):
     """Schema for progress evaluation."""
 
     reasoning: str = Field(description="Your internal thinking process about the progress")
-    response: float = Field(ge=0.0, le=1.0, description="Progress score from 0.0 (no progress) to 1.0 (complete)")
+    score: float = Field(ge=0.0, le=1.0, description="Progress score from 0.0 (no progress) to 1.0 (complete)")
 
 
 __all__ = [

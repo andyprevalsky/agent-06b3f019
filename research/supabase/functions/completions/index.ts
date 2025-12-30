@@ -28,8 +28,1357 @@ const MODEL_POOLS: Record<string, string[]> = {
     'moonshotai/kimi-k2-thinking',
     'google/gemini-3-pro-preview',
     'x-ai/grok-4.1-fast'
+  ],
+  // Browser automation pool - specialized models for web interaction
+  'rose-1-browser-use': [
+    'browser-use',              // Index 0 - Their hosted LLM (bu-1-0)
+    'yutori/n1',                // Index 1 - Vision-only, coordinate output
+    'anthropic/claude-cua',     // Index 2 - Vision-only, computer use
+    'openai/gpt-5.2',           // Index 3 - Uses browser-use format
   ]
 };
+
+// Browser-use API configuration
+const BROWSER_USE_API_URL = 'https://llm.api.browser-use.com/v1/chat/completions';
+
+// Yutori n1 API configuration
+const YUTORI_API_URL = 'https://api.yutori.com/v1/chat/completions';
+const YUTORI_MODEL = 'n1-preview-2025-11';
+
+// Anthropic CUA (Computer Use) API configuration
+const ANTHROPIC_CUA_MODEL = 'claude-sonnet-4-20250514';
+const ANTHROPIC_CUA_BETA = 'computer-use-2025-01-24';
+
+// Browser-use pool configuration
+const BROWSER_USE_TIMEOUT_MS = 10000;  // 10 second timeout per provider
+
+// Helper to truncate base64 data in objects for logging
+function truncateForLogging(obj: any, maxBase64Length = 100): any {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'string') {
+    // Check if it's a base64 data URI or long base64 string
+    if (obj.startsWith('data:image/') || (obj.length > 500 && /^[A-Za-z0-9+/=]+$/.test(obj.slice(0, 100)))) {
+      return `[BASE64_TRUNCATED:${obj.length} chars]`;
+    }
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => truncateForLogging(item, maxBase64Length));
+  }
+  if (typeof obj === 'object') {
+    const result: any = {};
+    for (const [key, value] of Object.entries(obj)) {
+      // Special handling for known screenshot fields
+      if ((key === 'screenshot' || key === 'url' || key === 'image_url') && typeof value === 'string') {
+        if (value.startsWith('data:image/') || (value.length > 500 && /^[A-Za-z0-9+/=]+$/.test(value.slice(0, 100)))) {
+          result[key] = `[BASE64_TRUNCATED:${value.length} chars]`;
+          continue;
+        }
+      }
+      result[key] = truncateForLogging(value, maxBase64Length);
+    }
+    return result;
+  }
+  return obj;
+}
+
+// Shuffle array helper (Fisher-Yates)
+function shuffleArray<T>(array: T[]): T[] {
+  const shuffled = [...array];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+// Promise timeout helper
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => 
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    )
+  ]);
+}
+
+// ============================================
+// BROWSER-USE TYPES AND INTERFACES
+// ============================================
+
+interface BrowserState {
+  url: string;
+  title?: string;
+  dom_tree: string;
+  screenshot?: string;  // base64
+  viewport: { width: number; height: number };
+  scroll_position: { 
+    x: number; 
+    y: number;
+    pages_above?: number;
+    pages_below?: number;
+    total_pages?: number;
+  };
+  tabs?: { id: string; url: string; title: string }[];
+  page_stats?: {
+    links: number;
+    interactive: number;
+    iframes: number;
+    scroll_containers: number;
+    images: number;
+    total_elements: number;
+  };
+  recent_events?: string[];
+  closed_popups?: string[];
+}
+
+interface ActionHistoryEntry {
+  step: number;
+  thinking?: string;
+  action: string;
+  index?: number;
+  coordinates?: { x: number; y: number };
+  element_description?: string;
+  params?: Record<string, any>;  // Action-specific parameters (text, url, key, etc.)
+  result: { success: boolean; error?: string; error_type?: string };
+  screenshot?: string;  // base64, for vision providers
+}
+
+interface BrowserUseRequest {
+  model: string;
+  task: string;
+  browser_state: BrowserState;
+  action_history: ActionHistoryEntry[];
+  available_actions: string[];
+  model_seed?: number;
+}
+
+interface UnifiedAction {
+  action: string;
+  thinking?: string;
+  index?: number;
+  coordinates?: { x: number; y: number };
+  element_description?: string;
+  params?: Record<string, any>;
+}
+
+// Detect if a request is a browser-use request (has browser_state field)
+function isBrowserUseRequest(body: any): body is BrowserUseRequest {
+  return body.browser_state && body.task && body.available_actions;
+}
+
+// ============================================
+// BROWSER-USE PROVIDER TRANSFORMS
+// ============================================
+
+// Browser tool definitions - using Python agent naming conventions
+// Each tool has: name, description, params with types and descriptions
+const BROWSER_USE_TOOLS: Record<string, { description: string; params: Record<string, { type: string; description: string; required?: boolean }> }> = {
+  // === NAVIGATION ===
+  goto: {
+    description: 'Navigate to a URL',
+    params: {
+      url: { type: 'string', description: 'URL to navigate to', required: true }
+    }
+  },
+  navback: {
+    description: 'Go back to the previous page in browser history',
+    params: {}
+  },
+  
+  // === WAITING ===
+  wait: {
+    description: 'Wait for x seconds (capped at 30s)',
+    params: {
+      seconds: { type: 'integer', description: 'Seconds to wait (default: 3)' }
+    }
+  },
+  
+  // === CLICKING ===
+  click: {
+    description: 'Click element by index',
+    params: {
+      index: { type: 'integer', description: 'Element index from browser_state', required: true }
+    }
+  },
+  // Coordinate-based clicking (for vision models)
+  click_coordinates: {
+    description: 'Click at specific coordinates (for vision models when index unavailable)',
+    params: {
+      x: { type: 'integer', description: 'X coordinate', required: true },
+      y: { type: 'integer', description: 'Y coordinate', required: true }
+    }
+  },
+  
+  // === TEXT INPUT ===
+  input_text: {
+    description: 'Input text into element by index',
+    params: {
+      index: { type: 'integer', description: 'Element index from browser_state', required: true },
+      text: { type: 'string', description: 'Text to input', required: true },
+      clear: { type: 'boolean', description: 'Clear field before typing (default: true)' }
+    }
+  },
+  
+  // === KEYBOARD ===
+  press_key: {
+    description: 'Send keyboard keys or shortcuts',
+    params: {
+      keys: { type: 'string', description: 'Keys (Escape, Enter, PageDown) or shortcuts (Control+o)', required: true }
+    }
+  },
+  
+  // === SCROLLING ===
+  scroll: {
+    description: 'Scroll by pages. Use down=True for scroll down, down=False for scroll up. Use index for scroll containers.',
+    params: {
+      down: { type: 'boolean', description: 'True=scroll down, False=scroll up (default: true)', required: true },
+      pages: { type: 'number', description: '0.5=half page, 1=full page, 10=to bottom/top (default: 1.0)' },
+      index: { type: 'integer', description: 'Optional element index to scroll within specific container' }
+    }
+  },
+  find_text: {
+    description: 'Scroll to specific text on the page',
+    params: {
+      text: { type: 'string', description: 'Text to find and scroll to', required: true }
+    }
+  },
+  
+  // === EXTRACTION ===
+  extract: {
+    description: 'LLM extracts structured data from page markdown. Use when on right page and know what to extract.',
+    params: {
+      query: { type: 'string', description: 'What to extract from the page', required: true },
+      extract_links: { type: 'boolean', description: 'Set True to extract URLs (default: false)' }
+    }
+  },
+  // === DROPDOWNS ===
+  dropdown_options: {
+    description: 'Get all options from a native dropdown or ARIA menu',
+    params: {
+      index: { type: 'integer', description: 'Element index of the dropdown', required: true }
+    }
+  },
+  select_dropdown: {
+    description: 'Set the option of a <select> element',
+    params: {
+      index: { type: 'integer', description: 'Element index of the dropdown', required: true },
+      text: { type: 'string', description: 'Exact text of the option to select', required: true }
+    }
+  },
+  
+  // === JAVASCRIPT ===
+  evaluate: {
+    description: 'Execute browser JavaScript. Wrap in IIFE with try-catch. Use for hover, drag, custom selectors, shadow DOM.',
+    params: {
+      code: { type: 'string', description: 'JavaScript code to execute', required: true }
+    }
+  },
+  
+  // === TAB MANAGEMENT ===
+  switch_tab: {
+    description: 'Switch to another open tab by tab_id (last 4 chars of target_id shown in browser state)',
+    params: {
+      tab_id: { type: 'string', description: '4-char tab ID', required: true }
+    }
+  },
+  close_tab: {
+    description: 'Close a tab by tab_id',
+    params: {
+      tab_id: { type: 'string', description: '4-char tab ID', required: true }
+    }
+  },
+  
+  // === COMPLETION ===
+  done: {
+    description: 'Complete the task and provide final result',
+    params: {
+      text: { type: 'string', description: 'Final result message in the format user requested', required: true },
+      success: { type: 'boolean', description: 'True if task completed successfully (default: true)' }
+    }
+  },
+  attempt_completion: {
+    description: 'Attempt to complete the task with a result message',
+    params: {
+      result: { type: 'string', description: 'The result/answer for the user', required: true }
+    }
+  },
+  send_message_to_user: {
+    description: 'Send a message to the user (for updates or asking for help)',
+    params: {
+      message: { type: 'string', description: 'Message content', required: true }
+    }
+  }
+};
+
+// Generate tool description string filtered by available_actions
+function generateToolDescriptions(availableActions: string[]): string {
+  const descriptions: string[] = [];
+  
+  for (const actionName of availableActions) {
+    const tool = BROWSER_USE_TOOLS[actionName];
+    if (!tool) continue;
+    
+    // Build params string like: (param1=type (desc), param2=type)
+    const paramParts: string[] = [];
+    for (const [paramName, paramInfo] of Object.entries(tool.params)) {
+      let part = `${paramName}=${paramInfo.type}`;
+      if (paramInfo.description) {
+        part += ` (${paramInfo.description})`;
+      }
+      paramParts.push(part);
+    }
+    
+    const paramsStr = paramParts.length > 0 ? ` (${paramParts.join(', ')})` : '';
+    descriptions.push(`- ${actionName}: ${tool.description}${paramsStr}`);
+  }
+  
+  return descriptions.join('\n');
+}
+
+// Generate JSON action format examples for available actions
+function generateActionExamples(availableActions: string[]): string {
+  const examples: string[] = [];
+  
+  for (const actionName of availableActions) {
+    const tool = BROWSER_USE_TOOLS[actionName];
+    if (!tool) continue;
+    
+    // Build example params
+    const exampleParams: Record<string, string> = {};
+    for (const [paramName, paramInfo] of Object.entries(tool.params)) {
+      if (paramInfo.required) {
+        if (paramInfo.type === 'string') {
+          exampleParams[paramName] = `<${paramName}>`;
+        } else if (paramInfo.type === 'integer') {
+          exampleParams[paramName] = '<index>' as any;
+        } else if (paramInfo.type === 'boolean') {
+          exampleParams[paramName] = 'true/false' as any;
+        } else {
+          exampleParams[paramName] = `<${paramInfo.type}>` as any;
+        }
+      }
+    }
+    
+    const paramsStr = Object.keys(exampleParams).length > 0 
+      ? JSON.stringify(exampleParams).replace(/"/g, '') 
+      : '';
+    
+    examples.push(`{"${actionName}": {${paramsStr.slice(1, -1)}}}`);
+  }
+  
+  return examples.join('\n');
+}
+
+// Full browser-use system prompt (based on their system_prompt_browser_use.md)
+function buildBrowserUseSystemPrompt(availableActions: string[]): string {
+  const toolDescriptions = generateToolDescriptions(availableActions);
+  
+  return `You are a browser-use agent operating in thinking mode. You automate browser tasks by outputting structured JSON actions.
+
+<intro>
+You excel at:
+1. Navigating complex websites and extracting precise information
+2. Automating form submissions and interactive web actions
+3. Operating effectively in an agent loop
+4. Efficiently performing diverse web tasks
+</intro>
+
+<input>
+At every step, your input will consist of:
+1. Current URL, viewport size, scroll position
+2. Interactive elements indexed for actions (format: [index]<type>text</type>)
+3. Previous action results and history
+4. Optional screenshot of the browser
+</input>
+
+<browser_rules>
+- Only interact with elements that have a numeric [index] assigned
+- Only use indexes that are explicitly provided in the current state
+- If expected elements are missing, try scrolling or waiting
+- By default, only elements in the visible viewport are listed - use scroll if content is offscreen
+- You can scroll by pages using the pages parameter (0.5 for half page, 2.0 for two pages)
+- If you fill an input field and action is interrupted, suggestions may have appeared
+</browser_rules>
+
+<available_actions>
+${toolDescriptions}
+</available_actions>
+
+<output>
+You must ALWAYS respond with valid JSON in this exact format:
+{
+  "thinking": "A structured reasoning block analyzing: current page state, what was attempted, what worked/failed, and strategic planning for next steps.",
+  "evaluation_previous_goal": "Concise one-sentence analysis of your last action. Clearly state success, failure, or uncertain.",
+  "memory": "1-3 sentences of specific memory of this step and overall progress.",
+  "next_goal": "State the next immediate goal and action to achieve it.",
+  "action": [{"action_name": {...params...}}]
+}
+Action list should NEVER be empty.
+</output>`;
+}
+
+// Anthropic CUA system prompt (minimal, role-setting)
+const ANTHROPIC_CUA_SYSTEM_PROMPT = `You are a computer use assistant that helps automate browser tasks. You have access to a computer tool that allows you to interact with a desktop browser environment.
+
+When given a task:
+1. Analyze the current screenshot to understand the page state
+2. Reason about what action to take next
+3. Use the computer tool to interact with the browser
+4. Observe the result and continue until the task is complete
+
+Be precise with your actions. Click accurately on the intended elements. Type text carefully. Scroll when needed to find content.`;
+
+// Models that require vision (coordinate-based or multimodal)
+const VISION_MODELS = ['yutori/n1', 'anthropic/claude-cua', 'browser-use'];
+// Models that use DOM indices only (no vision needed - reduces tokens and latency)
+const DOM_ONLY_MODELS = ['openai/gpt-5.2'];
+
+// Build browser-use format messages (used for browser-use LLM and generic LLMs)
+// Supports vision by including screenshot in multimodal user message
+// Set includeScreenshot=false for DOM-only models to reduce tokens and latency
+function transformToBrowserUseFormat(req: BrowserUseRequest, options?: { includeScreenshot?: boolean }): {
+  messages: any[];
+} {
+  const includeScreenshot = options?.includeScreenshot ?? true;
+  const bs = req.browser_state;
+  
+  // Build page stats summary (like browser-use's AgentMessagePrompt)
+  let statsText = '';
+  if (bs.page_stats) {
+    const ps = bs.page_stats;
+    statsText = `<page_stats>${ps.links} links, ${ps.interactive} interactive, `;
+    statsText += `${ps.iframes} iframes, ${ps.scroll_containers} scroll containers`;
+    if (ps.images > 0) statsText += `, ${ps.images} images`;
+    statsText += `, ${ps.total_elements} total elements</page_stats>\n`;
+  }
+  
+  // Build scroll context
+  let scrollText = `Scroll: (${bs.scroll_position.x}, ${bs.scroll_position.y})`;
+  if (bs.scroll_position.pages_above !== undefined) {
+    scrollText += ` | ${bs.scroll_position.pages_above} pages above, ${bs.scroll_position.pages_below} pages below`;
+  }
+  
+  // Build tabs info
+  let tabsText = '';
+  if (bs.tabs && bs.tabs.length > 0) {
+    tabsText = '\nOpen Tabs:\n';
+    for (const tab of bs.tabs) {
+      tabsText += `  Tab ${tab.id}: ${tab.url} - ${tab.title}\n`;
+    }
+  }
+  
+  // Build recent events
+  let eventsText = '';
+  if (bs.recent_events && bs.recent_events.length > 0) {
+    eventsText = `\nRecent Events: ${bs.recent_events.join(', ')}\n`;
+  }
+  
+  // Build closed popups
+  let popupsText = '';
+  if (bs.closed_popups && bs.closed_popups.length > 0) {
+    popupsText = '\nAuto-closed dialogs:\n';
+    for (const popup of bs.closed_popups) {
+      popupsText += `  - ${popup}\n`;
+    }
+  }
+  
+  // Build action history description
+  let historyDesc = '';
+  if (req.action_history.length > 0) {
+    historyDesc = '\n\nPrevious Actions:\n';
+    for (const entry of req.action_history) {
+      historyDesc += `Step ${entry.step}: `;
+      if (entry.thinking) historyDesc += `[Thinking: ${entry.thinking}] `;
+      historyDesc += `${entry.action}`;
+      if (entry.index !== undefined) historyDesc += ` (index: ${entry.index})`;
+      if (entry.result.success) {
+        historyDesc += ' ✓';
+      } else {
+        historyDesc += ` ✗ Error: ${entry.result.error || 'Unknown error'}`;
+      }
+      historyDesc += '\n';
+    }
+  }
+
+  // Build text content
+  const textContent = `Task: ${req.task}
+
+${statsText}Current URL: ${bs.url}${bs.title ? ` - ${bs.title}` : ''}
+Viewport: ${bs.viewport.width}x${bs.viewport.height}
+${scrollText}${tabsText}${eventsText}${popupsText}
+Interactive elements:
+${bs.dom_tree}${historyDesc}`;
+
+  // Build user message - multimodal if screenshot available AND requested
+  let userContent: any;
+  if (bs.screenshot && includeScreenshot) {
+    // Multimodal message with text + image
+    const imageUrl = bs.screenshot.startsWith('http') 
+      ? bs.screenshot 
+      : `data:image/png;base64,${bs.screenshot}`;
+    
+    userContent = [
+      { type: 'text', text: textContent },
+      { type: 'image_url', image_url: { url: imageUrl } }
+    ];
+  } else {
+    // Text-only message (for DOM-only models or when no screenshot)
+    userContent = textContent;
+  }
+
+  // Build dynamic system prompt based on available actions
+  const systemPrompt = buildBrowserUseSystemPrompt(req.available_actions);
+
+  const messages = [
+    {
+      role: 'system',
+      content: systemPrompt
+    },
+    {
+      role: 'user',
+      content: userContent
+    }
+  ];
+
+  return { messages };
+}
+
+// Call browser-use hosted LLM
+async function callBrowserUseLLM(
+  req: BrowserUseRequest,
+  apiKey: string
+): Promise<{ response: any; ttftMs: number }> {
+  const { messages } = transformToBrowserUseFormat(req);
+  
+  console.log('📤 browser-use request messages:', JSON.stringify(messages, null, 2));
+  
+  const startTime = Date.now();
+  
+  // Don't pass output_format - let browser-use API use its internal format
+  const requestBody = {
+    model: 'bu-1-0',
+    messages,
+    request_type: 'browser_agent',
+    fast: false,
+  };
+  
+  console.log('📤 browser-use full request:', JSON.stringify(truncateForLogging(requestBody), null, 2));
+  
+  const response = await fetch(BROWSER_USE_API_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestBody)
+  });
+  
+  const ttftMs = Date.now() - startTime;
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('browser-use API error:', response.status, errorText);
+    throw new Error(`browser-use API error: ${response.status} - ${errorText}`);
+  }
+  
+  const data = await response.json();
+  console.log('📥 browser-use raw response:', JSON.stringify(data, null, 2));
+  return { response: data, ttftMs };
+}
+
+// ============================================
+// YUTORI N1 TRANSFORM FUNCTIONS
+// ============================================
+
+// Transform unified request to Yutori format
+// Yutori expects: user message, then alternating observation (screenshot) and assistant messages
+// Screenshot can be a URL or base64 data URI
+function transformToYutoriFormat(req: BrowserUseRequest): {
+  messages: any[];
+} {
+  const messages: any[] = [];
+  
+  // Initial user message with task
+  // Per Yutori docs: "place any additional necessary instructions in the first user message, after the main task description"
+  messages.push({
+    role: 'user',
+    content: [
+      { type: 'text', text: `Task: ${req.task}` }
+    ]
+  });
+  
+  // Add action history as observation/assistant pairs
+  // Track last known URL for observation messages
+  let lastKnownUrl = req.browser_state.url;
+  
+  for (const entry of req.action_history) {
+    // Update URL tracking if this was a navigation action
+    if (entry.action === 'goto' && entry.params?.url) {
+      lastKnownUrl = entry.params.url;
+    }
+    
+    // Screenshot from history as observation
+    // Per Yutori docs: "Including the URL of the current page in observation messages is recommended"
+    if (entry.screenshot) {
+      // Check if it's already a URL or if it's base64
+      const imageUrl = entry.screenshot.startsWith('http') 
+        ? entry.screenshot 
+        : `data:image/png;base64,${entry.screenshot}`;
+      
+      const observationContent: any[] = [];
+      
+      // Add URL as text before the screenshot (recommended by Yutori docs)
+      if (lastKnownUrl) {
+        observationContent.push({ type: 'text', text: `Current URL: ${lastKnownUrl}` });
+      }
+      
+      observationContent.push({ type: 'image_url', image_url: { url: imageUrl } });
+      
+      messages.push({
+        role: 'observation',
+        content: observationContent
+      });
+    }
+    
+    // Previous action as assistant response
+    // Convert coordinates to 1000x1000 normalized space for Yutori
+    let normalizedCoords: [number, number] | undefined;
+    if (entry.coordinates) {
+      normalizedCoords = [
+        Math.round((entry.coordinates.x / req.browser_state.viewport.width) * 1000),
+        Math.round((entry.coordinates.y / req.browser_state.viewport.height) * 1000)
+      ];
+    }
+    
+    const actionResponse = {
+      thoughts: entry.thinking || `Executed ${entry.action}`,
+      actions: [{
+        action_type: entry.action,
+        ...(normalizedCoords ? { center_coordinates: normalizedCoords } : {}),
+        ...(entry.params || {})
+      }]
+    };
+    
+    messages.push({
+      role: 'assistant',
+      content: JSON.stringify(actionResponse)
+    });
+  }
+  
+  // Current screenshot as final observation
+  // Per Yutori docs: "Including the URL of the current page in observation messages is recommended"
+  if (req.browser_state.screenshot) {
+    // Check if it's already a URL or if it's base64
+    const imageUrl = req.browser_state.screenshot.startsWith('http') 
+      ? req.browser_state.screenshot 
+      : `data:image/png;base64,${req.browser_state.screenshot}`;
+    
+    const observationContent: any[] = [];
+    
+    // Add current URL as text before the screenshot
+    if (req.browser_state.url) {
+      observationContent.push({ type: 'text', text: `Current URL: ${req.browser_state.url}` });
+    }
+    
+    observationContent.push({ type: 'image_url', image_url: { url: imageUrl } });
+    
+    messages.push({
+      role: 'observation',
+      content: observationContent
+    });
+  }
+  
+  return { messages };
+}
+
+// Call Yutori n1 API
+async function callYutoriLLM(
+  req: BrowserUseRequest,
+  apiKey: string
+): Promise<{ response: any; ttftMs: number }> {
+  const { messages } = transformToYutoriFormat(req);
+  
+  console.log('📤 Yutori request messages count:', messages.length);
+  console.log('📤 Yutori request messages:', JSON.stringify(messages, null, 2));
+  
+  const requestBody = {
+    model: YUTORI_MODEL,
+    messages,
+    temperature: 0.3
+  };
+  
+  console.log('📤 Yutori full request body:', JSON.stringify(truncateForLogging(requestBody), null, 2));
+  
+  const startTime = Date.now();
+  
+  const response = await fetch(YUTORI_API_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestBody)
+  });
+  
+  const ttftMs = Date.now() - startTime;
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('Yutori API error:', response.status, errorText);
+    throw new Error(`Yutori API error: ${response.status} - ${errorText}`);
+  }
+  
+  const data = await response.json();
+  console.log('📥 Yutori raw response:', JSON.stringify(data, null, 2));
+  return { response: data, ttftMs };
+}
+
+// Normalize Yutori response to unified action format
+// Yutori returns coordinates in 1000x1000 normalized space
+function normalizeYutoriResponse(response: any, viewport: { width: number; height: number }): UnifiedAction {
+  console.log('🔍 Normalizing Yutori response');
+  
+  const content = response.choices?.[0]?.message?.content;
+  if (!content) {
+    return {
+      action: 'done',
+      thinking: 'No response from Yutori'
+    };
+  }
+  
+  // Parse the JSON content
+  let parsed: any;
+  try {
+    parsed = typeof content === 'string' ? JSON.parse(content) : content;
+  } catch {
+    console.log('⚠️ Could not parse Yutori response as JSON:', content);
+    return {
+      action: 'done',
+      thinking: `Raw response: ${content.slice(0, 200)}`
+    };
+  }
+  
+  const thoughts = parsed.thoughts || parsed.thinking;
+  const actions = parsed.actions || [];
+  
+  if (actions.length === 0) {
+    return {
+      action: 'done',
+      thinking: thoughts || 'Task complete'
+    };
+  }
+  
+  const firstAction = actions[0];
+  const actionType = firstAction.action_type || 'unknown';
+  
+  // Convert 1000x1000 coordinates to viewport coordinates
+  let coordinates: { x: number; y: number } | undefined;
+  if (firstAction.center_coordinates || firstAction.coordinates) {
+    const [normX, normY] = firstAction.center_coordinates || firstAction.coordinates;
+    coordinates = {
+      x: Math.round((normX / 1000) * viewport.width),
+      y: Math.round((normY / 1000) * viewport.height)
+    };
+  }
+  
+  // Map Yutori action names to Python agent expected names
+  const yutoriActionMap: Record<string, string> = {
+    'type': 'input_text',
+    'key': 'press_key',
+    'press_keys': 'press_key',
+    'scroll_up': 'scroll',
+    'scroll_down': 'scroll',
+    'navigate': 'goto',
+    'go_to_url': 'goto',
+    'complete': 'done',
+  };
+  
+  const normalizedAction = yutoriActionMap[actionType] || actionType;
+  
+  // Validate action is one we support (Yutori has limited actions)
+  const validYutoriActions = ['click', 'input_text', 'press_key', 'scroll', 'goto', 'done', 'wait'];
+  if (!validYutoriActions.includes(normalizedAction)) {
+    throw new Error(`normalizeYutoriResponse: Unknown action "${normalizedAction}" (raw: "${actionType}") - add to yutoriActionMap or validYutoriActions`);
+  }
+  
+  // Normalize Yutori params to Python agent expected format
+  const normalizedParams: Record<string, any> = {};
+  
+  // Text input
+  if (firstAction.typing_text) normalizedParams.text = firstAction.typing_text;
+  if (firstAction.text) normalizedParams.text = firstAction.text;
+  
+  // Navigation
+  if (firstAction.url) normalizedParams.url = firstAction.url;
+  
+  // Key presses - map 'keys' to 'key'
+  if (firstAction.key) normalizedParams.key = firstAction.key;
+  if (firstAction.keys) normalizedParams.key = firstAction.keys;
+  
+  // Handle scroll direction from action_type
+  if (actionType === 'scroll_up') {
+    normalizedParams.direction = 'up';
+    normalizedParams.amount = 300;
+  } else if (actionType === 'scroll_down') {
+    normalizedParams.direction = 'down';
+    normalizedParams.amount = 300;
+  } else if (firstAction.direction) {
+    normalizedParams.direction = firstAction.direction;
+    normalizedParams.amount = firstAction.amount || 300;
+  }
+  
+  // Wait - Yutori might use seconds or wait_time
+  if (firstAction.seconds !== undefined) {
+    normalizedParams.time_ms = firstAction.seconds * 1000;
+  }
+  if (firstAction.wait_time !== undefined) {
+    normalizedParams.time_ms = firstAction.wait_time * 1000;
+  }
+  
+  // Add normalized coordinates for reference
+  normalizedParams.normalized_coordinates = firstAction.center_coordinates || firstAction.coordinates;
+  
+  return {
+    action: normalizedAction,
+    thinking: thoughts,
+    coordinates,
+    params: normalizedParams
+  };
+}
+
+// ============================================
+// ANTHROPIC CUA TRANSFORM FUNCTIONS
+// ============================================
+
+// Transform unified request to Anthropic CUA format
+function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
+  messages: any[];
+  tools: any[];
+} {
+  const messages: any[] = [];
+  
+  // Build initial user message with task and current screenshot
+  const userContent: any[] = [
+    { type: 'text', text: `Task: ${req.task}` }
+  ];
+  
+  // Add current screenshot if available (base64 only - CUA requires base64)
+  if (req.browser_state.screenshot && !req.browser_state.screenshot.startsWith('http')) {
+    userContent.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: 'image/png',
+        data: req.browser_state.screenshot
+      }
+    });
+  }
+  
+  messages.push({ role: 'user', content: userContent });
+  
+  // Add action history as assistant/user pairs
+  for (let i = 0; i < req.action_history.length; i++) {
+    const entry = req.action_history[i];
+    
+    // Map our action names to CUA action names
+    const cuaAction = mapToCUAAction(entry.action, entry.params);
+    
+    // Handle actions that don't map to CUA tool calls (like goto/navback)
+    if (cuaAction === null) {
+      // Add as text-only context (no tool_use)
+      const contextText = entry.action === 'goto' 
+        ? `[Navigated to: ${entry.params?.url || 'unknown URL'}]`
+        : entry.action === 'navback'
+        ? `[Navigated back to previous page]`
+        : `[${entry.action}: ${JSON.stringify(entry.params || {})}]`;
+      
+      messages.push({
+        role: 'assistant',
+        content: [{ type: 'text', text: `${entry.thinking || ''}\n\n${contextText}` }]
+      });
+      
+      // Add observation as user message if screenshot available
+      if (entry.screenshot && !entry.screenshot.startsWith('http')) {
+        messages.push({
+          role: 'user',
+          content: [{
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: 'image/png',
+              data: entry.screenshot
+            }
+          }]
+        });
+      }
+      continue; // Skip the tool_use/tool_result pair
+    }
+    
+    // Assistant message with tool use
+    messages.push({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: entry.thinking || `Executing ${entry.action}` },
+        {
+          type: 'tool_use',
+          id: `tool_${i}`,
+          name: 'computer',
+          input: cuaAction
+        }
+      ]
+    });
+    
+    // User message with tool result
+    const toolResultContent: any[] = [];
+    if (entry.screenshot) {
+      if (entry.screenshot.startsWith('http')) {
+        toolResultContent.push({ type: 'text', text: '[Screenshot available via URL]' });
+      } else {
+        toolResultContent.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: entry.screenshot
+          }
+        });
+      }
+    } else {
+      toolResultContent.push({ 
+        type: 'text', 
+        text: entry.result.success ? 'Action completed successfully' : `Error: ${entry.result.error}` 
+      });
+    }
+    
+    messages.push({
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: `tool_${i}`,
+        content: toolResultContent
+      }]
+    });
+  }
+  
+  // CUA computer tool definition
+  const tools = [{
+    type: 'computer_20250124',
+    name: 'computer',
+    display_width_px: req.browser_state.viewport.width,
+    display_height_px: req.browser_state.viewport.height,
+    display_number: 1
+  }];
+  
+  return { messages, tools };
+}
+
+// Map our action names to Anthropic CUA action format
+function mapToCUAAction(action: string, params?: Record<string, any>): any {
+  switch (action) {
+    case 'click':
+      return {
+        action: 'left_click',
+        coordinate: params?.coordinates ? [params.coordinates.x, params.coordinates.y] : [0, 0]
+      };
+    case 'type':
+    case 'input_text':
+      return { action: 'type', text: params?.text || '' };
+    case 'scroll':
+    case 'scroll_down':
+      return { action: 'scroll', coordinate: [640, 400], direction: 'down', amount: 300 };
+    case 'scroll_up':
+      return { action: 'scroll', coordinate: [640, 400], direction: 'up', amount: 300 };
+    case 'press_key':
+      return { action: 'key', key: params?.key || 'Enter' };
+    case 'goto':
+    case 'navback':
+      // CUA doesn't have navigate actions - return null to add as text context
+      return null;
+    case 'done':
+    case 'attempt_completion':
+    case 'send_message_to_user':
+      // Non-browser actions - return null to skip in CUA context
+      return null;
+    default:
+      console.log(`⚠️ mapToCUAAction: Unknown action "${action}" - treating as text context`);
+      return null;
+  }
+}
+
+// Call Anthropic CUA API
+async function callAnthropicCUA(
+  req: BrowserUseRequest,
+  apiKey: string
+): Promise<{ response: any; ttftMs: number }> {
+  const { messages, tools } = transformToAnthropicCUAFormat(req);
+  
+  console.log('📤 Anthropic CUA request messages count:', messages.length);
+  
+  const requestBody = {
+    model: ANTHROPIC_CUA_MODEL,
+    max_tokens: 1024,
+    system: ANTHROPIC_CUA_SYSTEM_PROMPT,
+    tools,
+    messages
+  };
+  
+  console.log('📤 Anthropic CUA request:', JSON.stringify(requestBody, null, 2).slice(0, 1000));
+  
+  const startTime = Date.now();
+  
+  const response = await fetch(ANTHROPIC_API_URL, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': ANTHROPIC_CUA_BETA,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(requestBody)
+  });
+  
+  const ttftMs = Date.now() - startTime;
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('Anthropic CUA API error:', response.status, errorText);
+    throw new Error(`Anthropic CUA API error: ${response.status} - ${errorText}`);
+  }
+  
+  const data = await response.json();
+  console.log('📥 Anthropic CUA raw response:', JSON.stringify(data, null, 2));
+  return { response: data, ttftMs };
+}
+
+// Normalize Anthropic CUA response to unified action format
+function normalizeAnthropicCUAResponse(response: any): UnifiedAction {
+  console.log('🔍 Normalizing Anthropic CUA response');
+  
+  const content = response.content || [];
+  
+  // Find text and tool_use in content
+  const textPart = content.find((c: any) => c.type === 'text');
+  const toolUse = content.find((c: any) => c.type === 'tool_use');
+  
+  if (!toolUse) {
+    return {
+      action: 'done',
+      thinking: textPart?.text || 'No action returned'
+    };
+  }
+  
+  // Map CUA action back to Python agent expected names
+  const cuaAction = toolUse.input?.action || 'unknown';
+  let action: string;
+  let coordinates: { x: number; y: number } | undefined;
+  const normalizedParams: Record<string, any> = {};
+  
+  switch (cuaAction) {
+    case 'left_click':
+    case 'right_click':
+    case 'double_click':
+      action = 'click';
+      if (toolUse.input?.coordinate) {
+        coordinates = { x: toolUse.input.coordinate[0], y: toolUse.input.coordinate[1] };
+      }
+      break;
+    case 'type':
+      action = 'input_text';  // Map to Python expected name
+      if (toolUse.input?.text) normalizedParams.text = toolUse.input.text;
+      break;
+    case 'scroll':
+      action = 'scroll';  // Use unified 'scroll' action
+      if (toolUse.input?.direction) {
+        normalizedParams.direction = toolUse.input.direction;
+        normalizedParams.amount = 300; // Default scroll amount
+      }
+      if (toolUse.input?.coordinate) {
+        coordinates = { x: toolUse.input.coordinate[0], y: toolUse.input.coordinate[1] };
+      }
+      break;
+    case 'key':
+      action = 'press_key';  // Map to Python expected name
+      if (toolUse.input?.key) normalizedParams.key = toolUse.input.key;
+      break;
+    case 'wait':
+      action = 'wait';
+      if (toolUse.input?.duration !== undefined) {
+        normalizedParams.time_ms = toolUse.input.duration * 1000;
+      }
+      break;
+    case 'screenshot':
+      // CUA's native screenshot action - we capture automatically, so skip
+      return {
+        action: 'done',
+        thinking: textPart?.text || 'Screenshot requested (already capturing automatically)',
+        params: {}
+      };
+    default:
+      throw new Error(`normalizeAnthropicCUAResponse: Unmapped CUA action "${cuaAction}" - add to switch statement`);
+  }
+  
+  return {
+    action,
+    thinking: textPart?.text,
+    coordinates,
+    params: normalizedParams
+  };
+}
+
+// ============================================
+// GENERIC LLM TRANSFORM FUNCTIONS
+// ============================================
+
+// Call generic LLM via OpenRouter using browser-use format
+async function callGenericLLM(
+  req: BrowserUseRequest,
+  model: string,
+  openRouterKey: string,
+  supabaseUrl: string
+): Promise<{ response: any; ttftMs: number }> {
+  // Check if this is a DOM-only model (no vision needed)
+  const isDomOnly = DOM_ONLY_MODELS.includes(model);
+  
+  // transformToBrowserUseFormat already includes the dynamic system prompt
+  // For DOM-only models, skip screenshot to reduce tokens and improve latency
+  const { messages } = transformToBrowserUseFormat(req, { includeScreenshot: !isDomOnly });
+  
+  console.log(`📤 Generic LLM request to: ${model} (DOM-only: ${isDomOnly})`);
+  console.log('📤 Messages count:', messages.length);
+  
+  const startTime = Date.now();
+  
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${openRouterKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': supabaseUrl,
+      'X-Title': 'Rose Browser Use'
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature: 0.3,
+      max_tokens: 1024,
+      // Request JSON response
+      response_format: { type: 'json_object' }
+    })
+  });
+  
+  const ttftMs = Date.now() - startTime;
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('OpenRouter API error:', response.status, errorText);
+    throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+  }
+  
+  const data = await response.json();
+  
+  // Extract the content from OpenRouter response format
+  const content = data.choices?.[0]?.message?.content;
+  console.log('📥 Generic LLM raw content:', content);
+  
+  // Parse JSON content and return in browser-use compatible format
+  let completion: any;
+  try {
+    completion = typeof content === 'string' ? JSON.parse(content) : content;
+  } catch {
+    completion = { action: [], thinking: content };
+  }
+  
+  return { 
+    response: { completion }, 
+    ttftMs 
+  };
+}
+
+// Normalize browser-use response to unified action format
+function normalizeBrowserUseResponse(response: any): UnifiedAction {
+  console.log('🔍 Normalizing response:', JSON.stringify(response, null, 2));
+  
+  // browser-use returns { completion: { thinking, action: [...], ... }, usage }
+  // or sometimes just the completion directly
+  const completion = response.completion || response;
+  
+  // Check if completion is a string (raw LLM response)
+  if (typeof completion === 'string') {
+    // Try to parse as JSON
+    try {
+      const parsed = JSON.parse(completion);
+      return normalizeBrowserUseResponse({ completion: parsed });
+    } catch {
+      console.log('⚠️ Could not parse completion as JSON:', completion);
+      return {
+        action: 'done',
+        thinking: `Raw response: ${completion.slice(0, 200)}`
+      };
+    }
+  }
+  
+  // Extract action array - it could be in different places
+  let actions = completion.action;
+  if (!actions || actions.length === 0) {
+    console.log('⚠️ No actions in completion, checking for alternative formats');
+    return {
+      action: 'done',
+      thinking: completion.next_goal || completion.thinking || 'No action returned'
+    };
+  }
+  
+  const firstAction = actions[0];
+  console.log('🎯 First action:', JSON.stringify(firstAction, null, 2));
+  
+  // Action can be in different formats:
+  // 1. { action_name: "click", index: 5 } - flat format
+  // 2. { click: { index: 5 } } - nested format (browser-use native)
+  // 3. { action_name: { ...params } } - semi-nested
+  
+  let actionName: string;
+  let params: Record<string, any> = {};
+  let index: number | undefined;
+  
+  if (firstAction.action_name) {
+    // Format 1 or 3: has explicit action_name field
+    actionName = firstAction.action_name;
+    params = { ...firstAction };
+    delete params.action_name;
+    index = firstAction.index;
+  } else {
+    // Format 2: nested { click: { index: 5 } }
+    const keys = Object.keys(firstAction);
+    actionName = keys[0];
+    params = firstAction[actionName] || {};
+    index = params.index;
+  }
+  
+  // Map action names to Python agent expected names
+  const actionNameMap: Record<string, string> = {
+    'navigate': 'goto',
+    'go_to_url': 'goto',
+    'type': 'input_text',
+    'type_text': 'input_text',
+    'key': 'press_key',
+    'keyboard': 'press_key',
+    'send_keys': 'press_key',
+    'scroll_up': 'scroll',
+    'scroll_down': 'scroll',
+    'back': 'navback',
+    'go_back': 'navback',
+    'complete': 'done',
+    'finish': 'done',
+  };
+  
+  const normalizedAction = actionNameMap[actionName] || actionName;
+  
+  // Validate action is one we support
+  const validActions = [
+    'click', 'click_coordinates', 'input_text', 'press_key', 'scroll', 'goto', 'navback',
+    'wait', 'extract', 'done', 'dropdown_options', 'select_dropdown', 'evaluate',
+    'switch_tab', 'close_tab', 'find_text', 'send_message_to_user', 'attempt_completion'
+  ];
+  if (!validActions.includes(normalizedAction)) {
+    throw new Error(`normalizeBrowserUseResponse: Unknown action "${normalizedAction}" (raw: "${actionName}") - add to actionNameMap or validActions`);
+  }
+  
+  // Convert click_coordinates to click with coordinates
+  if (normalizedAction === 'click_coordinates') {
+    const x = params.x ?? params.coordinate_x;
+    const y = params.y ?? params.coordinate_y;
+    if (x === undefined || y === undefined) {
+      throw new Error(`normalizeBrowserUseResponse: click_coordinates requires x and y, got: ${JSON.stringify(params)}`);
+    }
+    return {
+      action: 'click',
+      thinking: completion.next_goal || completion.thinking,
+      coordinates: { x, y },
+      params: {}
+    };
+  }
+  
+  // Validate click action has required index (DOM-based models must return index)
+  if (normalizedAction === 'click' && index === undefined) {
+    throw new Error(`normalizeBrowserUseResponse: click action requires element index, got none. Raw action: ${JSON.stringify(firstAction)}`);
+  }
+  
+  // Normalize params to Python agent expected format
+  const normalizedParams: Record<string, any> = {};
+  
+  // Handle different param formats
+  if (params.url) normalizedParams.url = params.url;
+  if (params.text) normalizedParams.text = params.text;
+  if (params.typing_text) normalizedParams.text = params.typing_text; // Yutori format
+  
+  // press_key: map 'keys' to 'key'
+  if (params.key) normalizedParams.key = params.key;
+  if (params.keys) normalizedParams.key = params.keys;
+  
+  // extract: map 'query' to 'instruction'
+  if (params.instruction) normalizedParams.instruction = params.instruction;
+  if (params.query) normalizedParams.instruction = params.query;
+  if (params.extract_links !== undefined) normalizedParams.extract_links = params.extract_links;
+  
+  if (params.code) normalizedParams.code = params.code;
+  
+  // select_dropdown: map 'text' to 'value' (but text is also used for input_text)
+  // Only map to 'value' for select_dropdown action
+  if (normalizedAction === 'select_dropdown' && params.text) {
+    normalizedParams.value = params.text;
+  } else if (params.value) {
+    normalizedParams.value = params.value;
+  }
+  
+  if (params.message) normalizedParams.message = params.message;
+  if (params.reasoning) normalizedParams.reasoning = params.reasoning;
+  if (params.reason) normalizedParams.reason = params.reason;
+  
+  // wait: convert 'seconds' to 'time_ms'
+  if (params.seconds !== undefined) {
+    normalizedParams.time_ms = params.seconds * 1000;
+  }
+  if (params.timeout !== undefined) {
+    normalizedParams.time_ms = params.timeout; // Already in ms
+  }
+  if (params.time_ms !== undefined) {
+    normalizedParams.time_ms = params.time_ms;
+  }
+  
+  // scroll: convert 'down'/'pages' to 'direction'/'amount'
+  if (actionName === 'scroll_up') {
+    normalizedParams.direction = 'up';
+    normalizedParams.amount = 300; // Default scroll amount
+  } else if (actionName === 'scroll_down') {
+    normalizedParams.direction = 'down';
+    normalizedParams.amount = 300;
+  } else if (params.down !== undefined) {
+    normalizedParams.direction = params.down ? 'down' : 'up';
+    // Convert pages to pixel amount (1 page ≈ viewport height ≈ 600px)
+    const pages = params.pages !== undefined ? params.pages : 1.0;
+    normalizedParams.amount = Math.round(pages * 600);
+  } else if (params.direction) {
+    normalizedParams.direction = params.direction;
+    normalizedParams.amount = params.amount || 300;
+  }
+  
+  // Copy index to params if present
+  if (index !== undefined) {
+    normalizedParams.index = index;
+  }
+  
+  return {
+    action: normalizedAction,
+    thinking: completion.next_goal || completion.thinking,
+    index: index,
+    coordinates: params.coordinate_x !== undefined ? {
+      x: params.coordinate_x,
+      y: params.coordinate_y
+    } : undefined,
+    element_description: params.element_description,
+    params: normalizedParams
+  };
+}
 
 // Model preferences - hardcoded mappings for SMART/FAST/CHEAP
 // FAST uses Cerebras for ultra-low latency inference
@@ -1390,7 +2739,234 @@ serve(async (req) => {
       });
     }
 
-    // Parse request body
+    // Parse request body (raw first for browser-use detection)
+    const rawBody = await req.json();
+    
+    // ============================================
+    // HANDLE BROWSER-USE REQUESTS (EARLY)
+    // Browser-use has different format: task + browser_state instead of messages
+    // ============================================
+    if (isBrowserUseRequest(rawBody)) {
+      console.log(`🌐 Browser-use request detected for model: ${rawBody.model}`);
+      const browserUseReq = rawBody as BrowserUseRequest;
+      
+      // Get the browser-use pool
+      const browserPool = MODEL_POOLS['rose-1-browser-use'];
+      if (!browserPool) {
+        return new Response(JSON.stringify({ 
+          error: 'Browser-use pool not configured' 
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 500,
+        });
+      }
+      
+      // Helper to call a specific provider with full request/response logging
+      async function callProvider(
+        provider: string, 
+        providerIndex: number
+      ): Promise<{ action: UnifiedAction; ttftMs: number; actualModel: string }> {
+        // Log the full request (with truncated screenshots)
+        console.log(`\n📤 [${provider}] FULL REQUEST:`);
+        console.log(JSON.stringify(truncateForLogging({
+          provider,
+          providerIndex,
+          task: browserUseReq.task,
+          browser_state: browserUseReq.browser_state,
+          action_history: browserUseReq.action_history,
+          model_seed: browserUseReq.model_seed,
+        }), null, 2));
+        
+        if (provider === 'browser-use') {
+          const browserUseApiKey = Deno.env.get('BROWSER_USE_API_KEY');
+          if (!browserUseApiKey) throw new Error('BROWSER_USE_API_KEY not configured');
+          
+          const result = await callBrowserUseLLM(browserUseReq, browserUseApiKey);
+          const normalizedAction = normalizeBrowserUseResponse(result.response);
+          
+          console.log(`\n📥 [${provider}] FULL RESPONSE:`);
+          console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
+          console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
+          console.log(JSON.stringify(normalizedAction, null, 2));
+          
+          return {
+            action: normalizedAction,
+            ttftMs: result.ttftMs,
+            actualModel: 'browser-use/bu-1-0'
+          };
+          
+        } else if (provider === 'yutori/n1') {
+          const yutoriApiKey = Deno.env.get('YUTORI_API_KEY');
+          if (!yutoriApiKey) throw new Error('YUTORI_API_KEY not configured');
+          if (!browserUseReq.browser_state.screenshot) {
+            throw new Error('Yutori requires screenshot');
+          }
+          
+          const result = await callYutoriLLM(browserUseReq, yutoriApiKey);
+          
+          console.log(`\n📥 [${provider}] FULL RESPONSE:`);
+          console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
+          
+          const normalizedAction = normalizeYutoriResponse(result.response, browserUseReq.browser_state.viewport);
+          
+          console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
+          console.log(JSON.stringify(normalizedAction, null, 2));
+          
+          return {
+            action: normalizedAction,
+            ttftMs: result.ttftMs,
+            actualModel: 'yutori/n1-preview-2025-11'
+          };
+          
+        } else if (provider === 'anthropic/claude-cua') {
+          const anthropicApiKey = Deno.env.get('ANTHROPIC_API_KEY');
+          if (!anthropicApiKey) throw new Error('ANTHROPIC_API_KEY not configured');
+          if (browserUseReq.browser_state.screenshot?.startsWith('http')) {
+            throw new Error('Anthropic CUA requires base64 screenshot');
+          }
+          
+          const result = await callAnthropicCUA(browserUseReq, anthropicApiKey);
+          
+          console.log(`\n📥 [${provider}] FULL RESPONSE:`);
+          console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
+          
+          const normalizedAction = normalizeAnthropicCUAResponse(result.response);
+          
+          console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
+          console.log(JSON.stringify(normalizedAction, null, 2));
+          
+          return {
+            action: normalizedAction,
+            ttftMs: result.ttftMs,
+            actualModel: 'anthropic/claude-sonnet-4-cua'
+          };
+          
+        } else {
+          // Generic LLM via OpenRouter
+          const openRouterKey = Deno.env.get('OPENROUTER_API_KEY');
+          if (!openRouterKey) throw new Error('OPENROUTER_API_KEY not configured');
+          
+          const result = await callGenericLLM(browserUseReq, provider, openRouterKey, supabaseUrl);
+          
+          console.log(`\n📥 [${provider}] FULL RESPONSE:`);
+          console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
+          
+          const normalizedAction = normalizeBrowserUseResponse(result.response);
+          
+          console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
+          console.log(JSON.stringify(normalizedAction, null, 2));
+          
+          return {
+            action: normalizedAction,
+            ttftMs: result.ttftMs,
+            actualModel: provider
+          };
+        }
+      }
+      
+      // ============================================
+      // MODE 1: model_seed provided - direct call to specific provider (for testing)
+      // ============================================
+      if (browserUseReq.model_seed !== undefined) {
+        const providerIndex = browserUseReq.model_seed;
+        
+        if (providerIndex < 0 || providerIndex >= browserPool.length) {
+          return new Response(JSON.stringify({ 
+            error: `model_seed ${providerIndex} out of range. Pool has ${browserPool.length} providers (0-${browserPool.length - 1})` 
+          }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            status: 400,
+          });
+        }
+        
+        const selectedProvider = browserPool[providerIndex];
+        console.log(`🎯 Browser-use provider (seeded): ${selectedProvider} (index: ${providerIndex})`);
+        
+        try {
+          const result = await callProvider(selectedProvider, providerIndex);
+          
+          console.log(`✅ Browser-use response: action=${result.action.action}, index=${result.action.index}`);
+          
+          return new Response(JSON.stringify({
+            action: result.action,
+            requested_model: browserUseReq.model,
+            actual_model: result.actualModel,
+            pool_name: 'rose-1-browser-use',
+            pool_size: browserPool.length,
+            provider_index: providerIndex,
+            ttft_ms: result.ttftMs,
+          }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            status: 200,
+          });
+          
+        } catch (error) {
+          console.error(`❌ Browser-use (seeded) failed:`, error);
+          return new Response(JSON.stringify({ 
+            error: 'Browser-use request failed',
+            details: error instanceof Error ? error.message : 'Unknown error'
+          }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            status: 500,
+          });
+        }
+      }
+      
+      // ============================================
+      // MODE 2: No model_seed - random rotation with 5s timeout + fallback
+      // ============================================
+      const providerOrder = shuffleArray([...Array(browserPool.length).keys()]);
+      console.log(`🎲 Browser-use provider order: ${providerOrder.map(i => browserPool[i]).join(' → ')}`);
+      
+      let lastError = '';
+      
+      for (const providerIndex of providerOrder) {
+        const selectedProvider = browserPool[providerIndex];
+        console.log(`🎯 Trying: ${selectedProvider} (${BROWSER_USE_TIMEOUT_MS}ms timeout)`);
+        
+        try {
+          const result = await withTimeout(
+            callProvider(selectedProvider, providerIndex),
+            BROWSER_USE_TIMEOUT_MS,
+            selectedProvider
+          );
+          
+          console.log(`✅ Browser-use response: action=${result.action.action}, index=${result.action.index}`);
+          
+          return new Response(JSON.stringify({
+            action: result.action,
+            requested_model: browserUseReq.model,
+            actual_model: result.actualModel,
+            pool_name: 'rose-1-browser-use',
+            pool_size: browserPool.length,
+            provider_index: providerIndex,
+            ttft_ms: result.ttftMs,
+          }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            status: 200,
+          });
+          
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : 'Unknown error';
+          console.log(`⏱️ ${selectedProvider} failed: ${lastError}, trying next...`);
+          continue;
+        }
+      }
+      
+      // All providers failed
+      console.error(`❌ All browser-use providers failed. Last error: ${lastError}`);
+      return new Response(JSON.stringify({ 
+        error: 'All browser-use providers failed or timed out',
+        last_error: lastError
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 500,
+      });
+    }
+    
+    // ============================================
+    // STANDARD CHAT COMPLETION FORMAT
+    // ============================================
     const { 
       model, 
       messages: originalMessages, 
@@ -1407,7 +2983,7 @@ serve(async (req) => {
       model_preference,  // Optional: 'SMART' | 'FAST' | 'CHEAP' for hardcoded model selection
       conversation_id,  // Optional: ensures same model used for entire conversation
       ...otherParams
-    } = await req.json();
+    } = rawBody;
     
     const cotSteps = cot_steps || 1;
     const maxTokens = max_tokens;
@@ -1759,7 +3335,43 @@ serve(async (req) => {
                   
                   try {
                     const parsed = JSON.parse(data);
-                    // Include metadata
+                    
+                    // Transform Anthropic streaming events to OpenAI format (same as handleStreaming)
+                    if (isAnthropicModel(winningModel)) {
+                      // Skip non-content events (message_start, content_block_start, etc.)
+                      if (parsed.type !== 'content_block_delta') {
+                        return;
+                      }
+                      
+                      // Transform to OpenAI format
+                      const openAIFormat: any = {
+                        choices: [{
+                          index: 0,
+                          delta: {
+                            content: parsed.delta?.text || parsed.delta?.partial_json || ''
+                          }
+                        }],
+                        requested_model: model,
+                        actual_model: winningModel,
+                        pool_name: poolName,
+                        pool_size: pool.length,
+                        racing_ttft_ms: ttftMs,
+                        models_raced: modelsRaced
+                      };
+                      
+                      // Track first enqueue timing
+                      if (firstEnqueueTime === null) {
+                        firstEnqueueTime = Date.now() - streamStartTime;
+                        timings.first_enqueue_to_client_ms = firstEnqueueTime;
+                        console.log(`⏱️ TIMING: first_enqueue_to_client=${firstEnqueueTime}ms`);
+                      }
+                      openAIFormat.timings = timings;
+                      
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify(openAIFormat)}\n\n`));
+                      return;
+                    }
+                    
+                    // Non-Anthropic models (OpenRouter/Cerebras) - pass through with metadata
                     parsed.requested_model = model;
                     parsed.actual_model = winningModel;
                     parsed.pool_name = poolName;
@@ -1913,7 +3525,7 @@ serve(async (req) => {
           }
         }
         
-        console.log(`📤 Cerebras request body:`, JSON.stringify(cerebrasBody, null, 2));
+        console.log(`📤 Cerebras request body:`, JSON.stringify(truncateForLogging(cerebrasBody), null, 2));
         
         return await fetch(CEREBRAS_API_URL, {
           method: 'POST',

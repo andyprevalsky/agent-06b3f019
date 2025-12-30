@@ -28,6 +28,7 @@ from tools.request_user_approval import create_approval_request_activity
 from tools.send_sms import send_sms_activity
 from tools.send_email import send_email_activity
 from tools.spawn_browser_agent_v2 import spawn_browser_agent_activity_v2
+from tools.spawn_browser_agent_v3 import spawn_browser_agent_activity_v3  # V3: browser-use + Rose API
 # New event-driven tools
 from tools.deep_research import deep_research_activity
 from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
@@ -147,6 +148,7 @@ async def main():
             create_approval_request_activity,
             send_sms_activity,
             spawn_browser_agent_activity_v2,
+            spawn_browser_agent_activity_v3,  # V3: browser-use + Rose API
             send_email_activity,
             # New event-driven tool activities
             deep_research_activity,
@@ -202,10 +204,21 @@ async def main():
     # Handle shutdown gracefully using asyncio signal handlers
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
+    force_kill_event = asyncio.Event()
+    shutdown_count = 0
     
     def handle_shutdown():
-        logger.info("Shutdown signal received, initiating graceful shutdown...")
-        shutdown_event.set()
+        nonlocal shutdown_count
+        shutdown_count += 1
+        
+        if shutdown_count == 1:
+            logger.info("🛑 Shutdown signal received (Ctrl+C again to force kill)...")
+            shutdown_event.set()
+        else:
+            logger.warning("⚡ Force kill requested, exiting immediately!")
+            force_kill_event.set()
+            # Schedule force exit after a brief moment to let logs flush
+            loop.call_later(0.5, lambda: os._exit(1))
     
     # Register signal handlers with the event loop (asyncio-compatible)
     loop.add_signal_handler(signal.SIGINT, handle_shutdown)
@@ -225,29 +238,49 @@ async def main():
             return_when=asyncio.FIRST_COMPLETED
         )
         
-        # If shutdown was signaled, shutdown worker cleanly
+        # If shutdown was signaled, shutdown worker cleanly with timeout
         if shutdown_task in done:
-            logger.info("Stopping worker task...")
-            await worker.shutdown()
-            logger.info("Worker shutdown complete, cancelling worker task...")
+            logger.info("Stopping worker task (5s timeout, Ctrl+C again to force)...")
+            
+            # Create a force kill watcher
+            async def force_kill_watcher():
+                await force_kill_event.wait()
+                raise SystemExit(1)
+            
+            force_task = asyncio.create_task(force_kill_watcher())
+            
+            try:
+                # Try graceful shutdown with 5 second timeout
+                await asyncio.wait_for(worker.shutdown(), timeout=5.0)
+                logger.info("Worker shutdown complete, cancelling worker task...")
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Graceful shutdown timed out after 5s, forcing exit...")
+                os._exit(1)
+            finally:
+                force_task.cancel()
             
             # Cancel the worker task and wait for it
             worker_task.cancel()
             try:
-                await worker_task
-            except asyncio.CancelledError:
-                logger.info("Worker task cancelled successfully")
+                await asyncio.wait_for(worker_task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                logger.info("Worker task cancelled")
         
     except asyncio.CancelledError:
         logger.info("Worker cancelled, shutting down...")
-        await worker.shutdown()
+        try:
+            await asyncio.wait_for(worker.shutdown(), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("Shutdown timed out, forcing exit...")
+    except SystemExit:
+        logger.info("Force exit requested")
     except Exception as e:
         logger.error(f"Worker error: {str(e)}", exc_info=True)
         set_worker_status(False)
         raise
     finally:
         set_worker_status(False)
-        logger.info("Worker stopped gracefully")
+        logger.info("Worker stopped")
 
 
 if __name__ == "__main__":

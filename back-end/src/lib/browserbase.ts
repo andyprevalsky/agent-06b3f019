@@ -59,7 +59,7 @@ export async function getOrCreateContext(userId: string): Promise<string> {
 export async function createSessionWithContext(
   dbContextId: string,
   agentId: string
-): Promise<{ sessionId: string; debugUrl: string; taskId: string }> {
+): Promise<{ sessionId: string; debugUrl: string; taskId: string; wsUrl: string }> {
   console.log(`Creating browser session for context ${dbContextId}...`);
   
   // Look up the BrowserBase context ID from database
@@ -82,8 +82,8 @@ export async function createSessionWithContext(
         persist: true, // Save state back to context on close
       },
       viewport: {
-        width: 1288,  // ← Stagehand default for Computer Use models (Gemini 2.5)
-        height: 711,  // ← Must match or coordinates will be misaligned
+        width: 1280,  // WXGA standard
+        height: 800,
       },
     },
     proxies: [
@@ -107,13 +107,17 @@ export async function createSessionWithContext(
   // Use debuggerFullscreenUrl for embedding (no BrowserBase chrome, just the browser)
   const debugUrl = liveUrls.debuggerFullscreenUrl || liveUrls.debuggerUrl;
   
-  // Save to DB with database context ID
+  // CDP WebSocket URL for browser-use/Playwright connection
+  const wsUrl = liveUrls.wsUrl;
+  
+  // Save to DB with database context ID and wsUrl
   const dbSession = await prisma.browserSession.create({
     data: {
       contextId: dbContextId,  // ← Use database context ID for foreign key
       agentId,
       sessionId: session.id,
       debugUrl,
+      wsUrl,  // ← Save for session retrieval
       status: 'ACTIVE',
     }
   });
@@ -122,10 +126,12 @@ export async function createSessionWithContext(
   console.log(`  Context (DB): ${dbContextId}`);
   console.log(`  Context (BB): ${dbContext.contextId}`);
   console.log(`  Live View URL: ${debugUrl}`);
+  console.log(`  CDP WebSocket URL: ${wsUrl}`);
   
   return {
     sessionId: session.id,
     debugUrl,
+    wsUrl,  // ← Return for agent to connect via CDP
     taskId: dbSession.id,  // Stable ID for grouping browser actions
   };
 }
@@ -174,7 +180,7 @@ export async function closeSession(sessionId: string, pause: boolean = false, cu
  * @param taskId - The stable task ID (BrowserSession.id)
  * @returns Session info including saved URL to navigate back to
  */
-export async function resumeSession(taskId: string): Promise<{ debugUrl: string; sessionId: string; savedUrl?: string }> {
+export async function resumeSession(taskId: string): Promise<{ debugUrl: string; sessionId: string; wsUrl: string; savedUrl?: string }> {
   console.log(`Resuming browser task ${taskId}...`);
   
   // Look up the old session to get context
@@ -199,8 +205,8 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
         persist: true,
       },
       viewport: {
-        width: 1288,
-        height: 711,
+        width: 1280,  // WXGA standard
+        height: 800,
       },
     },
     proxies: [
@@ -222,6 +228,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
   // Get debug URLs for new session
   const liveUrls = await bb.sessions.debug(session.id);
   const debugUrl = liveUrls.debuggerFullscreenUrl || liveUrls.debuggerUrl;
+  const wsUrl = liveUrls.wsUrl;
   
   // Navigate to saved URL so user can interact from where agent left off
   if (oldSession.currentUrl) {
@@ -241,12 +248,13 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
     }
   }
   
-  // Update DB record with NEW sessionId and debugUrl
+  // Update DB record with NEW sessionId, debugUrl, and wsUrl
   await prisma.browserSession.update({
     where: { id: taskId },
     data: {
       sessionId: session.id,  // NEW BrowserBase session ID
       debugUrl,
+      wsUrl,  // CDP WebSocket URL
       status: 'ACTIVE',
       closedAt: null,
     }
@@ -257,11 +265,13 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
   console.log(`  New session ID: ${session.id}`);
   console.log(`  Context ID: ${oldSession.context.contextId}`);
   console.log(`  New debug URL: ${debugUrl}`);
+  console.log(`  CDP WebSocket URL: ${wsUrl}`);
   
   // Return the saved URL to navigate back to
   return { 
     debugUrl, 
-    sessionId: session.id, 
+    sessionId: session.id,
+    wsUrl,  // CDP WebSocket URL for browser-use
     savedUrl: oldSession.currentUrl || undefined 
   };
 }

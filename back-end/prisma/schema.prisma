@@ -228,6 +228,7 @@ model BrowserSession {
   sessionId  String               @unique
   status     BrowserSessionStatus @default(ACTIVE)
   debugUrl   String?
+  wsUrl      String?              // CDP WebSocket URL for browser-use
   currentUrl String?
   createdAt  DateTime             @default(now())
   closedAt   DateTime?

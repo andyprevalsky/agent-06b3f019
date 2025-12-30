@@ -11,7 +11,7 @@ primary_region = "iad"  # Ashburn, Virginia
 [env]
   # Python configuration
   PYTHONUNBUFFERED = "1"
-  PYTHON_VERSION = "3.10"
+  PYTHON_VERSION = "3.11"
   
   # Temporal Worker Configuration
   # These control concurrency and resource usage

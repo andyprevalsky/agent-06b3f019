@@ -56,6 +56,7 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       context_id: contextId,
       session_id: session.sessionId,
       debug_url: session.debugUrl,
+      ws_url: session.wsUrl,  // CDP WebSocket URL for browser-use
       project_id: process.env.BROWSERBASE_PROJECT_ID,
       cookies_injected: cookieResult.injected,
       cookies_count: cookieResult.cookieCount,
@@ -128,6 +129,7 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
       task_id,  // Same stable task ID
       session_id: result.sessionId,  // NEW BrowserBase session ID
       debug_url: result.debugUrl,
+      ws_url: result.wsUrl,  // CDP WebSocket URL for browser-use
       saved_url: result.savedUrl,  // URL to navigate back to
       status: 'ACTIVE',
       cookies_injected: cookieResult.injected,
@@ -162,6 +164,7 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
       task_id: session.id,
       session_id: session.sessionId,
       debug_url: session.debugUrl,
+      ws_url: session.wsUrl,  // CDP WebSocket URL for browser-use
       status: session.status
     });
     

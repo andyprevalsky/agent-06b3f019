@@ -101,9 +101,13 @@ export default function BrowserViewPanel({
     const browserMessages = messages.filter(m => m.metadata?.task_id === taskId);
     const lastMessage = browserMessages[browserMessages.length - 1];
     
-    const complete = lastMessage?.metadata?.action_type === 'task_complete' ||
-                     lastMessage?.metadata?.action_type === 'error';
+    const complete = lastMessage?.metadata?.action_type === 'task_complete';
     const success = lastMessage?.metadata?.action_type === 'task_complete';
+    
+    // Log errors but don't mark as complete
+    if (lastMessage?.metadata?.action_type === 'error') {
+      console.log('🖥️ [Browser] Action error:', lastMessage?.text?.slice(0, 100));
+    }
     const message = complete ? lastMessage?.text : undefined;
     
     return { isComplete: complete, isSuccess: success, completionMessage: message };

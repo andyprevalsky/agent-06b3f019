@@ -873,8 +873,8 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       const lastTaskMessage = taskMessages[taskMessages.length - 1];
       const actionType = lastTaskMessage?.metadata?.action_type;
       
-      // Browser task is active if it exists and is not completed/error
-      const isComplete = actionType === 'task_complete' || actionType === 'error';
+      // Browser task is active if it exists and is not completed (errors don't end task)
+      const isComplete = actionType === 'task_complete';
       return !isComplete;
     });
     
@@ -1324,9 +1324,23 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       );
       const lastMessage = taskMessages[taskMessages.length - 1];
       
-      const isComplete = 
-        lastMessage?.metadata?.action_type === 'task_complete' ||
-        lastMessage?.metadata?.action_type === 'error';
+      const isComplete = lastMessage?.metadata?.action_type === 'task_complete';
+      
+      // Log errors but don't hide chip
+      if (lastMessage?.metadata?.action_type === 'error') {
+        console.log('🖥️ [Browser] Action error (chip stays visible):', {
+          taskId: taskId.slice(-8),
+          error: lastMessage?.text?.slice(0, 100),
+        });
+      }
+      
+      // Debug: log task completion
+      if (isComplete) {
+        console.log('🖥️ [Browser] Task completed:', {
+          taskId: taskId.slice(-8),
+          message: lastMessage?.text?.slice(0, 100),
+        });
+      }
       
       // Only include active (non-complete) browser panels
       if (!isComplete && initMessage) {
@@ -1347,6 +1361,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       browsers: activeBrowserPanels,
     };
   }, [activeBrowserPanels]);
+
 
   // Memoize code agent panels for the code agent panel display
   const activeCodeAgentPanels = useMemo(() => {

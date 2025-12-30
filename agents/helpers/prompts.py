@@ -374,7 +374,7 @@ Only award 1.0 when the user would agree the goal is fully done with concrete pr
 Return JSON:
 {{
   "reasoning": "<internal thinking about what was actually accomplished>",
-  "response": <number between 0.0 and 1.0>
+  "score": <number between 0.0 and 1.0>
 }}
         """
     ).strip()

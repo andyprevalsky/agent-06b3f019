@@ -990,6 +990,121 @@ async def call_llm(
 # The run_agent loop handles LLM calls directly via call_llm_structured_streaming
 
 
+async def _call_llm_verifier(
+    messages: List[Dict[str, str]],
+    model: str,
+    config: Any,
+) -> Tuple[ProgressScore, Dict[str, Any]]:
+    """
+    Simple LLM call for verifier - no streaming UI, no tool detection.
+    
+    Returns:
+        Tuple of (ProgressScore instance, usage dict)
+    """
+    request_body = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 4096,
+        "stream": True,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "ProgressScore",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "reasoning": {"type": "string"},
+                        "score": {"type": "number", "minimum": 0, "maximum": 1}
+                    },
+                    "required": ["reasoning", "score"],
+                    "additionalProperties": False
+                },
+                "strict": True
+            }
+        }
+    }
+    
+    accumulated_reasoning = ""
+    accumulated_json = ""
+    actual_model = "unknown"
+    pool_name = "unknown"
+    chunk_count = 0
+    
+    async with httpx.AsyncClient(timeout=60.0) as http_client:
+        async with http_client.stream(
+            'POST',
+            config.rose.api_url,
+            json=request_body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                "x-api-key": config.rose.api_key,
+            }
+        ) as stream_response:
+            stream_response.raise_for_status()
+            
+            async for line in stream_response.aiter_lines():
+                chunk_count += 1
+                
+                if chunk_count % 10 == 0:
+                    _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
+                
+                if not line or not line.startswith('data: '):
+                    continue
+                
+                data_str = line[6:]
+                if data_str == '[DONE]':
+                    break
+                
+                try:
+                    chunk_data = json.loads(data_str)
+                    
+                    if chunk_data.get("actual_model"):
+                        actual_model = chunk_data["actual_model"]
+                    if chunk_data.get("pool_name"):
+                        pool_name = chunk_data["pool_name"]
+                    
+                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                    
+                    # Accumulate both reasoning and content
+                    if delta.get("reasoning"):
+                        accumulated_reasoning += delta["reasoning"]
+                    if delta.get("content"):
+                        accumulated_json += delta["content"]
+                        
+                except json.JSONDecodeError:
+                    continue
+    
+    logger.info(f"🏁 Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}")
+    
+    # Parse JSON - handle thinking models that put JSON in reasoning
+    json_content = accumulated_json
+    
+    if not json_content and accumulated_reasoning:
+        # Thinking models might put JSON in reasoning
+        json_match = re.search(r'\{[\s\S]*\}', accumulated_reasoning)
+        if json_match:
+            json_content = json_match.group(0)
+            logger.info("📦 Extracted JSON from reasoning (thinking model)")
+    
+    if not json_content:
+        raise ValueError(f"No JSON content received (chunks={chunk_count}, model={actual_model})")
+    
+    parsed = json.loads(json_content)
+    result = ProgressScore.model_validate(parsed)
+    
+    usage = {
+        "prompt_tokens": 0,
+        "completion_tokens": chunk_count,
+        "total_tokens": chunk_count,
+        "actual_model": actual_model,
+        "pool_name": pool_name,
+    }
+    
+    return result, usage
+
+
 @activity.defn
 async def check_progress(
     context: List[Dict[str, Any]],
@@ -1027,30 +1142,6 @@ async def check_progress(
         _safe_heartbeat("Checking progress with LLM judge")
         
         config = load_config()
-        client = AsyncOpenAI(
-            api_key=config.openrouter.api_key,
-            base_url=config.openrouter.base_url
-        )
-        
-        # Zod schema for response validation (documented for OpenRouter)
-        response_schema = {
-            "type": "object",
-            "properties": {
-                "reasoning": {
-                    "type": "string",
-                    "description": "Your internal thinking process about the progress"
-                },
-                "response": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1,
-                    "description": "Progress score from 0.0 (no progress) to 1.0 (complete)"
-                }
-            },
-            "required": ["reasoning", "response"],
-            "additionalProperties": False
-        }
-        
         system_prompt = build_verifier_prompt(phase, verifier_prompt)
         
         # Convert full context to OpenAI message format (no truncation)
@@ -1074,55 +1165,22 @@ async def check_progress(
             raw_context_json=json.dumps(context, ensure_ascii=False, default=str)
         )
         
-        # === REPLAY LOG: Write full request to file for debugging failures ===
-        # This allows reproducing verifier errors by replaying the exact request
-        replay_payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": 4096,
-            "stream": True,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "ProgressScore",
-                    "schema": schema,
-                    "strict": True
-                }
-            }
-        }
-        logger.info(
-            "📋 Verifier request FULL (for replay)",
-            request_body_json=json.dumps(replay_payload, ensure_ascii=False)
-        )
-        
-        # Use streaming LLM call (no-op callback since we don't stream verifier output)
-        async def noop_chunk(text_so_far: str, token_count: int):
-            pass
-        
-        result, usage, _ = await call_llm_structured_streaming(
-            messages=messages,
-            model=model,
-            temperature=0.3,
-            max_tokens=4096,  # Generous limit for verifier reasoning
-            response_model=ProgressScore,
-            on_chunk=noop_chunk
-        )
+        # Use dedicated verifier LLM call (simple, no streaming UI)
+        result, usage = await _call_llm_verifier(messages, model, config)
         
         logger.info(
             "Progress checked",
-            progress=result.response,
+            progress=result.score,
             reasoning=result.reasoning,
             tokens=usage.get("total_tokens", 0),
-            actual_model=usage.get("actual_model"),  # Which model from pool was used
+            actual_model=usage.get("actual_model"),
             pool_name=usage.get("pool_name")
         )
         
-        # For verifier: concatenate reasoning and response (score) in message
         return {
-            "score": result.response,
+            "score": result.score,
             "reasoning": result.reasoning,
-            "message": f"{result.reasoning}\n\nScore: {result.response}",
+            "message": f"{result.reasoning}\n\nScore: {result.score}",
             "usage": usage
         }
     except Exception as e:

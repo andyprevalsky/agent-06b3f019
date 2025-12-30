@@ -1,10 +1,10 @@
 """Browser agent tool schemas for structured outputs.
 
-These Pydantic models mirror the OpenAI function definitions for browser tools,
-allowing the browser agent to use call_llm_structured_streaming like the main agent.
+These Pydantic models define the tools available to the browser agent.
+Uses index-based element selection (matching browser-use action model).
 
-HYBRID APPROACH: We use Stagehand's observe() for element finding but give the agent
-direct Playwright tools (click, fill, type) with explicit selectors.
+INDEX-BASED APPROACH: Elements are referenced by their index in the DOM tree.
+The DOM tree is serialized with indices like [1] button "Submit", [2] input[type=text], etc.
 """
 
 from typing import List, Literal, Optional, Union, Type
@@ -16,25 +16,6 @@ from pydantic import BaseModel, Field, create_model
 # ============================================================================
 
 
-class ObserveTool(BaseModel):
-    """Find actionable elements on the page and get their selectors."""
-    
-    tool: Literal["observe"]
-    instruction: str = Field(
-        description="Describe what element(s) you're looking for"
-    )
-    iframes: Optional[bool] = Field(
-        default=None,
-        description="Set to true to search inside iframes as well"
-    )
-
-
-class AriaTreeTool(BaseModel):
-    """Get the accessibility (ARIA) tree from the current page."""
-    
-    tool: Literal["ariaTree"]
-
-
 class ScreenshotTool(BaseModel):
     """Take a screenshot of the current page."""
     
@@ -42,58 +23,99 @@ class ScreenshotTool(BaseModel):
 
 
 class ExtractTool(BaseModel):
-    """Extract structured data from the current page."""
+    """Extract structured data from the current page using LLM analysis."""
     
     tool: Literal["extract"]
-    instruction: str = Field(description="Clear instruction describing what data to extract")
-    schema: str = Field(description='Zod schema as a string (e.g., "z.object({ price: z.number() })")')
+    instruction: str = Field(
+        description="Clear instruction describing what data to extract from the page"
+    )
 
 
 # ============================================================================
-# ACTION TOOLS (Direct Playwright with Selectors)
+# ACTION TOOLS (Index-Based - Matching browser-use format)
 # ============================================================================
 
 
 class ClickTool(BaseModel):
-    """Click an element by CSS or XPath selector."""
+    """Click an element by its index in the DOM tree."""
     
     tool: Literal["click"]
-    selector: str = Field(
-        description="CSS selector or XPath (prefix with //) to identify the element"
+    index: int = Field(
+        description="Element index from the DOM tree (e.g., 4 for '[4] button \"Submit\"')"
     )
 
 
-class FillTool(BaseModel):
-    """Fill a form field by selector. Clears existing value first."""
+class InputTextTool(BaseModel):
+    """Type text into an input element. Use for forms, search boxes, etc."""
     
-    tool: Literal["fill"]
-    selector: str = Field(description="CSS selector or XPath for the input element")
-    value: str = Field(description="Text to fill into the field")
-
-
-class TypeTool(BaseModel):
-    """Type text into an element (does not clear existing value)."""
-    
-    tool: Literal["type"]
-    selector: str = Field(description="CSS selector or XPath for the element")
-    text: str = Field(description="Text to type")
-    delay: int = Field(default=50, description="Delay between keystrokes in ms")
+    tool: Literal["input_text"]
+    index: int = Field(
+        description="Element index of the input field from the DOM tree"
+    )
+    text: str = Field(
+        description="Text to type into the field"
+    )
 
 
 class PressKeyTool(BaseModel):
     """Press a keyboard key."""
     
-    tool: Literal["pressKey"]
-    key: str = Field(description="Key to press (e.g., 'Enter', 'Tab', 'Escape', 'Control+a')")
+    tool: Literal["press_key"]
+    key: str = Field(
+        description="Key to press (e.g., 'Enter', 'Tab', 'Escape', 'Control+a', 'Backspace')"
+    )
 
 
 class ClickAtCoordinatesTool(BaseModel):
-    """Fallback: Click at specific X,Y pixel coordinates."""
+    """Fallback: Click at specific X,Y pixel coordinates (for vision models)."""
     
-    tool: Literal["clickAtCoordinates"]
+    tool: Literal["click_coordinates"]
     x: int = Field(description="X coordinate in pixels from left edge of viewport")
     y: int = Field(description="Y coordinate in pixels from top edge of viewport")
-    button: Literal["left", "right", "middle"] = Field(default="left", description="Mouse button to click")
+    button: Literal["left", "right", "middle"] = Field(
+        default="left", 
+        description="Mouse button to click"
+    )
+
+
+# ============================================================================
+# DROPDOWN TOOLS (browser-use additions)
+# ============================================================================
+
+
+class DropdownOptionsTool(BaseModel):
+    """Get available options from a dropdown/select element."""
+    
+    tool: Literal["dropdown_options"]
+    index: int = Field(
+        description="Element index of the dropdown/select element"
+    )
+
+
+class SelectDropdownTool(BaseModel):
+    """Select an option from a dropdown by its value or text."""
+    
+    tool: Literal["select_dropdown"]
+    index: int = Field(
+        description="Element index of the dropdown/select element"
+    )
+    value: str = Field(
+        description="Value or visible text of the option to select"
+    )
+
+
+# ============================================================================
+# EVALUATE TOOL (Execute JavaScript)
+# ============================================================================
+
+
+class EvaluateTool(BaseModel):
+    """Execute JavaScript code in the browser console."""
+    
+    tool: Literal["evaluate"]
+    code: str = Field(
+        description="JavaScript code to execute. Returns the result of the expression."
+    )
 
 
 # ============================================================================
@@ -109,30 +131,45 @@ class GotoTool(BaseModel):
 
 
 class NavbackTool(BaseModel):
-    """Navigate back to the previous page."""
+    """Navigate back to the previous page in browser history."""
     
     tool: Literal["navback"]
-    reasoning: str = Field(description="Why you're going back")
 
 
 class ScrollTool(BaseModel):
-    """Scroll the page."""
+    """Scroll the page or a specific scrollable element."""
     
     tool: Literal["scroll"]
-    pixels: int = Field(description="Number of pixels to scroll")
     direction: Literal["up", "down"] = Field(description="Direction to scroll")
+    amount: int = Field(
+        default=300, 
+        description="Number of pixels to scroll (default: 300)"
+    )
+    index: Optional[int] = Field(
+        default=None,
+        description="Optional: element index to scroll within (for scrollable containers)"
+    )
 
 
 class WaitTool(BaseModel):
-    """Wait for a specified time."""
+    """Wait for a specified time in milliseconds."""
     
     tool: Literal["wait"]
-    timeMs: int = Field(description="Time to wait in milliseconds")
+    time_ms: int = Field(description="Time to wait in milliseconds")
 
 
 # ============================================================================
 # COMPLETION & USER INTERACTION TOOLS
 # ============================================================================
+
+
+class DoneTool(BaseModel):
+    """Signal that the browser task is complete."""
+    
+    tool: Literal["done"]
+    text: str = Field(
+        description="Summary of what was accomplished or the final result"
+    )
 
 
 class AttemptCompletionBrowserTool(BaseModel):
@@ -145,54 +182,59 @@ class AttemptCompletionBrowserTool(BaseModel):
     """
     
     tool: Literal["attempt_completion"]
-    reasoning: str = Field(description="Summary of what was accomplished and why you believe the task is complete")
-
-
-# DEPRECATED: Use attempt_completion instead
-class CloseTool(BaseModel):
-    """DEPRECATED - Use attempt_completion instead. Complete the task and close the browser session."""
-    
-    tool: Literal["close"]
-    reasoning: str = Field(description="Summary of what was accomplished")
-    success: bool = Field(description="Whether the full goal of the task was achieved")
+    reasoning: str = Field(
+        description="Summary of what was accomplished and why you believe the task is complete"
+    )
 
 
 class SendMessageToUserBrowserTool(BaseModel):
     """Request the user to complete an action (login, payment, CAPTCHA, etc.)."""
     
     tool: Literal["send_message_to_user"]
-    message: str = Field(description="Explain what the user needs to do and why you cannot do it")
-    reason: str = Field(description="Category: login, payment, captcha, verification, blocked, other")
+    message: str = Field(
+        description="Explain what the user needs to do and why you cannot do it"
+    )
+    reason: Literal["login", "payment", "captcha", "verification", "blocked", "other"] = Field(
+        description="Category of the user action needed"
+    )
 
 
 # ============================================================================
-# Tool Registry
+# Tool Registry (Index-Based)
 # ============================================================================
 
 
 # Map browser tool names to their Pydantic models
+# Uses browser-use action model naming conventions
 BROWSER_TOOL_MODELS = {
     # Observation
-    "observe": ObserveTool,
-    "ariaTree": AriaTreeTool,
     "screenshot": ScreenshotTool,
     "extract": ExtractTool,
-    # Actions
+    # Index-based actions
     "click": ClickTool,
-    "fill": FillTool,
-    "type": TypeTool,
-    "pressKey": PressKeyTool,
-    "clickAtCoordinates": ClickAtCoordinatesTool,
+    "input_text": InputTextTool,
+    "press_key": PressKeyTool,
+    # Coordinate-based fallback (for vision models)
+    "click_coordinates": ClickAtCoordinatesTool,
+    # Dropdown handling
+    "dropdown_options": DropdownOptionsTool,
+    "select_dropdown": SelectDropdownTool,
+    # JavaScript execution
+    "evaluate": EvaluateTool,
     # Navigation
     "goto": GotoTool,
     "navback": NavbackTool,
     "scroll": ScrollTool,
     "wait": WaitTool,
-    # Completion (attempt_completion is the standard, close is deprecated)
+    # Completion
+    "done": DoneTool,
     "attempt_completion": AttemptCompletionBrowserTool,
-    "close": CloseTool,  # Kept for backward compatibility
     "send_message_to_user": SendMessageToUserBrowserTool,
 }
+
+
+# List of available actions for Rose API request
+AVAILABLE_ACTIONS = list(BROWSER_TOOL_MODELS.keys())
 
 
 # ============================================================================
@@ -226,26 +268,30 @@ def create_browser_agent_action_model(
 
 __all__ = [
     # Observation
-    "ObserveTool",
-    "AriaTreeTool", 
     "ScreenshotTool",
     "ExtractTool",
-    # Actions
+    # Index-based actions
     "ClickTool",
-    "FillTool",
-    "TypeTool",
+    "InputTextTool",
     "PressKeyTool",
+    # Coordinate-based
     "ClickAtCoordinatesTool",
+    # Dropdown
+    "DropdownOptionsTool",
+    "SelectDropdownTool",
+    # JavaScript
+    "EvaluateTool",
     # Navigation
     "GotoTool",
     "NavbackTool",
     "ScrollTool",
     "WaitTool",
     # Completion
+    "DoneTool",
     "AttemptCompletionBrowserTool",
-    "CloseTool",  # Deprecated - kept for backward compatibility
     "SendMessageToUserBrowserTool",
     # Registry & Factory
     "BROWSER_TOOL_MODELS",
+    "AVAILABLE_ACTIONS",
     "create_browser_agent_action_model",
 ]

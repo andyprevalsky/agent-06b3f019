@@ -21,7 +21,7 @@ for path in sys.path:
 
 if [ -z "$HARBOR_SITE_PACKAGES" ]; then
     # Try uv tools location
-    HARBOR_SITE_PACKAGES="/Users/$USER/.local/share/uv/tools/harbor/lib/python3.13/site-packages"
+    HARBOR_SITE_PACKAGES="/Users/$USER/.local/share/uv/tools/harbor/lib/python3.11/site-packages"
 fi
 
 HARBOR_AGENTS_DIR="$HARBOR_SITE_PACKAGES/harbor/agents/installed"

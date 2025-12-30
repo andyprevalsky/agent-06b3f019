@@ -43,7 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.web_search import web_search
     from tools.spawn_sub_agents import spawn_sub_agents
     from tools.send_sms_as_user import send_sms_as_user
-    from tools.spawn_browser_agent_v2 import spawn_browser_agent
+    from tools.spawn_browser_agent_v3 import spawn_browser_agent  # V3: browser-use + Rose API
     from tools.search_user_network import search_user_network_for_people
     from tools.find_all import find_all
     from tools.enrich import enrich
