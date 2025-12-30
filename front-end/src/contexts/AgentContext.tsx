@@ -507,6 +507,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (!document.hidden && selectedAgentId) {
+        if (channelRef.current?.state === 'joined') return;
         setTimeout(() => {
           if (selectedAgentId) {
             setForceResubscribeCounter(prev => prev + 1);
@@ -517,6 +518,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
 
     const handleFocus = () => {
       if (selectedAgentId) {
+        if (channelRef.current?.state === 'joined') return;
         setTimeout(() => {
           if (selectedAgentId) {
             setForceResubscribeCounter(prev => prev + 1);

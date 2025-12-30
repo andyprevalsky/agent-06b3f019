@@ -1014,6 +1014,34 @@ async def spawn_browser_agent_activity_v3(
         except Exception as e:
             logger.warning(f"Failed to inject visual cursor: {e}")
         
+        # ===== REPLACE BROWSER-USE LOGO WITH ROSE LOGO =====
+        try:
+            logo_replace_script = """
+                (() => {
+                    const ROSE_LOGO_URL = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIxIDYyIDIyMCAyMjIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjIyIj4KICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMwMykgc2NhbGUoMC4xLC0wLjEpIiBmaWxsPSIjZmZmZmZmIj4KICAgIDxwYXRoIGQ9Ik0xMjc2IDIzNzggYy0xNDUgLTE5MiAtMjMxIC00NDIgLTIxMSAtNjE2IDggLTY4IDQxIC0yMDIgNjEgLTI1MSA4IC0xOSAxMyAtMzUgMTEgLTM3IC0yIC0yIC0zMCA3IC02MiAyMSAtMjQ5IDEwMCAtNTM3IDU0IC03ODQgLTEyNCAtMzYgLTI1IC02OSAtNDkgLTc1IC01MyAtMTcgLTExIDIyIC00NiAxMTkgLTEwNSAxNjMgLTEwMSAzMDAgLTE0NCA0NjAgLTE0NCA5MiAtMSAyMjYgMjQgMzAxIDU2IDIwIDggMzggMTUgMzkgMTUgMiAwIC0xMCAtMzkgLTI1IC04NyAtNjkgLTIxMyAtNTggLTM5NSAzNiAtNjAwIDMxIC02OSAxMzYgLTIzNyAxNTQgLTI0OCAxMCAtNiAxMTQgMTQ0IDE1MiAyMjAgMzcgNzMgNzUgMTk5IDg4IDI5MyAxNCAxMDEgMSAyMDYgLTQwIDMzMCAtMTUgNDggLTI3IDg4IC0yNiA4OSAxIDIgMjYgLTcgNTUgLTE4IDE5NSAtNzQgNDIzIC02NiA2MTEgMjIgOTggNDYgMjE3IDExOCAyNDUgMTQ5IDE4IDIwIDE4IDIxIC0xIDM1IC0xNzcgMTM5IC0zOTYgMjI1IC01NzAgMjI1IC03OSAwIC0xOTUgLTIzIC0yODIgLTU2IC00NCAtMTYgLTYzIC0yMCAtNTkgLTExIDI3IDcyIDYwIDE5NiA2OCAyNjAgMTcgMTMyIC0xNyAzMDAgLTg5IDQ0MiAtMzYgNzIgLTEyNCAyMDkgLTE0MSAyMTkgLTUgNCAtMjEgLTggLTM1IC0yNnogbTQwIC05MzUgYzcgLTQ2IDUwIC05MiAxMDkgLTExOSAyNyAtMTMgNDEgLTIzIDMxIC0yMyAtMTEgLTEgLTM4IC0xMiAtNjIgLTI2IC00OSAtMjkgLTgzIC05MCAtODUgLTE1MSAtMSAtMzcgLTIgLTM2IC05IDEzIC00IDI5IC0xNyA2NyAtMjggODUgLTIyIDM1IC04NiA3NyAtMTE4IDc5IC0xMSAwIDEgOSAyNiAyMCA3OSAzNSAxMTggOTAgMTIxIDE2OCAxIDI1IDMgMjggNiAxMSAyIC0xNCA2IC0zOSA5IC01N3oiLz4KICA8L2c+Cjwvc3ZnPg==';
+                    
+                    function replaceLogo() {
+                        const img = document.querySelector('#pretty-loading-animation img');
+                        if (img && img.src.includes('browser-use.com')) {
+                            img.src = ROSE_LOGO_URL;
+                            img.alt = 'Rose';
+                        }
+                    }
+                    
+                    replaceLogo();
+                    const observer = new MutationObserver(replaceLogo);
+                    if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+                    setTimeout(() => observer.disconnect(), 10000);
+                })();
+            """
+            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                params={"source": logo_replace_script, "runImmediately": True},
+                session_id=cdp_session.session_id
+            )
+            logger.info("🎨 Replaced browser-use logo with Rose logo")
+        except Exception as e:
+            logger.warning(f"Failed to replace logo: {e}")
+        
         # ===== FETCH USER PROFILE =====
         user_profile = {}
         try:
@@ -1406,8 +1434,9 @@ Based on this feedback, I need to continue working on the task and address the i
                 title_done = f"Navigated → {url}"
             elif action_name == "scroll":
                 direction = unified_action.get("params", {}).get("direction", "down")
-                title_progress = f"Scrolling {direction}..."
-                title_done = f"Scrolled {direction}"
+                amount = unified_action.get("params", {}).get("amount", 300)
+                title_progress = f"Scrolling {direction} {amount}px..."
+                title_done = f"Scrolled {direction} {amount}px"
             elif action_name == "press_key":
                 key = unified_action.get("params", {}).get("key", "?")
                 title_progress = f"Pressing {key}..."
@@ -1445,13 +1474,10 @@ Based on this feedback, I need to continue working on the task and address the i
             
             # Post FINISHED - use action_name for icon mapping
             if result.get("success", True):
-                logger.info(f"Action {action_name} successful",  agent_id=agent_id, title=title_done, task_id=task_id,
-                    message=result.get("message", ""), status=MessageStatus.FINISHED,
-                    browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action
-                )
+                logger.info(f"Action {action_name} successful", agent_id=agent_id, title=title_done, task_id=task_id)
                 await save_browser_action_message(
                     agent_id=agent_id, title=title_done, task_id=task_id,
-                    message=result.get("message", ""), status=MessageStatus.FINISHED,
+                    message="", status=MessageStatus.FINISHED,
                     browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action
                 )
             else:

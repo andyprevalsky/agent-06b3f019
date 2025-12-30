@@ -77,6 +77,15 @@ logging.basicConfig(
     level=logging.DEBUG,
 )
 
+# Silence verbose browser-use CDP logging
+logging.getLogger('browser_use').setLevel(logging.INFO)
+logging.getLogger('browser_use.browser').setLevel(logging.INFO)
+logging.getLogger('cdp_use').setLevel(logging.WARNING)
+logging.getLogger('cdp_use.client').setLevel(logging.WARNING)
+logging.getLogger('cdp_use.cdp').setLevel(logging.WARNING)
+logging.getLogger('cdp_use.cdp.registry').setLevel(logging.WARNING)
+logging.getLogger('websockets.client').setLevel(logging.WARNING)
+
 structlog.configure(
     processors=[
         structlog.stdlib.filter_by_level,

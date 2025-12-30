@@ -52,6 +52,12 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
+  // Find timestamp of last ASSISTANT message - used to clean up orphaned IN_PROGRESS tools
+  const lastAssistantTimestamp = sortedMessages
+    .filter(m => m.role === 'ASSISTANT')
+    .map(m => new Date(m.timestamp).getTime())
+    .pop() ?? 0;
+
   const toolMessageMap = new Map<string, { message: Message; firstTimestamp: string }>();
   const nonToolMessages: Message[] = [];
 
@@ -91,12 +97,26 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
     timestamp: firstTimestamp
   }));
 
+  // Clean up orphaned IN_PROGRESS tools from failed LLM calls
+  // If an ASSISTANT message came AFTER an IN_PROGRESS tool, that tool is orphaned
+  const cleanedToolMessages = deduplicatedToolMessages.filter(m => {
+    // Keep all FINISHED/ERROR tools
+    if (m.metadata?.toolStatus !== 'IN_PROGRESS') return true;
+    
+    // Keep user attention IN_PROGRESS (different lifecycle - waiting for user)
+    if (m.metadata?.isUserAttentionMessage) return true;
+    
+    // For other IN_PROGRESS, only keep if it came after the last ASSISTANT message
+    const toolTime = new Date(m.timestamp).getTime();
+    return toolTime >= lastAssistantTimestamp;
+  });
+
   // Compress set_plan messages - only keep the latest one
-  const latestSetPlan = deduplicatedToolMessages
+  const latestSetPlan = cleanedToolMessages
     .filter(m => m.metadata?.toolName === 'set_plan')
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
   
-  const withCompressedPlans = deduplicatedToolMessages.filter(m => 
+  const withCompressedPlans = cleanedToolMessages.filter(m => 
     m.metadata?.toolName !== 'set_plan' || m.message_id === latestSetPlan?.message_id
   );
 

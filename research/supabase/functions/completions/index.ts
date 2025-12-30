@@ -786,10 +786,7 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   
   const content = response.choices?.[0]?.message?.content;
   if (!content) {
-    return {
-      action: 'done',
-      thinking: 'No response from Yutori'
-    };
+    throw new Error('normalizeYutoriResponse: No response content from Yutori');
   }
   
   // Parse the JSON content (handles markdown-wrapped JSON)
@@ -798,10 +795,7 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
     parsed = extractJSON(content);
     if (!parsed) {
       console.log('⚠️ Could not extract JSON from Yutori response:', content.slice(0, 300));
-      return {
-        action: 'done',
-        thinking: `Raw response: ${content.slice(0, 200)}`
-      };
+      throw new Error(`normalizeYutoriResponse: Could not extract JSON from Yutori response: ${content.slice(0, 200)}`);
     }
   } else {
     parsed = content;
@@ -1272,20 +1266,14 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
       return normalizeBrowserUseResponse({ completion: parsed });
     }
     console.log('⚠️ Could not extract JSON from completion:', completion.slice(0, 300));
-    return {
-      action: 'done',
-      thinking: `Raw response: ${completion.slice(0, 200)}`
-    };
+    throw new Error(`normalizeBrowserUseResponse: Could not extract JSON from completion: ${completion.slice(0, 200)}`);
   }
   
   // Extract action array - it could be in different places
   let actions = completion.action;
   if (!actions || actions.length === 0) {
     console.log('⚠️ No actions in completion, checking for alternative formats');
-    return {
-      action: 'done',
-      thinking: completion.next_goal || completion.thinking || 'No action returned'
-    };
+    throw new Error(`normalizeBrowserUseResponse: No actions in completion. Got: ${JSON.stringify(completion).slice(0, 300)}`);
   }
   
   const firstAction = actions[0];
