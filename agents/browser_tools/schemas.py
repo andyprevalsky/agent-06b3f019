@@ -159,6 +159,40 @@ class WaitTool(BaseModel):
 
 
 # ============================================================================
+# TAB MANAGEMENT TOOLS
+# ============================================================================
+
+
+class SwitchTabTool(BaseModel):
+    """Switch to a different browser tab by tab ID."""
+    
+    tool: Literal["switch_tab"]
+    tab_id: str = Field(
+        description="Tab ID to switch to (4-char suffix shown in tabs list, e.g., '1a2b')"
+    )
+
+
+class CloseTabTool(BaseModel):
+    """Close a browser tab by tab ID."""
+    
+    tool: Literal["close_tab"]
+    tab_id: Optional[str] = Field(
+        default=None,
+        description="Tab ID to close. If None, closes the current tab."
+    )
+
+
+class OpenNewTabTool(BaseModel):
+    """Open a new tab and optionally navigate to a URL."""
+    
+    tool: Literal["open_new_tab"]
+    url: Optional[str] = Field(
+        default=None,
+        description="URL to open in new tab (defaults to about:blank)"
+    )
+
+
+# ============================================================================
 # COMPLETION & USER INTERACTION TOOLS
 # ============================================================================
 
@@ -226,6 +260,10 @@ BROWSER_TOOL_MODELS = {
     "navback": NavbackTool,
     "scroll": ScrollTool,
     "wait": WaitTool,
+    # Tab management
+    "switch_tab": SwitchTabTool,
+    "close_tab": CloseTabTool,
+    "open_new_tab": OpenNewTabTool,
     # Completion
     "done": DoneTool,
     "attempt_completion": AttemptCompletionBrowserTool,
@@ -286,6 +324,10 @@ __all__ = [
     "NavbackTool",
     "ScrollTool",
     "WaitTool",
+    # Tab management
+    "SwitchTabTool",
+    "CloseTabTool",
+    "OpenNewTabTool",
     # Completion
     "DoneTool",
     "AttemptCompletionBrowserTool",

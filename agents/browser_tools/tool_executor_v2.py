@@ -19,6 +19,7 @@ VERIFIED EVENT NAMES (from browser_use/browser/events.py):
 - SelectDropdownOptionEvent(node, text) - select dropdown by text
 - ScreenshotEvent(full_page=False) - take screenshot
 - WaitEvent(seconds) - wait
+- SwitchTabEvent(target_id) - switch to tab by target ID
 """
 
 import asyncio
@@ -78,6 +79,13 @@ async def execute_browser_tool(
                 "message": tool_args.get("message", ""),
                 "reason": tool_args.get("reason", "other")
             }
+        # Tab management
+        elif tool_name == "switch_tab":
+            return await _execute_switch_tab(dom_service, tool_args)
+        elif tool_name == "close_tab":
+            return await _execute_close_tab(dom_service, tool_args)
+        elif tool_name == "open_new_tab":
+            return await _execute_open_new_tab(dom_service, tool_args)
         else:
             return {"success": False, "error": f"Unknown tool: {tool_name}"}
             
@@ -554,3 +562,96 @@ async def _execute_wait(args: Dict[str, Any]) -> Dict[str, Any]:
     time_ms = args.get("time_ms", 1000)
     await asyncio.sleep(time_ms / 1000)
     return {"success": True, "waited_ms": time_ms}
+
+
+# ============================================================================
+# Tab Management Tool Implementations
+# ============================================================================
+
+async def _execute_switch_tab(dom_service: DOMService, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Switch to a different tab by tab_id using SwitchTabEvent."""
+    from browser_use.browser.events import SwitchTabEvent
+    
+    tab_id = args.get("tab_id")
+    if not tab_id:
+        return {"success": False, "error": "Missing 'tab_id' parameter"}
+    
+    session = dom_service.session
+    
+    try:
+        # browser-use SwitchTabEvent uses target_id
+        # The tab_id from our schema is a 4-char suffix, we need to find the full target_id
+        all_targets = session.session_manager.get_all_page_targets()
+        target_id = None
+        
+        for target in all_targets:
+            if target.target_id.endswith(tab_id) or target.target_id == tab_id:
+                target_id = target.target_id
+                break
+        
+        if not target_id:
+            return {"success": False, "error": f"Tab with ID ending in '{tab_id}' not found"}
+        
+        event = session.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
+        await event
+        return {"success": True, "switched_to": tab_id, "full_target_id": target_id}
+    except Exception as e:
+        logger.error(f"Switch tab error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def _execute_close_tab(dom_service: DOMService, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Close a browser tab by tab_id. Closes current tab if tab_id is None."""
+    tab_id = args.get("tab_id")
+    session = dom_service.session
+    
+    try:
+        if tab_id:
+            # Find the full target_id from the 4-char suffix
+            all_targets = session.session_manager.get_all_page_targets()
+            target_id = None
+            
+            for target in all_targets:
+                if target.target_id.endswith(tab_id) or target.target_id == tab_id:
+                    target_id = target.target_id
+                    break
+            
+            if not target_id:
+                return {"success": False, "error": f"Tab with ID ending in '{tab_id}' not found"}
+        else:
+            # Close current tab
+            target_id = session.agent_focus_target_id
+            if not target_id:
+                return {"success": False, "error": "No current tab to close"}
+        
+        # Use CDP to close the page
+        await session._cdp_close_page(target_id)
+        return {"success": True, "closed_tab": tab_id or "current", "target_id": target_id}
+    except Exception as e:
+        logger.error(f"Close tab error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def _execute_open_new_tab(dom_service: DOMService, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Open a new tab and optionally navigate to a URL."""
+    from browser_use.browser.events import NavigateToUrlEvent
+    
+    url = args.get("url", "about:blank")
+    session = dom_service.session
+    
+    try:
+        # NavigateToUrlEvent with new_tab=True creates a new tab
+        event = session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
+        await event
+        
+        # Get the new tab's target_id
+        new_target_id = session.agent_focus_target_id
+        
+        return {
+            "success": True, 
+            "opened_url": url, 
+            "new_tab_id": new_target_id[-4:] if new_target_id else None
+        }
+    except Exception as e:
+        logger.error(f"Open new tab error: {e}")
+        return {"success": False, "error": str(e)}

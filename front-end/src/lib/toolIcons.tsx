@@ -33,6 +33,9 @@ import {
   Pause,
   XCircle,
   Cog,
+  Layers,
+  X,
+  Plus,
   type LucideIcon
 } from 'lucide-react';
 
@@ -118,9 +121,28 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'navigation': Navigation,
   'screenshot': Camera,
   'error': XCircle,
+  
+  // Browser action names (used as action_type from spawn_browser_agent_v3)
+  'click': MousePointer,
   'click_coordinates': MousePointer,
+  'input_text': Keyboard,
   'type_text': Keyboard,
   'press_key': Keyboard,
+  'scroll': ArrowDown,
+  'goto': Navigation,
+  'navback': Navigation,
+  'wait': Clock,
+  'extract': FileText,
+  'evaluate': Code,
+  'dropdown_options': ListChecks,
+  'select_dropdown': ListChecks,
+  'done': CheckCircle,
+  'attempt_completion': CheckCircle,
+  
+  // Tab management tools
+  'switch_tab': Layers,
+  'close_tab': X,
+  'open_new_tab': Plus,
   
   // Code agent action_type mappings (from spawn_code_agent)
   'code_started': Code,

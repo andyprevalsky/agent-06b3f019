@@ -34,6 +34,10 @@ from .schemas import (
     NavbackTool,
     ScrollTool,
     WaitTool,
+    # Tab management
+    SwitchTabTool,
+    CloseTabTool,
+    OpenNewTabTool,
     # Completion
     DoneTool,
     AttemptCompletionBrowserTool,
@@ -72,6 +76,10 @@ __all__ = [
     "NavbackTool",
     "ScrollTool",
     "WaitTool",
+    # Tab management
+    "SwitchTabTool",
+    "CloseTabTool",
+    "OpenNewTabTool",
     # Completion
     "DoneTool",
     "AttemptCompletionBrowserTool",

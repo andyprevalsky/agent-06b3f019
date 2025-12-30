@@ -33,8 +33,6 @@ const MODEL_POOLS: Record<string, string[]> = {
   'rose-1-browser-use': [
     'browser-use',              // Index 0 - Their hosted LLM (bu-1-0)
     'yutori/n1',                // Index 1 - Vision-only, coordinate output
-    'anthropic/claude-cua',     // Index 2 - Vision-only, computer use
-    'openai/gpt-5.2',           // Index 3 - Uses browser-use format
   ]
 };
 
@@ -80,6 +78,47 @@ function truncateForLogging(obj: any, maxBase64Length = 100): any {
     return result;
   }
   return obj;
+}
+
+// Extract JSON from potentially markdown-wrapped content
+// Handles: raw JSON, ```json ... ```, ``` ... ```, or JSON embedded in text
+function extractJSON(content: string): any {
+  if (!content || typeof content !== 'string') return null;
+  
+  const trimmed = content.trim();
+  
+  // 1. Try direct parse first
+  try {
+    return JSON.parse(trimmed);
+  } catch {}
+  
+  // 2. Try extracting from markdown code blocks
+  // Match ```json ... ``` or ``` ... ```
+  const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    try {
+      return JSON.parse(codeBlockMatch[1].trim());
+    } catch {}
+  }
+  
+  // 3. Try finding JSON object anywhere in the string
+  // Look for outermost { ... }
+  const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch {}
+  }
+  
+  // 4. Try finding JSON array anywhere in the string
+  const arrayMatch = trimmed.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    try {
+      return JSON.parse(arrayMatch[0]);
+    } catch {}
+  }
+  
+  return null;
 }
 
 // Shuffle array helper (Fisher-Yates)
@@ -283,9 +322,15 @@ const BROWSER_USE_TOOLS: Record<string, { description: string; params: Record<st
     }
   },
   close_tab: {
-    description: 'Close a tab by tab_id',
+    description: 'Close a tab by tab_id. Closes current tab if omitted.',
     params: {
-      tab_id: { type: 'string', description: '4-char tab ID', required: true }
+      tab_id: { type: 'string', description: '4-char tab ID (optional, closes current if omitted)' }
+    }
+  },
+  open_new_tab: {
+    description: 'Open a new browser tab, optionally navigating to a URL',
+    params: {
+      url: { type: 'string', description: 'URL to open in new tab (defaults to about:blank)' }
     }
   },
   
@@ -747,16 +792,19 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
     };
   }
   
-  // Parse the JSON content
+  // Parse the JSON content (handles markdown-wrapped JSON)
   let parsed: any;
-  try {
-    parsed = typeof content === 'string' ? JSON.parse(content) : content;
-  } catch {
-    console.log('⚠️ Could not parse Yutori response as JSON:', content);
-    return {
-      action: 'done',
-      thinking: `Raw response: ${content.slice(0, 200)}`
-    };
+  if (typeof content === 'string') {
+    parsed = extractJSON(content);
+    if (!parsed) {
+      console.log('⚠️ Could not extract JSON from Yutori response:', content.slice(0, 300));
+      return {
+        action: 'done',
+        thinking: `Raw response: ${content.slice(0, 200)}`
+      };
+    }
+  } else {
+    parsed = content;
   }
   
   const thoughts = parsed.thoughts || parsed.thinking;
@@ -817,6 +865,17 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   if (firstAction.keys) normalizedParams.key = firstAction.keys;
   
   // Handle scroll direction from action_type
+  // Yutori returns amount in pixels directly (e.g. 300, 600)
+  // Small values (<50) are likely multipliers - convert them, otherwise use directly
+  const normalizeScrollAmount = (amount: number, viewportHeight: number = 800): number => {
+    if (amount < 50) {
+      // Small value - probably a multiplier (e.g. 3 = 3 * 100px)
+      return Math.max(100, Math.round(amount * 100));
+    }
+    // Larger values are pixels, use directly with reasonable bounds
+    return Math.min(Math.max(amount, 100), 2000);
+  };
+  
   if (actionType === 'scroll_up') {
     normalizedParams.direction = 'up';
     normalizedParams.amount = 300;
@@ -825,7 +884,9 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
     normalizedParams.amount = 300;
   } else if (firstAction.direction) {
     normalizedParams.direction = firstAction.direction;
-    normalizedParams.amount = firstAction.amount || 300;
+    const rawAmount = firstAction.amount || 300;
+    normalizedParams.amount = normalizeScrollAmount(rawAmount, viewport.height);
+    console.log(`📜 Yutori scroll: raw=${firstAction.amount} → normalized=${normalizedParams.amount}px (direction=${firstAction.direction})`);
   }
   
   // Wait - Yutori might use seconds or wait_time
@@ -1205,17 +1266,16 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   
   // Check if completion is a string (raw LLM response)
   if (typeof completion === 'string') {
-    // Try to parse as JSON
-    try {
-      const parsed = JSON.parse(completion);
+    // Try to extract JSON (handles markdown-wrapped JSON)
+    const parsed = extractJSON(completion);
+    if (parsed) {
       return normalizeBrowserUseResponse({ completion: parsed });
-    } catch {
-      console.log('⚠️ Could not parse completion as JSON:', completion);
-      return {
-        action: 'done',
-        thinking: `Raw response: ${completion.slice(0, 200)}`
-      };
     }
+    console.log('⚠️ Could not extract JSON from completion:', completion.slice(0, 300));
+    return {
+      action: 'done',
+      thinking: `Raw response: ${completion.slice(0, 200)}`
+    };
   }
   
   // Extract action array - it could be in different places
@@ -1277,7 +1337,7 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   const validActions = [
     'click', 'click_coordinates', 'input_text', 'press_key', 'scroll', 'goto', 'navback',
     'wait', 'extract', 'done', 'dropdown_options', 'select_dropdown', 'evaluate',
-    'switch_tab', 'close_tab', 'find_text', 'send_message_to_user', 'attempt_completion'
+    'switch_tab', 'close_tab', 'open_new_tab', 'find_text', 'send_message_to_user', 'attempt_completion'
   ];
   if (!validActions.includes(normalizedAction)) {
     throw new Error(`normalizeBrowserUseResponse: Unknown action "${normalizedAction}" (raw: "${actionName}") - add to actionNameMap or validActions`);

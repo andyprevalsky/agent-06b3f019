@@ -438,6 +438,24 @@ def get_element_description(element, max_length: int = 40) -> str:
     return desc[:max_length]
 
 
+async def move_visual_cursor(dom_service: DOMService, x: int, y: int) -> None:
+    """Move the injected visual cursor to coordinates."""
+    try:
+        session = dom_service.session
+        if not session:
+            return
+        cdp_session = await session.get_or_create_cdp_session(focus=True)
+        await cdp_session.cdp_client.send.Runtime.evaluate(
+            params={
+                "expression": f"if (window.__moveRoseCursor) window.__moveRoseCursor({x}, {y});",
+                "returnByValue": True
+            },
+            session_id=cdp_session.session_id
+        )
+    except:
+        pass  # Visual cursor is optional
+
+
 async def execute_action(
     dom_service: DOMService,
     action_history: ActionHistory,
@@ -488,13 +506,18 @@ async def execute_action(
         if action_name == "click":
             if element:
                 # Index-based click (DOM models)
+                # Get coordinates first to move visual cursor
+                coord_tuple = await dom_service.get_element_coordinates(index)
+                element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
+                if element_coords:
+                    await move_visual_cursor(dom_service, element_coords["x"], element_coords["y"])
+                
+                # Browser-use highlight (fire-and-forget)
+                asyncio.create_task(session.highlight_interaction_element(element))
+                
                 event = session.event_bus.dispatch(ClickElementEvent(node=element))
                 await event
                 await event.event_result(raise_if_any=True, raise_if_none=False)
-                
-                # Record action with coordinates
-                coord_tuple = await dom_service.get_element_coordinates(index)
-                element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
                 await action_history.record_action(
                     dom_service=dom_service,
                     action="click",
@@ -506,6 +529,12 @@ async def execute_action(
                 return {"success": True, "message": f"Clicked element [{index}]"}
             elif coords:
                 # Coordinate-based click (vision models like Yutori)
+                # Move visual cursor first
+                await move_visual_cursor(dom_service, int(coords["x"]), int(coords["y"]))
+                
+                # Browser-use highlight (fire-and-forget)
+                asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
+                
                 event = session.event_bus.dispatch(ClickCoordinateEvent(
                     coordinate_x=int(coords["x"]),
                     coordinate_y=int(coords["y"])
@@ -528,12 +557,18 @@ async def execute_action(
             text = params.get("text", "")
             if element:
                 # Index-based input (DOM models)
+                # Get coordinates first to move visual cursor
+                coord_tuple = await dom_service.get_element_coordinates(index)
+                element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
+                if element_coords:
+                    await move_visual_cursor(dom_service, element_coords["x"], element_coords["y"])
+                
+                # Browser-use highlight (fire-and-forget)
+                asyncio.create_task(session.highlight_interaction_element(element))
+                
                 event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text))
                 await event
                 await event.event_result(raise_if_any=True, raise_if_none=False)
-                
-                coord_tuple = await dom_service.get_element_coordinates(index)
-                element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
                 await action_history.record_action(
                     dom_service=dom_service,
                     action="input_text",
@@ -546,6 +581,12 @@ async def execute_action(
                 return {"success": True, "message": f"Typed '{text[:50]}...' into element [{index}]"}
             elif coords:
                 # Coordinate-based input (vision models like Yutori)
+                # Move visual cursor first
+                await move_visual_cursor(dom_service, int(coords["x"]), int(coords["y"]))
+                
+                # Browser-use highlight (fire-and-forget)
+                asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
+                
                 # First click to focus the element
                 click_event = session.event_bus.dispatch(ClickCoordinateEvent(
                     coordinate_x=int(coords["x"]),
@@ -555,7 +596,6 @@ async def execute_action(
                 await click_event.event_result(raise_if_any=True, raise_if_none=False)
                 
                 # Small delay to ensure focus
-                import asyncio
                 await asyncio.sleep(0.1)
                 
                 # Then type using SendKeysEvent (types to focused element)
@@ -940,6 +980,40 @@ async def spawn_browser_agent_activity_v3(
         
         logger.info(f"🌐 Connected to browser via CDP")
         
+        # ===== INJECT VISUAL CURSOR (persists across navigations) =====
+        try:
+            session = dom_service.session
+            cdp_session = await session.get_or_create_cdp_session(focus=True)
+            # Use addScriptToEvaluateOnNewDocument so cursor persists across navigations
+            cursor_script = """
+                (() => {
+                    if (window.__roseCursorInjected) return;
+                    window.__roseCursorInjected = true;
+                    const existing = document.getElementById('rose-agent-cursor');
+                    if (existing) existing.remove();
+                    const cursor = document.createElement('div');
+                    cursor.id = 'rose-agent-cursor';
+                    cursor.style.cssText = `
+                        position: fixed; width: 20px; height: 20px;
+                        background: radial-gradient(circle, rgba(239,68,68,0.9) 0%, rgba(239,68,68,0.4) 50%, transparent 70%);
+                        border-radius: 50%; pointer-events: none; z-index: 999999;
+                        transform: translate(-50%, -50%); transition: left 0.15s ease-out, top 0.15s ease-out;
+                        box-shadow: 0 0 10px rgba(239,68,68,0.5); display: none;
+                    `;
+                    document.body.appendChild(cursor);
+                    window.__moveRoseCursor = (x, y) => { cursor.style.left = x + 'px'; cursor.style.top = y + 'px'; cursor.style.display = 'block'; };
+                    window.__hideRoseCursor = () => { cursor.style.display = 'none'; };
+                })();
+            """
+            # Register script to run on every new document (survives navigation)
+            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                params={"source": cursor_script, "runImmediately": True},
+                session_id=cdp_session.session_id
+            )
+            logger.info("🎯 Injected visual cursor (persistent)")
+        except Exception as e:
+            logger.warning(f"Failed to inject visual cursor: {e}")
+        
         # ===== FETCH USER PROFILE =====
         user_profile = {}
         try:
@@ -1259,6 +1333,18 @@ Reasoning: {v_reasoning}
 
 Based on this feedback, I need to continue working on the task and address the issues mentioned."""
 
+                    # Emit thinking to FE so user can see verifier feedback
+                    await save_browser_assistant_message(agent_id, verifier_feedback_thinking, task_id)
+                    
+                    # Emit "Continuing" action to FE
+                    continuing_tool_call_id = str(uuid_module.uuid4())
+                    await save_browser_action_message(
+                        agent_id=agent_id, title="Continuing task...", task_id=task_id,
+                        message=f"Verifier score: {score:.0%} - continuing to work on task",
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url, action_type="system", tool_call_id=continuing_tool_call_id
+                    )
+
                     await action_history.record_action(
                         dom_service=dom_service,
                         action="wait",  # Neutral action - processing feedback
@@ -1342,29 +1428,31 @@ Based on this feedback, I need to continue working on the task and address the i
                     title_progress = f"Selecting '{value}'..."
                     title_done = f"Selected '{value}'"
             
-            # Prepend model name to title_done for visibility
-            title_done = f"[{model_short}] {title_done}"
+            # Prepend model name to title_done for visibility (dev only)
+            # if config.environment != "production":
+            #     title_done = f"[{model_short}] {title_done}"
             
-            # Post IN_PROGRESS
+            
+            # Post IN_PROGRESS - use action_name for icon mapping
             await save_browser_action_message(
                 agent_id=agent_id, title=title_progress, task_id=task_id,
                 message="", status=MessageStatus.IN_PROGRESS,
-                browser_url=browser_url, action_type="action", tool_call_id=tool_call_id_action
+                browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action
             )
             
             # Execute action
             result = await execute_action(dom_service, action_history, unified_action)
             
-            # Post FINISHED
+            # Post FINISHED - use action_name for icon mapping
             if result.get("success", True):
                 logger.info(f"Action {action_name} successful",  agent_id=agent_id, title=title_done, task_id=task_id,
                     message=result.get("message", ""), status=MessageStatus.FINISHED,
-                    browser_url=browser_url, action_type="action", tool_call_id=tool_call_id_action
+                    browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action
                 )
                 await save_browser_action_message(
                     agent_id=agent_id, title=title_done, task_id=task_id,
                     message=result.get("message", ""), status=MessageStatus.FINISHED,
-                    browser_url=browser_url, action_type="action", tool_call_id=tool_call_id_action
+                    browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action
                 )
             else:
                 logger.error(f"Action {action_name} failed",  agent_id=agent_id, title=title_done, task_id=task_id,
