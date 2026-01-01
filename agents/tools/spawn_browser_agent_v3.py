@@ -526,7 +526,7 @@ async def execute_action(
                     coordinates=element_coords,
                     result={"success": True}
                 )
-                return {"success": True, "message": f"Clicked element [{index}]"}
+                return {"success": True, "message": ""}
             elif coords:
                 # Coordinate-based click (vision models like Yutori)
                 # Move visual cursor first
@@ -549,7 +549,7 @@ async def execute_action(
                     coordinates=coords,
                     result={"success": True}
                 )
-                return {"success": True, "message": f"Clicked at coordinates ({coords['x']}, {coords['y']})"}
+                return {"success": True, "message": ""}
             else:
                 return {"success": False, "error": "Click requires either element index or coordinates"}
         
@@ -578,7 +578,7 @@ async def execute_action(
                     params={"text": text},
                     result={"success": True}
                 )
-                return {"success": True, "message": f"Typed '{text[:50]}...' into element [{index}]"}
+                return {"success": True, "message": ""}
             elif coords:
                 # Coordinate-based input (vision models like Yutori)
                 # Move visual cursor first
@@ -611,7 +611,7 @@ async def execute_action(
                     params={"text": text},
                     result={"success": True}
                 )
-                return {"success": True, "message": f"Typed '{text[:50]}...' at coordinates ({coords['x']}, {coords['y']})"}
+                return {"success": True, "message": ""}
             else:
                 # Fallback: no index or coords - type to currently focused element
                 type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
@@ -625,7 +625,7 @@ async def execute_action(
                     params={"text": text},
                     result={"success": True}
                 )
-                return {"success": True, "message": f"Typed '{text[:50]}...' to focused element"}
+                return {"success": True, "message": ""}
         
         elif action_name == "press_key":
             key = params.get("key", "")
@@ -640,7 +640,7 @@ async def execute_action(
                 params={"key": key},
                 result={"success": True}
             )
-            return {"success": True, "message": f"Pressed key '{key}'"}
+            return {"success": True, "message": ""}
         
         elif action_name == "scroll":
             direction = params.get("direction", "down")
@@ -663,7 +663,7 @@ async def execute_action(
                 params={"direction": direction, "amount": amount},
                 result={"success": True}
             )
-            return {"success": True, "message": f"Scrolled {direction} {amount}px"}
+            return {"success": True, "message": ""}
         
         elif action_name == "goto":
             url = params.get("url", "")
@@ -678,7 +678,7 @@ async def execute_action(
                 params={"url": url},
                 result={"success": True}
             )
-            return {"success": True, "message": f"Navigated to {url}"}
+            return {"success": True, "message": ""}
         
         elif action_name == "navback":
             event = session.event_bus.dispatch(GoBackEvent())
@@ -691,7 +691,7 @@ async def execute_action(
                 thinking=thinking,
                 result={"success": True}
             )
-            return {"success": True, "message": "Navigated back"}
+            return {"success": True, "message": ""}
         
         elif action_name == "wait":
             time_ms = params.get("time_ms", 1000)
@@ -708,7 +708,7 @@ async def execute_action(
                 params={"time_ms": time_ms},
                 result={"success": True}
             )
-            return {"success": True, "message": f"Waited {time_ms}ms"}
+            return {"success": True, "message": ""}
         
         elif action_name == "dropdown_options":
             if not element:
@@ -736,7 +736,7 @@ async def execute_action(
                 params={"value": value},
                 result={"success": True}
             )
-            return {"success": True, "message": f"Selected '{value}' from dropdown [{index}]"}
+            return {"success": True, "message": ""}
         
         elif action_name == "evaluate":
             code = params.get("code", "")
@@ -783,9 +783,9 @@ async def execute_action(
                     action="extract",
                     thinking=thinking,
                     params={"instruction": instruction},
-                    result={"success": True, "content": extracted_content[:500]}
+                    result={"success": True, "content": extracted_content}
                 )
-                return {"success": True, "message": f"Extracted data", "content": extracted_content}
+                return {"success": True, "message": extracted_content, "content": extracted_content}
             except Exception as e:
                 logger.error(f"Extract failed: {e}")
                 return {"success": False, "error": str(e)}
@@ -872,7 +872,6 @@ AVAILABLE ACTIONS:
 - select_dropdown: Select an option from a dropdown
 - evaluate: Execute JavaScript
 - extract: Extract structured data from the page
-- done: Signal task completion
 - attempt_completion: Signal you believe the task is complete
 - send_message_to_user: Request user assistance
 
@@ -1092,7 +1091,7 @@ async def spawn_browser_agent_activity_v3(
         model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
         
         # ===== MAIN AGENT LOOP =====
-        max_iterations = 200
+        max_iterations = 80
         iteration = 0
         
         while iteration < max_iterations:
@@ -1122,7 +1121,7 @@ BROWSER CONTEXT:
 - Browser is in full screen mode (no URL bar visible)
 - User may already be logged in via stored cookies
 - Use send_message_to_user when you need human help (login, CAPTCHA, payments over limit)
-- Use attempt_completion or done when the task is complete"""
+- Use attempt_completion when the task is complete"""
             
             # 4. Call Rose API for next action
             try:
@@ -1279,11 +1278,20 @@ BROWSER CONTEXT:
                     
                     verifier_prompt = build_verifier_prompt("EXECUTE", f"Goal: {goal}\n\nVerify browser task completion.")
                     
-                    progress_result = await call_temporal_activity_from_activity(
-                        check_progress,
-                        args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE"],
-                        start_to_close_timeout=timedelta(seconds=10),
-                    )
+                    # Try ultra first with 7s timeout, fallback to lite on timeout
+                    try:
+                        progress_result = await call_temporal_activity_from_activity(
+                            check_progress,
+                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE"],
+                            start_to_close_timeout=timedelta(seconds=7),
+                        )
+                    except TimeoutError:
+                        logger.warning("Verifier ultra timeout, falling back to lite")
+                        progress_result = await call_temporal_activity_from_activity(
+                            check_progress,
+                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-lite", "EXECUTE"],
+                            start_to_close_timeout=timedelta(seconds=15),
+                        )
                     
                     v_usage = progress_result.get("usage", {})
                     total_input_tokens += v_usage.get("prompt_tokens", 0)
@@ -1321,6 +1329,17 @@ BROWSER CONTEXT:
                             visited_urls=visited_urls,
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary
+                        )
+                        
+                        # Send task_complete message so FE shows completion card
+                        await save_browser_action_message(
+                            agent_id=agent_id,
+                            title="✓ Task Completed",
+                            task_id=task_id,
+                            message=context_message,
+                            status=MessageStatus.FINISHED,
+                            browser_url=browser_url,
+                            action_type="task_complete"
                         )
                         
                         usage_items = [
@@ -1437,6 +1456,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 amount = unified_action.get("params", {}).get("amount", 300)
                 title_progress = f"Scrolling {direction} {amount}px..."
                 title_done = f"Scrolled {direction} {amount}px"
+                # Override action_name with direction-specific type for correct icon
+                action_name = f"scroll_{direction}"
             elif action_name == "press_key":
                 key = unified_action.get("params", {}).get("key", "?")
                 title_progress = f"Pressing {key}..."
@@ -1477,7 +1498,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 logger.info(f"Action {action_name} successful", agent_id=agent_id, title=title_done, task_id=task_id)
                 await save_browser_action_message(
                     agent_id=agent_id, title=title_done, task_id=task_id,
-                    message="", status=MessageStatus.FINISHED,
+                    message=result.get("message", ""), status=MessageStatus.FINISHED,
                     browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action
                 )
             else:
@@ -1515,6 +1536,17 @@ Based on this feedback, I need to continue working on the task and address the i
             visited_urls=visited_urls,
             reasoning_messages=reasoning_messages,
             action_summary=action_summary
+        )
+        
+        # Send task_complete message so FE shows completion card
+        await save_browser_action_message(
+            agent_id=agent_id,
+            title="Task Incomplete - Max Steps Reached",
+            task_id=task_id,
+            message=context_message,
+            status=MessageStatus.FINISHED,
+            browser_url=browser_url,
+            action_type="task_complete"
         )
         
         execution_time_ms = (_safe_time() - start_time) * 1000
@@ -1638,12 +1670,22 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     retry_policy=RetryPolicy(maximum_attempts=2, initial_interval=timedelta(seconds=5))
                 )
                 
-                # Report usage
+                # Report usage - convert dicts to UsageItem objects
                 if result.get("usage_items"):
+                    usage_items = []
+                    for item in result["usage_items"]:
+                        item_type = UsageType.LLM if item.get("type") == "llm" else UsageType.SERVICE
+                        usage_items.append(UsageItem(
+                            type=item_type,
+                            cost_cents=item.get("cost_cents", 0),
+                            provider=item.get("provider", ""),
+                            tokens_in=item.get("input_tokens"),
+                            tokens_out=item.get("output_tokens"),
+                        ))
                     yield ToolEvent(
                         type=EventType.USAGE,
                         tool_name="spawn_browser_agent",
-                        usage_items=result["usage_items"]
+                        usage_items=usage_items
                     )
                 
                 if result.get("status") == "needs_user_help":

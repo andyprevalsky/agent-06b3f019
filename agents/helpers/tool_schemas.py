@@ -148,7 +148,7 @@ class MessagePersonTool(BaseModel):
 
 
 class SpawnBrowserAgentTool(BaseModel):
-    """Spawn an autonomous browser agent to complete complex, multi-step web tasks including purchases, checkouts, and e-commerce transactions. The browser agent uses AI to navigate, interact, add items to cart, complete checkout flows, and accomplish goals without step-by-step orchestration. Provide a complete, high-level goal - the browser agent will autonomously break it down and execute all necessary steps. Login state and saved payment methods persist across sessions."""
+    """Spawn an autonomous browser agent to complete complex, multi-step web tasks including purchases, checkouts, and e-commerce transactions. The browser agent uses AI to navigate, interact, add items to cart, complete checkout flows, and accomplish goals without step-by-step orchestration. Provide a complete, high-level goal - the browser agent will autonomously break it down and execute all necessary steps. Login state and saved payment methods persist across sessions. Do not use this tool to do research. Minimize the work done by this tool and keep the trajectory as short as possible. Give it the deepest starting URL you reasonably can in the trajectory. Do not call multiple this tool multiple times in parallel."""
 
     tool: Literal["spawn_browser_agent"]
     goal: str = Field(

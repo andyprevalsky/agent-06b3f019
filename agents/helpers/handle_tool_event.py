@@ -111,7 +111,6 @@ async def handle_tool_event(
                     agent_id=agent_id,
                     user_id=user_id,
                     tool_name=event.tool_name or tool_name,
-                    cost_cents=item.cost_cents,
                     usage_items=[item],
                     execute_activity=execute_activity,
                 )
@@ -136,7 +135,6 @@ async def _save_tool_usage(
     agent_id: str,
     user_id: str,
     tool_name: str,
-    cost_cents: int,
     usage_items: list,
     execute_activity: ExecuteActivityCallable,
 ):
@@ -153,7 +151,7 @@ async def _save_tool_usage(
     
     await execute_activity(
         save_tool_usage,
-        args=[agent_id, user_id, tool_name, cost_cents, usage_items_dicts],
+        args=[agent_id, user_id, tool_name, usage_items_dicts],
         start_to_close_timeout=timedelta(seconds=15),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )

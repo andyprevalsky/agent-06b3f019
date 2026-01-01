@@ -265,9 +265,9 @@ BROWSER_TOOL_MODELS = {
     "close_tab": CloseTabTool,
     "open_new_tab": OpenNewTabTool,
     # Completion
-    "done": DoneTool,
+    # "done": DoneTool,  # Use attempt_completion instead - browser-use 'done' maps to attempt_completion
     "attempt_completion": AttemptCompletionBrowserTool,
-    "send_message_to_user": SendMessageToUserBrowserTool,
+    # "send_message_to_user": SendMessageToUserBrowserTool,
 }
 
 

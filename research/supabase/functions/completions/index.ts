@@ -825,21 +825,19 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   }
   
   // Map Yutori action names to Python agent expected names
+  // Yutori native actions: click, scroll, type, key_press, hover, drag, wait, refresh, go_back, goto_url, read_texts_and_links, stop
   const yutoriActionMap: Record<string, string> = {
     'type': 'input_text',
-    'key': 'press_key',
-    'press_keys': 'press_key',
-    'scroll_up': 'scroll',
-    'scroll_down': 'scroll',
-    'navigate': 'goto',
-    'go_to_url': 'goto',
-    'complete': 'done',
+    'key_press': 'press_key',
+    'go_back': 'navback',
+    'goto_url': 'goto',
+    'stop': 'attempt_completion',
   };
   
   const normalizedAction = yutoriActionMap[actionType] || actionType;
   
   // Validate action is one we support (Yutori has limited actions)
-  const validYutoriActions = ['click', 'input_text', 'press_key', 'scroll', 'goto', 'done', 'wait'];
+  const validYutoriActions = ['click', 'scroll', 'input_text', 'press_key', 'navback', 'goto', 'wait', 'attempt_completion'];
   if (!validYutoriActions.includes(normalizedAction)) {
     throw new Error(`normalizeYutoriResponse: Unknown action "${normalizedAction}" (raw: "${actionType}") - add to yutoriActionMap or validYutoriActions`);
   }
@@ -1303,29 +1301,27 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   }
   
   // Map action names to Python agent expected names
+  // Browser-use native actions: search, navigate, go_back, wait, click, input, upload_file,
+  // switch, close, extract, scroll, send_keys, find_text, screenshot, dropdown_options, select_dropdown, evaluate, done
   const actionNameMap: Record<string, string> = {
     'navigate': 'goto',
-    'go_to_url': 'goto',
-    'type': 'input_text',
-    'type_text': 'input_text',
-    'key': 'press_key',
-    'keyboard': 'press_key',
-    'send_keys': 'press_key',
-    'scroll_up': 'scroll',
-    'scroll_down': 'scroll',
-    'back': 'navback',
     'go_back': 'navback',
-    'complete': 'done',
-    'finish': 'done',
+    'input': 'input_text',
+    'send_keys': 'press_key',
+    'switch': 'switch_tab',
+    'close': 'close_tab',
+    'done': 'attempt_completion',
   };
   
   const normalizedAction = actionNameMap[actionName] || actionName;
   
   // Validate action is one we support
   const validActions = [
-    'click', 'click_coordinates', 'input_text', 'press_key', 'scroll', 'goto', 'navback',
-    'wait', 'extract', 'done', 'dropdown_options', 'select_dropdown', 'evaluate',
-    'switch_tab', 'close_tab', 'open_new_tab', 'find_text', 'send_message_to_user', 'attempt_completion'
+    'click', 'click_coordinates', 'scroll', 'wait', 'extract', 'evaluate', 
+    'dropdown_options', 'select_dropdown', 'screenshot', 
+    'find_text', 'upload_file', 'search',
+    'goto', 'navback', 'input_text', 'press_key', 
+    'switch_tab', 'close_tab', 'open_new_tab', 'attempt_completion'
   ];
   if (!validActions.includes(normalizedAction)) {
     throw new Error(`normalizeBrowserUseResponse: Unknown action "${normalizedAction}" (raw: "${actionName}") - add to actionNameMap or validActions`);
