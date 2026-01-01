@@ -3,3 +3,4 @@ ALTER TABLE "BrowserSession" ADD COLUMN "wsUrl" TEXT;
 
 
 
+
