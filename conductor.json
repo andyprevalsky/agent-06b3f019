@@ -1,0 +1,19 @@
+{
+  "scripts": {
+    "setup": [
+      "# Node.js dependencies",
+      "cd back-end && npm install",
+      "cd front-end && npm install",
+      "",
+      "# Python dependencies for agents",
+      "cd agents && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt",
+      "",
+      "# Copy .env files",
+      "ln -sf \"$CONDUCTOR_ROOT_PATH/.env.back-end\" back-end/.env",
+      "ln -sf \"$CONDUCTOR_ROOT_PATH/.env.agents\" agents/.env",
+      "ln -sf \"$CONDUCTOR_ROOT_PATH/.env.front-end\" front-end/.env",
+      "ln -sf \"$CONDUCTOR_ROOT_PATH/.env.research\" research/.env"
+    ]
+  }
+}
+
