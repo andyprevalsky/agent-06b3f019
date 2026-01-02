@@ -5,6 +5,7 @@ import { useState, useEffect, useMemo, memo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import SubAgentToolBubble from './SubAgentToolBubble';
+import SignupPromptBubble from './SignupPromptBubble';
 import { MarkdownText } from './MarkdownText';
 import { PlanChip } from './PlanChip';
 import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
@@ -24,6 +25,8 @@ interface MessageBubbleProps {
   onSendMessage?: (message: string) => void;
   /** Compact mode - removes left spacers for tighter layouts */
   compact?: boolean;
+  /** Callback to open the auth modal (for signup prompts) */
+  onOpenAuthModal?: () => void;
 }
 
 interface ToolMessageData {
@@ -508,7 +511,7 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -518,6 +521,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   // Check if this is a send_message_to_user message (render as raw text, not tool card)
   const isUserAttentionMessage = isTool && message.metadata?.isUserAttentionMessage;
+
+  // Check if this is a request_user_signup message (render as SignupPromptBubble)
+  const isSignupRequest = isTool && message.metadata?.requestUserSignup;
 
   // Check if this is a sub-agent tool message (actual spawn_sub_agents calls, not browser actions)
   const isSubAgentTool = message.metadata?.toolName === 'spawn_sub_agents';
@@ -604,6 +610,23 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   }, [isSubAgentTool, message.metadata, message.text, onNavigateToAgent]);
 
   if (subAgentBubble) return subAgentBubble;
+
+  // request_user_signup: render as SignupPromptBubble
+  if (isSignupRequest && agentId) {
+    const signupReason = message.metadata?.requestUserSignup?.reason || message.text || 'Please sign up to continue.';
+    const isWaiting = message.metadata?.toolStatus === 'IN_PROGRESS';
+
+    return (
+      <SignupPromptBubble
+        reason={signupReason}
+        agentId={agentId}
+        isWaiting={isWaiting}
+        shouldType={shouldType}
+        onComplete={onTypingComplete}
+        onOpenAuthModal={onOpenAuthModal}
+      />
+    );
+  }
 
   // set_plan tool: render as PlanChip instead of standard tool card
   // NOTE: Must call onTypingComplete immediately since PlanChip doesn't animate text.

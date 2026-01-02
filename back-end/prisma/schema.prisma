@@ -174,12 +174,15 @@ model User {
   usedInviteCode              Int?
   encryptedPaymentInformation String?
   phone                       String?
+  // Anonymous user field - tracks if user was created via Supabase signInAnonymously
+  isAnonymous                 Boolean       @default(false)
   credits                     Credit[]
   subscriptions               Subscription?
 
   @@index([userId])
   @@index([inviteCode])
   @@index([usedInviteCode])
+  @@index([isAnonymous])
 }
 
 model Credit {

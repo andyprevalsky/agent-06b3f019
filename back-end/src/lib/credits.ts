@@ -132,6 +132,23 @@ export async function hasCreditsRemaining(userId: string): Promise<boolean> {
 }
 
 /**
+ * Creates signup bonus credit when anonymous user converts to real account.
+ * This is separate from initial credit to ensure both bonuses are applied.
+ */
+export async function createSignupBonusCredit(userId: string) {
+  const credit = await prisma.credit.create({
+    data: {
+      userId,
+      amountCents: 100, // $1.00 signup bonus
+      expirationDate: null, // Never expires
+    },
+  });
+
+  console.log(`✅ Created $1 signup bonus credit for user ${userId}`);
+  return credit;
+}
+
+/**
  * Add credit for a subscription (called when subscription is created/renewed)
  */
 export async function addSubscriptionCredit(

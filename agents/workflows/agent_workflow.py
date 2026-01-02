@@ -54,6 +54,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.set_plan import set_plan
     from tools.attempt_completion import attempt_completion
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
+    from tools.request_user_signup import request_user_signup
     from loop.run_agent import run_agent
 
 logger = structlog.get_logger()
@@ -83,6 +84,7 @@ TOOL_EXECUTORS = {
     "attempt_completion": attempt_completion,
     "search_x402_bazaar": search_x402_bazaar,
     "pay_for_x402_bazaar_service": pay_for_x402_bazaar_service,
+    "request_user_signup": request_user_signup,
 }
 
 # Tools requiring user approval before execution
@@ -117,10 +119,14 @@ class AgentWorkflow:
         self._has_new_messages: bool = False
         self._has_credits: bool = True  # Cached credit status
         self._last_credit_check: int = 0  # Iteration count at last check
-        
+
+        # Signup request state (for request_user_signup tool)
+        self._signup_completed: bool = False
+        self._signup_dismissed: bool = False
+
         # Context - kept in sync with run_agent for tools that check it
         self.context: List[Dict] = []
-        
+
         # Sub-agent tracking
         self.parent_workflow_id: Optional[str] = None
         self.pending_children: Set[str] = set()
@@ -188,9 +194,9 @@ class AgentWorkflow:
         """Receive completion signal from child agent."""
         child_agent_id = data.get("child_agent_id", "")
         result = data.get("result", {})
-        
+
         workflow.logger.info(f"✅ Child {child_agent_id[:8]} completed")
-        
+
         child_tool_id = self.child_tool_ids.get(child_agent_id)
         if child_tool_id:
             summary = result.get("summary", "")
@@ -207,8 +213,20 @@ class AgentWorkflow:
                     "progress": 1.0
                 }
             )
-            
+
         self.pending_children.discard(child_agent_id)
+
+    @workflow.signal
+    async def signup_completed(self):
+        """Signal that user has completed signup (from request_user_signup tool)."""
+        workflow.logger.info("✅ Received signup_completed signal")
+        self._signup_completed = True
+
+    @workflow.signal
+    async def signup_dismissed(self):
+        """Signal that user dismissed the signup prompt (continuing as anonymous)."""
+        workflow.logger.info("⏭️ Received signup_dismissed signal")
+        self._signup_dismissed = True
         
     # =========================================================================
     # MAIN RUN

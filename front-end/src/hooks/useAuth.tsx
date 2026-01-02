@@ -1,6 +1,13 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
-import { supabase, getStoredSession, getCachedUser, persistCachedUser } from '@/lib/supabase';
+import {
+  supabase,
+  getStoredSession,
+  getCachedUser,
+  persistCachedUser,
+  signInAnonymously,
+  isAnonymousUser,
+} from '@/lib/supabase';
 import { checkNeedsInviteCode } from '@/lib/api';
 
 export function useAuth() {
@@ -10,18 +17,30 @@ export function useAuth() {
   const [loading, setLoading] = useState(true);
   const initRef = useRef(false);
   const inviteCheckRef = useRef(0);
+  const anonInitRef = useRef(false);
+
+  // Derived state - isAuthenticated means we have a valid Supabase session (anonymous or not)
+  const isAuthenticated = !!session;
+  const isAnonymous = isAnonymousUser(user);
 
   const log = useCallback((message: string, payload?: Record<string, unknown>) => {
     console.log(`[Auth] ${message}`, payload ?? '');
   }, []);
 
   const updateInviteStatus = useCallback(
-    async (origin: string, currentSession: Session | null) => {
+    async (origin: string, currentSession: Session | null, currentUser: User | null) => {
       inviteCheckRef.current += 1;
       const checkId = inviteCheckRef.current;
 
       if (!currentSession) {
         log(`No session available for invite check (${origin})`);
+        setIsFullySignedIn(false);
+        return;
+      }
+
+      // Anonymous users are not "fully signed in" - they need to verify phone
+      if (isAnonymousUser(currentUser)) {
+        log(`Anonymous user - not fully signed in (${origin})`);
         setIsFullySignedIn(false);
         return;
       }
@@ -47,7 +66,7 @@ export function useAuth() {
 
   const applySession = useCallback(
     async (origin: string, nextSession: Session | null) => {
-      log(`Applying session (${origin})`, { hasSession: !!nextSession });
+      log(`Applying session (${origin})`, { hasSession: !!nextSession, isAnonymous: nextSession?.user?.is_anonymous });
       setSession(nextSession);
 
       if (nextSession?.user) {
@@ -58,51 +77,96 @@ export function useAuth() {
         persistCachedUser(null);
       }
 
-      await updateInviteStatus(origin, nextSession);
+      await updateInviteStatus(origin, nextSession, nextSession?.user ?? null);
     },
     [log, updateInviteStatus]
   );
 
+  // Initialize anonymous user when no session exists
+  const initializeAnon = useCallback(async () => {
+    if (anonInitRef.current) return;
+    anonInitRef.current = true;
+
+    log('No session found, signing in anonymously...');
+
+    try {
+      const { session: anonSession } = await signInAnonymously();
+      if (anonSession) {
+        log('Anonymous session created', { userId: anonSession.user?.id });
+        await applySession('anonymous-init', anonSession);
+      }
+    } catch (error) {
+      console.error('[Auth] Failed to sign in anonymously:', error);
+      anonInitRef.current = false; // Allow retry
+    }
+  }, [log, applySession]);
+
   // Manual refresh - call this after login or invite code submission
   const refreshAuthState = useCallback(async (reason = 'manual-refresh') => {
-    const stored = getStoredSession();
-    await applySession(reason, stored);
+    const { data: { session: currentSession } } = await supabase.auth.getSession();
+    await applySession(reason, currentSession);
   }, [applySession]);
 
   // Initialize once on mount
   useEffect(() => {
     if (initRef.current) return;
     initRef.current = true;
-    
+
     const init = async () => {
       log('Initializing auth state...');
-      await refreshAuthState('init');
+
+      // Check for existing session
+      const { data: { session: existingSession } } = await supabase.auth.getSession();
+
+      if (existingSession) {
+        log('Found existing session', {
+          userId: existingSession.user?.id,
+          isAnonymous: existingSession.user?.is_anonymous
+        });
+        await applySession('init', existingSession);
+      } else {
+        // No session - create anonymous user
+        await initializeAnon();
+      }
+
       setLoading(false);
     };
-    
+
     init();
-    
-    // Listen for sign out only
+
+    // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      log('Supabase auth event', { event, hasSession: !!session });
-      applySession(`supabase:${event}`, session ?? null);
+      log('Supabase auth event', { event, hasSession: !!session, isAnonymous: session?.user?.is_anonymous });
+
+      // Handle the session change
+      if (event === 'SIGNED_OUT') {
+        // On sign out, create a new anonymous session
+        anonInitRef.current = false;
+        initializeAnon();
+      } else {
+        applySession(`supabase:${event}`, session ?? null);
+      }
     });
-    
+
     return () => subscription.unsubscribe();
-  }, [applySession, log, refreshAuthState]);
+  }, [applySession, log, initializeAnon]);
 
   useEffect(() => {
     log('State changed', {
       userId: user?.id,
       hasSession: !!session,
+      isAuthenticated,
+      isAnonymous,
       isFullySignedIn,
       loading,
     });
-  }, [log, user, session, isFullySignedIn, loading]);
+  }, [log, user, session, isAuthenticated, isAnonymous, isFullySignedIn, loading]);
 
   return {
     user,
     session,
+    isAuthenticated,
+    isAnonymous,
     isFullySignedIn,
     loading,
     refreshAuthState,

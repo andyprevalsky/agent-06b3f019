@@ -5,20 +5,25 @@ import { supabase } from './supabase';
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
-// Helper function to get auth headers
-async function getAuthHeaders() {
-  // Use supabase.auth.getSession() to trigger auto-refresh if token is expired
+/**
+ * Get auth headers for API requests.
+ *
+ * With Supabase native anonymous auth, all users (anonymous or not) have a valid JWT.
+ * The JWT will contain is_anonymous=true for anonymous users.
+ */
+async function getAuthHeaders(): Promise<Record<string, string>> {
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token;
-  
-  if (!token) {
-    throw new Error('Not authenticated');
+
+  if (token) {
+    return {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    };
   }
 
-  return {
-    'Authorization': `Bearer ${token}`,
-    'Content-Type': 'application/json',
-  };
+  // No session available - this shouldn't happen as we auto-create anonymous sessions
+  throw new Error('Not authenticated');
 }
 
 // Types
@@ -478,7 +483,7 @@ export async function checkNeedsInviteCode(): Promise<boolean> {
 // Get paginated people in user's network
 export async function getPeople(page = 1, limit = 50): Promise<PeoplePaginatedResponse> {
   const headers = await getAuthHeaders();
-  
+
   const response = await fetch(`${API_BASE_WITH_PATH}/people?page=${page}&limit=${limit}`, {
     headers,
   });
@@ -488,5 +493,43 @@ export async function getPeople(page = 1, limit = 50): Promise<PeoplePaginatedRe
   }
 
   return await response.json();
+}
+
+// =============================================================================
+// Signup Workflow Signals (for request_user_signup tool)
+// =============================================================================
+
+/**
+ * Signal the agent workflow that signup was completed
+ */
+export async function signalSignupCompleted(agentId: string): Promise<void> {
+  const headers = await getAuthHeaders();
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/signal/signup_completed`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to signal signup completed');
+  }
+}
+
+/**
+ * Signal the agent workflow that signup was dismissed (continue as anonymous)
+ */
+export async function signalSignupDismissed(agentId: string): Promise<void> {
+  const headers = await getAuthHeaders();
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/signal/signup_dismissed`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to signal signup dismissed');
+  }
 }
 

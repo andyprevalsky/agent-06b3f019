@@ -128,7 +128,6 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'input_text': Keyboard,
   'type_text': Keyboard,
   'press_key': Keyboard,
-  'scroll': ArrowDown,
   'scroll_up': ArrowUp,
   'scroll_down': ArrowDown,
   'goto': Navigation,
