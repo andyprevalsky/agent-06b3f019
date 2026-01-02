@@ -1,6 +1,9 @@
+// Load environment variables FIRST, before any other imports
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import { authenticate } from './middleware/auth';
 import agentsRouter from './routes/agents';
 import formatRouter from './routes/format';
@@ -50,9 +53,6 @@ import { runGmailSyncJob } from './services/integrations/gmailSync';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
-
-// Load environment variables
-dotenv.config();
 
 // Verify critical env vars
 if (!process.env.BACKEND_API_KEY) {

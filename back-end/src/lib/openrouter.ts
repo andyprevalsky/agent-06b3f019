@@ -1,4 +1,8 @@
 import OpenAI from 'openai';
+import dotenv from 'dotenv';
+
+// Ensure env vars are loaded before checking
+dotenv.config();
 
 if (!process.env.OPENROUTER_API_KEY) {
   throw new Error('Missing OPENROUTER_API_KEY environment variable');
