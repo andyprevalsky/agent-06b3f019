@@ -4,7 +4,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import * as amplitude from '@amplitude/analytics-browser';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Gift, Copy, Check, Plug, Network } from 'lucide-react';
+import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Copy, Check, Plug, Network } from 'lucide-react';
 import AppSidebar from '@/components/terminal/AppSidebar';
 import { supabase, signOut, initializeRealtime, clearStoredSession } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
@@ -17,8 +17,6 @@ import {
   resumeAgent,
   pauseAgent,
   checkAndRespondToAttentionRequest,
-  getMyInviteCode,
-  InviteCodeInfo,
   Agent,
   AgentDetail,
   Message,
@@ -215,102 +213,6 @@ function collapseBrowserStartupMessages(messages: Message[]): Message[] {
   return result;
 }
 
-// Component for displaying invite code content inside popover
-function InviteCodeContent() {
-  const { toast } = useToast();
-  const [inviteInfo, setInviteInfo] = useState<InviteCodeInfo | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    loadInviteCode();
-  }, []);
-
-  const loadInviteCode = async () => {
-    try {
-      setLoading(true);
-      const info = await getMyInviteCode();
-      setInviteInfo(info);
-    } catch (error: any) {
-      console.error('Error loading invite code:', error);
-      toast({
-        title: "Error",
-        description: error.message || "Failed to load invite code",
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCopy = async () => {
-    if (!inviteInfo) return;
-
-    try {
-      await navigator.clipboard.writeText(inviteInfo.inviteCode.toString());
-      setCopied(true);
-      toast({
-        title: "Copied!",
-        description: "Invite code copied to clipboard",
-      });
-      
-      setTimeout(() => setCopied(false), 2000);
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to copy to clipboard",
-        variant: "destructive",
-      });
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="flex justify-center py-4">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-400"></div>
-      </div>
-    );
-  }
-
-  if (!inviteInfo) {
-    return (
-      <div className="text-center text-navi-black/70 text-sm">
-        Failed to load invite code
-      </div>
-    );
-  }
-
-  return (
-    <>
-      <div className="relative">
-        <div 
-          className="w-full px-4 py-3 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-center text-2xl font-mono tracking-widest cursor-pointer hover:bg-[#e8e9ec] transition-colors"
-          onClick={handleCopy}
-        >
-          {inviteInfo.inviteCode.toString().padStart(6, '0')}
-        </div>
-        <button
-          onClick={handleCopy}
-          className="absolute top-2 right-2 p-1.5 rounded-md hover:bg-gray-300/50 transition-colors"
-          aria-label="Copy invite code"
-        >
-          {copied ? (
-            <Check className="w-4 h-4 text-green-600" />
-          ) : (
-            <Copy className="w-4 h-4 text-gray-500" />
-          )}
-        </button>
-      </div>
-
-      <div className="text-center">
-        <p className="text-lg font-semibold text-navi-black">
-          {inviteInfo.usesRemaining} Use{inviteInfo.usesRemaining !== 1 ? 's' : ''} Left
-        </p>
-      </div>
-    </>
-  );
-}
-
 // Opening messages for reveal animation [message, pauseDurationMs]
 const OPENING_MESSAGES: [string, number][] = [
   ["Hello!", 1800],
@@ -360,11 +262,14 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
   const navigate = useNavigate();
   const { toast } = useToast();
   
-  // Auth state from hook - isFullySignedIn is TRUE only when session exists AND invite code is used
-  const { user: authUser, isFullySignedIn, refreshAuthState, loading: authLoading } = useAuth();
-  
-  // User is only considered "logged in" for Terminal features when fully signed in
+  // Auth state from hook - isAuthenticated is TRUE for both JWT users AND anonymous users (Supabase native)
+  const { user: authUser, isFullySignedIn, isAuthenticated, isAnonymous, refreshAuthState, loading: authLoading } = useAuth();
+
+  // User is considered "logged in" for Terminal features when fully signed in (non-anonymous)
+  // For features like invite codes, we need a non-anonymous user
   const user = isFullySignedIn ? authUser : null;
+  // Both JWT and anonymous users can submit goals (anonymous users have real Supabase sessions)
+  const canSubmitGoals = isAuthenticated;
   
   // Get context values - agent state comes from context
   const {
@@ -390,11 +295,9 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
   const [isLoadingAgents, setIsLoadingAgents] = useState(true);
   const [isFirstLoad, setIsFirstLoad] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [inviteCodeModalOpen, setInviteCodeModalOpen] = useState(false);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
   const [showCreditModal, setShowCreditModal] = useState(false);
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
-  const [inviteModalPosition, setInviteModalPosition] = useState({ top: 0, right: 0 });
   const clientSource = useMemo(() => getClientSource(), []);
   
   // Pause state
@@ -419,7 +322,6 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const loginButtonRef = useRef<HTMLButtonElement>(null);
   const queryInputRef = useRef<HTMLDivElement>(null);
-  const giftButtonRef = useRef<HTMLButtonElement>(null);
   const pendingSubmitAfterLoginRef = useRef<boolean>(false);
   const autoSubmitInFlightRef = useRef<boolean>(false);
   const messageInputRef = useRef<string>('');
@@ -724,20 +626,20 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     };
   }, [FRAME_DURATION_MS, animationComplete]);
 
-  // Initialize realtime and Amplitude when user becomes fully signed in
+  // Initialize realtime and Amplitude when user is authenticated (JWT or anonymous)
   useEffect(() => {
-    if (isFullySignedIn && authUser) {
-      // Set up realtime connection
+    if (isAuthenticated && authUser) {
+      // Set up realtime connection - works for both anonymous and regular users now
       initializeRealtime();
-      
+
       // Identify user in Amplitude
       if (authUser.phone) {
         amplitude.setUserId(authUser.phone);
-      } else if (authUser.id) {
+      } else {
         amplitude.setUserId(authUser.id);
       }
     }
-  }, [isFullySignedIn, authUser]);
+  }, [isAuthenticated, authUser]);
   
   // Handle sign out - reset Amplitude
   useEffect(() => {
@@ -750,16 +652,16 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     return () => subscription.unsubscribe();
   }, []);
 
-  // Load agents on mount
+  // Load agents on mount (for authenticated users, including anonymous)
   useEffect(() => {
-    if (user) {
+    if (canSubmitGoals) {
       loadAgents();
     }
-  }, [user]);
+  }, [canSubmitGoals]);
 
-  // Poll agents every 10 seconds
+  // Poll agents every 10 seconds (for authenticated users, including anonymous)
   useEffect(() => {
-    if (!user) return;
+    if (!canSubmitGoals) return;
 
     const intervalId = setInterval(() => {
       loadAgents();
@@ -768,7 +670,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     return () => {
       clearInterval(intervalId);
     };
-  }, [user]);
+  }, [canSubmitGoals]);
 
   // Realtime subscription is now handled by AgentContext
 
@@ -1058,10 +960,9 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       });
     }
 
-    // Check if user is logged in before attempting any API calls
-    console.log('user', user);
-    if (!user) {
-      console.log('User not logged in, opening login modal');
+    // Check if user can submit goals (authenticated via JWT or anonymous token)
+    if (!canSubmitGoals) {
+      console.log('User not authenticated, opening login modal');
       pendingSubmitAfterLoginRef.current = true; // Flag to auto-submit after login
       setLoginModalOpen(true);
       toast({
@@ -1205,7 +1106,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     
     // Submit the query immediately by calling handleSendMessage
     // But we need to use the trimmed value directly since state updates are async
-    if (!user) {
+    if (!canSubmitGoals) {
       setLoginModalOpen(true);
       toast({
         title: 'Authentication required',
@@ -1614,80 +1515,6 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       </header>
 
 
-      {/* Gift Button - To the left of Agent Settings - Sibling to Header */}
-      <div 
-        className="absolute top-4 z-50"
-        style={{
-          left: 'calc(50% + 448px + 16px)', // QueryBox right edge + gap
-        }}
-      >
-        <button
-          ref={giftButtonRef}
-          onClick={() => {
-            if (user) {
-              if (!inviteCodeModalOpen && giftButtonRef.current) {
-                const rect = giftButtonRef.current.getBoundingClientRect();
-                setInviteModalPosition({
-                  top: rect.bottom + 8,
-                  right: window.innerWidth - rect.right,
-                });
-              }
-              setInviteCodeModalOpen(!inviteCodeModalOpen);
-            }
-          }}
-          disabled={!user}
-          className={cn(
-            "w-[38px] h-[38px] flex items-center justify-center rounded-lg bg-navi-black border border-navi-light-black shadow-sm transition-all duration-200",
-            user 
-              ? "hover:bg-navi-light-black cursor-pointer opacity-100" 
-              : "cursor-not-allowed opacity-50"
-          )}
-          aria-label="Invite Code"
-        >
-          <Gift className="w-5 h-5 text-white" />
-        </button>
-      </div>
-
-      {/* Invite Code Modal - Fixed positioning - Sibling to Header */}
-      {inviteCodeModalOpen && user && (
-        <>
-          {/* Backdrop */}
-          <div
-            className="fixed inset-0 z-[55]"
-            onClick={() => setInviteCodeModalOpen(false)}
-          />
-
-          {/* Popover content */}
-          <div 
-            className="fixed z-[60] w-[320px] border border-gray-300 rounded-lg shadow-lg overflow-hidden"
-            style={{ 
-              top: `${inviteModalPosition.top}px`,
-              right: `${inviteModalPosition.right}px`,
-              backgroundColor: backgroundColors > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity})` : undefined,
-              backdropFilter: blur > 0 ? `blur(${Math.max(20, dripStyles.blur)}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
-              WebkitBackdropFilter: blur > 0 ? `blur(${Math.max(20, dripStyles.blur)}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
-              borderColor: borderColor > 0 ? dripStyles.borderRgb : undefined,
-              boxShadow: shadowIntensity > 0 
-                ? `0 8px 32px rgba(0, 0, 0, ${dripStyles.shadowIntensity}), inset 0 1px 1px rgba(255,255,255,${dripStyles.bgOpacity * 0.5})`
-                : undefined,
-            }}
-          >
-            <div className="p-5 space-y-4">
-              <div className="text-center mb-2">
-                <p className="text-sm font-medium text-navi-black">
-                  Your Invite Code
-                </p>
-                <p className="text-xs text-navi-black/70 mt-1">
-                  Share this code with friends to invite them to Rose Labs
-                </p>
-              </div>
-
-              <InviteCodeContent />
-            </div>
-          </div>
-        </>
-      )}
-
       <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
         {/* Left Sidebar - Always visible */}
         <AppSidebar
@@ -2019,6 +1846,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         onOpenChange={setLoginModalOpen}
         triggerRef={queryInputRef}
         onAuthComplete={refreshAuthState}
+        anonymousUserId={isAnonymous ? authUser?.id : undefined}
       />
 
       {/* Credit/Subscription Modal for OUT_OF_CREDITS */}
@@ -2035,15 +1863,16 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
 
 // Main Terminal component - wraps content in AgentProvider
 export default function Terminal() {
-  const { user: authUser, isFullySignedIn } = useAuth();
+  const { user: authUser, isFullySignedIn, isAuthenticated } = useAuth();
   const user = isFullySignedIn ? authUser : null;
-  
+
   // loadAgents callback will be set by TerminalContent via ref
   const loadAgentsRef = useRef<(() => void) | null>(null);
-  
+
   return (
-    <AgentProvider 
-      user={user} 
+    <AgentProvider
+      user={user}
+      isAuthenticated={isAuthenticated}
       onLoadAgents={() => loadAgentsRef.current?.()}
     >
       <TerminalContentWithRef loadAgentsRef={loadAgentsRef} />

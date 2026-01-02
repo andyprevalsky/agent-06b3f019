@@ -93,11 +93,14 @@ const AgentContext = createContext<AgentContextValue | null>(null);
 
 interface AgentProviderProps {
   children: React.ReactNode;
-  user: any; // Auth user
+  user: any; // Auth user (null for anonymous users in some contexts)
+  isAuthenticated?: boolean; // True for both JWT and anonymous users (Supabase native)
   onLoadAgents?: () => void; // Callback to refresh agent list in sidebar
 }
 
-export function AgentProvider({ children, user, onLoadAgents }: AgentProviderProps) {
+export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }: AgentProviderProps) {
+  // canSubscribe is true when user is authenticated (JWT or anonymous - both have real Supabase sessions)
+  const canSubscribe = isAuthenticated ?? !!user;
   // Agent state
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [selectedAgentId, setSelectedAgentIdState] = useState<string | null>(null);
@@ -254,7 +257,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
       setStreamingAttention(null);
     };
 
-    if (!selectedAgentId || !user) {
+    if (!selectedAgentId || !canSubscribe) {
       cleanup();
       return cleanup;
     }
@@ -277,7 +280,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
     }
 
     const scheduleReconnect = () => {
-      if (!selectedAgentId || !user) return;
+      if (!selectedAgentId || !canSubscribe) return;
 
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -498,7 +501,7 @@ export function AgentProvider({ children, user, onLoadAgents }: AgentProviderPro
 
     setupRealtime();
     return cleanup;
-  }, [selectedAgentId, user, forceResubscribeCounter, dispatchMessage, onLoadAgents]);
+  }, [selectedAgentId, canSubscribe, forceResubscribeCounter, dispatchMessage, onLoadAgents]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Tab visibility reconnect

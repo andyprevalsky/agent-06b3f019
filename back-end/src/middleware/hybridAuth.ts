@@ -1,18 +1,20 @@
 /**
  * Hybrid Auth Middleware
- * 
+ *
  * Accepts either:
  * 1. Internal API key (X-API-Key header)
- * 2. JWT token (Authorization: Bearer)
+ * 2. JWT token (Authorization: Bearer) - includes anonymous users via Supabase signInAnonymously
  * 3. x402 payment (X-PAYMENT header)
- * 
+ *
  * Sets req.userId for the route handler to use.
+ * For anonymous users (Supabase native), the JWT will have is_anonymous=true.
  */
 
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import jwksClient from 'jwks-rsa';
 import { prisma } from '../lib/prisma';
+import { createInitialCredit } from '../lib/credits';
 
 // Lazy initialization of JWKS client
 let client: jwksClient.JwksClient | null = null;
@@ -20,11 +22,11 @@ let client: jwksClient.JwksClient | null = null;
 function getJwksClient() {
   if (!client) {
     const supabaseUrl = process.env.SUPABASE_URL;
-    
+
     if (!supabaseUrl) {
       throw new Error('Missing SUPABASE_URL environment variable');
     }
-    
+
     client = jwksClient({
       jwksUri: `${supabaseUrl}/auth/v1/.well-known/jwks.json`,
       cache: true,
@@ -40,6 +42,7 @@ export interface HybridAuthRequest extends Request {
   userId?: string;
   isInternal?: boolean;
   isX402?: boolean;
+  isAnonymous?: boolean;
   user?: {
     id: string;
     email?: string;
@@ -65,18 +68,18 @@ function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
  */
 async function getOrCreateWalletUser(walletAddress: string) {
   const userId = walletAddress.toLowerCase(); // Normalize
-  
+
   let user = await prisma.user.findUnique({
     where: { userId }
   });
-  
+
   if (!user) {
     user = await prisma.user.create({
       data: { userId }
     });
     console.log(`✅ Created x402 user for wallet: ${userId}`);
   }
-  
+
   return user;
 }
 
@@ -85,7 +88,7 @@ async function getOrCreateWalletUser(walletAddress: string) {
  */
 async function addCredits(userId: string, amountDollars: number) {
   const amountCents = Math.round(amountDollars * 100);
-  
+
   const credit = await prisma.credit.create({
     data: {
       userId,
@@ -93,14 +96,14 @@ async function addCredits(userId: string, amountDollars: number) {
       expirationDate: null, // Never expires
     }
   });
-  
+
   console.log(`💰 Added $${amountDollars} credit for user ${userId}`);
   return credit;
 }
 
 /**
  * Hybrid authentication middleware
- * Supports: Internal API key, JWT, or x402 payment
+ * Supports: Internal API key, JWT (including anonymous users), or x402 payment
  */
 export async function hybridAuth(
   req: HybridAuthRequest,
@@ -122,13 +125,15 @@ export async function hybridAuth(
       return next();
     }
 
-    // 2. Try JWT (for logged-in users)
+    // 2. Try JWT (for both regular and anonymous users)
+    // Anonymous users created via Supabase signInAnonymously() have real JWTs
+    // with is_anonymous=true in the payload
     const authHeader = req.headers.authorization;
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
       const supabaseUrl = process.env.SUPABASE_URL;
-      
+
       if (!supabaseUrl) {
         res.status(500).json({ error: 'Server configuration error' });
         return;
@@ -143,7 +148,7 @@ export async function hybridAuth(
             issuer: `${supabaseUrl}/auth/v1`,
             algorithms: ['ES256', 'HS256', 'RS256'],
           },
-          (err, decoded) => {
+          async (err, decoded) => {
             if (err) {
               console.error('JWT verification failed:', err.message);
               res.status(401).json({ error: 'Invalid or expired token' });
@@ -152,14 +157,41 @@ export async function hybridAuth(
             }
 
             const payload = decoded as jwt.JwtPayload;
-            req.userId = payload.sub!;
+            const userId = payload.sub!;
+            const isAnonymous = payload.is_anonymous === true;
+
+            req.userId = userId;
             req.user = {
-              id: payload.sub!,
+              id: userId,
               email: payload.email,
               phone: payload.phone,
             };
             req.isInternal = false;
             req.isX402 = false;
+            req.isAnonymous = isAnonymous;
+
+            // Ensure user record exists in our database
+            // This is especially important for anonymous users created by Supabase
+            // Use create with catch to handle race conditions (concurrent requests)
+            try {
+              await prisma.user.create({
+                data: {
+                  userId,
+                  isAnonymous,
+                  phone: payload.phone || null,
+                },
+              });
+              console.log(`✅ Created user record for ${userId} (anonymous: ${isAnonymous})`);
+
+              // Give initial credit to new users (both anonymous and regular)
+              await createInitialCredit(userId);
+            } catch (dbError: any) {
+              // P2002 = unique constraint violation (user already exists from race condition)
+              // This is expected and not an error - just means another request created the user first
+              if (dbError.code !== 'P2002') {
+                console.warn(`User record creation warning for ${userId}:`, dbError);
+              }
+            }
 
             next();
             resolve();
@@ -186,20 +218,23 @@ export async function hybridAuth(
 
       // Get or create user for this wallet
       const user = await getOrCreateWalletUser(payerWallet);
-      
+
       // Add credits from payment
       await addCredits(user.userId, paymentAmount);
-      
+
       req.userId = user.userId;
       req.isInternal = false;
       req.isX402 = true;
+      req.isAnonymous = false;
 
       return next();
     }
 
     // 4. No valid auth method found
-    res.status(401).json({ error: 'Authentication required. Provide JWT token, API key, or x402 payment.' });
-    
+    res.status(401).json({
+      error: 'Authentication required. Provide JWT token, API key, or x402 payment.',
+    });
+
   } catch (error) {
     console.error('Hybrid auth error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -210,4 +245,3 @@ export async function hybridAuth(
  * Export helper functions for reuse
  */
 export { getOrCreateWalletUser, addCredits };
-

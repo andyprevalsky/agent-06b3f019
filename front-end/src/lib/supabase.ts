@@ -227,13 +227,13 @@ export const sendOTP = async (phone: string) => {
   return data;
 };
 
-export const verifyOTP = async (phone: string, token: string) => {
+export const verifyOTP = async (phone: string, token: string, anonymousUserId?: string) => {
   const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ phone, token }),
+    body: JSON.stringify({ phone, token, anonymousUserId }),
   });
 
   const data = await response.json();
@@ -299,8 +299,42 @@ export const getSession = async () => {
 // Call this after authentication succeeds
 export const initializeRealtime = async () => {
   const { data: { session } } = await supabase.auth.getSession();
-  
+
   if (session?.access_token) {
     await supabase.realtime.setAuth(session.access_token);
   }
 };
+
+// =============================================================================
+// Anonymous User Helpers (using Supabase native anonymous auth)
+// =============================================================================
+
+/**
+ * Sign in anonymously using Supabase's native anonymous auth.
+ * Creates a real Supabase user with is_anonymous=true in the JWT.
+ * This user can later be converted to a permanent user by linking a phone identity.
+ */
+export const signInAnonymously = async () => {
+  console.log('[Supabase] Signing in anonymously...');
+  const { data, error } = await supabase.auth.signInAnonymously();
+
+  if (error) {
+    console.error('[Supabase] Anonymous sign-in failed:', error);
+    throw error;
+  }
+
+  console.log('[Supabase] Anonymous sign-in successful', {
+    userId: data.user?.id,
+    isAnonymous: data.user?.is_anonymous,
+  });
+
+  return data;
+};
+
+/**
+ * Check if the current user is anonymous
+ */
+export const isAnonymousUser = (user: User | null): boolean => {
+  return user?.is_anonymous === true;
+};
+

@@ -3,7 +3,6 @@ import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect, RefObject } from "react";
 import { sendOTP, verifyOTP } from "@/lib/supabase";
 import { X } from "lucide-react";
-import { checkNeedsInviteCode, useInviteCode } from "@/lib/api";
 import * as amplitude from '@amplitude/analytics-browser';
 
 interface PhoneAuthModalProps {
@@ -11,14 +10,14 @@ interface PhoneAuthModalProps {
   onOpenChange: (open: boolean) => void;
   triggerRef: RefObject<HTMLDivElement>;
   onAuthComplete?: () => void; // Called when user is fully signed in
+  anonymousUserId?: string; // Pass this to merge anonymous user's agents on login
 }
 
-const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: PhoneAuthModalProps) => {
+const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonymousUserId }: PhoneAuthModalProps) => {
   const { toast } = useToast();
-  const [step, setStep] = useState<'phone' | 'otp' | 'invite'>('phone');
+  const [step, setStep] = useState<'phone' | 'otp'>('phone');
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
-  const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [modalPosition, setModalPosition] = useState({ top: 0, left: 0 });
 
@@ -94,11 +93,16 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: Phon
 
     try {
       const strippedPhone = stripPhoneNumber(phone);
+
+      // Always use standard OTP flow - this handles both:
+      // - New users (creates account)
+      // - Existing users (signs into existing account)
+      // Anonymous users will get a new session for their phone number
       await sendOTP(strippedPhone);
-      
+
       // Track phone entered event
       amplitude.track('phone_entered');
-      
+
       setStep('otp');
       toast({
         title: "Code sent!",
@@ -122,28 +126,20 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: Phon
 
     try {
       const strippedPhone = stripPhoneNumber(phone);
-      
-      // Verify OTP with Supabase
-      await verifyOTP(strippedPhone, otp);
-      
+
+      // Verify OTP - creates new session for the phone number
+      // Pass anonymousUserId to merge any agents created while anonymous
+      await verifyOTP(strippedPhone, otp, anonymousUserId);
+
       // Track in Amplitude
       amplitude.track('otp_code_submitted');
       amplitude.setUserId(strippedPhone);
-      
+
       // Small delay to let Supabase finish internal state updates
       await new Promise(resolve => setTimeout(resolve, 100));
-      
-      // Check if user needs to enter an invite code
-      const needsInvite = await checkNeedsInviteCode();
-      
-      if (needsInvite) {
-        // Show invite code entry screen
-        setStep('invite');
-        setLoading(false);
-      } else {
-        // User already has invite code - complete the flow
-        completeAuth();
-      }
+
+      // Complete the flow (no invite code needed anymore)
+      completeAuth();
     } catch (error: any) {
       console.error('Verify OTP error:', error);
       toast({
@@ -155,7 +151,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: Phon
     }
   };
 
-  // Called when auth flow is fully complete (user has session + invite code)
+  // Called when auth flow is fully complete
   const completeAuth = () => {
     toast({
       title: "Success!",
@@ -163,43 +159,14 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: Phon
     });
     setLoading(false);
     onOpenChange(false);
-    
+
     // Reset state
     setStep('phone');
     setPhone('');
     setOtp('');
-    setInviteCode('');
-    
+
     // Notify parent that auth is complete
     onAuthComplete?.();
-  };
-
-  const handleSubmitInviteCode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-
-    try {
-      const inviteCodeNum = parseInt(inviteCode, 10);
-      if (isNaN(inviteCodeNum)) {
-        throw new Error('Invalid invite code format');
-      }
-
-      await useInviteCode(inviteCodeNum);
-      
-      // Track invite code submitted event
-      amplitude.track('invite_code_submitted');
-      
-      // Complete the auth flow
-      completeAuth();
-    } catch (error: any) {
-      console.error('Invite code error:', error);
-      toast({
-        title: "Invalid invite code",
-        description: error.message || "Please check the code and try again.",
-        variant: "destructive",
-      });
-      setLoading(false);
-    }
   };
 
   const handleBack = () => {
@@ -214,7 +181,6 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: Phon
       setStep('phone');
       setPhone('');
       setOtp('');
-      setInviteCode('');
     }, 200);
   };
 
@@ -252,7 +218,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: Phon
             zIndex: -1,
           }}
         />
-        {step === 'phone' ? (
+        {step === 'phone' && (
           <form onSubmit={handleSendOTP} className="p-6">
             {/* Header: Logo left, X right */}
             <div className="flex items-start justify-between mb-6">
@@ -316,7 +282,8 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: Phon
               </button>
             </div>
           </form>
-        ) : step === 'otp' ? (
+        )}
+        {step === 'otp' && (
           <form onSubmit={handleVerifyOTP} className="p-6">
             {/* Header: Logo left, X right */}
             <div className="flex items-start justify-between mb-6">
@@ -389,73 +356,6 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete }: Phon
                 disabled={loading}
               >
                 ← Change phone number
-              </button>
-            </div>
-          </form>
-        ) : (
-          <form onSubmit={handleSubmitInviteCode} className="p-6">
-            {/* Header: Logo left, X right */}
-            <div className="flex items-start justify-between mb-6">
-              <svg className="w-8 h-8" viewBox="21 62 220 222" xmlns="http://www.w3.org/2000/svg">
-                <defs>
-                  <linearGradient id="phoneauth-logo-gradient" x1="100%" y1="0%" x2="0%" y2="100%">
-                    <stop offset="0%" stopColor="#FE7503" />
-                    <stop offset="25%" stopColor="#FC585C" />
-                    <stop offset="50%" stopColor="#E062CC" />
-                    <stop offset="75%" stopColor="#A76CED" />
-                    <stop offset="100%" stopColor="#7A6BEC" />
-                  </linearGradient>
-                </defs>
-                <g transform="translate(0,303) scale(0.1,-0.1)" fill="url(#phoneauth-logo-gradient)">
-                  <path d="M1276 2378 c-145 -192 -231 -442 -211 -616 8 -68 41 -202 61 -251 8 -19 13 -35 11 -37 -2 -2 -30 7 -62 21 -249 100 -537 54 -784 -124 -36 -25 -69 -49 -75 -53 -17 -11 22 -46 119 -105 163 -101 300 -144 460 -144 92 -1 226 24 301 56 20 8 38 15 39 15 2 0 -10 -39 -25 -87 -69 -213 -58 -395 36 -600 31 -69 136 -237 154 -248 10 -6 114 144 152 220 37 73 75 199 88 293 14 101 1 206 -40 330 -15 48 -27 88 -26 89 1 2 26 -7 55 -18 195 -74 423 -66 611 22 98 46 217 118 245 149 18 20 18 21 -1 35 -177 139 -396 225 -570 225 -79 0 -195 -23 -282 -56 -44 -16 -63 -20 -59 -11 27 72 60 196 68 260 17 132 -17 300 -89 442 -36 72 -124 209 -141 219 -5 4 -21 -8 -35 -26z m40 -935 c7 -46 50 -92 109 -119 27 -13 41 -23 31 -23 -11 -1 -38 -12 -62 -26 -49 -29 -83 -90 -85 -151 -1 -37 -2 -36 -9 13 -4 29 -17 67 -28 85 -22 35 -86 77 -118 79 -11 0 1 9 26 20 79 35 118 90 121 168 1 25 3 28 6 11 2 -14 6 -39 9 -57z"/>
-                </g>
-              </svg>
-              <button
-                type="button"
-                onClick={handleClose}
-                className="text-gray-400 hover:text-gray-600 transition-colors p-1"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Titles */}
-            <div className="mb-6">
-              <h2 className="text-2xl font-semibold text-navi-black">
-                Enter Invite Code
-              </h2>
-              <p className="text-xl text-gray-400 mt-1">
-                Rose is invite-only
-              </p>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label htmlFor="inviteCode" className="block text-sm text-gray-500 mb-1">
-                  6-digit Invite Code
-                </label>
-                <input
-                  id="inviteCode"
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]{6}"
-                  maxLength={6}
-                  placeholder="000000"
-                  value={inviteCode}
-                  onChange={(e) => setInviteCode(e.target.value.replace(/\D/g, ''))}
-                  required
-                  className="w-full px-3 py-2 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-center text-sm font-mono tracking-widest placeholder-navi-black/30 focus:outline-none focus:border-gray-400"
-                  disabled={loading}
-                  autoFocus
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading || inviteCode.length !== 6}
-                className="w-full px-3 py-2 bg-navi-black text-white text-sm rounded-lg hover:bg-navi-black/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loading ? 'Verifying...' : 'Submit'}
               </button>
             </div>
           </form>

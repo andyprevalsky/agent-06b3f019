@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
-import { AuthRequest, authenticate } from '../middleware/auth';
 import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
 import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
@@ -62,14 +61,14 @@ const updateStatusSchema = z.object({
 });
 
 // GET /api/agents - Get all agents for the authenticated user
-router.get('/', authenticate, async (req: AuthRequest, res) => {
+router.get('/', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     // Prevent caching - agent statuses change in real-time
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
-    
-    const userId = req.user!.id;
+
+    const userId = req.userId;
 
     // Only get top-level agents (no parent)
     const agents = await prisma.agent.findMany({
@@ -349,14 +348,14 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
 });
 
 // GET /api/agents/:id - Get agent details with messages
-router.get('/:id', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     // Prevent caching - data changes in real-time
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
-    
-    const userId = req.isInternal ? undefined : req.user!.id;
+
+    const userId = req.isInternal ? undefined : req.userId;
     const agentId = req.params.id;
     const before = req.query.before as string | undefined; // Load messages BEFORE this timestamp (scroll up)
     const limit = 50;
@@ -546,7 +545,7 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
 });
 
 // POST /api/agents/:id/messages - Post a message (user or internal)
-router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
+router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     const agentId = req.params.id;
     const body = postMessageSchema.parse(req.body);
@@ -582,7 +581,7 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
       }
     } else {
       // User: verify ownership
-      const userId = req.user!.id;
+      const userId = req.userId;
       const agent = await prisma.agent.findFirst({
         where: {
           id: agentId,
@@ -638,7 +637,7 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
 });
 
 // GET /api/agents/:id/status - Get agent status (for browser agent pause check)
-router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     const agentId = req.params.id;
 
@@ -669,7 +668,7 @@ router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
 });
 
 // PATCH /api/agents/:id/status - Update agent status (internal/worker only)
-router.patch('/:id/status', authenticate, async (req: AuthRequest, res) => {
+router.patch('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     const agentId = req.params.id;
     const body = updateStatusSchema.parse(req.body);
@@ -726,9 +725,9 @@ router.patch('/:id/status', authenticate, async (req: AuthRequest, res) => {
 });
 
 // DELETE /api/agents/:id - Soft delete an agent and cancel workflow
-router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
+router.delete('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
-    const userId = req.isInternal ? undefined : req.user!.id;
+    const userId = req.isInternal ? undefined : req.userId;
     const agentId = req.params.id;
 
     // Verify agent belongs to user (or internal)
@@ -832,9 +831,9 @@ async function pauseAgentRecursive(agentId: string): Promise<void> {
 }
 
 // POST /api/agents/:id/pause - Pause workflow
-router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
+router.post('/:id/pause', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
-    const userId = req.user!.id;
+    const userId = req.userId;
     const agentId = req.params.id;
 
     // Verify agent belongs to user
@@ -906,9 +905,9 @@ async function resumeAgentRecursive(agentId: string): Promise<void> {
 }
 
 // POST /api/agents/:id/resume - Resume workflow
-router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
+router.post('/:id/resume', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
-    const userId = req.user!.id;
+    const userId = req.userId;
     const agentId = req.params.id;
 
     // Verify agent belongs to user
@@ -943,9 +942,9 @@ const updateAgentSchema = z.object({
   verifier_prompt: z.string().min(1).optional(),
 });
 
-router.patch('/:id', authenticate, async (req: AuthRequest, res) => {
+router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
-    const userId = req.user!.id;
+    const userId = req.userId;
     const agentId = req.params.id;
     const body = updateAgentSchema.parse(req.body);
 
@@ -1059,7 +1058,7 @@ router.patch('/:id', authenticate, async (req: AuthRequest, res) => {
 
 // POST /api/agents/:id/restart - Restart an agent's workflow
 // Terminates existing workflow and starts a fresh one with same agent data
-router.post('/:id/restart', authenticate, async (req: AuthRequest, res) => {
+router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     const agentId = req.params.id;
 
@@ -1068,7 +1067,7 @@ router.post('/:id/restart', authenticate, async (req: AuthRequest, res) => {
     const agent = await prisma.agent.findFirst({
       where: {
         id: agentId,
-        ...(req.isInternal ? {} : { userId: req.user!.id }),
+        ...(req.isInternal ? {} : { userId: req.userId }),
         deletedAt: null,
       },
       include: {
@@ -1140,6 +1139,92 @@ router.post('/:id/restart', authenticate, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error('Restart agent error:', error);
     res.status(500).json({ error: 'Failed to restart agent' });
+  }
+});
+
+// =============================================================================
+// Signup Workflow Signals (for request_user_signup tool)
+// =============================================================================
+
+// POST /api/agents/:id/signal/signup_completed - Signal that user completed signup
+router.post('/:id/signal/signup_completed', hybridAuth, async (req: HybridAuthRequest, res) => {
+  try {
+    const agentId = req.params.id;
+    const userId = req.userId;
+
+    // Verify agent exists and belongs to user
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        userId,
+        deletedAt: null,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    // Send signal to workflow
+    if (agent.temporalWorkflowId) {
+      try {
+        const client = await getTemporalClient();
+        const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+        await handle.signal('signup_completed');
+        console.log(`✅ Sent signup_completed signal to workflow ${agent.temporalWorkflowId}`);
+      } catch (error) {
+        console.error(`Failed to signal workflow ${agent.temporalWorkflowId}:`, error);
+        res.status(500).json({ error: 'Failed to signal workflow' });
+        return;
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Signal signup_completed error:', error);
+    res.status(500).json({ error: 'Failed to signal signup completed' });
+  }
+});
+
+// POST /api/agents/:id/signal/signup_dismissed - Signal that user dismissed signup prompt
+router.post('/:id/signal/signup_dismissed', hybridAuth, async (req: HybridAuthRequest, res) => {
+  try {
+    const agentId = req.params.id;
+    const userId = req.userId;
+
+    // Verify agent exists and belongs to user
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        userId,
+        deletedAt: null,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    // Send signal to workflow
+    if (agent.temporalWorkflowId) {
+      try {
+        const client = await getTemporalClient();
+        const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+        await handle.signal('signup_dismissed');
+        console.log(`✅ Sent signup_dismissed signal to workflow ${agent.temporalWorkflowId}`);
+      } catch (error) {
+        console.error(`Failed to signal workflow ${agent.temporalWorkflowId}:`, error);
+        res.status(500).json({ error: 'Failed to signal workflow' });
+        return;
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Signal signup_dismissed error:', error);
+    res.status(500).json({ error: 'Failed to signal signup dismissed' });
   }
 });
 

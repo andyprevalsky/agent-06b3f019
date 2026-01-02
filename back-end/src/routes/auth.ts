@@ -1,12 +1,13 @@
 /**
  * Auth Routes
- * 
- * Handles OTP verification with user initialization
+ *
+ * Handles OTP verification with user initialization.
+ * Anonymous users are now created via Supabase's native signInAnonymously().
  */
 
 import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
-import { createInitialCredit } from '../lib/credits';
+import { createSignupBonusCredit } from '../lib/credits';
 
 // Supabase API response types
 interface SendOtpResponse {
@@ -21,6 +22,7 @@ interface VerifyOtpResponse {
     id: string;
     phone?: string;
     email?: string;
+    is_anonymous?: boolean;
   };
   access_token?: string;
   refresh_token?: string;
@@ -33,6 +35,39 @@ interface VerifyOtpResponse {
 }
 
 const router = Router();
+
+/**
+ * Merge agents from anonymous user to authenticated user.
+ * Transfers ownership of all agents (and their messages, usage) from the anonymous user.
+ */
+async function mergeAnonymousUserAgents(anonymousUserId: string, authenticatedUserId: string) {
+  try {
+    // Find all agents belonging to the anonymous user
+    const anonymousAgents = await prisma.agent.findMany({
+      where: { userId: anonymousUserId },
+      select: { id: true },
+    });
+
+    if (anonymousAgents.length === 0) {
+      console.log(`No agents to merge from anonymous user ${anonymousUserId}`);
+      return;
+    }
+
+    // Transfer agent ownership to the authenticated user
+    const result = await prisma.agent.updateMany({
+      where: { userId: anonymousUserId },
+      data: { userId: authenticatedUserId },
+    });
+
+    console.log(`✅ Merged ${result.count} agents from anonymous user ${anonymousUserId} to ${authenticatedUserId}`);
+
+    // Optionally: Mark the anonymous user record for cleanup (don't delete in case of issues)
+    // The anonymous user record can be cleaned up later via a batch job
+  } catch (error) {
+    // Log but don't fail the auth flow - agent merge is best-effort
+    console.error(`Failed to merge agents from ${anonymousUserId} to ${authenticatedUserId}:`, error);
+  }
+}
 
 /**
  * POST /api/auth/send-otp
@@ -70,8 +105,8 @@ router.post('/send-otp', async (req: Request, res: Response) => {
     if (!response.ok) {
       const data = await response.json() as SendOtpResponse;
       console.error('Supabase OTP error:', data);
-      return res.status(response.status).json({ 
-        error: data.error_description || data.msg || 'Failed to send OTP' 
+      return res.status(response.status).json({
+        error: data.error_description || data.msg || 'Failed to send OTP'
       });
     }
 
@@ -84,11 +119,16 @@ router.post('/send-otp', async (req: Request, res: Response) => {
 
 /**
  * POST /api/auth/verify-otp
- * Verify OTP, create user record, and initialize $5 credit
+ * Verify OTP, create user record, initialize credit
+ *
+ * With Supabase native anonymous auth:
+ * - Anonymous users have real Supabase user IDs (UUIDs)
+ * - When they verify phone via standard OTP, they get a NEW user ID
+ * - We merge the anonymous user's agents into the new authenticated user
  */
 router.post('/verify-otp', async (req: Request, res: Response) => {
   try {
-    const { phone, token } = req.body;
+    const { phone, token, anonymousUserId } = req.body;
 
     if (!phone || !token) {
       return res.status(400).json({ error: 'Phone and OTP token are required' });
@@ -107,7 +147,7 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'apikey': supabaseKey,
+        apikey: supabaseKey,
       },
       body: JSON.stringify({
         type: 'sms',
@@ -116,16 +156,21 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       }),
     });
 
-    const data = await response.json() as VerifyOtpResponse;
+    const data = (await response.json()) as VerifyOtpResponse;
 
     if (!response.ok) {
-      console.error('Supabase verify error:', data);
-      return res.status(response.status).json({ 
-        error: data.error_description || data.msg || 'Invalid OTP' 
+      console.error('Supabase verify error:', {
+        status: response.status,
+        data,
+        phone,
+        tokenLength: token?.length,
+      });
+      return res.status(response.status).json({
+        error: data.error_description || data.msg || 'Invalid OTP',
       });
     }
 
-    // OTP verified successfully - now create user record and initialize credit
+    // OTP verified successfully - ensure user record exists and handle credits
     if (data.user?.id) {
       const userId = data.user.id;
       const userPhone = phone; // Phone from request (E.164 format)
@@ -136,28 +181,62 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       });
 
       if (!existingUser) {
-        // Create user record with phone
+        // User doesn't exist in our DB - this could be:
+        // 1. An anonymous user who just verified phone (their Supabase user was created by signInAnonymously)
+        // 2. A brand new user who went straight to phone verification
+
+        // Create user record
         await prisma.user.create({
-          data: { 
+          data: {
             userId,
-            phone: userPhone, // Store phone number
+            phone: userPhone,
+            isAnonymous: false, // They just verified phone, so not anonymous anymore
           },
         });
         console.log(`✅ Created user record for ${userId} with phone ${userPhone}`);
 
-        // Initialize $5 credit for new user
-        await createInitialCredit(userId);
-        console.log(`✅ Initialized $5 credit for new user ${userId}`);
+        // Give signup bonus credit for completing phone verification
+        await createSignupBonusCredit(userId);
+        console.log(`✅ Created signup bonus credit for user ${userId}`);
+
+        // Merge agents from anonymous user if provided
+        if (anonymousUserId && anonymousUserId !== userId) {
+          await mergeAnonymousUserAgents(anonymousUserId, userId);
+        }
       } else {
-        // Update phone if not set (for existing users who may not have phone stored)
+        // User exists - update to mark as non-anonymous and add phone
+        const updates: { phone?: string; isAnonymous?: boolean } = {};
+
         if (!existingUser.phone && userPhone) {
+          updates.phone = userPhone;
+        }
+
+        // If they were anonymous before, mark as non-anonymous and give signup bonus
+        if (existingUser.isAnonymous) {
+          updates.isAnonymous = false;
+
           await prisma.user.update({
             where: { userId },
-            data: { phone: userPhone },
+            data: updates,
           });
-          console.log(`✅ Updated phone for existing user ${userId}`);
+
+          // Give signup bonus for converting from anonymous to authenticated
+          await createSignupBonusCredit(userId);
+          console.log(`✅ Converted anonymous user ${userId} to authenticated, gave signup bonus`);
+        } else if (Object.keys(updates).length > 0) {
+          await prisma.user.update({
+            where: { userId },
+            data: updates,
+          });
+          console.log(`✅ Updated user ${userId}:`, updates);
+        } else {
+          console.log(`User ${userId} already exists and is authenticated`);
         }
-        console.log(`User ${userId} already exists`);
+
+        // Merge agents from anonymous user if provided (returning user who had an anon session)
+        if (anonymousUserId && anonymousUserId !== userId) {
+          await mergeAnonymousUserAgents(anonymousUserId, userId);
+        }
       }
     }
 
@@ -180,4 +259,3 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 });
 
 export default router;
-
