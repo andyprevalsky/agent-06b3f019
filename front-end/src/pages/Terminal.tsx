@@ -1949,6 +1949,8 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
                         <button
                           key={i}
                           onClick={() => {
+                            amplitude.track('goal_typed');
+                            amplitude.track('popular_goal_clicked', { goal });
                             setMessageInput(goal);
                           }}
                           className="px-3 py-1 text-xs bg-secondary hover:bg-secondary/80 rounded-full whitespace-nowrap flex-shrink-0 border"
