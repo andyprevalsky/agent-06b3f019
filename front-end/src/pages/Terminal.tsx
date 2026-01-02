@@ -1539,7 +1539,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
 
         {/* Main Content - Centered */}
         <main className="flex-1 flex justify-center h-screen overflow-hidden" style={{ height: '100dvh' }}>
-          <div className="flex flex-col relative max-w-5xl w-full px-6 h-full overflow-hidden">
+          <div className="flex flex-col relative max-w-5xl w-full px-2 md:px-6 h-full overflow-hidden">
           {/* Breadcrumb for sub-agents - Below Header */}
           {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
             <div className="absolute top-20 left-0 right-0 z-40 px-6">
@@ -1613,7 +1613,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
           ) : (
             <>
             <ScrollArea 
-              className="flex-1 px-6 relative" 
+              className="flex-1 px-2 md:px-6 relative" 
               style={{ 
                 display: 'flex', 
                 flexDirection: 'column', 

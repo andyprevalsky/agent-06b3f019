@@ -169,7 +169,7 @@ export default function QueryInput({
     : selectedModel;
 
   return (
-    <div className="w-full px-2 md:px-0">
+    <div className="w-full md:px-0">
       <div className="max-w-4xl mx-auto">
         {/* Query Wrap - Glossy modal background */}
         <div 

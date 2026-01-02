@@ -453,7 +453,7 @@ export function MessageList({
           {/* Paused banner */}
           {agent?.status === 'PAUSED' && (
             <div className="flex gap-3">
-              <div className="flex-shrink-0 w-8" />
+              <div className="flex-shrink-0 w-8 hidden md:block" />
               <div 
                 className="flex items-center gap-2 py-1.5 px-3 rounded-full border border-border"
                 style={{
@@ -478,7 +478,7 @@ export function MessageList({
           {/* Out of credits */}
           {agent?.status === 'OUT_OF_CREDITS' && (
             <div className="flex gap-3 items-center">
-              <div className="flex-shrink-0 w-8" />
+              <div className="flex-shrink-0 w-8 hidden md:block" />
               <div className="flex items-center gap-3">
                 <p className="text-sm text-red-500 dark:text-red-400 font-medium">
                   agent ran out of credits
@@ -500,7 +500,7 @@ export function MessageList({
           {/* Completed */}
           {agent?.status === 'COMPLETED' && (
             <div className="flex gap-3">
-              <div className="flex-shrink-0 w-8" />
+              <div className="flex-shrink-0 w-8 hidden md:block" />
               <p className="text-sm text-muted-foreground">your goal is complete</p>
             </div>
           )}
@@ -517,7 +517,7 @@ export function MessageList({
          (showThinkingLoader && filteredMessages[filteredMessages.length - 1]?.role !== 'ASSISTANT')) && 
         agent?.status !== 'PAUSED' && (
           <div className={cn("flex", !compact && "gap-3")}>
-            {!compact && <div className="flex-shrink-0 w-8" />}
+            {!compact && <div className="flex-shrink-0 w-8 hidden md:block" />}
             <div className="flex flex-col gap-2">
               {/* Thinking header */}
               <div className="flex items-center gap-2">
@@ -588,7 +588,7 @@ export function MessageList({
       {/* Streaming attention message */}
       {filteredStreamingAttention && subAgentId === undefined && filteredStreamingBubbles.size > 0 && (
         <div className="flex gap-3 mt-4">
-          <div className="flex-shrink-0 w-8" />
+          <div className="flex-shrink-0 w-8 hidden md:block" />
           <MessageBubble
             key={`streaming-attention-${filteredStreamingAttention.tool_call_id}`}
             message={{

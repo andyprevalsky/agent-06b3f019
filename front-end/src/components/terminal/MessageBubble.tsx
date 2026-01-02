@@ -450,8 +450,8 @@ const AttentionMessage = memo(function AttentionMessage({
   
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-      <div className="flex-shrink-0 w-8" />
-      
+      <div className="flex-shrink-0 w-8 hidden md:block" />
+
       <div className="flex-1 space-y-3">
         {/* Render message as raw markdown text */}
         <div className="text-sm">
@@ -588,8 +588,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         {/* Empty space where icon would be to align with agent messages */}
-        <div className="flex-shrink-0 w-8" />
-        
+        <div className="flex-shrink-0 w-8 hidden md:block" />
+
         <div className="flex-1">
           <SubAgentToolBubble
             toolCallId={message.metadata.toolCallId || ''}
@@ -654,7 +654,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
-        <div className="flex-shrink-0 w-8" />
+        <div className="flex-shrink-0 w-8 hidden md:block" />
         <div className="flex-1">
           <PlanChip
             plan={{
@@ -700,8 +700,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   if (toolData) {
     return (
       <div className={cn("flex animate-in fade-in duration-300", !compact && "gap-3")}>
-        {!compact && <div className="flex-shrink-0 w-8" />}
-        
+        {!compact && <div className="flex-shrink-0 w-8 hidden md:block" />}
+
         <div className="flex-1">
           <ToolMessage 
             data={toolData} 
