@@ -6,29 +6,106 @@ A running list of benchmarks we want to test our system against.
 
 ## Browser / Web Agent Benchmarks
 
-### Mind2Web
+### Summary Table
+
+| Benchmark | SOTA | Popularity | Cost/Run | Integration |
+|-----------|------|------------|----------|-------------|
+| Online-Mind2Web | 83.6% (Lux) | ★★★★☆ | $9-$1,600 | MEDIUM |
+| WebArena | 61.7% (IBM CUGA) | ★★★★★ | $500-$2,000 | HARD |
+| VisualWebArena | 16.4% (GPT-4V+SoM) | ★★★★☆ | $1,000-$3,000 | HARD |
+| RLI | 2.5% (Manus) | ★★★☆☆ | ~$7,200 | VERY HARD |
+
+**Integration Priority**: Online-Mind2Web → WebArena → VisualWebArena → RLI
+
+---
+
+### Mind2Web / Online-Mind2Web
 - **URL**: https://osu-nlp-group.github.io/Mind2Web/
 - **Paper**: https://arxiv.org/abs/2306.06070
 - **GitHub**: https://github.com/OSU-NLP-Group/Mind2Web
-- **Description**: Large-scale dataset for generalist web agents. 2,000+ open-ended tasks across 137 real-world websites.
-- **Status**: [ ] Not started
-
-### Remote Labor Index (RLI)
-- **URL**: https://www.remotelabor.ai
-- **Paper**: https://arxiv.org/abs/2510.26787
-- **GitHub**: https://github.com/centerforaisafety/RLI (check)
-- **Description**: Real-world, economically valuable remote-work projects. Tests end-to-end agent performance on tasks spanning game development, product design, architecture, data analysis, video animation, etc. 6,000+ hours of work valued at $140k+. Current SOTA (Manus) achieves only 2.5% automation rate.
+- **Online GitHub**: https://github.com/OSU-NLP-Group/Online-Mind2Web
+- **Leaderboards**:
+  - [HAL: Online Mind2Web](https://hal.cs.princeton.edu/online_mind2web)
+  - [HuggingFace](https://huggingface.co/spaces/osunlp/Online_Mind2Web_Leaderboard)
+- **Description**: Large-scale dataset for generalist web agents. Original: 2,000+ tasks across 137 websites (cached HTML). Online: 300 tasks across 136 live websites.
+- **Tasks**: 300 (Online-Mind2Web, live websites)
+- **Industry Standards** (Online-Mind2Web, 2025):
+  - Lux (OpenAGI): 83.6%
+  - Gemini CUA: 69.0%
+  - OpenAI Operator: 61.3%
+  - Claude Sonnet 4: 61.0%
+  - SeeAct + GPT-5: 42.3%
+  - Human baseline: ~88%
+- **Popularity**: ★★★★☆ (High - NeurIPS 2023 spotlight, COLM 2025 for Online version)
+- **Cost per run**: $9 (Gemini Flash) to $1,600 (Claude Sonnet 4) for 300 tasks
+- **Integration difficulty**: MEDIUM (~1 week)
+  - Browserbase CDP already supported
+  - Live websites, no Docker needed
+  - Need task loader + evaluator
 - **Status**: [ ] Not started
 
 ### WebArena
 - **URL**: https://webarena.dev/
 - **GitHub**: https://github.com/web-arena-x/webarena
+- **Leaderboard**: [Google Sheets](https://docs.google.com/spreadsheets/d/1M801lEpBbKSNwP-vDBkC_pF7LdyGU1f_ufZb_NWNBZQ)
 - **Description**: Realistic web environment for autonomous agents. Self-hosted websites for reproducible evaluation.
+- **Tasks**: 812 (self-hosted Docker containers)
+- **Industry Standards** (2025):
+  - IBM CUGA: 61.7%
+  - OpenAI Operator: 58.0%
+  - AWA 1.5 (Jace AI): 57.0%
+  - Gemini 2.5 Pro: 54.8%
+  - AWM (open-source): 35.5%
+  - Human baseline: 78.2%
+- **Popularity**: ★★★★★ (Very High - gold standard, every major lab reports)
+- **Cost per run**: ~$500-2,000 estimated (812 tasks × $0.60-2.50/task)
+- **Integration difficulty**: HARD (~2 weeks)
+  - 5+ Docker containers (Shopping, Reddit, GitLab, Map, Wikipedia)
+  - Significant infrastructure setup
+  - Reproducible but complex
 - **Status**: [ ] Not started
 
 ### VisualWebArena
 - **URL**: https://jykoh.com/vwa
-- **Description**: Extension of WebArena with visually-grounded tasks.
+- **GitHub**: https://github.com/web-arena-x/visualwebarena
+- **Leaderboard**: [Project Page](https://jykoh.com/vwa)
+- **Description**: Extension of WebArena with visually-grounded tasks. Tests multimodal agent capabilities.
+- **Tasks**: 910 (vision-grounded)
+- **Industry Standards** (2024-2025):
+  - GPT-4V + SoM: 16.4%
+  - Gemini-Pro: ~14%
+  - GPT-4o: ~13%
+  - GPT-4 Turbo: ~12%
+  - Mixtral-8x7B: ~8%
+  - Human baseline: 88.7%
+- **Popularity**: ★★★★☆ (High - ACL 2024, tests multimodal)
+- **Cost per run**: ~$1,000-3,000 estimated (910 tasks with vision tokens)
+- **Integration difficulty**: HARD (~2 weeks)
+  - Same Docker setup as WebArena
+  - Additional Classifieds/Reddit/Wikipedia containers
+  - Python 3.10/3.11 required (not 3.12)
+- **Status**: [ ] Not started
+
+### Remote Labor Index (RLI)
+- **URL**: https://www.remotelabor.ai
+- **Paper**: https://arxiv.org/abs/2510.26787
+- **GitHub**: https://github.com/centerforaisafety/rli_evaluation_platform
+- **Leaderboard**: [Scale AI RLI](https://scale.com/leaderboard/rli)
+- **Description**: Real-world, economically valuable remote-work projects from Upwork. Tests end-to-end agent performance on tasks spanning game development, product design, architecture, data analysis, video animation, etc. 6,000+ hours of work valued at $143,991.
+- **Tasks**: 240 real Upwork projects (median 11.5 hours, mean 28.9 hours per task)
+- **Industry Standards** (2025):
+  - Manus 1.5: 2.50% (ELO: 518)
+  - Manus 1.0: 2.50% (ELO: 510)
+  - Claude Sonnet 4.5: 2.08% (ELO: 442)
+  - GPT-5: 1.67% (ELO: 437)
+  - ChatGPT Agent: 1.25% (ELO: 454)
+  - Human baseline: 100%
+- **Popularity**: ★★★☆☆ (Medium - emerging, Scale AI backed)
+- **Cost per run**: ~$7,200 ($30/task budget × 240 tasks)
+- **Integration difficulty**: VERY HARD (~1 month+)
+  - Multi-hour tasks (median 11.5 hours per task)
+  - CLI (OpenHands) + GUI environments needed
+  - Manual expert evaluation required
 - **Status**: [ ] Not started
 
 ---
