@@ -1,4 +1,8 @@
 import { PrismaClient } from '@prisma/client';
+import dotenv from 'dotenv';
+
+// Ensure env vars are loaded before accessing DATABASE_URL
+dotenv.config();
 
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
