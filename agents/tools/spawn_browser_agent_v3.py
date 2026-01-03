@@ -20,6 +20,7 @@ import uuid as uuid_module
 import base64
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
+from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
 from browser_tools.schemas import BROWSER_TOOL_MODELS, AVAILABLE_ACTIONS
 from browser_tools.dom_service import DOMService, ActionHistory
 from helpers.model_pricing import get_model_pricing_with_fallback
@@ -1125,10 +1126,22 @@ BROWSER CONTEXT:
             
             # 4. Call Rose API for next action
             try:
+                # Tracing: log last action before Rose API call
+                action_entries = action_history.get_entries()
+                if action_entries:
+                    last = action_entries[-1]
+                    logger.info(
+                        "🔍 [TRACE] Last action before Rose API",
+                        action=last.get("action"),
+                        has_thinking=bool(last.get("thinking")),
+                        has_screenshot=bool(last.get("screenshot")),
+                        thinking_preview=last.get("thinking", "")[:100] if last.get("thinking") else "NONE"
+                    )
+
                 llm_result = await call_rose_browser_use(
                     task=enriched_task,
                     browser_state=browser_state,
-                    action_history=action_history.get_entries(),
+                    action_history=action_entries,
                     config=config,
                 )
                 
@@ -1392,11 +1405,23 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_url=browser_url, action_type="system", tool_call_id=continuing_tool_call_id
                     )
 
+                    # Get current screenshot for the feedback action (Yutori needs observation/assistant pairs)
+                    current_state = await dom_service.get_browser_state(include_screenshot=True)
+                    current_screenshot = current_state.get("screenshot")
+
                     await action_history.record_action(
                         dom_service=dom_service,
                         action="wait",  # Neutral action - processing feedback
                         thinking=verifier_feedback_thinking,
-                        result={"success": True, "message": "Verifier feedback processed"}
+                        result={"success": True, "message": "Verifier feedback processed"},
+                        screenshot=current_screenshot  # Include screenshot for Yutori observation/assistant pairs
+                    )
+
+                    logger.info(
+                        "🔍 [TRACE] Recorded verifier feedback action",
+                        step=len(action_history),
+                        has_screenshot=bool(current_screenshot),
+                        thinking_preview=verifier_feedback_thinking[:200]
                     )
                     
                 except Exception as verifier_error:
@@ -1578,16 +1603,63 @@ Based on this feedback, I need to continue working on the task and address the i
             "execution_time_ms": execution_time_ms
         }
         
+    except asyncio.CancelledError:
+        # Activity was cancelled (user paused the agent)
+        logger.info("🔴 Browser agent activity cancelled (paused)")
+
+        # Cleanup - disconnect from browser but keep session alive
+        if dom_service:
+            try:
+                await dom_service.disconnect()
+            except:
+                pass
+
+        # Pause the session (not close) so it can be resumed
+        if session_id:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        f"{config.backend.api_url}/api/browser-session/close",
+                        headers={"x-api-key": config.backend.api_key or ""},
+                        json={"session_id": session_id, "pause": True, "current_url": current_url}
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to pause session on cancel: {e}")
+
+        # Send task_complete message so FE hides the browser chip
+        if task_id:
+            try:
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title="Browser Session Cancelled",
+                    task_id=task_id,
+                    message="Agent paused by user",
+                    status=MessageStatus.FINISHED,
+                    browser_url=browser_url or "",
+                    action_type="task_complete"
+                )
+            except:
+                pass
+
+        # Return cancelled status
+        return {
+            "status": "cancelled",
+            "task_id": task_id,
+            "session_id": session_id,
+            "browser_url": browser_url,
+            "message": "Browser agent cancelled by user"
+        }
+
     except Exception as e:
         logger.error("Browser automation failed", error=str(e))
-        
+
         # Cleanup
         if dom_service:
             try:
                 await dom_service.disconnect()
             except:
                 pass
-        
+
         if session_id:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1598,7 +1670,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
             except:
                 pass
-        
+
         error_context = f"Failed during: {action_summary[-1] if action_summary else 'initialization'}"
         error_message = build_context_summary(
             success=False,
@@ -1608,7 +1680,7 @@ Based on this feedback, I need to continue working on the task and address the i
             action_summary=action_summary,
             error_context=error_context
         )
-        
+
         if task_id:
             try:
                 await save_browser_action_message(
@@ -1618,7 +1690,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
             except:
                 pass
-        
+
         raise
 
 
@@ -1638,89 +1710,94 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
-        original_goal = tool_call.get("goal", "")
+        goal = tool_call.get("goal", "")
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
-        
-        task_id = None
-        session_id = None
-        cdp_url = None
-        current_goal = original_goal
-        iteration = 0
-        
-        logger.info("Browser agent starting (v3)", goal=original_goal)
-        
+
+        logger.info("Browser agent starting (v3)", goal=goal)
+
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="Starting up a browser",
             message='',
             status=MessageStatus.IN_PROGRESS
         )
-        
+
         try:
-            while True:
-                iteration += 1
-                is_resume = iteration > 1
-                
-                result = await workflow.execute_activity(
-                    spawn_browser_agent_activity_v3,
-                    args=[user_id, agent_id, current_goal, tool_call_id, task_id, session_id, cdp_url, is_resume],
-                    start_to_close_timeout=timedelta(minutes=15),
-                    heartbeat_timeout=timedelta(minutes=15),
-                    retry_policy=RetryPolicy(maximum_attempts=2, initial_interval=timedelta(seconds=5))
-                )
-                
-                # Report usage - convert dicts to UsageItem objects
-                if result.get("usage_items"):
-                    usage_items = []
-                    for item in result["usage_items"]:
-                        item_type = UsageType.LLM if item.get("type") == "llm" else UsageType.SERVICE
-                        usage_items.append(UsageItem(
-                            type=item_type,
-                            cost_cents=item.get("cost_cents", 0),
-                            provider=item.get("provider", ""),
-                            tokens_in=item.get("input_tokens"),
-                            tokens_out=item.get("output_tokens"),
-                        ))
-                    yield ToolEvent(
-                        type=EventType.USAGE,
-                        tool_name="spawn_browser_agent",
-                        usage_items=usage_items
-                    )
-                
-                if result.get("status") == "needs_user_help":
-                    task_id = result["task_id"]
-                    session_id = result["session_id"]
-                    
-                    from tools.request_user_approval import request_user_approval_direct
-                    attention_result = await request_user_approval_direct(
-                        workflow_instance,
-                        question=f"🌐 **Browser Agent Needs Help**\n\n{result['message']}\n\n_Please complete the required action, then click Continue._",
-                        image_url=None
-                    )
-                    
-                    yield ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title="Browser Session Resumed",
-                        message="",
-                        status=MessageStatus.FINISHED,
-                        metadata={"task_id": task_id, "browser_url": result.get("browser_url"), "action_type": "system"}
-                    )
-                    
-                    user_action = attention_result.get("response", "Continued")
-                    current_goal = f"CONTEXT: User completed action. Original goal: {original_goal}. User action: {user_action}. Continue from where you left off."
-                    continue
-                else:
+            # Start activity - no retry policy, let orchestrator agent decide to retry
+            activity_handle = workflow.start_activity(
+                spawn_browser_agent_activity_v3,
+                args=[user_id, agent_id, goal, tool_call_id, None, None, None, False],
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(seconds=30),
+                cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+            )
+
+            # Poll for pause while activity runs
+            was_cancelled = False
+            while not activity_handle.done():
+                if workflow_instance.is_paused:
+                    logger.info("🔴 Cancelling browser agent due to pause")
+                    activity_handle.cancel()
+                    was_cancelled = True
                     break
-            
+                await workflow.sleep(1)  # Use workflow.sleep for determinism
+
+            # Get result
+            result = None
+            try:
+                result = await activity_handle
+            except (asyncio.CancelledError, ActivityError) as e:
+                # Check if it's a cancellation (either direct or wrapped by Temporal)
+                if isinstance(e, ActivityError):
+                    if not isinstance(e.cause, (asyncio.CancelledError, TemporalCancelledError)):
+                        raise  # Re-raise non-cancellation errors
+                was_cancelled = True
+                result = {"status": "cancelled", "message": "Browser agent cancelled by user"}
+
+            # Handle cancelled
+            if was_cancelled or (result and result.get("status") == "cancelled"):
+                logger.info("🔴 Browser agent cancelled")
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Browser Session Paused",
+                    message="User paused the browser agent",
+                    status=MessageStatus.FINISHED,
+                    metadata={"action_type": "session_paused"}
+                )
+                return
+
+            # Report usage
+            if result.get("usage_items"):
+                usage_items = []
+                for item in result["usage_items"]:
+                    item_type = UsageType.LLM if item.get("type") == "llm" else UsageType.SERVICE
+                    usage_items.append(UsageItem(
+                        type=item_type,
+                        cost_cents=item.get("cost_cents", 0),
+                        provider=item.get("provider", ""),
+                        tokens_in=item.get("input_tokens"),
+                        tokens_out=item.get("output_tokens"),
+                    ))
+                yield ToolEvent(
+                    type=EventType.USAGE,
+                    tool_name="spawn_browser_agent",
+                    usage_items=usage_items
+                )
+
+            # Yield final result
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",
                 message=result.get("message", ""),
                 status=MessageStatus.FINISHED
             )
-            
+
         except Exception as e:
+            # Let CancelledError propagate - workflow handles it
+            if isinstance(e, asyncio.CancelledError):
+                raise
+
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation failed",

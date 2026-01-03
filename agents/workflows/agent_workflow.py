@@ -519,7 +519,12 @@ class AgentWorkflow:
                 # These yield ToolEvents and call workflow_instance._handle_tool_event
                 await executor(self, {"tool": tool_name, **tool_args}, tool_call_id)
                 return {"success": True, "message": f"{tool_name} completed"}
-                
+
+        except asyncio.CancelledError:
+            # User paused the agent - don't show as error
+            workflow.logger.info(f"Tool {tool_name} cancelled (user paused)")
+            return {"success": False, "message": "User paused the agent during browser execution"}
+
         except Exception as e:
             workflow.logger.error(f"Tool {tool_name} failed: {e}")
             # Emit error event so it shows in frontend

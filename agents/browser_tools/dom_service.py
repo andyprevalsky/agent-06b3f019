@@ -348,9 +348,54 @@ class DOMService:
             result["closed_popups"] = state.closed_popup_messages
         
         # Add screenshot if requested
+        logger.info(
+            f"📸 [DEBUG] Screenshot check: include_screenshot={include_screenshot}, "
+            f"has_screenshot={bool(state.screenshot)}, "
+            f"screenshot_len={len(state.screenshot) if state.screenshot else 0}"
+        )
         if include_screenshot and state.screenshot:
             result["screenshot"] = state.screenshot
-        
+
+            # Debug: analyze and save screenshot
+            import base64
+            from io import BytesIO
+            import os
+            import time as time_module
+
+            # Screenshot debug logging disabled
+            # try:
+            #     screenshot_bytes = base64.b64decode(state.screenshot)
+            #     logger.info(f"📸 [SCREENSHOT] Captured: size_kb={round(len(screenshot_bytes) / 1024, 1)}")
+            #
+            #     # Get dimensions using PIL
+            #     try:
+            #         from PIL import Image
+            #         img = Image.open(BytesIO(screenshot_bytes))
+            #         dimension_match = (img.width == viewport_width and img.height == viewport_height)
+            #         logger.info(
+            #             f"📸 [SCREENSHOT] Dimensions: actual={img.width}x{img.height}, "
+            #             f"expected={viewport_width}x{viewport_height}, match={dimension_match}"
+            #         )
+            #         if not dimension_match:
+            #             logger.warning(
+            #                 f"⚠️ [SCREENSHOT] DIMENSION MISMATCH - may include browser chrome! "
+            #                 f"width_diff={img.width - viewport_width}, height_diff={img.height - viewport_height}"
+            #             )
+            #     except ImportError:
+            #         logger.warning("📸 PIL not available for dimension check")
+            #
+            #     # Always save screenshots to disk for debugging
+            #     debug_dir = "/tmp/browser_screenshots"
+            #     os.makedirs(debug_dir, exist_ok=True)
+            #     filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
+            #     with open(filename, "wb") as f:
+            #         f.write(screenshot_bytes)
+            #     logger.info(f"📸 [DEBUG] Saved to {filename}")
+            #
+            # except Exception as e:
+            #     logger.error(f"📸 Failed to analyze screenshot: {e}")
+            pass
+
         return result
     
     def _extract_page_statistics(self, state) -> Dict[str, int]:

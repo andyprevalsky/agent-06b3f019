@@ -694,6 +694,12 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
         Math.round((entry.coordinates.x / req.browser_state.viewport.width) * 1000),
         Math.round((entry.coordinates.y / req.browser_state.viewport.height) * 1000)
       ];
+      // Tracing: log coordinate transform
+      console.log('📸 [YUTORI] Coordinate transform', {
+        original: `${entry.coordinates.x},${entry.coordinates.y}`,
+        normalized: `${normalizedCoords[0]},${normalizedCoords[1]}`,
+        viewport: `${req.browser_state.viewport.width}x${req.browser_state.viewport.height}`
+      });
     }
     
     const actionResponse = {
@@ -733,7 +739,14 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
       content: observationContent
     });
   }
-  
+
+  // Tracing: log Yutori messages summary
+  console.log('🔍 [TRACE] Yutori messages:', {
+    total: messages.length,
+    assistantCount: messages.filter(m => m.role === 'assistant').length,
+    observationCount: messages.filter(m => m.role === 'observation').length
+  });
+
   return { messages };
 }
 
@@ -2793,6 +2806,27 @@ serve(async (req) => {
     if (isBrowserUseRequest(rawBody)) {
       console.log(`🌐 Browser-use request detected for model: ${rawBody.model}`);
       const browserUseReq = rawBody as BrowserUseRequest;
+
+      // Tracing: log action_history details
+      console.log('🔍 [TRACE] action_history count:', browserUseReq.action_history.length);
+      if (browserUseReq.action_history.length > 0) {
+        const lastAction = browserUseReq.action_history[browserUseReq.action_history.length - 1];
+        console.log('🔍 [TRACE] Last action:', {
+          action: lastAction.action,
+          hasThinking: !!lastAction.thinking,
+          hasScreenshot: !!lastAction.screenshot,
+          thinkingPreview: lastAction.thinking?.slice(0, 100)
+        });
+      }
+
+      // Tracing: log screenshot metadata
+      if (browserUseReq.browser_state.screenshot) {
+        console.log('📸 [SCREENSHOT] Rose API received', {
+          viewport: `${browserUseReq.browser_state.viewport.width}x${browserUseReq.browser_state.viewport.height}`,
+          screenshotChars: browserUseReq.browser_state.screenshot.length,
+          isBase64: !browserUseReq.browser_state.screenshot.startsWith('http')
+        });
+      }
       
       // Get the browser-use pool
       const browserPool = MODEL_POOLS['rose-1-browser-use'];

@@ -172,25 +172,26 @@ export async function hybridAuth(
 
             // Ensure user record exists in our database
             // This is especially important for anonymous users created by Supabase
-            // Use create with catch to handle race conditions (concurrent requests)
-            try {
-              await prisma.user.create({
-                data: {
-                  userId,
-                  isAnonymous,
-                  phone: payload.phone || null,
-                },
-              });
-              console.log(`✅ Created user record for ${userId} (anonymous: ${isAnonymous})`);
+            // Use upsert to handle race conditions cleanly (no error logs)
+            const result = await prisma.user.upsert({
+              where: { userId },
+              create: {
+                userId,
+                isAnonymous,
+                phone: payload.phone || null,
+              },
+              update: {
+                // Update phone if provided and user exists
+                ...(payload.phone ? { phone: payload.phone } : {}),
+              },
+            });
 
+            // Check if this was a new user (createdAt equals updatedAt within 1 second)
+            const isNewUser = Math.abs(result.createdAt.getTime() - result.updatedAt.getTime()) < 1000;
+            if (isNewUser) {
+              console.log(`✅ Created user record for ${userId} (anonymous: ${isAnonymous})`);
               // Give initial credit to new users (both anonymous and regular)
               await createInitialCredit(userId);
-            } catch (dbError: any) {
-              // P2002 = unique constraint violation (user already exists from race condition)
-              // This is expected and not an error - just means another request created the user first
-              if (dbError.code !== 'P2002') {
-                console.warn(`User record creation warning for ${userId}:`, dbError);
-              }
             }
 
             next();

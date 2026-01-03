@@ -2,14 +2,14 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { AuthRequest, authenticate } from '../middleware/auth';
-import { 
-  getOrCreateContext, 
-  createSessionWithContext, 
+import {
+  getOrCreateContext,
+  createSessionWithContext,
   closeSession,
   resumeSession,
   getSession,
   injectUserCookies
-} from '../lib/browserbase';
+} from '../lib/steel';
 
 const router = Router();
 
@@ -57,7 +57,7 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       session_id: session.sessionId,
       debug_url: session.debugUrl,
       ws_url: session.wsUrl,  // CDP WebSocket URL for browser-use
-      project_id: process.env.BROWSERBASE_PROJECT_ID,
+      // project_id no longer needed for Steel
       cookies_injected: cookieResult.injected,
       cookies_count: cookieResult.cookieCount,
     });
