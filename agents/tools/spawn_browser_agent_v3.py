@@ -1254,10 +1254,9 @@ BROWSER CONTEXT:
                         result = entry.get("result", {})
                         success = result.get("success", False)
                         status = "✅ Success" if success else f"❌ Failed: {result.get('error', 'unknown')}"
-                        
+
                         line = f"Step {step}: {action} - {status}"
-                        if entry.get("thinking"):
-                            line += f"\n  Thinking: {entry['thinking'][:200]}"
+                        # NOTE: Intentionally excluding entry["thinking"] - prone to reward hacking
                         params = entry.get("params", {})
                         if params:
                             # Remove verbose data like screenshots
@@ -1280,13 +1279,15 @@ BROWSER CONTEXT:
 - Interactive Elements: {page_stats.get('interactive', 0)}
 - Scroll Position: Page {pages_above + 1} of {total_pages}"""
                     
+                    # Only expose tool results to verifier, not assistant reasoning
+                    # (assistant messages are prone to reward hacking)
                     verifier_context = [
                         # Message 1: USER - Goal
                         {"role": "USER", "text": f"Goal: {goal}"},
-                        # Message 2: ASSISTANT - Completion reasoning + current page state
-                        {"role": "ASSISTANT", "text": f"Completion reasoning: {close_reasoning}\n\n{page_state}"},
-                        # Message 3: ASSISTANT - Action execution log (last 30)
-                        {"role": "ASSISTANT", "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown):\n\n{actions_text}"}
+                        # Message 2: TOOL - Current page state
+                        {"role": "TOOL", "text": page_state, "metadata": {"toolName": "browser_state", "toolStatus": "FINISHED"}},
+                        # Message 3: TOOL - Action execution log (last 30)
+                        {"role": "TOOL", "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown):\n\n{actions_text}", "metadata": {"toolName": "action_history", "toolStatus": "FINISHED"}}
                     ]
                     
                     verifier_prompt = build_verifier_prompt("EXECUTE", f"Goal: {goal}\n\nVerify browser task completion.")

@@ -98,14 +98,18 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
 
 
 def convert_context_to_messages(
-    context: List[Dict[str, Any]], 
-    include_system: bool = True
+    context: List[Dict[str, Any]],
+    include_system: bool = True,
+    # Default False: including assistant messages is prone to reward hacking
+    # (agent can bias verifier with its own reasoning)
+    include_assistant: bool = False
 ) -> List[Dict[str, Any]]:
     """
     Convert workflow context to OpenAI/OpenRouter message format.
-    
+
     Handles:
     - SYSTEM messages (blueprints): included if include_system=True
+    - ASSISTANT messages: included if include_assistant=True (default False to prevent reward hacking)
     - ASSISTANT messages with tool_calls metadata: converted to proper OpenAI format
     - TOOL messages with verifierMessage=True: converted to ASSISTANT role for conversation flow
     - TOOL messages: converted to tool role only if preceded by matching ASSISTANT tool_call,
@@ -114,11 +118,12 @@ def convert_context_to_messages(
     - Sorts messages by timestamp to ensure chronological order
     - FINISHED tool messages use their IN_PROGRESS timestamp for sorting, ensuring tool results
       stay grouped with their ASSISTANT tool_call even if USER messages arrive in between
-    
+
     Args:
         context: List of message dicts with role/text/metadata
         include_system: Whether to include SYSTEM messages (e.g. blueprints)
-        
+        include_assistant: Whether to include ASSISTANT messages (default False to prevent reward hacking)
+
     Returns:
         List of OpenAI-formatted messages in chronological order
     """
@@ -189,6 +194,16 @@ def convert_context_to_messages(
             messages.append({"role": "user", "content": content})
             
         elif role == 'ASSISTANT':
+            # Still track declared tool IDs even if not including assistant messages
+            # This ensures TOOL messages can be properly matched
+            if metadata.get('tool_calls'):
+                for tc in metadata['tool_calls']:
+                    tc_id = str(tc.get('tool_call_id', uuid.uuid4()))
+                    declared_tool_ids.add(tc_id)
+
+            if not include_assistant:
+                continue
+
             # Include tool_calls if present in metadata
             assistant_msg = {"role": "assistant", "content": content}
             if metadata.get('tool_calls'):
@@ -197,7 +212,6 @@ def convert_context_to_messages(
                 for tc in metadata['tool_calls']:
                     # Get or generate tool_call_id
                     tc_id = str(tc.get('tool_call_id', uuid.uuid4()))
-                    declared_tool_ids.add(tc_id)  # Track this ID
                     tool_calls.append({
                         "id": tc_id,
                         "type": "function",
@@ -207,7 +221,7 @@ def convert_context_to_messages(
                         }
                     })
                 assistant_msg["tool_calls"] = tool_calls
-            
+
             messages.append(assistant_msg)
             
         elif role == 'TOOL':
@@ -1145,7 +1159,7 @@ async def check_progress(
         system_prompt = build_verifier_prompt(phase, verifier_prompt)
         
         # Convert full context to OpenAI message format (no truncation)
-        # NOTE: SYSTEM messages (like blueprints) are excluded from verifier
+        # NOTE: SYSTEM and ASSISTANT messages are excluded from verifier (default)
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(convert_context_to_messages(context, include_system=False))
         messages.append({"role": "user", "content": "Evaluate the agent's progress as JSON."})

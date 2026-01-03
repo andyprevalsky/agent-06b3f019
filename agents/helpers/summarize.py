@@ -146,8 +146,9 @@ Be thorough but concise. Focus on actionable information and concrete results.
 Maximum length: ~1000 tokens."""
         
         # Convert context to messages (exclude system messages like blueprints)
+        # Summarization needs assistant messages to see what the agent accomplished
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(convert_context_to_messages(context, include_system=False))
+        messages.extend(convert_context_to_messages(context, include_system=False, include_assistant=True))
         messages.append({
             "role": "user", 
             "content": "Provide a comprehensive summary of what was accomplished."
