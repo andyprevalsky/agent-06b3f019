@@ -201,7 +201,7 @@ export default function QueryInput({
           {/* Content */}
           <div className="relative z-10">
             {/* Top Bar */}
-            <div className="hidden md:flex items-center justify-between gap-2 px-3 pb-2">
+            <div className="flex items-center justify-between gap-2 px-3 pb-2">
             <div className="flex items-center gap-2">
               {/* Rose-ToolSet Chip */}
               <RoseToolSetChip />
