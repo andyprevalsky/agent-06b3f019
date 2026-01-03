@@ -20,6 +20,7 @@ import {
 import { Model } from '@/hooks/useAppData';
 import { AgentDetail } from '@/lib/api';
 import RoseToolSetChip from './RoseToolSetChip';
+import TestPromptsSelector from './TestPromptsSelector';
 import AgentSettingsDialog from './AgentSettingsDialog';
 
 interface DripStyles {
@@ -205,7 +206,8 @@ export default function QueryInput({
             <div className="flex items-center gap-2">
               {/* Rose-ToolSet Chip */}
               <RoseToolSetChip />
-              {/* Tool picker removed - LLM automatically selects tools based on goal */}
+              {/* Test Prompts Selector - Dev only */}
+              {import.meta.env.DEV && <TestPromptsSelector onSelectPrompt={onChange} />}
             </div>
 
             {/* Context Meter and Settings */}
