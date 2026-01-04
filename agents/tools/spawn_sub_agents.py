@@ -76,7 +76,7 @@ class SpawnSubAgentsManager(ToolManager):
             parent_is_paused = getattr(workflow_instance, 'is_paused', False)
             
             # Check depth limit
-            MAX_DEPTH = 1  # Sub-agents can't create sub-agents
+            MAX_DEPTH = 4  # Allow up to 4 levels of nesting
             if workflow_instance.depth >= MAX_DEPTH:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
@@ -86,11 +86,26 @@ class SpawnSubAgentsManager(ToolManager):
                 )
                 return
             
+            # Determine busId for children:
+            # - If parent has a busId, children inherit it
+            # - If parent is root (no busId), children use parent's agentId as busId
+            parent_bus_id = getattr(workflow_instance, 'bus_id', None)
+            if parent_bus_id is None:
+                # Parent is root - children use parent's agentId as busId
+                bus_id = parent_agent_id
+                # Also set parent's bus_id so it broadcasts its own state
+                workflow_instance.bus_id = bus_id
+                # Broadcast parent's initial state to the bus
+                await workflow_instance._update_tree_state()
+            else:
+                # Inherit parent's busId
+                bus_id = parent_bus_id
+
             # 2. Execute spawn activity (inherit model from parent)
             parent_model = getattr(workflow_instance, 'model', 'rose-labs/rose-1-lite')
             result = await workflow.execute_activity(
                 spawn_sub_agents_activity,
-                args=[user_id, sub_agents, parent_agent_id, parent_workflow_id, depth, parent_is_paused, parent_model],
+                args=[user_id, sub_agents, parent_agent_id, parent_workflow_id, depth, parent_is_paused, parent_model, bus_id],
                 start_to_close_timeout=timedelta(seconds=60),
             )
             
@@ -126,12 +141,18 @@ class SpawnSubAgentsManager(ToolManager):
                     )
             
             # 4. Post summary message (agents spawned successfully)
+            # Include subAgentIds and busId for frontend tree rendering
             spawned_count = len(agents_list)
+            sub_agent_ids = [a["agent_id"] for a in agents_list if "agent_id" in a]
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=f"⭐ Spawned {spawned_count} sub-agent{'s' if spawned_count != 1 else ''}",
+                title="Spawning agent cluster",
                 message="",
-                status=MessageStatus.FINISHED
+                status=MessageStatus.FINISHED,
+                metadata={
+                    "subAgentIds": sub_agent_ids,
+                    "busId": bus_id,
+                }
             )
             
             # 5. Wait for all children to complete (via signals)
@@ -184,11 +205,12 @@ async def spawn_sub_agents_activity(
     parent_workflow_id: str,
     depth: int,
     parent_is_paused: bool,
-    parent_model: str = "rose-labs/rose-1-lite"
+    parent_model: str = "rose-labs/rose-1-lite",
+    bus_id: str = None
 ) -> Dict[str, Any]:
     """
     Activity: Spawn multiple sub-agents to work on parallel subtasks.
-    
+
     Args:
         user_id: User ID (agents will be created for this user)
         sub_agents: List of agent configs, each with:
@@ -199,7 +221,8 @@ async def spawn_sub_agents_activity(
         depth: Nesting depth for children
         parent_is_paused: Whether parent is currently paused (children inherit this state)
         parent_model: Model from parent agent (inherited by all sub-agents)
-        
+        bus_id: Shared bus channel ID for sub-agent tree updates
+
     Returns:
         Dict with summary: {"spawned": int, "completed": int, "failed": int, "agents": [...]}
     """
@@ -230,6 +253,7 @@ async def spawn_sub_agents_activity(
                     "pause_state": parent_is_paused,  # Inherit parent's pause state
                     # Pass output schema from tool call (required for sub-agents)
                     "response_schema": agent.get("output_schema"),
+                    "bus_id": bus_id,  # Shared bus channel for tree updates
                 }
 
                 # Always inherit model from parent

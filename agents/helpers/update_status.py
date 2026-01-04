@@ -7,7 +7,7 @@ Other helpers should import and use _update_agent_status_impl directly.
 from temporalio import activity
 import structlog
 import httpx
-from typing import Optional
+from typing import Dict, Optional
 
 from config import load_config
 
@@ -23,14 +23,15 @@ async def _update_agent_status_impl(
     context_size: int,
     message_count: int,
     tokens_in: int = 0,
-    tokens_out: int = 0
+    tokens_out: int = 0,
+    structured_response: Optional[Dict] = None
 ) -> None:
     """
     Core implementation for updating agent status.
-    
+
     This is the SINGLE function that calls PATCH /api/agents/{agent_id}/status.
     Can be called directly from other activities or via the activity wrapper.
-    
+
     Args:
         agent_id: Agent ID
         status: Status value (STARTING_UP, ACTIVE, PAUSED, COMPLETED, FAILED)
@@ -41,22 +42,27 @@ async def _update_agent_status_impl(
         message_count: Total messages in context
         tokens_in: Input tokens (prompt)
         tokens_out: Output tokens (completion)
+        structured_response: Extracted structured output (when completing with schema)
     """
     config = load_config()
     
     async with httpx.AsyncClient() as client:
+        payload = {
+            "status": status,
+            "progress": progress,
+            "statusMessage": status_message,
+            "tokenCount": token_count,
+            "tokensIn": tokens_in,
+            "tokensOut": tokens_out,
+            "contextSize": context_size,
+            "messageCount": message_count
+        }
+        if structured_response is not None:
+            payload["structuredResponse"] = structured_response
+
         response = await client.patch(
             f"{config.backend.api_url}/api/agents/{agent_id}/status",
-            json={
-                "status": status,
-                "progress": progress,
-                "statusMessage": status_message,
-                "tokenCount": token_count,
-                "tokensIn": tokens_in,
-                "tokensOut": tokens_out,
-                "contextSize": context_size,
-                "messageCount": message_count
-            },
+            json=payload,
             headers={
                 "X-API-Key": config.backend.api_key,
                 "Content-Type": "application/json"

@@ -545,3 +545,68 @@ export async function signalSignupDismissed(agentId: string): Promise<void> {
   }
 }
 
+// =============================================================================
+// Sub-agent Tree
+// =============================================================================
+
+// Sub-agent Tree Types
+export interface OutputSchemaField {
+  name: string;
+  type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]';
+  required: boolean;
+  description: string;
+}
+
+export interface OutputSchema {
+  fields: OutputSchemaField[];
+}
+
+export interface AgentTreeNode {
+  agent_id: string;
+  parent_agent_id: string | null;
+  goal: string;
+  status: Agent['status'];
+  progress: number;
+  tools_in_use: string[];
+  message_count: number;
+  output_schema?: OutputSchema;
+  structured_output?: Record<string, unknown>;
+}
+
+export interface AncestorNode {
+  id: string;
+  goal: string;
+}
+
+// Get all agents in a sub-agent tree by busId
+export async function fetchTreeState(busId: string): Promise<AgentTreeNode[]> {
+  const headers = await getAuthHeaders();
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/tree?busId=${encodeURIComponent(busId)}`, {
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch tree state');
+  }
+
+  const data = await response.json();
+  return data.agents;
+}
+
+// Get ancestor chain for breadcrumb navigation
+export async function fetchAncestors(agentId: string): Promise<AncestorNode[]> {
+  const headers = await getAuthHeaders();
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/ancestors`, {
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch ancestors');
+  }
+
+  const data = await response.json();
+  return data.ancestors;
+}
+

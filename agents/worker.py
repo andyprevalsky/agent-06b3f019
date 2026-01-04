@@ -67,6 +67,7 @@ from helpers import (
     fetch_agent_response_schema,
 )
 from helpers.llm import call_planner_llm_activity
+from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
 from helpers.update_tokens import update_agent_tokens_activity
 from health_server import run_health_server, set_worker_status
@@ -202,6 +203,7 @@ async def main():
             get_user_context,
             update_agent_tokens_activity,
             fetch_agent_response_schema,
+            update_agent_tree_state,
         ],
         max_concurrent_activities=config.temporal.max_concurrent_activities,
         max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,

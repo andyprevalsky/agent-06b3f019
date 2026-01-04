@@ -46,10 +46,11 @@ const createAgentSchema = z.object({
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
   parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)
   parent_workflow_id: z.string().optional(), // Optional: for sub-agents to signal parent
-  depth: z.number().int().min(0).max(1).optional().default(0), // Nesting depth
+  depth: z.number().int().min(0).max(4).optional().default(0), // Nesting depth (max 4)
   pause_state: z.boolean().optional().default(false), // Optional: inherit parent's pause state
   // Response schema: passed by parent agent for sub-agents (required for sub-agents, generated async for root agents)
   response_schema: ResponseSchemaSchema.optional(),
+  bus_id: z.string().uuid().optional(), // Optional: shared bus channel for sub-agent tree updates
   // Verifier is now optional - auto-generated from goal if not provided
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
@@ -72,6 +73,7 @@ const updateStatusSchema = z.object({
   tokensOut: z.number().int().min(0).optional().default(0),
   contextSize: z.number().int().min(0),
   messageCount: z.number().int().min(0),
+  structuredResponse: z.record(z.unknown()).optional(),
 });
 
 // GET /api/agents - Get all agents for the authenticated user
@@ -140,6 +142,54 @@ router.get('/', hybridAuth, async (req: HybridAuthRequest, res) => {
   }
 });
 
+// GET /api/agents/tree - Get all agents in a sub-agent tree by busId
+// MUST be before /:id routes to prevent 'tree' from being treated as an agent ID
+router.get('/tree', hybridAuth, async (req: HybridAuthRequest, res) => {
+  try {
+    const { busId } = req.query;
+
+    if (!busId || typeof busId !== 'string') {
+      res.status(400).json({ error: 'busId query parameter is required' });
+      return;
+    }
+
+    const agents = await prisma.agent.findMany({
+      where: {
+        busId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        parentAgentId: true,
+        goal: true,
+        status: true,
+        progress: true,
+        toolsInUse: true,
+        messageCount: true,
+        responseSchema: true,
+        structuredResponse: true,
+      },
+    });
+
+    res.json({
+      agents: agents.map((agent) => ({
+        agent_id: agent.id,
+        parent_agent_id: agent.parentAgentId,
+        goal: agent.goal,
+        status: agent.status,
+        progress: agent.progress,
+        tools_in_use: agent.toolsInUse,
+        message_count: agent.messageCount,
+        output_schema: agent.responseSchema,
+        structured_output: agent.structuredResponse,
+      })),
+    });
+  } catch (error) {
+    console.error('Get agent tree error:', error);
+    res.status(500).json({ error: 'Failed to fetch agent tree' });
+  }
+});
+
 // POST /api/agents - Create a new agent
 // Supports: JWT auth, internal API key, or x402 payment
 router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
@@ -185,6 +235,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           parentAgentId: body.parent_agent_id || null,
           parentWorkflowId: body.parent_workflow_id || null,
           depth: body.depth || 0,
+          busId: body.bus_id || null,
           goal: body.goal,
           model: body.model,
           reasoningMaxTokens: body.reasoning_max_tokens,
@@ -233,10 +284,11 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           type: verifier.type,
           llmJudgePrompt: verifier.llm_judge_prompt,
         },
-        // userPhone removed - fetched dynamically from user context in workflow
         ...(body.task_queue ? { taskQueue: body.task_queue } : {}),
         ...(body.parent_workflow_id ? { parentWorkflowId: body.parent_workflow_id } : {}),
+        ...(body.parent_agent_id ? { parentAgentId: body.parent_agent_id } : {}),
         ...(body.depth !== undefined ? { depth: body.depth } : {}),
+        ...(body.bus_id ? { busId: body.bus_id } : {}),
       });
 
       // Update agent with workflow ID
@@ -255,11 +307,18 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       // Only for ROOT agents (no parent) and when no schema was provided
       // Sub-agents get their schema from the parent's tool call
       if (!body.parent_agent_id && !body.response_schema) {
+        console.log('🎯 Starting response schema generation for root agent', { agentId: agent.agent.id });
         setResponseSchema(agent.agent.id).catch((err) => {
           console.error('❌ Failed to set response schema (background)', {
             agentId: agent.agent.id,
             error: err instanceof Error ? err.message : String(err),
           });
+        });
+      } else {
+        console.log('⏭️ Skipping schema generation', {
+          agentId: agent.agent.id,
+          hasParent: !!body.parent_agent_id,
+          hasSchema: !!body.response_schema
         });
       }
     } catch (error) {
@@ -315,8 +374,6 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     const userId = req.isInternal ? undefined : req.userId;
     const agentId = req.params.id;
-    const before = req.query.before as string | undefined; // Load messages BEFORE this timestamp (scroll up)
-    const limit = 50;
 
     // Verify agent belongs to user (or internal) and is not deleted
     const agent = await prisma.agent.findFirst({
@@ -340,75 +397,11 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       return;
     }
 
-    // Fetch messages with pagination by ASSISTANT messages
-    // Strategy: 
-    // 1. Find last N assistant messages (these represent conversation "turns")
-    // 2. Get the oldest timestamp from those assistant messages
-    // 3. Load ALL messages from that timestamp onwards (includes tool calls, system msgs, etc.)
-    // This ensures we get complete conversation turns with all context
-    
-    // First, get the last N assistant messages to find the time range
-    const assistantMessages = await prisma.message.findMany({
-      where: {
-        agentId,
-        role: 'ASSISTANT',
-        ...(before ? { timestamp: { lt: new Date(before) } } : {}),
-      },
-      orderBy: {
-        timestamp: 'desc',
-      },
-      take: limit,
-      select: {
-        timestamp: true,
-      },
+    // Fetch ALL messages (pagination disabled for now)
+    const messages = await prisma.message.findMany({
+      where: { agentId },
+      orderBy: { timestamp: 'asc' },
     });
-
-    let messages: any[] = [];
-    let oldestAssistantTimestamp: Date | null = null;
-
-    if (assistantMessages.length === 0 || assistantMessages.length < limit) {
-      // We have ALL assistant messages (or none) - fetch all messages from the beginning
-      // This ensures we get USER goal and TOOL blueprint messages that come before first ASSISTANT message
-      const oldestMessage = await prisma.message.findFirst({
-        where: { 
-          agentId,
-          ...(before ? { timestamp: { lt: new Date(before) } } : {}),
-        },
-        orderBy: { timestamp: 'asc' },
-        select: { timestamp: true },  // Lightweight - only get timestamp
-      });
-
-      if (oldestMessage) {
-        messages = await prisma.message.findMany({
-          where: {
-            agentId,
-            timestamp: { gte: oldestMessage.timestamp },
-            ...(before ? { timestamp: { lt: new Date(before) } } : {}),
-          },
-          orderBy: { timestamp: 'asc' },
-        });
-      }
-      
-      // For pagination response, use oldest assistant timestamp if we have any
-      oldestAssistantTimestamp = assistantMessages.length > 0 
-        ? assistantMessages[assistantMessages.length - 1].timestamp 
-        : null;
-    } else {
-      // Hit the limit - there might be more assistant messages, use pagination
-      oldestAssistantTimestamp = assistantMessages[assistantMessages.length - 1].timestamp;
-
-      // Fetch all messages from the oldest assistant timestamp onwards
-      messages = await prisma.message.findMany({
-        where: {
-          agentId,
-          timestamp: { gte: oldestAssistantTimestamp },
-          ...(before ? { timestamp: { lt: new Date(before) } } : {}),
-        },
-        orderBy: {
-          timestamp: 'asc', // Chronological order
-        },
-      });
-    }
 
     // Fetch parent goal if this is a sub-agent
     let parentGoal: string | null = null;
@@ -493,13 +486,42 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
         metadata: msg.metadata,
       })),
       pagination: {
-        has_more: assistantMessages.length === limit,
-        oldest_timestamp: oldestAssistantTimestamp ? oldestAssistantTimestamp.toISOString() : null,
+        has_more: false,
+        oldest_timestamp: null,
       },
     });
   } catch (error) {
     console.error('Get agent error:', error);
     res.status(500).json({ error: 'Failed to fetch agent' });
+  }
+});
+
+// GET /api/agents/:id/ancestors - Get ancestor chain for breadcrumb navigation
+router.get('/:id/ancestors', hybridAuth, async (req: HybridAuthRequest, res) => {
+  try {
+    const agentId = req.params.id;
+
+    // Use recursive CTE to fetch all ancestors in a single query
+    const ancestors = await prisma.$queryRaw<{ id: string; goal: string }[]>`
+      WITH RECURSIVE ancestors AS (
+        SELECT id, goal, "parentAgentId", 0 as depth
+        FROM "Agent"
+        WHERE id = (SELECT "parentAgentId" FROM "Agent" WHERE id = ${agentId})
+
+        UNION ALL
+
+        SELECT a.id, a.goal, a."parentAgentId", ancestors.depth + 1
+        FROM "Agent" a
+        JOIN ancestors ON a.id = ancestors."parentAgentId"
+      )
+      SELECT id, goal FROM ancestors
+      ORDER BY depth DESC
+    `;
+
+    res.json({ ancestors });
+  } catch (error) {
+    console.error('Get ancestors error:', error);
+    res.status(500).json({ error: 'Failed to fetch ancestors' });
   }
 });
 
@@ -657,6 +679,9 @@ router.patch('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
         tokensOut: body.tokensOut,
         contextSize: body.contextSize,
         messageCount: body.messageCount,
+        ...(body.structuredResponse !== undefined && {
+          structuredResponse: body.structuredResponse,
+        }),
         updatedAt: new Date(),
       },
     });
@@ -683,7 +708,56 @@ router.patch('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
   }
 });
 
-// DELETE /api/agents/:id - Soft delete an agent and cancel workflow
+// Helper function to recursively delete an agent and all its children
+async function deleteAgentRecursive(agentId: string): Promise<void> {
+  const agent = await prisma.agent.findFirst({
+    where: {
+      id: agentId,
+      deletedAt: null,
+    },
+    include: {
+      children: {
+        where: {
+          deletedAt: null,
+        },
+      },
+    },
+  });
+
+  if (!agent) {
+    return;
+  }
+
+  // First, recursively delete all children
+  for (const child of agent.children) {
+    await deleteAgentRecursive(child.id);
+  }
+
+  // Terminate Temporal workflow if it exists
+  if (agent.temporalWorkflowId) {
+    try {
+      console.log(`🔄 Terminating workflow ${agent.temporalWorkflowId} for agent ${agentId}`);
+      const { getTemporalClient } = await import('../lib/temporal');
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.terminate('Agent deleted by user');
+      console.log(`✅ Terminated workflow ${agent.temporalWorkflowId}`);
+    } catch (error) {
+      console.warn(`⚠️ Failed to terminate workflow ${agent.temporalWorkflowId}: ${error instanceof Error ? error.message : String(error)}`);
+      // Continue with deletion even if termination fails
+    }
+  }
+
+  // Soft delete this agent
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { deletedAt: new Date() },
+  });
+
+  console.log(`🗑️ Deleted agent ${agentId}`);
+}
+
+// DELETE /api/agents/:id - Soft delete an agent and all its children, cancel workflows
 router.delete('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     const userId = req.isInternal ? undefined : req.userId;
@@ -703,40 +777,8 @@ router.delete('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       return;
     }
 
-    // Cancel Temporal workflow if it exists
-    if (agent.temporalWorkflowId) {
-      try {
-        const logMsg = `[${new Date().toISOString()}] Attempting to cancel workflow ${agent.temporalWorkflowId} for agent ${agentId}`;
-        console.log(`🔄 ${logMsg}`);
-        await import('fs').then(fs => fs.promises.appendFile('/tmp/workflow-cancel.log', logMsg + '\n'));
-        
-        const { getTemporalClient } = await import('../lib/temporal');
-        const client = await getTemporalClient();
-        const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-        
-        // Terminate the workflow (forceful stop)
-        // Using terminate() instead of cancel() because cancel() is graceful
-        // and may not work if the workflow is stuck in a retry loop
-        await handle.terminate('Agent deleted by user');
-        
-        const successMsg = `[${new Date().toISOString()}] Successfully terminated workflow ${agent.temporalWorkflowId}`;
-        console.log(`✅ ${successMsg}`);
-        await import('fs').then(fs => fs.promises.appendFile('/tmp/workflow-cancel.log', successMsg + '\n'));
-      } catch (error) {
-        const errorMsg = `[${new Date().toISOString()}] Failed to cancel workflow ${agent.temporalWorkflowId}: ${error instanceof Error ? error.message : String(error)}`;
-        console.error(`⚠️  ${errorMsg}`);
-        await import('fs').then(fs => fs.promises.appendFile('/tmp/workflow-cancel.log', errorMsg + '\n'));
-        // Continue with deletion even if cancellation fails
-      }
-    } else {
-      console.log(`ℹ️  No workflow ID for agent ${agentId}, skipping workflow cancellation`);
-    }
-
-    // Soft delete
-    await prisma.agent.update({
-      where: { id: agentId },
-      data: { deletedAt: new Date() },
-    });
+    // Recursively delete this agent and all its children
+    await deleteAgentRecursive(agentId);
 
     res.status(204).send();
   } catch (error) {
@@ -762,6 +804,16 @@ async function pauseAgentRecursive(agentId: string): Promise<void> {
   });
 
   if (!agent) {
+    return;
+  }
+
+  // Skip agents that are already in a terminal state
+  if (agent.status === 'COMPLETED' || agent.status === 'FAILED') {
+    console.log(`⏭️ Skipping pause for ${agentId} - already ${agent.status}`);
+    // Still recurse to children in case any are still running
+    for (const child of agent.children) {
+      await pauseAgentRecursive(child.id);
+    }
     return;
   }
 
@@ -899,6 +951,9 @@ const updateAgentSchema = z.object({
   reasoning_max_tokens: z.number().int().min(0).optional(),
   tool_ids: z.array(z.string().uuid()).optional(),
   verifier_prompt: z.string().min(1).optional(),
+  tools_in_use: z.array(z.string()).optional(), // For tree state updates
+  progress: z.number().min(0).max(1).optional(), // For tree state updates
+  message_count: z.number().int().min(0).optional(), // For tree state updates
 });
 
 router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
@@ -930,6 +985,15 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
     }
     if (body.reasoning_max_tokens !== undefined) {
       agentUpdateData.reasoningMaxTokens = body.reasoning_max_tokens;
+    }
+    if (body.tools_in_use !== undefined) {
+      agentUpdateData.toolsInUse = body.tools_in_use;
+    }
+    if (body.progress !== undefined) {
+      agentUpdateData.progress = body.progress;
+    }
+    if (body.message_count !== undefined) {
+      agentUpdateData.messageCount = body.message_count;
     }
     if (Object.keys(agentUpdateData).length > 0) {
       await prisma.agent.update({

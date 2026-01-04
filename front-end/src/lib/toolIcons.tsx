@@ -158,11 +158,50 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
 };
 
 /**
- * Get icon for a tool by name.
- * Returns Info icon as fallback if tool not found.
+ * Prefix patterns for display strings -> icon mapping.
+ * Used when toolsInUse contains formatted display strings like "Searching the web for..."
+ */
+const DISPLAY_PREFIX_ICONS: [string, LucideIcon][] = [
+  ['Searching the web', Search],
+  ['Browsing the web', Globe],
+  ['Delegating', Users],
+  ['Researching', FileSearch],
+  ['Waiting', Clock],
+  ['Messaging', MessageSquare],
+  ['Sending SMS', MessageSquare],
+  ['Searching contacts', Users],
+  ['Finding all', FileSearch],
+  ['Enriching', FlaskConical],
+  ['Monitoring', Radio],
+  ['Checking monitor', ListChecks],
+  ['Reading messages', MessageSquare],
+  ['Planning', Lightbulb],
+  ['Completing', CheckCircle],
+  ['Searching bazaar', Search],
+  ['Paying for', CheckCircle],
+  ['Requesting signup', AlertCircle],
+];
+
+/**
+ * Get icon for a tool by name or display string.
+ * Supports both raw tool names (e.g., "web_search") and formatted display strings
+ * (e.g., "Searching the web for hotels").
+ * Returns Info icon as fallback if not found.
  */
 export function getToolIcon(toolName: string): LucideIcon {
-  return TOOL_ICONS[toolName] || Info;
+  // First try exact match
+  if (TOOL_ICONS[toolName]) {
+    return TOOL_ICONS[toolName];
+  }
+
+  // Then try prefix matching for display strings
+  for (const [prefix, icon] of DISPLAY_PREFIX_ICONS) {
+    if (toolName.startsWith(prefix)) {
+      return icon;
+    }
+  }
+
+  return Info;
 }
 
 

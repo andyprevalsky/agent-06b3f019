@@ -20,7 +20,7 @@ const TEST_PROMPTS: TestPrompt[] = [
   {
     title: 'Test Spawn Sub Agents',
     description: 'Tests recursive sub-agent spawning with depth parameter',
-    prompt: 'Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 4, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10 and you are complete.',
+    prompt: 'Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each sub agent you spawned.',
   },
   {
     title: 'Test Web Search',

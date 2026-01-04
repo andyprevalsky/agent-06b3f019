@@ -29,7 +29,9 @@ with workflow.unsafe.imports_passed_through():
         mark_finished,
         get_user_context,
         check_user_usage,
+        fetch_agent_response_schema,
     )
+    from helpers.messages import broadcast_to_bus, update_agent_tree_state
     from helpers.prompts import build_system_prompt, build_verifier_prompt
     from helpers.handle_tool_event import handle_tool_event
     from tools.base import ToolEvent, EventType, MessageStatus
@@ -56,6 +58,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
     from tools.request_user_signup import request_user_signup
     from loop.run_agent import run_agent
+    from helpers.format_tool_display import format_tool_display
 
 logger = structlog.get_logger()
 
@@ -69,6 +72,7 @@ TOOL_EXECUTORS = {
     "deep_research": deep_research,
     "wait_seconds": wait_seconds,
     "send_message_to_user": send_message_to_user,
+    "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
     "enable_write_permissions": enable_write_permissions,
     "web_search": web_search,
     "spawn_sub_agents": spawn_sub_agents,
@@ -129,10 +133,17 @@ class AgentWorkflow:
 
         # Sub-agent tracking
         self.parent_workflow_id: Optional[str] = None
+        self.parent_agent_id: Optional[str] = None  # Parent agent ID for tree structure
         self.pending_children: Set[str] = set()
         self.child_tool_ids: Dict[str, str] = {}
         self.child_last_tokens: Dict[str, Dict[str, int]] = {}
         self.depth: int = 0
+
+        # Tree state tracking (for sub-agent tree UI)
+        self.bus_id: Optional[str] = None  # Shared bus channel ID for tree updates
+        self.tools_in_use: Set[str] = set()  # Currently executing tools (display strings)
+        self.message_count: int = 0  # Total message count for this agent
+        self.output_schema: Optional[Dict] = None  # Cached response schema for tree display
     
     # =========================================================================
     # SIGNALS
@@ -245,7 +256,9 @@ class AgentWorkflow:
         verifier: Dict,
         context: Optional[List[Dict]] = None,
         parent_workflow_id: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
         depth: int = 0,
+        bus_id: Optional[str] = None,
     ) -> Dict:
         """Execute agent task: PLAN phase → EXECUTE phase."""
         self.agent_id = agent_id
@@ -255,9 +268,10 @@ class AgentWorkflow:
         self.reasoning_max_tokens = reasoning_max_tokens
         self.verifier = verifier
         self.parent_workflow_id = parent_workflow_id
+        self.parent_agent_id = parent_agent_id
         self.depth = depth
-        is_sub_agent = depth >= 1
-        
+        self.bus_id = bus_id
+
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
         
         # Fetch model context window
@@ -282,7 +296,22 @@ class AgentWorkflow:
             )
         except Exception:
             pass
-        
+
+        # Fetch and cache output schema for tree display (available immediately after spawn)
+        if self.bus_id:
+            try:
+                self.output_schema = await workflow.execute_activity(
+                    fetch_agent_response_schema,
+                    args=[agent_id],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2)
+                )
+            except Exception as e:
+                workflow.logger.debug(f"Failed to fetch output schema (non-fatal): {e}")
+
+            # Broadcast initial tree state with schema
+            await self._update_tree_state(progress=0.0, status="ACTIVE")
+
         # Fetch user context once (for both phases)
         user_context_section = ""
         try:
@@ -322,12 +351,10 @@ class AgentWorkflow:
             "web_search",
             # "search_x402_bazaar",
             # "pay_for_x402_bazaar_service",
+            "send_message_to_user_execute_phase",
             "attempt_completion",
         ]
-        # Sub-agents can't spawn more sub-agents
-        if is_sub_agent:
-            execute_tools = [t for t in execute_tools if t != "spawn_sub_agents"]
-        
+
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)
         # =====================================================================
@@ -348,6 +375,7 @@ class AgentWorkflow:
             post_message=self._post_message,
             poll_messages=self._poll_messages,
             execute_tool=self._execute_tool,
+            update_tree_state=self._update_tree_state,
             max_context_tokens=self.max_context_tokens,
             reasoning_max_tokens=reasoning_max_tokens,
             is_plan_loop=True,  # PLAN phase: requires set_plan, posts "sit back" message
@@ -380,6 +408,7 @@ class AgentWorkflow:
             post_message=self._post_message,
             poll_messages=self._poll_messages,
             execute_tool=self._execute_tool,
+            update_tree_state=self._update_tree_state,
             max_context_tokens=self.max_context_tokens,
             reasoning_max_tokens=reasoning_max_tokens,
             skip_blueprint_query=True,  # Already queried in PLAN phase
@@ -426,7 +455,9 @@ class AgentWorkflow:
             verifier=self.verifier,
             context=compressed_context,
             parent_workflow_id=self.parent_workflow_id,
+            parent_agent_id=self.parent_agent_id,
             depth=self.depth,
+            bus_id=self.bus_id,
         )
     
     async def _check_credits(self) -> None:
@@ -456,6 +487,9 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
+            # Track message count and broadcast tree state
+            self.message_count += 1
+            await self._update_tree_state()
         except Exception as e:
             workflow.logger.error(f"Failed to post message: {e}")
     
@@ -488,7 +522,12 @@ class AgentWorkflow:
         """Execute a tool - supports both new and legacy signatures during migration."""
         if tool_name not in TOOL_EXECUTORS:
             return {"error": True, "message": f"Unknown tool: {tool_name}"}
-        
+
+        # Track tool as in-use with human-readable display string
+        tool_display = format_tool_display(tool_name, tool_args)
+        self.tools_in_use.add(tool_display)
+        await self._update_tree_state()
+
         try:
             # Check approval requirement
             if tool_name in APPROVAL_REQUIRED_TOOLS:
@@ -496,9 +535,9 @@ class AgentWorkflow:
                 if manager.requires_approval:
                     question = manager.get_approval_question({"tool": tool_name, **tool_args})
                     await request_user_approval_direct(self, question=question, metadata={"toolApproval": True})
-            
+
             executor = TOOL_EXECUTORS[tool_name]
-            
+
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
             # These return results and call handle_tool_event internally
             NEW_SIGNATURE_TOOLS = {
@@ -508,7 +547,7 @@ class AgentWorkflow:
                 "deep_research", "attempt_completion",
                 "search_x402_bazaar", "pay_for_x402_bazaar_service",
             }
-            
+
             if tool_name in NEW_SIGNATURE_TOOLS:
                 result = await executor(
                     execute_activity=workflow.execute_activity,
@@ -543,6 +582,10 @@ class AgentWorkflow:
                 tool_name
             )
             return {"error": True, "message": str(e)}
+        finally:
+            # Remove tool from in-use and broadcast tree state
+            self.tools_in_use.discard(tool_display)
+            await self._update_tree_state()
     
     async def _handle_tool_event(self, event: ToolEvent, tool_call_id: str, tool_name: str) -> None:
         """
@@ -571,6 +614,49 @@ class AgentWorkflow:
         self.tokens_in += result.get("tokens_in", 0)
         self.tokens_out += result.get("tokens_out", 0)
         self.token_count += result.get("token_count", 0)
+
+    async def _update_tree_state(self, progress: float = None, status: str = None, structured_output: Dict = None) -> None:
+        """
+        Broadcast tree state update to the bus channel and persist to DB.
+
+        Only broadcasts if this agent has a bus_id (i.e., is part of a sub-agent tree).
+        Used for real-time sub-agent tree UI updates.
+        """
+        if not self.bus_id:
+            return
+
+        tools_list = list(self.tools_in_use)
+
+        # Build broadcast payload
+        broadcast_payload = {
+            "agentId": self.agent_id,
+            "parentAgentId": self.parent_agent_id,
+            "goal": self.goal,
+            "status": status or "ACTIVE",
+            "progress": progress if progress is not None else 0.0,
+            "toolsInUse": tools_list,
+            "messageCount": self.message_count,
+        }
+
+        # Always include output schema (available from spawn, cached in instance)
+        if self.output_schema:
+            broadcast_payload["outputSchema"] = self.output_schema
+
+        # Include structured output (actual values) only for completed agents
+        if structured_output:
+            broadcast_payload["structuredOutput"] = structured_output
+
+        # Execute activity that does both broadcast AND DB persist
+        # (broadcast must be in activity to avoid workflow sandbox httpx issues)
+        try:
+            await workflow.execute_activity(
+                update_agent_tree_state,
+                args=[self.agent_id, tools_list, self.bus_id, broadcast_payload],
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+        except Exception as e:
+            workflow.logger.debug(f"Tree state update failed (non-fatal): {e}")
     
     async def _handle_incomplete(self, result: Dict, phase: str) -> Dict:
         """Handle non-completed phase result."""
@@ -588,9 +674,11 @@ class AgentWorkflow:
                 verifier=self.verifier,
                 context=result.get("context"),
                 parent_workflow_id=self.parent_workflow_id,
+                parent_agent_id=self.parent_agent_id,
                 depth=self.depth,
+                bus_id=self.bus_id,
             )
-        
+
             return result
             
     async def _mark_complete(self, context: List[Dict], structured_response: Optional[Dict] = None) -> None:
@@ -616,11 +704,15 @@ class AgentWorkflow:
             # Save blueprint
             await save_blueprint(self, self.user_id, context)
 
-            # Mark finished
+            # Broadcast COMPLETED status with structured output to tree
+            # (output_schema is already cached from startup and included in all broadcasts)
+            await self._update_tree_state(progress=1.0, status="COMPLETED", structured_output=structured_response)
+
+            # Mark finished (includes structured_response for persistence)
             await workflow.execute_activity(
                 mark_finished,
                 args=[self.agent_id, context, self.token_count, 0, len(context), self.tokens_in, self.tokens_out,
-                      summary if self.parent_workflow_id else ""],
+                      summary if self.parent_workflow_id else "", structured_response],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )

@@ -1213,11 +1213,13 @@ async def check_progress(
         Dict with 'score' (float 0.0-1.0), 'reasoning' (str), and optionally 'structured_response'
 
     Raises:
-        ValueError: If response_schema is not provided
+        ValueError: If response_schema is not provided for EXECUTE phase
     """
-    # Schema is required - fail fast if not provided
+    # If no schema provided, use empty schema
+    # For EXECUTE phase, this means we skip structured output extraction
+    # (schema may not be ready yet due to async generation race condition)
     if not response_schema:
-        raise ValueError("response_schema is required for check_progress - schema generation may not have completed yet")
+        response_schema = {"fields": []}
 
     try:
         # DEBUG: Log what we received

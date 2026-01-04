@@ -1,6 +1,6 @@
 """Finished tool for marking agent task completion."""
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime
 from temporalio import activity
 import structlog
@@ -20,7 +20,8 @@ async def mark_finished(
     message_count: int = 0,
     tokens_in: int = 0,
     tokens_out: int = 0,
-    summary: str = ""
+    summary: str = "",
+    structured_response: Optional[Dict] = None
 ) -> Dict:
     """
     Activity: Mark an agent task as finished.
@@ -36,7 +37,8 @@ async def mark_finished(
         tokens_in: Input tokens (prompt)
         tokens_out: Output tokens (completion)
         summary: Summary of work completed (for sub-agents to return to parent)
-        
+        structured_response: Extracted structured output from the agent (if schema was defined)
+
     Returns:
         Dict with completion details including summary
     """
@@ -57,7 +59,8 @@ async def mark_finished(
             context_size=context_size,
             message_count=message_count,
             tokens_in=tokens_in,
-            tokens_out=tokens_out
+            tokens_out=tokens_out,
+            structured_response=structured_response
         )
         
         logger.info("Agent status updated to COMPLETED", agent_id=agent_id)

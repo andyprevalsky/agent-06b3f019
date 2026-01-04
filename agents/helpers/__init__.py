@@ -20,6 +20,7 @@ __all__ = [
     "call_llm",
     "check_progress",
     "call_llm_activity",
+    "fetch_agent_response_schema",
     "update_agent_status",
     "compress_context",
     "generate_completion_summary",

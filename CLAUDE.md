@@ -70,6 +70,12 @@ Check these when errors occur:
 - Supabase URL: `https://kzlurqihzaolhzsbkctf.supabase.co`
 - Test phone: `+19729777432`
 - Test OTP: `181818`
+- Backend API Key: `AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=`
+
+**Query backend locally:**
+```bash
+curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag="
+```
 
 ## Database
 

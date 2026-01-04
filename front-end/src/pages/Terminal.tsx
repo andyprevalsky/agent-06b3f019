@@ -17,10 +17,14 @@ import {
   resumeAgent,
   pauseAgent,
   checkAndRespondToAttentionRequest,
+  getMyInviteCode,
+  fetchAncestors,
+  InviteCodeInfo,
   Agent,
   AgentDetail,
   Message,
   CreateAgentPayload,
+  AncestorNode,
 } from '@/lib/api';
 import { getClientSource } from '@/lib/clientSource';
 import CreateAgentModal from '@/components/terminal/CreateAgentModal';
@@ -305,11 +309,14 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
   
   // Browser fullscreen state
   const [isAnyBrowserFullscreen, setIsAnyBrowserFullscreen] = useState(false);
+
+  // Ancestor chain for breadcrumb navigation
+  const [ancestors, setAncestors] = useState<AncestorNode[]>([]);
   
   // Message input state
   const [messageInput, setMessageInput] = useState(
-    import.meta.env.DEV 
-      ? `Get me a black beanie < 35$ and well-made`
+    import.meta.env.DEV
+      ? `Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 4, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10 and you are complete.`
       : ''
   );
   const [isSendingMessage, setIsSendingMessage] = useState(false);
@@ -551,7 +558,22 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       setIsLoadingNetwork(false);
     }
   }, [selectedAgentId, isLoadingAgent, agentDetail?.status]);
-  
+
+  // Fetch ancestor chain for breadcrumb navigation
+  useEffect(() => {
+    if (!selectedAgentId) {
+      setAncestors([]);
+      return;
+    }
+
+    fetchAncestors(selectedAgentId)
+      .then(setAncestors)
+      .catch((err) => {
+        console.error('Failed to fetch ancestors:', err);
+        setAncestors([]);
+      });
+  }, [selectedAgentId]);
+
   // Rotate popular goals carousel like a stock ticker with constant motion
   useEffect(() => {
     if (selectedAgentId) {
@@ -1541,25 +1563,34 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         <main className="flex-1 flex justify-center h-screen overflow-hidden" style={{ height: '100dvh' }}>
           <div className="flex flex-col relative max-w-5xl w-full px-2 md:px-6 h-full overflow-hidden">
           {/* Breadcrumb for sub-agents - Below Header */}
-          {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
+          {selectedAgentId && agentDetail?.parent_agent_id && (
             <div className="absolute top-20 left-0 right-0 z-40 px-6">
               <div className="max-w-4xl mx-auto">
-                <button
-                  onClick={() => {
-                    if (agentDetail.parent_agent_id) {
-                      handleSelectAgent(agentDetail.parent_agent_id);
-                    }
-                  }}
-                  className="px-4 py-2 rounded-lg text-sm flex items-center gap-2 border border-gray-200/50 dark:border-gray-700/50 bg-white/80 dark:bg-gray-800/80 shadow-lg"
+                <div
+                  className="inline-flex px-4 py-2 rounded-lg text-sm items-center gap-1 border border-gray-200/50 dark:border-gray-700/50 bg-white/80 dark:bg-gray-800/80 shadow-lg overflow-x-auto max-w-full"
                   style={{
                     backdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
                     WebkitBackdropFilter: blur > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
                   }}
                 >
-                  <span className="truncate max-w-[200px] text-gray-600 dark:text-gray-400">{agentDetail.parent_goal}</span>
-                  <span className="text-gray-400 dark:text-gray-500">›</span>
-                  <span className="font-medium truncate max-w-[200px] text-gray-800 dark:text-gray-200">{agentDetail.goal}</span>
-                </button>
+                  {/* Ancestor chain (root → ... → parent) */}
+                  {ancestors.map((ancestor) => (
+                    <span key={ancestor.id} className="flex items-center gap-1 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectAgent(ancestor.id)}
+                        className="truncate max-w-[150px] text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
+                      >
+                        {ancestor.goal}
+                      </button>
+                      <span className="text-gray-400 dark:text-gray-500">›</span>
+                    </span>
+                  ))}
+                  {/* Current agent */}
+                  <span className="font-medium truncate max-w-[200px] text-gray-800 dark:text-gray-200 flex-shrink-0">
+                    {agentDetail.goal}
+                  </span>
+                </div>
               </div>
             </div>
           )}
@@ -1641,7 +1672,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
               <div className="h-24" />
               
               {/* Spacer for breadcrumb when viewing sub-agent */}
-              {selectedAgentId && agentDetail?.parent_agent_id && agentDetail?.parent_goal && (
+              {selectedAgentId && agentDetail?.parent_agent_id && (
                 <div className="h-14" />
               )}
               

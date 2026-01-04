@@ -43,7 +43,12 @@ class SendMessageToUserManager(ToolManager):
             )
             return
 
-        is_question = tool_call.get("is_question", True)
+        # Execute phase variant always uses is_question=False
+        tool_name = tool_call.get("tool", "send_message_to_user")
+        if tool_name == "send_message_to_user_execute_phase":
+            is_question = False
+        else:
+            is_question = tool_call.get("is_question", True)
         if not isinstance(is_question, bool):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
@@ -81,7 +86,31 @@ class SendMessageToUserManager(ToolManager):
             # No blocking required - informative ping only.
             return
 
-        # 2. Wait for user message signal (flag set by receive_user_response signal)
+        # 2. For sub-agents, auto-respond instead of blocking
+        is_sub_agent = getattr(workflow_instance, 'depth', 0) >= 1
+        if is_sub_agent:
+            logger.info(
+                "Sub-agent called send_message_to_user with is_question=True, auto-responding",
+                agent_id=workflow_instance.agent_id,
+                depth=workflow_instance.depth,
+            )
+            auto_response = (
+                "Please do not ask me anymore questions. I trust your judgment, intuition, "
+                "and ability to make reasonable assumptions. Please proceed to the Autonomous Execution phase."
+            )
+            # Post auto-response as USER message to DB (will be polled on next iteration)
+            await workflow_instance._post_message(auto_response, "USER", {"autoResponse": True})
+            # Mark tool as finished
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Auto-response (sub-agent)",
+                message=message,
+                status=MessageStatus.FINISHED,
+                metadata=_metadata(is_waiting=False),
+            )
+            return
+
+        # 3. Wait for user message signal (flag set by receive_user_response signal)
         try:
             await workflow.wait_condition(
                 lambda: workflow_instance._has_new_messages
@@ -140,6 +169,8 @@ async def send_message_to_user(workflow_instance, tool_call: Dict[str, Any], too
 
     This is a simple visibility/clarification bridge: it never writes to DB or
     trigger notifications, it only mirrors text into the chat transcript.
+
+    For sub-agents (depth >= 1), auto-responds instead of blocking.
     """
     manager = get_manager()
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):

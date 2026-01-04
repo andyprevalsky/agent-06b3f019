@@ -109,6 +109,13 @@ class SendMessageToUserTool(BaseModel):
     )
 
 
+class SendMessageToUserExecutePhaseTool(BaseModel):
+    """Send an informational message to the user during execution (non-blocking). Use this to provide status updates or share findings."""
+
+    tool: Literal["send_message_to_user_execute_phase"]
+    message: str = Field(description="User-visible markdown text explaining what you want them to know.")
+
+
 class EnableWritePermissionsTool(BaseModel):
     """Request write permissions before performing a hard write to an internet database.
     
@@ -621,6 +628,7 @@ TOOL_MODELS = {
     "web_search": WebSearchTool,
     "deep_research": DeepResearchTool,
     "send_message_to_user": SendMessageToUserTool,
+    "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "enable_write_permissions": EnableWritePermissionsTool,
     "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
@@ -731,6 +739,7 @@ __all__ = [
     "WebSearchTool",
     "DeepResearchTool",
     "SendMessageToUserTool",
+    "SendMessageToUserExecutePhaseTool",
     "EnableWritePermissionsTool",
     "SendSmsTool",
     "SendSmsAsUserTool",

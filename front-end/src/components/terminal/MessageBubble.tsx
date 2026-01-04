@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import SubAgentToolBubble from './SubAgentToolBubble';
 import SignupPromptBubble from './SignupPromptBubble';
+import SubAgentTree from './SubAgentTree';
 import { MarkdownText } from './MarkdownText';
 import { PlanChip } from './PlanChip';
 import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
@@ -577,7 +578,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     } as ToolMessageData;
   }, [isAssistant, shouldType, isTool, message, isStreaming]);
 
-  // Sub-agent tool messages: use special SubAgentToolBubble component
+  // Sub-agent tool messages: use SubAgentTree for summary messages with subAgentIds/busId,
+  // or SubAgentToolBubble for individual progress updates
   const subAgentBubble = useMemo(() => {
     if (!isSubAgentTool || !message.metadata) return null;
 
@@ -585,6 +587,52 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       ? 'FINISHED'
       : (message.metadata.toolStatus || 'FINISHED');
 
+    // Check if this is a summary message with tree data (has subAgentIds and busId)
+    const subAgentIds = message.metadata.subAgentIds as string[] | undefined;
+    const busId = message.metadata.busId as string | undefined;
+
+    if (subAgentIds && subAgentIds.length > 0 && busId) {
+      // Render tree view for summary messages
+      // Strip emoji prefix from title if present, use "Spawning agent cluster" as default
+      let title = (message.metadata.title as string) || 'Spawning agent cluster';
+      // Remove leading emoji (star, rocket, etc.)
+      title = title.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\s*/u, '');
+      return (
+        <div className="flex gap-3 animate-in fade-in duration-300">
+          <div className="flex-shrink-0 w-8" />
+          <SubAgentTree
+            busId={busId}
+            subAgentIds={subAgentIds}
+            title={title}
+            onNavigate={(agentId) => {
+              if (onNavigateToAgent) {
+                onNavigateToAgent(agentId);
+              }
+            }}
+          />
+        </div>
+      );
+    }
+
+    // Check if this is the initial "Spawning X sub-agents" message (IN_PROGRESS, no subAgentId)
+    const isSpawningMessage = toolStatus === 'IN_PROGRESS' && !message.metadata.subAgentId;
+    if (isSpawningMessage) {
+      // Render simple text line matching tree node style with └─ prefix
+      return (
+        <div className="flex gap-3 animate-in fade-in duration-300">
+          <div className="flex-shrink-0 w-8" />
+          <div className="flex items-center gap-1 font-mono text-sm">
+            <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">└─</span>
+            <span className="w-4 text-center select-none animate-pulse">○</span>
+            <span className="text-gray-700 dark:text-gray-300">
+              Spawning sub-agents...
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    // Render chip for individual progress updates (has subAgentId but not subAgentIds)
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         {/* Empty space where icon would be to align with agent messages */}

@@ -64,6 +64,9 @@ async def run_agent(
     post_message: Optional[Callable[[str, str, Optional[Dict]], Awaitable[None]]] = None,
     poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,  # Takes last_checked timestamp
     execute_tool: Optional[Callable[[str, Dict, str], Awaitable[Dict]]] = None,
+
+    # For tree state updates (sub-agent UI)
+    update_tree_state: Optional[Callable[[], Awaitable[None]]] = None,
     
     # Custom response model (for browser agent with different tool schemas)
     # If None, uses create_agent_action_model(tools)
@@ -229,6 +232,10 @@ async def run_agent(
             user_messages = [m.get("text", "") for m in context if m.get("role") == "USER"]
             if user_messages:
                 try:
+                    # Update tree state before blueprint query
+                    if update_tree_state:
+                        await update_tree_state()
+
                     blueprints = await query_blueprints(
                         handle_tool_event_callback=_handle_tool_event,
                         execute_activity=execute_activity,
@@ -236,6 +243,11 @@ async def run_agent(
                         user_id=user_id,
                         limit=3,
                     )
+
+                    # Update tree state after blueprint query
+                    if update_tree_state:
+                        await update_tree_state()
+
                     # Add blueprints to context
                     if blueprints:
                         for idx, bp in enumerate(blueprints, 1):
@@ -526,7 +538,8 @@ async def run_agent(
                     goal = "your goal"
                     for msg in context:
                         if msg.get("role") == "USER":
-                            goal = msg.get("text", "your goal")[:100]
+                            full_goal = msg.get("text", "your goal")
+                            goal = full_goal[:300] + "..." if len(full_goal) > 300 else full_goal
                             break
                     
                     fyi_message = f"Looks like I have everything I need in order to accomplish your goal - **{goal}**\n\nWe will now proceed to fulfill your request, just sit back, relax, and let us figure out the rest :)"

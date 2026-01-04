@@ -9,11 +9,10 @@ import { prisma } from './prisma';
 // Schema field types supported
 const FieldTypeSchema = z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]']);
 
-// Individual field definition
+// Individual field definition (no 'required' - we hardcode it to true)
 const SchemaFieldSchema = z.object({
   name: z.string().describe('Field name in snake_case'),
   type: FieldTypeSchema.describe('Field type'),
-  required: z.boolean().describe('Whether this field is required'),
   description: z.string().describe('Brief description of what this field contains'),
 });
 
@@ -38,8 +37,47 @@ type GenerateResult = {
   tokensOut: number;
 };
 
+// JSON Schema for structured output mode
+// Note: 'required' field is NOT in schema - we hardcode it to true for all fields
+const RESPONSE_SCHEMA_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    reasoning: {
+      type: 'string',
+      description: 'Your analysis of what outputs this goal requires',
+    },
+    fields: {
+      type: 'array',
+      description: 'List of output fields (1-5 fields typically)',
+      items: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Field name in snake_case',
+          },
+          type: {
+            type: 'string',
+            enum: ['str', 'int', 'float', 'bool', 'list[str]', 'list[int]'],
+            description: 'Field type',
+          },
+          description: {
+            type: 'string',
+            description: 'Brief description of what this field contains',
+          },
+        },
+        required: ['name', 'type', 'description'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['reasoning', 'fields'],
+  additionalProperties: false,
+};
+
 /**
  * Generate a structured response schema from a goal using Rose Ultra.
+ * Uses structured output mode (JSON schema) for reliable JSON responses.
  */
 export async function generateResponseSchema(goal: string): Promise<GenerateResult> {
   const startTime = Date.now();
@@ -62,29 +100,7 @@ SUPPORTED TYPES:
 - float: Decimal number
 - bool: True/false
 - list[str]: List of strings
-- list[int]: List of integers
-
-You MUST respond with ONLY a JSON object in this exact format, no other text:
-{
-  "reasoning": "Your analysis of what outputs this goal requires",
-  "fields": [
-    {"name": "field_name", "type": "str|int|float|bool|list[str]|list[int]", "required": true, "description": "What this field contains"}
-  ]
-}
-
-EXAMPLES:
-
-Goal: "Find the cheapest flight from NYC to LA on January 15"
-Response:
-{"reasoning": "This goal requires finding flight details including price, airline, and time.", "fields": [{"name": "price", "type": "float", "required": true, "description": "Lowest price found in USD"}, {"name": "airline", "type": "str", "required": true, "description": "Airline name"}, {"name": "departure_time", "type": "str", "required": true, "description": "Departure time"}, {"name": "booking_url", "type": "str", "required": false, "description": "URL to book the flight"}]}
-
-Goal: "Research competitors in the CRM space"
-Response:
-{"reasoning": "Need to return list of competitors and analysis.", "fields": [{"name": "competitors", "type": "list[str]", "required": true, "description": "List of competitor company names"}, {"name": "summary", "type": "str", "required": true, "description": "Brief market analysis"}]}
-
-Goal: "Send a message to John about the meeting"
-Response:
-{"reasoning": "Simple boolean to confirm message was sent.", "fields": [{"name": "message_sent", "type": "bool", "required": true, "description": "Whether message was sent successfully"}]}`;
+- list[int]: List of integers`;
 
   const response = await fetch(roseApiUrl, {
     method: 'POST',
@@ -97,10 +113,18 @@ Response:
       model: 'rose-labs/rose-1-ultra',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Goal: ${goal}\n\nRespond with ONLY the JSON object, no other text.` },
+        { role: 'user', content: `Goal: ${goal}` },
       ],
       temperature: 0.3,
       max_tokens: 2000,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response_schema',
+          strict: true,
+          schema: RESPONSE_SCHEMA_JSON_SCHEMA,
+        },
+      },
     }),
   });
 
@@ -119,25 +143,17 @@ Response:
     throw new Error('LLM returned no content');
   }
 
-  // Extract JSON from response (handle potential markdown code blocks)
-  let jsonStr = content.trim();
-  if (jsonStr.startsWith('```json')) {
-    jsonStr = jsonStr.slice(7);
-  } else if (jsonStr.startsWith('```')) {
-    jsonStr = jsonStr.slice(3);
-  }
-  if (jsonStr.endsWith('```')) {
-    jsonStr = jsonStr.slice(0, -3);
-  }
-  jsonStr = jsonStr.trim();
-
-  // Parse and validate with Zod
+  // Parse JSON (structured output mode guarantees valid JSON)
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonStr);
+    parsed = JSON.parse(content);
   } catch (parseError) {
-    throw new Error(`Failed to parse LLM response as JSON: ${parseError instanceof Error ? parseError.message : parseError}. Content: ${jsonStr.substring(0, 200)}`);
+    throw new Error(
+      `Failed to parse LLM response as JSON: ${parseError instanceof Error ? parseError.message : parseError}. Content: ${content.substring(0, 200)}`
+    );
   }
+
+  // Validate with Zod
   const result = ResponseSchemaSchema.parse(parsed);
 
   const tokensIn = data.usage?.prompt_tokens || 0;
@@ -154,8 +170,16 @@ Response:
     durationMs,
   });
 
+  // Hardcode required: true for all fields
+  const fieldsWithRequired = result.fields.map((f) => ({
+    name: f.name,
+    type: f.type,
+    required: true as const,
+    description: f.description,
+  }));
+
   return {
-    schema: { fields: result.fields as ResponseSchema['fields'] },
+    schema: { fields: fieldsWithRequired },
     tokensIn,
     tokensOut,
   };
@@ -173,11 +197,13 @@ function sleep(ms: number): Promise<void> {
  * This function runs in the background (fire-and-forget).
  */
 export async function setResponseSchema(agentId: string): Promise<void> {
-  const maxRetries = 5;
-  const baseDelayMs = 1000;
+  console.log('📋 setResponseSchema called', { agentId });
+  const maxRetries = 4;
+  const baseDelayMs = 100;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
+      console.log(`📋 setResponseSchema attempt ${attempt + 1}/${maxRetries}`, { agentId });
       // Fetch agent goal from DB
       const agent = await prisma.agent.findUnique({
         where: { id: agentId },

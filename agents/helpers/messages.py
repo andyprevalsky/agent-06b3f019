@@ -297,6 +297,162 @@ async def stream_attention_event(
         logger.debug(f"Attention stream error (non-fatal): {str(e)}")
 
 
+async def broadcast_to_bus(bus_id: str, payload: Dict[str, Any]) -> None:
+    """
+    Broadcast agent state update to the shared bus channel.
+
+    This is used for real-time sub-agent tree updates. All agents in a tree
+    share the same bus_id and broadcast their state changes to this channel.
+    The frontend subscribes to the bus to get real-time updates for tree rendering.
+
+    Args:
+        bus_id: Shared bus channel ID (typically root agent's ID)
+        payload: State update payload containing:
+            - agentId: The agent broadcasting the update
+            - parentAgentId: Parent agent ID (for tree structure)
+            - goal: Agent's goal
+            - status: Current agent status
+            - progress: Progress value (0.0-1.0)
+            - toolsInUse: List of currently active tools
+            - messageCount: Total message count
+    """
+    try:
+        config = load_config()
+
+        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
+
+        broadcast_payload = {
+            "messages": [{
+                "topic": f"bus:{bus_id}",
+                "event": "AGENT_STATE_CHANGED",
+                "payload": {"record": payload},
+                "private": True
+            }]
+        }
+
+        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
+
+        logger.info(
+            "Broadcasting to bus",
+            bus_id=bus_id,
+            agent_id=payload.get("agentId"),
+            status=payload.get("status"),
+            tools_in_use=payload.get("toolsInUse"),
+        )
+
+        client = _get_broadcast_client()
+        response = await client.post(
+            broadcast_url,
+            json=broadcast_payload,
+            headers={
+                "apikey": broadcast_key,
+                "Authorization": f"Bearer {broadcast_key}",
+                "Content-Type": "application/json"
+            }
+        )
+
+        if response.status_code not in (200, 202):
+            logger.warning(f"Bus broadcast failed: status={response.status_code}, body={response.text}")
+        else:
+            logger.debug(f"Bus broadcast success: status={response.status_code}")
+
+    except Exception as e:
+        # Don't fail the workflow if broadcast fails - it's best-effort
+        logger.warning(f"Bus broadcast error (non-fatal): {str(e)}")
+
+
+@activity.defn
+async def update_agent_tree_state(
+    agent_id: str,
+    tools_in_use: List[str],
+    bus_id: str = None,
+    broadcast_payload: Dict[str, Any] = None,
+) -> None:
+    """
+    Persist tree state (toolsInUse) to the database AND broadcast to Supabase bus.
+
+    Called from _update_tree_state in the workflow to keep the DB in sync
+    and provide real-time updates to the frontend.
+
+    Args:
+        agent_id: The agent ID
+        tools_in_use: List of currently active tool names
+        bus_id: Optional bus channel ID for real-time broadcast
+        broadcast_payload: Optional payload for bus broadcast
+    """
+    config = load_config()
+
+    # 1. Broadcast to Supabase bus (real-time updates)
+    if bus_id and broadcast_payload:
+        try:
+            broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
+            broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    broadcast_url,
+                    json={
+                        "messages": [{
+                            "topic": f"bus:{bus_id}",
+                            "event": "AGENT_STATE_CHANGED",
+                            "payload": {"record": broadcast_payload},
+                            # Private channel - matches agent: channel pattern
+                            "private": True
+                        }]
+                    },
+                    headers={
+                        "apikey": broadcast_key,
+                        "Authorization": f"Bearer {broadcast_key}",
+                        "Content-Type": "application/json"
+                    },
+                    timeout=5.0
+                )
+
+                if response.status_code not in (200, 202):
+                    logger.warning(f"Bus broadcast failed: status={response.status_code}")
+                else:
+                    logger.info(
+                        f"Bus broadcast success",
+                        agent_id=agent_id,
+                        bus_id=bus_id,
+                        topic=f"bus:{bus_id}",
+                        tools=broadcast_payload.get("toolsInUse", []),
+                    )
+
+        except Exception as e:
+            logger.warning(f"Bus broadcast error (non-fatal): {str(e)}")
+
+    # 2. Persist to database (tools_in_use, progress, messageCount)
+    try:
+        activity.heartbeat(f"Updating tree state for agent {agent_id}")
+
+        # Build update payload from broadcast_payload if available
+        update_payload = {"tools_in_use": tools_in_use}
+        if broadcast_payload:
+            if "progress" in broadcast_payload:
+                update_payload["progress"] = broadcast_payload["progress"]
+            if "messageCount" in broadcast_payload:
+                update_payload["message_count"] = broadcast_payload["messageCount"]
+
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{config.backend.api_url}/api/agents/{agent_id}",
+                json=update_payload,
+                headers={
+                    "X-API-Key": config.backend.api_key,
+                    "Content-Type": "application/json"
+                },
+                timeout=10.0
+            )
+
+            if response.status_code not in (200, 204):
+                logger.debug(f"Tree state update failed: status={response.status_code}")
+
+    except Exception as e:
+        # Don't fail the workflow if update fails - it's best-effort
+        logger.debug(f"Tree state update error (non-fatal): {str(e)}")
+
+
 @activity.defn
 async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
     """
