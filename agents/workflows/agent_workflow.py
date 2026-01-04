@@ -201,6 +201,7 @@ class AgentWorkflow:
         if child_tool_id:
             summary = result.get("summary", "")
             goal_text = result.get("goal", "")
+            structured_response = result.get("structured_response")
             await self._post_message(
                 summary if summary else f"Completed: {goal_text}",
                 "TOOL",
@@ -210,7 +211,8 @@ class AgentWorkflow:
                     "toolStatus": "FINISHED",
                     "title": f"Sub-agent completed: {goal_text[:30]}",
                     "subAgentId": child_agent_id,
-                    "progress": 1.0
+                    "progress": 1.0,
+                    "structuredResponse": structured_response
                 }
             )
 
@@ -385,9 +387,12 @@ class AgentWorkflow:
         )
         
         self._track_tokens(execute_result)
-        
+
         if execute_result["status"] == "completed":
-            await self._mark_complete(execute_result.get("context", []))
+            await self._mark_complete(
+                execute_result.get("context", []),
+                execute_result.get("structured_response")
+            )
             return {"status": "completed", "goal": goal}
         
         return await self._handle_incomplete(execute_result, "EXECUTE")
@@ -589,10 +594,10 @@ class AgentWorkflow:
         
             return result
             
-    async def _mark_complete(self, context: List[Dict]) -> None:
+    async def _mark_complete(self, context: List[Dict], structured_response: Optional[Dict] = None) -> None:
         """Mark task complete, save blueprint, signal parent."""
         workflow.logger.info("✓ Marking task complete")
-        
+
         try:
             # Generate summary
             summary_result = await workflow.execute_activity(
@@ -605,13 +610,13 @@ class AgentWorkflow:
             self._track_tokens({"tokens_in": summary_result.get("usage", {}).get("prompt_tokens", 0),
                                "tokens_out": summary_result.get("usage", {}).get("completion_tokens", 0),
                                "token_count": summary_result.get("usage", {}).get("total_tokens", 0)})
-            
+
             if summary:
                 await self._post_message(summary, "ASSISTANT", {"isFinalSummary": True})
-            
+
             # Save blueprint
             await save_blueprint(self, self.user_id, context)
-            
+
             # Mark finished
             await workflow.execute_activity(
                 mark_finished,
@@ -630,7 +635,12 @@ class AgentWorkflow:
                 parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
                 await parent.signal("child_completed", {
                     "child_agent_id": self.agent_id,
-                    "result": {"status": "completed", "goal": self.goal, "summary": summary}
+                    "result": {
+                        "status": "completed",
+                        "goal": self.goal,
+                        "summary": summary,
+                        "structured_response": structured_response
+                    }
                 })
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")

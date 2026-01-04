@@ -1008,12 +1008,19 @@ async def _call_llm_verifier(
     messages: List[Dict[str, str]],
     model: str,
     config: Any,
-) -> Tuple[ProgressScore, Dict[str, Any]]:
+    response_schema: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Simple LLM call for verifier - no streaming UI, no tool detection.
-    
+
+    Args:
+        messages: Chat messages for the LLM
+        model: Model to use
+        config: Application config
+        response_schema: Optional response schema to include output extraction
+
     Returns:
-        Tuple of (ProgressScore instance, usage dict)
+        Tuple of (parsed JSON dict with reasoning, score, and optionally output), usage dict)
     """
     request_body = {
         "model": model,
@@ -1021,22 +1028,7 @@ async def _call_llm_verifier(
         "temperature": 0.3,
         "max_tokens": 4096,
         "stream": True,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "ProgressScore",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "reasoning": {"type": "string"},
-                        "score": {"type": "number", "minimum": 0, "maximum": 1}
-                    },
-                    "required": ["reasoning", "score"],
-                    "additionalProperties": False
-                },
-                "strict": True
-            }
-        }
+        "response_format": _build_verifier_json_schema(response_schema)
     }
     
     accumulated_reasoning = ""
@@ -1104,10 +1096,9 @@ async def _call_llm_verifier(
     
     if not json_content:
         raise ValueError(f"No JSON content received (chunks={chunk_count}, model={actual_model})")
-    
+
     parsed = json.loads(json_content)
-    result = ProgressScore.model_validate(parsed)
-    
+
     usage = {
         "prompt_tokens": 0,
         "completion_tokens": chunk_count,
@@ -1115,8 +1106,81 @@ async def _call_llm_verifier(
         "actual_model": actual_model,
         "pool_name": pool_name,
     }
-    
-    return result, usage
+
+    return parsed, usage
+
+
+def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Build a JSON schema for the verifier response.
+
+    If response_schema is provided, includes an 'output' field with the schema fields.
+    The output is always included in the response, but should only be used when score >= 1.0.
+
+    Args:
+        response_schema: Optional response schema with fields definition
+
+    Returns:
+        JSON schema dict for use with OpenAI structured outputs
+    """
+    # Base schema always has reasoning and score
+    properties = {
+        "reasoning": {"type": "string"},
+        "score": {"type": "number", "minimum": 0, "maximum": 1}
+    }
+    required = ["reasoning", "score"]
+
+    # If response_schema provided, add output field
+    if response_schema and response_schema.get("fields"):
+        output_properties = {}
+        output_required = []
+
+        for field in response_schema["fields"]:
+            field_name = field["name"]
+            field_type = field["type"]
+
+            # Map our types to JSON schema types
+            if field_type == "str":
+                json_type = {"type": "string"}
+            elif field_type == "int":
+                json_type = {"type": "integer"}
+            elif field_type == "float":
+                json_type = {"type": "number"}
+            elif field_type == "bool":
+                json_type = {"type": "boolean"}
+            elif field_type == "list[str]":
+                json_type = {"type": "array", "items": {"type": "string"}}
+            elif field_type == "list[int]":
+                json_type = {"type": "array", "items": {"type": "integer"}}
+            else:
+                json_type = {"type": "string"}  # Default fallback
+
+            output_properties[field_name] = json_type
+
+            # All fields are required in the output for strict mode
+            output_required.append(field_name)
+
+        properties["output"] = {
+            "type": "object",
+            "properties": output_properties,
+            "required": output_required,
+            "additionalProperties": False
+        }
+        required.append("output")
+
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "ProgressScoreWithOutput" if response_schema else "ProgressScore",
+            "schema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    }
 
 
 @activity.defn
@@ -1124,20 +1188,29 @@ async def check_progress(
     context: List[Dict[str, Any]],
     verifier_prompt: str,
     model: str = "anthropic/claude-sonnet-4.5",
-    phase: str = "EXECUTE"
+    phase: str = "EXECUTE",
+    response_schema: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal.
-    
+
     Args:
         context: Message history (first USER message is the goal)
         verifier_prompt: Custom LLM judge prompt
         model: LLM model to use
         phase: Current workflow phase (PREPARE_RESEARCH, RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
-        
+        response_schema: Required structured response schema for output extraction
+
     Returns:
-        Dict with 'score' (float 0.0-1.0) and 'reasoning' (str)
+        Dict with 'score' (float 0.0-1.0), 'reasoning' (str), and optionally 'structured_response'
+
+    Raises:
+        ValueError: If response_schema is not provided
     """
+    # Schema is required - fail fast if not provided
+    if not response_schema:
+        raise ValueError("response_schema is required for check_progress - schema generation may not have completed yet")
+
     try:
         # DEBUG: Log what we received
         logger.info(
@@ -1154,9 +1227,9 @@ async def check_progress(
                     logger.error(f"❌ context[{i}] is {type(m).__name__}, not dict: {str(m)[:200]}")
         
         _safe_heartbeat("Checking progress with LLM judge")
-        
+
         config = load_config()
-        system_prompt = build_verifier_prompt(phase, verifier_prompt)
+        system_prompt = build_verifier_prompt(phase, verifier_prompt, response_schema)
         
         # Convert full context to OpenAI message format (no truncation)
         # NOTE: SYSTEM and ASSISTANT messages are excluded from verifier (default)
@@ -1180,22 +1253,31 @@ async def check_progress(
         )
         
         # Use dedicated verifier LLM call (simple, no streaming UI)
-        result, usage = await _call_llm_verifier(messages, model, config)
-        
+        # Pass response_schema so the verifier includes output extraction in same call
+        result, usage = await _call_llm_verifier(messages, model, config, response_schema)
+
+        score = result["score"]
+        reasoning = result["reasoning"]
+
         logger.info(
             "Progress checked",
-            progress=result.score,
-            reasoning=result.reasoning,
+            progress=score,
+            reasoning=reasoning,
             tokens=usage.get("total_tokens", 0),
             actual_model=usage.get("actual_model"),
-            pool_name=usage.get("pool_name")
+            pool_name=usage.get("pool_name"),
+            has_output="output" in result
         )
-        
+
+        # Only use output when score >= 1.0 (schema enforcement is handled by strict JSON schema)
+        structured_response = result.get("output") if score >= 1.0 else None
+
         return {
-            "score": result.score,
-            "reasoning": result.reasoning,
-            "message": f"{result.reasoning}\n\nScore: {result.score}",
-            "usage": usage
+            "score": score,
+            "reasoning": reasoning,
+            "message": f"{reasoning}\n\nScore: {score}",
+            "usage": usage,
+            "structured_response": structured_response
         }
     except Exception as e:
         logger.error("Failed to check progress", error=str(e))
@@ -1205,8 +1287,44 @@ async def check_progress(
             "score": 0.5,
             "reasoning": error_message,
             "message": f"{error_message}\n\nScore: 0.5",
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "structured_response": None
         }
+
+
+@activity.defn
+async def fetch_agent_response_schema(agent_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch the response schema for an agent from the database.
+
+    Args:
+        agent_id: The agent ID
+
+    Returns:
+        The response schema dict, or None if not set
+    """
+    _safe_heartbeat("Fetching response schema")
+    config = load_config()
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{config['api_base_url']}/api/agents/{agent_id}",
+                headers={"x-internal-api-key": config.get("internal_api_key", "")}
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("response_schema")
+            else:
+                logger.warning(
+                    "Failed to fetch agent response schema",
+                    agent_id=agent_id,
+                    status=response.status_code
+                )
+                return None
+    except Exception as e:
+        logger.error("Error fetching response schema", agent_id=agent_id, error=str(e))
+        return None
 
 
 @activity.defn

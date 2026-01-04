@@ -1,14 +1,125 @@
-import { memo, useState, useCallback, useMemo, type MouseEvent } from 'react';
+import React, { memo, useState, useCallback, useMemo, useRef, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronUp, ChevronDown, Maximize2, X } from 'lucide-react';
+import { ChevronUp, ChevronDown, Maximize2, X, FileJson } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getToolIcon } from '@/lib/toolIcons';
 import { getStoredSession } from '@/lib/supabase';
 import { MessageList } from './MessageList';
 import { useAgentContext } from '@/contexts/AgentContext';
+import { ResponseSchemaField } from '@/lib/api';
 
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
+
+function formatFieldType(type: ResponseSchemaField['type']): string {
+  switch (type) {
+    case 'str': return 'string';
+    case 'int': return 'integer';
+    case 'float': return 'number';
+    case 'bool': return 'boolean';
+    case 'list[str]': return 'string[]';
+    case 'list[int]': return 'integer[]';
+    default: return type;
+  }
+}
+
+// Reusable schema chip component with portaled tooltip
+function SchemaChip({
+  outputSchema,
+  size = 'sm',
+  tooltipPosition = 'bottom'
+}: {
+  outputSchema: { fields: ResponseSchemaField[] } | undefined;
+  size?: 'sm' | 'md';
+  tooltipPosition?: 'top' | 'bottom';
+}) {
+  const [isHovered, setIsHovered] = useState(false);
+  const [tooltipStyle, setTooltipStyle] = useState<React.CSSProperties>({});
+  const triggerRef = useRef<HTMLDivElement>(null);
+
+  const iconSize = size === 'sm' ? 'h-4 w-4' : 'h-5 w-5';
+  const padding = size === 'sm' ? 'p-1.5' : 'p-2';
+  const tooltipWidth = size === 'sm' ? 256 : 288; // w-64 = 256px, w-72 = 288px
+
+  const hasSchema = outputSchema?.fields && outputSchema.fields.length > 0;
+
+  const handleMouseEnter = useCallback(() => {
+    if (triggerRef.current) {
+      const rect = triggerRef.current.getBoundingClientRect();
+      const style: React.CSSProperties = {
+        position: 'fixed',
+        width: tooltipWidth,
+        zIndex: 9999,
+      };
+
+      if (tooltipPosition === 'top') {
+        style.top = rect.bottom + 8;
+        style.left = rect.left;
+      } else {
+        style.bottom = window.innerHeight - rect.top + 8;
+        style.right = window.innerWidth - rect.right;
+      }
+
+      setTooltipStyle(style);
+    }
+    setIsHovered(true);
+  }, [tooltipPosition, tooltipWidth]);
+
+  const handleMouseLeave = useCallback(() => {
+    setIsHovered(false);
+  }, []);
+
+  return (
+    <>
+      <div
+        ref={triggerRef}
+        className="relative flex-shrink-0"
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className={cn(padding, "rounded hover:bg-muted transition-colors cursor-default")}
+        >
+          <FileJson className={cn(iconSize, hasSchema ? "text-muted-foreground" : "text-muted-foreground/50")} />
+        </div>
+      </div>
+      {/* Portaled Tooltip */}
+      {isHovered && createPortal(
+        <div
+          style={tooltipStyle}
+          className="pointer-events-none"
+        >
+          <div className="rounded-lg border border-border p-3 shadow-lg bg-background/80" style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}>
+            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Output Schema</div>
+            {hasSchema ? (
+              <div className="space-y-1.5">
+                {outputSchema.fields.map((field, idx) => (
+                  <div key={idx} className="text-xs">
+                    <div className="flex items-center gap-1.5">
+                      <code className="font-mono bg-muted px-1 py-0.5 rounded text-[10px]">
+                        {field.name}
+                      </code>
+                      <span className="text-muted-foreground text-[10px]">
+                        {formatFieldType(field.type)}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-0.5 pl-0.5">
+                      {field.description}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground italic">No schema defined</p>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
 
 interface BrowserStatusBarProps {
   taskId: string;
@@ -44,6 +155,12 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
     () => browserMessages.some((m) => m.metadata?.action_type === 'session_paused'),
     [browserMessages]
   );
+
+  // Extract output schema from browser init message
+  const outputSchema = useMemo(() => {
+    const initMessage = browserMessages.find((m) => m.metadata?.output_schema);
+    return initMessage?.metadata?.output_schema as { fields: ResponseSchemaField[] } | undefined;
+  }, [browserMessages]);
 
   // Event handlers
   const handleResume = useCallback(async () => {
@@ -86,8 +203,9 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
         {/* Actions panel on left - uses MessageList */}
         <div className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
           style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}>
-          <div className="p-3 border-b border-border">
+          <div className="p-3 border-b border-border flex items-center justify-between">
             <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Task progress</h4>
+            <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
           </div>
           <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
             <div className="pb-[80vh]">
@@ -109,9 +227,12 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
               <div className={cn("h-2 w-2 rounded-full", isDisconnected ? "bg-yellow-500" : "bg-green-500 animate-pulse")} />
               <span className="text-sm font-medium">{isDisconnected ? "Disconnected" : "Active"}</span>
             </div>
-            <button onClick={handleFullscreenToggle} className="p-2 rounded hover:bg-muted transition-colors">
-              <X className="h-5 w-5 text-muted-foreground" />
-            </button>
+            <div className="flex items-center gap-1">
+              <SchemaChip outputSchema={outputSchema} size="md" tooltipPosition="bottom" />
+              <button onClick={handleFullscreenToggle} className="p-2 rounded hover:bg-muted transition-colors">
+                <X className="h-5 w-5 text-muted-foreground" />
+              </button>
+            </div>
           </div>
           <div className="flex-1 relative bg-white">
             <iframe src={browserUrl} className="w-full h-full border-0"
@@ -164,6 +285,7 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
               {lastActionTitle}
             </span>
           </div>
+          <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
           <div className="p-1.5 rounded hover:bg-muted transition-colors flex-shrink-0 mr-1">
             <ChevronUp className="h-5 w-5 text-muted-foreground" />
           </div>
@@ -203,6 +325,7 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
             </div>
           </div>
           <div className="flex items-center gap-1 flex-shrink-0">
+            <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
             <button onClick={handleFullscreenToggle} className="p-1.5 rounded hover:bg-muted transition-colors">
               <Maximize2 className="h-4 w-4 text-muted-foreground" />
             </button>

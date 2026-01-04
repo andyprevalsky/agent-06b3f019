@@ -22,7 +22,7 @@ import uuid
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from pydantic import BaseModel
-from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity
+from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity, fetch_agent_response_schema
 from helpers.tool_schemas import create_agent_action_model
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import compress_context
@@ -584,7 +584,19 @@ async def run_agent(
                         none_indices=[i for i, m in enumerate(context) if m is None],
                         context_snapshot=str(context)[:2000],
                     )
-                
+
+                # Fetch response schema from DB for structured response extraction
+                response_schema = None
+                try:
+                    response_schema = await execute_activity(
+                        fetch_agent_response_schema,
+                        args=[agent_id],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to fetch response schema (non-fatal): {e}")
+
                 verifier_result = await _run_verifier(
                     execute_activity=execute_activity,
                     context=context,
@@ -593,6 +605,7 @@ async def run_agent(
                     agent_id=agent_id,
                     task_id=task_id,
                     post_message=post_message,
+                    response_schema=response_schema,
                 )
                 
                 # Track verifier tokens
@@ -603,7 +616,8 @@ async def run_agent(
                 
                 score = verifier_result.get("score", 0.0)
                 v_reasoning = verifier_result.get("reasoning", "")
-                
+                structured_response = verifier_result.get("structured_response")
+
                 # If complete, save blueprint and exit
                 if score >= 1.0:
                     try:
@@ -614,7 +628,7 @@ async def run_agent(
                         )
                     except Exception as e:
                         logger.warning(f"Blueprint save failed (non-fatal): {e}")
-                    
+
                     return {
                         "status": "completed",
                         "context": context,
@@ -623,6 +637,7 @@ async def run_agent(
                         "token_count": token_count,
                         "message": v_reasoning,
                         "score": score,
+                        "structured_response": structured_response,
                     }
                 
                 # Not complete - add feedback to context
@@ -809,10 +824,11 @@ async def _run_verifier(
     agent_id: str,
     task_id: Optional[str],
     post_message: Optional[Callable],
+    response_schema: Optional[Dict] = None,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = str(uuid.uuid4())
-    
+
     # Post IN_PROGRESS
     if post_message:
         await post_message(
@@ -827,10 +843,10 @@ async def _run_verifier(
                 "subAgentId": task_id,
             }
         )
-    
+
     result = await execute_activity(
         check_progress,
-        args=[context, verifier_prompt, model, "EXECUTE"],
+        args=[context, verifier_prompt, model, "EXECUTE", response_schema],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )

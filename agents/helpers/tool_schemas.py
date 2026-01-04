@@ -22,6 +22,25 @@ class VerifierConfig(BaseModel):
     llm_judge_prompt: str = Field(description="Prompt for the LLM judge to evaluate the agent's performance")
 
 
+class ResponseSchemaFieldConfig(BaseModel):
+    """Configuration for a single field in the output schema."""
+
+    name: str = Field(description="Field name in snake_case")
+    type: Literal["str", "int", "float", "bool", "list[str]", "list[int]"] = Field(
+        description="Field type: str, int, float, bool, list[str], or list[int]"
+    )
+    required: bool = Field(description="Whether this field is required in the output")
+    description: str = Field(description="Brief description of what this field contains")
+
+
+class ResponseSchemaConfig(BaseModel):
+    """Configuration for the structured output schema that the agent must return."""
+
+    fields: List[ResponseSchemaFieldConfig] = Field(
+        description="List of output fields that the agent must return when complete"
+    )
+
+
 class SubAgentConfig(BaseModel):
     """Configuration for a single sub-agent."""
 
@@ -32,6 +51,9 @@ class SubAgentConfig(BaseModel):
         description="True if this sub-agent must stay read-only (plan-phase spawn), False for normal execution.",
     )
     verifier: VerifierConfig = Field(description="Verifier config with type='FLOAT_LLM_JUDGE' and llm_judge_prompt")
+    output_schema: ResponseSchemaConfig = Field(
+        description="Structured output schema defining what data this sub-agent must return when complete"
+    )
 
 
 class WaitSecondsTool(BaseModel):
@@ -153,6 +175,9 @@ class SpawnBrowserAgentTool(BaseModel):
     tool: Literal["spawn_browser_agent"]
     goal: str = Field(
         description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy a black beanie under $35 from Amazon', 'Order a Chipotle bowl from Uber Eats with white rice, steak, fajita peppers, corn, pico de gallo, and hot sauce', 'Purchase the cheapest MacBook Pro M3 from Amazon, Best Buy, or Apple Store', 'Find the top 3 trending Python repos on GitHub and summarize their READMEs'"
+    )
+    output_schema: ResponseSchemaConfig = Field(
+        description="Structured output schema defining what data the browser agent must return when complete"
     )
 
 

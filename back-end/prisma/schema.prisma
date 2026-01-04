@@ -32,6 +32,7 @@ model Agent {
   depth                     Int         @default(0)
   parentWorkflowId          String?
   reasoningMaxTokens        Int         @default(2048)
+  responseSchema            Json?
   parent                    Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
   children                  Agent[]     @relation("AgentHierarchy")
   tools                     AgentTool[]

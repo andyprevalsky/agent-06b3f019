@@ -49,6 +49,17 @@ export interface Agent {
   updated_at: string;
 }
 
+export interface ResponseSchemaField {
+  name: string;
+  type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]';
+  required: boolean;
+  description: string;
+}
+
+export interface ResponseSchema {
+  fields: ResponseSchemaField[];
+}
+
 export interface AgentDetail extends Agent {
   parent_agent_id?: string | null;
   parent_goal?: string | null;
@@ -57,6 +68,7 @@ export interface AgentDetail extends Agent {
     llm_judge_prompt: string;
   } | null;
   tools: Tool[];
+  response_schema?: ResponseSchema | null;
 }
 
 export interface Tool {

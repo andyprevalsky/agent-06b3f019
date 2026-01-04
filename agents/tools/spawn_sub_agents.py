@@ -227,9 +227,11 @@ async def spawn_sub_agents_activity(
                     "parent_agent_id": parent_agent_id,
                     "parent_workflow_id": parent_workflow_id,
                     "depth": depth,
-                    "pause_state": parent_is_paused  # Inherit parent's pause state
+                    "pause_state": parent_is_paused,  # Inherit parent's pause state
+                    # Pass output schema from tool call (required for sub-agents)
+                    "response_schema": agent.get("output_schema"),
                 }
-                
+
                 # Always inherit model from parent
                 payload["model"] = parent_model
                 # Note: reasoning_max_tokens not passed - sub-agents use backend default (256)

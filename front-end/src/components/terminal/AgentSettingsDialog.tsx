@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
-import { Settings, Loader2, Trash2 } from 'lucide-react';
-import { AgentDetail, deleteAgent } from '@/lib/api';
+import { Settings, Loader2, Trash2, FileJson } from 'lucide-react';
+import { AgentDetail, deleteAgent, ResponseSchemaField } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
@@ -29,14 +29,26 @@ function getModelContextWindow(model: string, models: Model[]): number {
 function calculateCost(tokensIn: number, tokensOut: number, toolCostCents: number, promptPrice?: string, completionPrice?: string): string {
   const promptPricePerToken = promptPrice ? parseFloat(promptPrice) : 0;
   const completionPricePerToken = completionPrice ? parseFloat(completionPrice) : 0;
-  
+
   const llmCost = (tokensIn * promptPricePerToken) + (tokensOut * completionPricePerToken);
   const toolCost = toolCostCents / 100; // Convert cents to dollars
   const totalCost = llmCost + toolCost;
-  
+
   if (totalCost === 0) return '$0.00';
   if (totalCost < 0.01) return `$${totalCost.toFixed(4)}`;
   return `$${totalCost.toFixed(2)}`;
+}
+
+function formatFieldType(type: ResponseSchemaField['type']): string {
+  switch (type) {
+    case 'str': return 'string';
+    case 'int': return 'integer';
+    case 'float': return 'number';
+    case 'bool': return 'boolean';
+    case 'list[str]': return 'string[]';
+    case 'list[int]': return 'integer[]';
+    default: return type;
+  }
 }
 
 export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: AgentSettingsDialogProps) {
@@ -197,6 +209,43 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Output Schema Section */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <FileJson className="h-4 w-4 text-muted-foreground" />
+              <Label>Output Schema</Label>
+            </div>
+
+            {agent.response_schema?.fields && agent.response_schema.fields.length > 0 ? (
+              <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+                {agent.response_schema.fields.map((field, idx) => (
+                  <div key={idx} className="text-sm">
+                    <div className="flex items-center gap-2">
+                      <code className="font-mono text-xs bg-background px-1.5 py-0.5 rounded">
+                        {field.name}
+                      </code>
+                      <span className="text-muted-foreground text-xs">
+                        {formatFieldType(field.type)}
+                      </span>
+                      {field.required && (
+                        <span className="text-[10px] text-amber-600 dark:text-amber-500 font-medium">
+                          required
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5 pl-1">
+                      {field.description}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground italic">
+                Schema generating...
+              </p>
+            )}
           </div>
 
           {/* Delete Agent Section */}

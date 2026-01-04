@@ -54,12 +54,13 @@ async def save_browser_action_message(
     auxiliary: dict = None,
     tool_call_id: str = None,
     is_init_message: bool = False,
+    output_schema: dict = None,
 ):
     """Save browser sub-action message directly to DB."""
     try:
         config = load_config()
         unique_tool_call_id = tool_call_id or str(uuid_module.uuid4())
-        
+
         metadata = {
             "toolCallId": unique_tool_call_id,
             "toolName": "spawn_browser_agent",
@@ -70,7 +71,11 @@ async def save_browser_action_message(
             "action_type": action_type,
             "auxiliary": auxiliary or {}
         }
-        
+
+        # Include output schema in init message for FE display
+        if output_schema:
+            metadata["output_schema"] = output_schema
+
         if not is_init_message:
             metadata["subAgentId"] = task_id
         
@@ -894,34 +899,44 @@ async def spawn_browser_agent_activity_v3(
     task_id: Optional[str] = None,
     session_id: Optional[str] = None,
     cdp_url: Optional[str] = None,
-    is_resume: bool = False
+    is_resume: bool = False,
+    output_schema: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Browser agent activity using browser-use BrowserSession + Rose API.
-    
+
     Key changes from v2:
     - Uses browser-use BrowserSession instead of Stagehand
     - Calls Rose API rose-1-browser-use for LLM decisions
     - Always takes screenshots after actions (no screenshot tool)
     - Index-based element selection
+
+    Args:
+        output_schema: Response schema from parent agent's tool call (required for sub-agents)
     """
     from helpers.llm import check_progress
     from tools.knowledge_base import query_blueprints_activity
-    
+
     dom_service = None
     action_history = ActionHistory()
     browser_url = None
     config = load_config()
     start_time = _safe_time()
-    
+
     # Token tracking for usage
     total_input_tokens = 0
     total_output_tokens = 0
-    
+
     # Execution tracking
     visited_urls = []
     reasoning_messages = []
     action_summary = []
+
+    # Use response schema from parent agent's tool call (required)
+    response_schema = output_schema
+    if not response_schema:
+        raise ValueError("output_schema is required for browser agent - parent agent must provide structured output schema in tool call")
+    logger.info("Using response schema from tool call", fields=len(response_schema.get("fields", [])))
     
     try:
         # ===== SESSION INITIALIZATION =====
@@ -957,11 +972,12 @@ async def spawn_browser_agent_activity_v3(
                 browser_url = session_data["debug_url"]
                 cdp_url = session_data.get("ws_url")  # CDP WebSocket URL from Browserbase
             
-            # Init message
+            # Init message - include output_schema for FE display
             await save_browser_action_message(
                 agent_id=agent_id, title="Browser Ready", task_id=task_id,
                 message="", status=MessageStatus.FINISHED, browser_url=browser_url,
-                action_type="browser", tool_call_id=tool_call_id, is_init_message=True
+                action_type="browser", tool_call_id=tool_call_id, is_init_message=True,
+                output_schema=response_schema
             )
             await save_browser_action_message(
                 agent_id=agent_id, title="Task Started", task_id=task_id,
@@ -1291,19 +1307,19 @@ BROWSER CONTEXT:
                     ]
                     
                     verifier_prompt = build_verifier_prompt("EXECUTE", f"Goal: {goal}\n\nVerify browser task completion.")
-                    
+
                     # Try ultra first with 7s timeout, fallback to lite on timeout
                     try:
                         progress_result = await call_temporal_activity_from_activity(
                             check_progress,
-                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE"],
+                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE", response_schema],
                             start_to_close_timeout=timedelta(seconds=7),
                         )
                     except TimeoutError:
                         logger.warning("Verifier ultra timeout, falling back to lite")
                         progress_result = await call_temporal_activity_from_activity(
                             check_progress,
-                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-lite", "EXECUTE"],
+                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-lite", "EXECUTE", response_schema],
                             start_to_close_timeout=timedelta(seconds=15),
                         )
                     
@@ -1323,7 +1339,8 @@ BROWSER CONTEXT:
                     if score >= 1.0:
                         # Task complete
                         execution_time_ms = (_safe_time() - start_time) * 1000
-                        
+                        structured_response = progress_result.get("structured_response")
+
                         # Disconnect and close session
                         await dom_service.disconnect()
                         try:
@@ -1335,7 +1352,7 @@ BROWSER CONTEXT:
                                 )
                         except:
                             pass
-                        
+
                         # Build context summary
                         context_message = build_context_summary(
                             success=True,
@@ -1344,7 +1361,7 @@ BROWSER CONTEXT:
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary
                         )
-                        
+
                         # Send task_complete message so FE shows completion card
                         await save_browser_action_message(
                             agent_id=agent_id,
@@ -1355,12 +1372,12 @@ BROWSER CONTEXT:
                             browser_url=browser_url,
                             action_type="task_complete"
                         )
-                        
+
                         usage_items = [
                             {
                                 "type": "llm",
                                 "cost_cents": round(
-                                    (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"] + 
+                                    (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"] +
                                     (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"],
                                     4
                                 ),
@@ -1374,14 +1391,15 @@ BROWSER CONTEXT:
                                 "provider": "Browserbase Session"
                             }
                         ]
-                        
+
                         return {
                             "status": "completed",
                             "success": True,
                             "message": context_message,
                             "browser_url": browser_url,
                             "usage_items": usage_items,
-                            "execution_time_ms": execution_time_ms
+                            "execution_time_ms": execution_time_ms,
+                            "structured_response": structured_response
                         }
                     
                     # Not complete - record verifier feedback as thinking for next iteration
@@ -1712,10 +1730,11 @@ class SpawnBrowserAgentManagerV3(ToolManager):
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
         goal = tool_call.get("goal", "")
+        output_schema = tool_call.get("output_schema")  # Response schema from parent's tool call
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
-        logger.info("Browser agent starting (v3)", goal=goal)
+        logger.info("Browser agent starting (v3)", goal=goal, has_output_schema=output_schema is not None)
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -1726,9 +1745,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
         try:
             # Start activity - no retry policy, let orchestrator agent decide to retry
+            # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema
             activity_handle = workflow.start_activity(
                 spawn_browser_agent_activity_v3,
-                args=[user_id, agent_id, goal, tool_call_id, None, None, None, False],
+                args=[user_id, agent_id, goal, tool_call_id, None, None, None, False, output_schema],
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=30),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,

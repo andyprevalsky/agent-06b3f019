@@ -6,6 +6,7 @@ import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
 import { chooseTools } from '../lib/chooseTools';
 import { getX402Endpoints } from '../lib/x402Endpoints';
+import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSchema';
 
 const router = Router();
 
@@ -23,6 +24,19 @@ Scoring Instructions:
 - The agent has access to tools and can solve problems through persistence and creativity.`;
 }
 
+// Response schema field type
+const ResponseSchemaFieldSchema = z.object({
+  name: z.string(),
+  type: z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]']),
+  required: z.boolean(),
+  description: z.string(),
+});
+
+// Response schema type (passed by parent agent for sub-agents)
+const ResponseSchemaSchema = z.object({
+  fields: z.array(ResponseSchemaFieldSchema),
+});
+
 // Validation schemas
 const createAgentSchema = z.object({
   goal: z.string().min(1),
@@ -36,6 +50,8 @@ const createAgentSchema = z.object({
   parent_workflow_id: z.string().optional(), // Optional: for sub-agents to signal parent
   depth: z.number().int().min(0).max(1).optional().default(0), // Nesting depth
   pause_state: z.boolean().optional().default(false), // Optional: inherit parent's pause state
+  // Response schema: passed by parent agent for sub-agents (required for sub-agents, generated async for root agents)
+  response_schema: ResponseSchemaSchema.optional(),
   // Verifier is now optional - auto-generated from goal if not provided
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
@@ -240,6 +256,8 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           tokensOut, // Include tokens from tool selection
           progress: 0.0,
           status: body.pause_state ? 'PAUSED' : 'STARTING_UP',
+          // Store response schema directly if provided (for sub-agents)
+          responseSchema: body.response_schema || undefined,
         },
       });
 
@@ -304,6 +322,18 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         workflowId,
         taskQueue: body.task_queue || 'default',
       });
+
+      // Fire-and-forget: generate response schema in background
+      // Only for ROOT agents (no parent) and when no schema was provided
+      // Sub-agents get their schema from the parent's tool call
+      if (!body.parent_agent_id && !body.response_schema) {
+        setResponseSchema(agent.agent.id).catch((err) => {
+          console.error('❌ Failed to set response schema (background)', {
+            agentId: agent.agent.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
     } catch (error) {
       console.error('❌ Failed to start workflow', {
         agentId: agent.agent.id,
@@ -525,6 +555,7 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
           name: at.tool.name,
           description: at.tool.description,
         })),
+        response_schema: agent.responseSchema,
       },
       messages: messages.map((msg) => ({
         message_id: msg.id,
@@ -1225,6 +1256,32 @@ router.post('/:id/signal/signup_dismissed', hybridAuth, async (req: HybridAuthRe
   } catch (error) {
     console.error('Signal signup_dismissed error:', error);
     res.status(500).json({ error: 'Failed to signal signup dismissed' });
+  }
+});
+
+// POST /api/agents/generate-response-schema - Generate response schema for a goal (used by browser agent)
+const generateSchemaRequestSchema = z.object({
+  goal: z.string().min(1),
+});
+
+router.post('/generate-response-schema', hybridAuth, async (req: HybridAuthRequest, res) => {
+  try {
+    const body = generateSchemaRequestSchema.parse(req.body);
+
+    const { schema, tokensIn, tokensOut } = await generateResponseSchema(body.goal);
+
+    res.json({
+      schema,
+      tokensIn,
+      tokensOut,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request body', details: error.errors });
+      return;
+    }
+    console.error('Generate response schema error:', error);
+    res.status(500).json({ error: 'Failed to generate response schema' });
   }
 });
 

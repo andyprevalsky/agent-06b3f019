@@ -305,7 +305,7 @@ def build_system_prompt(
     return system_prompt.strip()
 
 
-def build_verifier_prompt(phase: str, verifier_prompt: str) -> str:
+def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dict = None) -> str:
     prompt = ""
 
     role_section = dedent(
@@ -363,8 +363,41 @@ Intent is not completion. Research alone caps at 0.10; acquisition goals without
     ).strip()
     prompt += "\n\n\n" + rules_section
 
-    output_section = dedent(
-        f"""
+    # Build output section based on whether we have a response schema
+    if response_schema and response_schema.get("fields"):
+        fields_desc = "\n".join([
+            f"  - {f['name']} ({f['type']}): {f['description']}"
+            for f in response_schema["fields"]
+        ])
+        output_section = dedent(
+            f"""
+OUTPUT CONTRACT
+---------------
+Evaluation criteria:
+{verifier_prompt}
+
+Only award 1.0 when the user would agree the goal is fully done with concrete proof.
+
+STRUCTURED OUTPUT EXTRACTION:
+When the goal is complete (score = 1.0), you must also extract the following output fields from the conversation:
+{fields_desc}
+
+Return JSON:
+{{
+  "reasoning": "<internal thinking about what was actually accomplished>",
+  "score": <number between 0.0 and 1.0>,
+  "output": {{
+    "<field_name>": <extracted value>,
+    ...
+  }}
+}}
+
+IMPORTANT: Always include the "output" field with your best extraction of the values, even if the goal is not complete. The output will only be used when score >= 1.0.
+            """
+        ).strip()
+    else:
+        output_section = dedent(
+            f"""
 OUTPUT CONTRACT
 ---------------
 Evaluation criteria:
@@ -377,8 +410,8 @@ Return JSON:
   "reasoning": "<internal thinking about what was actually accomplished>",
   "score": <number between 0.0 and 1.0>
 }}
-        """
-    ).strip()
+            """
+        ).strip()
     prompt += "\n\n\n" + output_section
 
     return prompt.strip()
