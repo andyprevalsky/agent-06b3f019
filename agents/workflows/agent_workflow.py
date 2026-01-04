@@ -242,7 +242,6 @@ class AgentWorkflow:
         goal: str,
         model: str,
         reasoning_max_tokens: int,
-        tool_ids: List[str],  # Legacy param, not used
         verifier: Dict,
         context: Optional[List[Dict]] = None,
         parent_workflow_id: Optional[str] = None,

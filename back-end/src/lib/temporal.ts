@@ -48,7 +48,6 @@ export async function startAgentWorkflow(params: {
   goal: string;
   model: string;
   reasoningMaxTokens: number;
-  toolIds: string[];
   verifier: {
     type: string;
     llmJudgePrompt: string;
@@ -77,7 +76,6 @@ export async function startAgentWorkflow(params: {
       params.goal,
       params.model,
       params.reasoningMaxTokens,
-      params.toolIds,
       {
         type: params.verifier.type,
         llmJudgePrompt: params.verifier.llmJudgePrompt,
@@ -85,7 +83,6 @@ export async function startAgentWorkflow(params: {
       [], // Start with empty context, workflow will poll for goal message
       params.parentWorkflowId || null, // Parent workflow ID for signaling
       params.depth || 0, // Nesting depth
-      // userPhone removed - now fetched from user context in workflow
     ],
   });
 

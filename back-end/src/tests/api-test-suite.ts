@@ -30,7 +30,6 @@ interface TestContext {
   userId?: string;
   agentId?: string;
   blueprintId?: string;
-  toolIds?: string[];
 }
 
 const context: TestContext = {};
@@ -191,9 +190,6 @@ async function testToolsEndpoint() {
   if (!response.data.tools || !Array.isArray(response.data.tools)) {
     throw new Error('Tools response missing or invalid tools array');
   }
-
-  // Store tool IDs for later tests
-  context.toolIds = response.data.tools.map((t: any) => t.id);
 }
 
 async function testWaitlistEndpoint() {
@@ -297,7 +293,6 @@ async function testAgentsCreateEndpoint() {
     body: JSON.stringify({
       goal: 'Test agent for API test suite',
       model: 'anthropic/claude-sonnet-4.5',
-      tool_ids: context.toolIds?.slice(0, 2) || [],
       task_queue: 'navi-agent-tasks-test', // Use test queue
       verifier: {
         type: 'FLOAT_LLM_JUDGE',

@@ -4,7 +4,6 @@ import { prisma } from '../lib/prisma';
 import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
 import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
-import { chooseTools } from '../lib/chooseTools';
 import { getX402Endpoints } from '../lib/x402Endpoints';
 import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSchema';
 
@@ -42,7 +41,6 @@ const createAgentSchema = z.object({
   goal: z.string().min(1),
   model: z.string().optional().default('rose-labs/rose-1-lite'),
   reasoning_max_tokens: z.number().int().min(0).optional().default(256),
-  tool_ids: z.array(z.string().uuid()).nullable().optional().default([]).transform(val => val ?? []),
   source: z.enum(['WEB', 'MAC_APP']).optional().default('WEB'),
   task_queue: z.string().optional(), // Optional: for test isolation
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
@@ -166,65 +164,6 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       llm_judge_prompt: verifierPrompt,
     };
 
-    // 🤖 LLM-based tool selection
-    // Get all available tools for LLM to choose from
-    const allTools = await prisma.tool.findMany({
-      select: {
-        id: true,
-        name: true,
-        description: true,
-      },
-    });
-
-    // Always-included default tools (by name)
-    // Note: All core tools are now SYSTEM_TOOLS in the workflow (always available, no DB lookup needed)
-    // DB tools are optional extras that can be assigned per-agent
-    const defaultToolNames: string[] = [];
-
-    if (body.source === 'MAC_APP') {
-      defaultToolNames.push('send_sms_as_user');
-    }
-    
-    // Find IDs for default tools
-    const defaultToolIds = allTools
-      .filter(tool => defaultToolNames.includes(tool.name))
-      .map(tool => tool.id);
-    
-    console.log('🔧 Default tools always included', {
-      defaultToolNames,
-      defaultToolIds,
-      foundCount: defaultToolIds.length
-    });
-
-    // Use LLM to select relevant tools based on the goal
-    const { toolIds: llmSelectedToolIds, tokensIn, tokensOut } = await chooseTools(body.goal, allTools);
-    
-    // Merge default tools + LLM-selected tools + user-provided tools (no duplicates)
-    const mergedToolIds = Array.from(new Set([...defaultToolIds, ...body.tool_ids, ...llmSelectedToolIds]));
-    
-    console.log('🔧 Tool selection summary', {
-      defaultTools: defaultToolIds.length,
-      userProvided: body.tool_ids.length,
-      llmSelected: llmSelectedToolIds.length,
-      merged: mergedToolIds.length,
-      defaultToolNames: allTools.filter(t => defaultToolIds.includes(t.id)).map(t => t.name),
-      llmTools: allTools.filter(t => llmSelectedToolIds.includes(t.id)).map(t => t.name),
-      tokensIn,
-      tokensOut
-    });
-
-    // Verify all merged tools exist
-    const tools = await prisma.tool.findMany({
-      where: {
-        id: { in: mergedToolIds },
-      },
-    });
-
-    if (tools.length !== mergedToolIds.length) {
-      res.status(400).json({ error: 'One or more tool IDs are invalid' });
-      return;
-    }
-
     // Fetch pricing for the model
     const pricing = await getModelPricing(body.model);
     let tokenInPriceMicrodollars: number | null = null;
@@ -252,8 +191,6 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           source: body.source,
           tokenInPriceMicrodollars,
           tokenOutPriceMicrodollars,
-          tokensIn, // Include tokens from tool selection
-          tokensOut, // Include tokens from tool selection
           progress: 0.0,
           status: body.pause_state ? 'PAUSED' : 'STARTING_UP',
           // Store response schema directly if provided (for sub-agents)
@@ -268,14 +205,6 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           type: verifier.type,
           llmJudgePrompt: verifier.llm_judge_prompt,
         },
-      });
-
-      // Associate tools (using merged tool IDs)
-      await tx.agentTool.createMany({
-        data: mergedToolIds.map((toolId) => ({
-          agentId: newAgent.id,
-          toolId,
-        })),
       });
 
       // Insert goal as the first USER message in the chat
@@ -300,7 +229,6 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         goal: body.goal,
         model: body.model,
         reasoningMaxTokens: body.reasoning_max_tokens,
-        toolIds: mergedToolIds, // Use merged tool IDs
         verifier: {
           type: verifier.type,
           llmJudgePrompt: verifier.llm_judge_prompt,
@@ -1103,7 +1031,6 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
       },
       include: {
         verifier: true,
-        tools: true,
       },
     });
 
@@ -1144,7 +1071,6 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
       goal: agent.goal,
       model: agent.model,
       reasoningMaxTokens: agent.reasoningMaxTokens,
-      toolIds: agent.tools.map(t => t.toolId),
       verifier: {
         type: agent.verifier.type,
         llmJudgePrompt: agent.verifier.llmJudgePrompt,
