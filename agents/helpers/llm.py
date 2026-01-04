@@ -65,15 +65,23 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
         """Recursively add additionalProperties: false to all objects."""
         if not isinstance(obj, dict):
             return
-            
-        # If this is an object type, add additionalProperties: false
+
+        # If this is an object type, handle additionalProperties
         if obj.get("type") == "object":
-            obj["additionalProperties"] = False
-            
+            existing_additional = obj.get("additionalProperties")
+
+            # If additionalProperties is already a schema (dict), it's a Dict[K,V] type
+            # Preserve it and recurse into the schema to add strict properties there
+            if isinstance(existing_additional, dict):
+                add_strict_properties(existing_additional)
+            else:
+                # For regular objects, set additionalProperties: false
+                obj["additionalProperties"] = False
+
             # Ensure all properties are required
             if "properties" in obj:
                 obj["required"] = list(obj["properties"].keys())
-                
+
                 # Recurse into each property
                 for prop in obj["properties"].values():
                     add_strict_properties(prop)
@@ -1465,4 +1473,66 @@ async def call_llm_activity(
         
     except Exception as e:
         logger.error("LLM activity failed", error=str(e))
+        raise
+
+
+@activity.defn
+async def call_planner_llm_activity(
+    messages: List[Dict[str, str]],
+    model: str,
+    tools_description: str,
+    user_context: str,
+) -> Dict[str, Any]:
+    """
+    Temporal activity for calling the dedicated planner LLM.
+
+    The planner receives conversation context and generates an execution plan
+    with tasks and dependencies. No streaming to frontend.
+
+    Args:
+        messages: Conversation history (user/assistant messages)
+        model: LLM model to use
+        tools_description: Description of tools available in execute phase
+        user_context: User context for personalization
+
+    Returns:
+        Dict from PlannerResponse.model_dump() with title, content, tasks, dependencies_graph, join
+    """
+    from helpers.prompts import build_planner_system_prompt
+    from helpers.tool_schemas import PlannerResponse
+
+    _safe_heartbeat("Calling planner LLM")
+
+    # Build system prompt for planner
+    system_prompt = build_planner_system_prompt(tools_description, user_context)
+
+    # Prepend system message
+    full_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    # No-op callback - planner doesn't stream to frontend
+    async def noop(text: str, count: int):
+        _safe_heartbeat(f"Planner thinking... {len(text)} chars")
+
+    try:
+        result, usage, _ = await call_llm_structured_streaming(
+            messages=full_messages,
+            model=model,
+            temperature=0.7,
+            max_tokens=2048,
+            response_model=PlannerResponse,
+            on_chunk=noop,
+        )
+
+        logger.info(
+            "Planner LLM completed",
+            title=result.title,
+            task_count=len(result.tasks),
+            join=result.join,
+            tokens=usage.get("total_tokens", 0)
+        )
+
+        return result.model_dump()
+
+    except Exception as e:
+        logger.error("Planner LLM failed", error=str(e))
         raise

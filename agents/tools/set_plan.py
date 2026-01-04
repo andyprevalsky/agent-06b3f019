@@ -1,96 +1,150 @@
 """
-Set Plan - Plan phase tool for defining execution plans.
+Set Plan - Triggers dedicated planner LLM to generate execution plan.
 
-This tool uses the two-axis planning framework:
-1. Reducing uncertainty (ambiguity, unknown constraints, unknown strategy)
-2. Reducing remaining work (executing known steps once the world is understood)
-
-Plans use explicit dependency graphs to define execution order:
-- tasks: List of task descriptions (index = task ID)
-- dependencies: DAG specifying which tasks must complete before others
-- join: How to combine results ('all' for AND, 'any' for OR)
+When the main agent calls set_plan(), a dedicated planner LLM analyzes
+the conversation context and generates an optimal task structure with
+dependencies.
 """
 
+from datetime import timedelta
 from typing import Dict, Any, Optional, AsyncGenerator, List
 from collections import deque
 
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
+from helpers.tool_schemas import TOOL_MODELS
 
 
 def validate_dependencies(tasks: List[str], deps: Dict[str, List[str]]) -> Optional[str]:
     """
     Validate the dependency graph.
-    
+
     Returns error message if invalid, None if valid.
     """
     n = len(tasks)
-    
+
     if not deps:
         return None  # Empty deps is valid (all parallel)
-    
+
     # Check for invalid task indices
     for task_idx, predecessors in deps.items():
         if not task_idx.isdigit():
             return f"Invalid task index '{task_idx}'. Must be a numeric string (e.g., '0', '1', '2')."
-        
+
         idx = int(task_idx)
         if idx < 0 or idx >= n:
             return f"Task index '{task_idx}' out of range. Valid indices: 0 to {n-1}."
-        
+
         if not isinstance(predecessors, list):
             return f"Dependencies for task '{task_idx}' must be a list, got {type(predecessors).__name__}."
-        
+
         for pred in predecessors:
             if not isinstance(pred, str) or not pred.isdigit():
                 return f"Task {task_idx} has invalid predecessor '{pred}'. Must be a numeric string."
-            
+
             pred_idx = int(pred)
             if pred_idx < 0 or pred_idx >= n:
                 return f"Task {task_idx} depends on non-existent task '{pred}'. Valid indices: 0 to {n-1}."
-    
+
     # Check for self-references
     for task_idx, predecessors in deps.items():
         if task_idx in predecessors:
             return f"Task {task_idx} cannot depend on itself."
-    
+
     # Check for cycles using Kahn's algorithm (topological sort)
     # Build adjacency list and in-degree count
     in_degree = [0] * n
     adj: Dict[int, List[int]] = {i: [] for i in range(n)}
-    
+
     for task_idx, predecessors in deps.items():
         idx = int(task_idx)
         for pred in predecessors:
             pred_idx = int(pred)
             adj[pred_idx].append(idx)
             in_degree[idx] += 1
-    
+
     # Find all nodes with in-degree 0
     queue = deque([i for i in range(n) if in_degree[i] == 0])
     processed = 0
-    
+
     while queue:
         node = queue.popleft()
         processed += 1
-        
+
         for neighbor in adj[node]:
             in_degree[neighbor] -= 1
             if in_degree[neighbor] == 0:
                 queue.append(neighbor)
-    
+
     if processed != n:
         # Find which nodes are in the cycle
         cycle_nodes = [str(i) for i in range(n) if in_degree[i] > 0]
         return f"Dependency cycle detected involving tasks: {', '.join(cycle_nodes)}. Ensure no task transitively depends on itself."
-    
+
+    return None  # Valid
+
+
+def _get_execute_phase_tools_description() -> str:
+    """Get description of tools available in execute phase for planner context."""
+    execute_tools = [
+        "web_search", "deep_research", "spawn_browser_agent", "spawn_code_agent",
+        "spawn_sub_agents", "send_sms_as_user", "find_all", "enrich", "monitor",
+        "search_user_network_for_people", "message_person", "read_message_history_with_person"
+    ]
+    lines = []
+    for name in execute_tools:
+        if name in TOOL_MODELS:
+            model = TOOL_MODELS[name]
+            doc = model.__doc__ or ""
+            # Get first sentence of docstring
+            first_sentence = doc.split('.')[0] if doc else 'No description'
+            lines.append(f"- {name}: {first_sentence}")
+    return "\n".join(lines) if lines else "Standard execution tools available."
+
+
+def _validate_planner_result(planner_result: Dict[str, Any]) -> Optional[str]:
+    """
+    Validate the planner result. Returns error message if invalid, None if valid.
+    """
+    task_objects = planner_result.get("tasks", [])
+    tasks = [t.get("goal", "") for t in task_objects]
+    dependencies = planner_result.get("dependencies_graph", {})
+    join = planner_result.get("join", "all")
+
+    # Validate tasks
+    if not tasks:
+        return "No tasks returned. The plan must have at least one task."
+
+    # Validate join
+    if join not in ("all", "any"):
+        return f"Invalid join value '{join}'. Must be 'all' or 'any'."
+
+    # Validate dependencies_graph
+    deps = dependencies or {}
+    dep_error = validate_dependencies(tasks, deps)
+    if dep_error:
+        return dep_error
+
+    # Verify tasks[i].depends_on matches dependencies_graph
+    for i, task_obj in enumerate(task_objects):
+        task_deps = task_obj.get("depends_on", [])
+        graph_deps = deps.get(str(i), [])
+        task_deps_str = sorted([str(d) for d in task_deps])
+        graph_deps_str = sorted(graph_deps)
+        if task_deps_str != graph_deps_str:
+            return f"Task {i} has depends_on={task_deps} but dependencies_graph['{i}']={graph_deps}. They must match exactly."
+
     return None  # Valid
 
 
 class SetPlanManager(ToolManager):
-    """Manager for set_plan tool."""
-    
+    """Manager for set_plan tool - triggers planner LLM."""
+
     tool_name = "set_plan"
-    
+    MAX_RETRIES = 2  # Retry once on validation failure
+
     async def execute_tool(
         self,
         workflow_instance,
@@ -98,65 +152,117 @@ class SetPlanManager(ToolManager):
         tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """
-        Set or update the execution plan using the two-axis framework.
-        
-        Args:
-            tool_call: Contains title, content, tasks, dependencies, join
-            
+        Trigger planner LLM to generate execution plan.
+
+        The planner receives conversation context and generates tasks with dependencies.
+        On validation failure, retries once with the error as context.
+
         Yields:
-            - Message with plan data for frontend display
-            - Error if validation fails
+            - IN_PROGRESS while planner is thinking
+            - Plan data on success
+            - Error if validation fails after retries
         """
-        title = tool_call.get("title", "Untitled Plan")
-        content = tool_call.get("content", "")
-        tasks: List[str] = tool_call.get("tasks", [])
-        dependencies: Optional[Dict[str, List[str]]] = tool_call.get("dependencies")
-        join: str = tool_call.get("join", "all")
-        
-        # Validate tasks
-        if not tasks:
+        # Import activity here to avoid circular imports
+        from helpers.llm import call_planner_llm_activity
+
+        # 1. Yield in-progress status
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Generating plan...",
+            message="Analyzing context and generating execution plan...",
+            status=MessageStatus.IN_PROGRESS
+        )
+
+        # 2. Extract goal from first USER message
+        goal = "Complete the user's request"
+        for msg in workflow_instance.context:
+            if msg.get("role") == "USER":
+                goal = msg.get("text", goal)
+                break
+
+        # 3. Build conversation history for planner
+        base_messages = [
+            {"role": "user", "content": f"GOAL: {goal}\n\nPlan this goal into tasks."}
+        ]
+        for msg in workflow_instance.context:
+            role = msg.get("role", "").upper()
+            text = msg.get("text", "")
+            if not text:
+                continue
+            if role == "USER":
+                base_messages.append({"role": "user", "content": text})
+            elif role == "ASSISTANT":
+                base_messages.append({"role": "assistant", "content": text})
+            elif role in ("TOOL", "SYSTEM"):
+                base_messages.append({"role": "user", "content": f"[{role}]: {text}"})
+
+        # 4. Build context for planner activity
+        tools_description = _get_execute_phase_tools_description()
+        user_context = getattr(workflow_instance, 'user_context_section', '')
+
+        # 5. Call planner with retry on validation failure
+        planner_result = None
+        last_error = None
+
+        for attempt in range(self.MAX_RETRIES):
+            messages_for_planner = base_messages.copy()
+
+            # On retry, add the previous error as context
+            if last_error:
+                messages_for_planner.append({
+                    "role": "user",
+                    "content": f"[VALIDATION ERROR - Please fix]: {last_error}"
+                })
+
+            try:
+                planner_result = await workflow.execute_activity(
+                    call_planner_llm_activity,
+                    args=[messages_for_planner, workflow_instance.model, tools_description, user_context],
+                    start_to_close_timeout=timedelta(seconds=120),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Planner Error",
+                    message=f"Failed to generate plan: {str(e)}",
+                    status=MessageStatus.ERROR
+                )
+                return
+
+            # Validate the result
+            validation_error = _validate_planner_result(planner_result)
+            if validation_error is None:
+                break  # Valid plan!
+
+            last_error = validation_error
+            if attempt < self.MAX_RETRIES - 1:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="🔄 Retrying plan generation...",
+                    message=f"Validation error: {validation_error}\n\nRetrying with correction...",
+                    status=MessageStatus.IN_PROGRESS
+                )
+
+        # If still invalid after retries, fail
+        if last_error:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="❌ Plan Validation Error",
-                message=(
-                    "You must provide at least one task in the 'tasks' field.\n\n"
-                    "Example:\n"
-                    "```\n"
-                    "tasks: ['Research competitors', 'Analyze findings', 'Write report']\n"
-                    "```"
-                ),
+                title="❌ Plan Validation Failed",
+                message=f"Planner failed after {self.MAX_RETRIES} attempts: {last_error}",
                 status=MessageStatus.ERROR
             )
             return
-        
-        # Validate join modifier
-        if join not in ("all", "any"):
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Plan Validation Error",
-                message=(
-                    f"Invalid join value '{join}'. Must be 'all' or 'any'.\n\n"
-                    "- 'all' (AND): All tasks must complete; results are merged.\n"
-                    "- 'any' (OR): First successful task satisfies the goal (hypotheses).\n\n"
-                    "Use 'any' when uncertainty > decomposability, 'all' when decomposability >= uncertainty."
-                ),
-                status=MessageStatus.ERROR
-            )
-            return
-        
-        # Validate dependencies
-        deps = dependencies or {}
-        validation_error = validate_dependencies(tasks, deps)
-        if validation_error:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Dependency Validation Error",
-                message=validation_error,
-                status=MessageStatus.ERROR
-            )
-            return
-        
-        # Build plan data structure for frontend
+
+        # 6. Extract validated result
+        task_objects = planner_result["tasks"]
+        tasks = [t["goal"] for t in task_objects]
+        deps = planner_result["dependencies_graph"] or {}
+        title = planner_result["title"]
+        content = planner_result["content"]
+        join = planner_result["join"]
+
+        # 7. Build plan data structure for frontend
         plan_data = {
             "type": "plan_artifact",
             "title": title,
@@ -164,16 +270,13 @@ class SetPlanManager(ToolManager):
             "tasks": tasks,
             "dependencies": deps,
             "join": join,
-            "status": "planning"  # planning, ready, executing, complete
+            "status": "planning"
         }
-        
-        # Store plan in workflow state (required before progress_to_execution)
-        workflow_instance.current_plan = plan_data
-        
-        # Build descriptive message based on plan structure
+
+        # 12. Build descriptive message based on plan structure
         n_tasks = len(tasks)
         has_deps = bool(deps)
-        
+
         if join == "any":
             msg = f"**{title}**\n\n{n_tasks} hypotheses to evaluate (any one may satisfy)."
         elif not has_deps:
@@ -184,13 +287,13 @@ class SetPlanManager(ToolManager):
                 deps.get(str(i)) == [str(i - 1)]
                 for i in range(1, n_tasks)
             ) and "0" not in deps
-            
+
             if is_sequential:
                 msg = f"**{title}**\n\n{n_tasks} tasks (sequential execution)."
             else:
                 msg = f"**{title}**\n\n{n_tasks} tasks (staged execution with dependencies)."
-        
-        # Yield event with plan data embedded in message
+
+        # 13. Yield event with plan data embedded in message
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title=title,
@@ -217,13 +320,13 @@ async def set_plan(
 ):
     """
     Workflow helper for set_plan (event-driven system).
-    
+
     Args:
         workflow_instance: The workflow instance
-        tool_call: Tool call dict with title, content, tasks, dependencies, join
+        tool_call: Tool call dict (now empty - planner generates plan)
         tool_call_id: Unique ID for this tool call
     """
     manager = get_manager()
-    
+
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "set_plan")

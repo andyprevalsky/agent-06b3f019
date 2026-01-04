@@ -66,6 +66,7 @@ from helpers import (
     get_user_context,
     fetch_agent_response_schema,
 )
+from helpers.llm import call_planner_llm_activity
 from helpers.save_tool_usage import save_tool_usage
 from helpers.update_tokens import update_agent_tokens_activity
 from health_server import run_health_server, set_worker_status
@@ -143,6 +144,9 @@ async def main():
         "pygments",
         "httpx",
         "sniffio",
+        # helpers.llm uses threading.Lock via OpenAI/instructor clients
+        # but workflow only calls activities via execute_activity, not directly
+        "helpers.llm",
     )
     
     # Create worker with all workflows and activities
@@ -184,6 +188,7 @@ async def main():
             call_llm,
             check_progress,
             call_llm_activity,
+            call_planner_llm_activity,
             update_agent_status,
             compress_context,
             generate_completion_summary,

@@ -11,6 +11,26 @@ logger = structlog.get_logger(__name__)
 
 
 # ============================================================================
+# Planner LLM Response Models
+# ============================================================================
+
+
+class PlannerTask(BaseModel):
+    """A single task in the planner output."""
+    goal: str = Field(description="Imperative description of what this task accomplishes")
+    depends_on: List[int] = Field(default_factory=list, description="Indices of tasks this depends on (empty = no deps)")
+
+
+class PlannerResponse(BaseModel):
+    """Structured output from the planner LLM."""
+    title: str = Field(description="Short plan title")
+    content: str = Field(description="Markdown explanation of the plan")
+    tasks: List[PlannerTask] = Field(description="List of tasks with dependencies")
+    dependencies_graph: Dict[str, List[str]] = Field(description="Explicit dependency DAG: {'task_idx': ['dep_idx', ...]}")
+    join: Literal["all", "any"] = Field(description="How to combine results: 'all' (AND) or 'any' (OR)")
+
+
+# ============================================================================
 # Individual Tool Pydantic Models
 # ============================================================================
 
@@ -472,38 +492,15 @@ class CheckMonitorEventsTool(BaseModel):
 
 class SetPlanTool(BaseModel):
     """
-    Set or update the execution plan using the two-axis planning framework.
-    
-    Planning operates on two orthogonal axes:
-    1. Reducing uncertainty (ambiguity, unknown constraints, unknown strategy)
-    2. Reducing remaining work (executing known steps once the world is understood)
-    
-    Use explicit dependency graph to define execution order.
+    Signal readiness for plan generation. A dedicated planner LLM will analyze
+    the conversation history and available tools to generate an optimal execution plan.
+
+    Call this when you have gathered enough context and are ready to proceed.
+    The planner will structure your research into tasks with proper dependencies.
     """
 
     tool: Literal["set_plan"]
-    title: str = Field(description="Short title for the plan.")
-    content: str = Field(description="Plan content as markdown text.")
-    
-    tasks: List[str] = Field(
-        description="List of task descriptions. Index position defines task ID (0, 1, 2...)."
-    )
-    
-    dependencies: Optional[Dict[str, List[str]]] = Field(
-        default=None,
-        description="REQUIRED for sequential/causally-dependent tasks. Task dependency graph where keys are "
-        "task indices (as strings) and values are predecessor indices that must complete first. "
-        "ONLY use null/{} for truly independent parallel tasks. "
-        "Sequential chain: {'1': ['0'], '2': ['1'], '3': ['2']}. "
-        "Fan-in: {'3': ['0', '1', '2']}."
-    )
-    
-    join: Literal["all", "any"] = Field(
-        description="How to combine task results:\n"
-        "- 'all' (AND): All tasks must complete; results are merged.\n"
-        "- 'any' (OR): First successful task satisfies the goal.\n"
-        "Use 'any' when uncertainty > decomposability (hypotheses). Use 'all' when decomposability >= uncertainty."
-    )
+    # No parameters - planner LLM generates the plan internally
 
 
 class ProgressToAutonomousExecutionPhaseTool(BaseModel):

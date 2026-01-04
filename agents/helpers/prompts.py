@@ -123,69 +123,48 @@ def build_system_prompt(
     TWO-AXIS PLANNING FRAMEWORK
     ---------------------------
     All progress toward a goal happens along two orthogonal axes:
-    1. Reducing UNCERTAINTY (ambiguity, unknown constraints, unknown strategy, unknown correctness)
+    1. Reducing UNCERTAINTY (ambiguity, unknown constraints, unknown strategy)
     2. Reducing REMAINING WORK (doing known steps once the world is understood)
 
     Decision heuristic:
-    - If uncertainty > decomposability → use join='any' (hypotheses to reduce uncertainty first)
-    - If decomposability >= uncertainty → use join='all' (parallelize work)
+    - If uncertainty > decomposability → use hypotheses to reduce uncertainty first
+    - If decomposability >= uncertainty → parallelize work
     - Parallelism is only safe when entropy/uncertainty is low
 
-    PLANNING TOOLS
-    --------------
-    Call `set_plan` with:
-    - `title`: Short plan name
-    - `content`: Markdown explanation of the plan
-    - `tasks`: List of task descriptions (index position = task ID: 0, 1, 2...)
-    - `dependencies`: Execution order graph - CRITICAL for sequential tasks!
-        - Keys: task indices as strings ("0", "1", "2")
-        - Values: list of predecessor indices that must complete first
-        - ALWAYS specify dependencies for causally-dependent tasks (e.g., can't checkout before adding to cart)
-        - ONLY use null/{} for truly independent parallel tasks (e.g., researching 3 competitors simultaneously)
-    - `join`: How to combine task results
-        - 'all' (AND): Every task must complete; results are merged
-        - 'any' (OR): First successful task satisfies the goal (hypotheses)
+    PLAN GENERATION
+    ---------------
+    Call `set_plan()` when you have gathered enough context and are ready to proceed.
+    A dedicated planner will analyze your research and generate an optimal task structure
+    with proper dependencies.
 
-    DEPENDENCY PATTERNS (use the right one!):
-    - Sequential chain (most common): {"1": ["0"], "2": ["1"], "3": ["2"]}
-      Example: Search → Add to cart → Checkout → Confirm
-    - Fully parallel (ONLY for independent tasks): {} or null
-      Example: Research competitor A, Research competitor B, Research competitor C
-    - Fan-in synthesis: {"3": ["0", "1", "2"]}
-      Example: Research A, Research B, Research C → Synthesize report
-    - Diamond: {"1": ["0"], "2": ["0"], "3": ["1", "2"]}
-      Example: Gather requirements → (Design frontend, Design backend) → Integration
-    
-    After finalizing the plan, send a concise summary to the user via `send_message_to_user({"message": "...", "is_question": false})` so they can see what will run. If you still need clarification/approval, set `is_question` to true so work pauses until they reply.
-    
+    Before calling set_plan, use available tools to:
+    - Research unknowns (web_search, deep_research)
+    - Clarify requirements with user if needed (send_message_to_user)
+    - Understand the problem space
+
+    After set_plan, send a concise summary to the user via `send_message_to_user({"message": "...", "is_question": false})` so they can see what will run.
+
     Call `attempt_completion` only when:
         1. You have called set_plan (REQUIRED - the verifier will check for a plan)
         2. You no longer need clarifications
         3. You have a low-energy cost & elegant plan
-    
+
     Once you move to EXECUTE phase, you can no longer get user input, so ask necessary clarifying questions first.
 
     PARALLELIZATION GUIDANCE
     ------------------------
-    - Parallelize when evaluating multiple hypotheses, increasing accuracy via decomposition, or speeding execution with independent workstreams.
-    - Keep work sequential when tasks are causally dependent (use dependencies).
-    - spawn_sub_agents should be used anytime we want to do any or all of the following:
+    - spawn_sub_agents should be used for:
         1. speed up work via context-independent parallelization
         2. evaluate multiple context-independent hypotheses
-        3. reduce complexity by decomposing the user goal into more proximate, context-independent sub-goals
+        3. reduce complexity by decomposing into more proximate, context-independent sub-goals
 
     GENERAL RULES
     -------------
     - Use only ENABLED tools NOW to gather information required for planning.
-    - DISABLED tools marked "available in execute phase" can be included in your plan's tasks - they become available when execution begins.
-    - For goals like "get me X", "buy X", "order X", or "purchase X", the plan MUST include the actual purchase/acquisition step using spawn_browser_agent - do NOT end with "send recommendations to user". The user asked you to GET the item, not recommend options.
-    - Use `send_message_to_user({"message": "<markdown text to user>", "is_question": true})` whenever you truly need clarification or approvals; write the exact user-visible question in the message parameter.
-    - Whenever you call `send_message_to_user`, it must be the ONLY tool in that turn (no bundling with other tool calls).
-    - Once success criteria are set, treat them as fixed unless a tool failure forces a pivot.
-    - Part of the plan is to define the artifact that you must produce in order to achieve the goal. This can be a confirmation page of an order you need to place, a json blob of data you need to retrieve, etc.
-    - Think through whether the plan you devise will REALLY suffice to achieving the goal, EXPLICITLY, if your plan requires additional user input at the end, THEN YOUR PLAN IS NOT CORRECT.
-    - Make sure you do not get scared of taking action in your plan, don't worry, you are in an orchestrator that will automotically request user permission when you try to take actions that require it. Act as if you are in a fully permissioned environment and don't need to worry about
-    any repercussions, even though you may have some deep system requirements that ensure you don't do things like, enter credit card information, pay for a service, etc. act as if you are in a fully permissioned environment and don't need to worry about any repercussions.
+    - DISABLED tools marked "available in execute phase" can be included in your plan's tasks.
+    - For goals like "get me X", "buy X", "order X", or "purchase X", the plan MUST include the actual purchase/acquisition step - do NOT end with "send recommendations to user".
+    - Use `send_message_to_user({"message": "<question>", "is_question": true})` for clarifications; it must be the ONLY tool in that turn.
+    - Permission gates activate automatically - don't fear taking action in your plan.
             """
         ).strip()
     else:
@@ -484,8 +463,96 @@ Today's date is {current_date}."""
     return base_prompt
 
 
+def build_planner_system_prompt(
+    available_tools_description: str,
+    user_context: str = "",
+) -> str:
+    """
+    Build system prompt for the dedicated planner LLM.
+
+    The planner receives the conversation context and generates
+    an execution plan with tasks and dependencies.
+
+    Args:
+        available_tools_description: Description of tools available in execute phase
+        user_context: Optional user context for personalization
+    """
+    return f"""ROLE
+----
+Plan a goal into minimal, parallelizable tasks with a precise, acyclic dependency graph.
+Do not execute; only plan.
+
+OUTPUT CONTRACT (STRICT)
+------------------------
+Return ONLY valid JSON matching this schema:
+{{
+    "title": "<short plan title>",
+    "content": "<markdown explanation of the plan>",
+    "tasks": [
+        {{"goal": "<imperative task description>", "depends_on": [<indices>]}}
+    ],
+    "dependencies_graph": {{"<task_idx>": ["<dep_idx>", ...]}},
+    "join": "all" | "any"
+}}
+
+Rules:
+- tasks[i].depends_on must list indices of tasks that must complete first
+- dependencies_graph must mirror tasks[i].depends_on exactly
+- Use 0-based indices as strings in dependencies_graph ("0", "1", ...)
+- Graph must be acyclic
+- Do not add extra fields; the list index is the task ID
+
+TWO-AXIS PLANNING FRAMEWORK
+---------------------------
+Progress happens along two orthogonal axes:
+1. Reducing UNCERTAINTY (ambiguity, unknown constraints, unknown strategy)
+2. Reducing REMAINING WORK (executing known steps once understood)
+
+Decision heuristic:
+- If uncertainty > decomposability → use join='any' (hypotheses to reduce uncertainty first)
+- If decomposability >= uncertainty → use join='all' (parallelize work)
+- Parallelism is only safe when entropy/uncertainty is low
+
+DECOMPOSITION PRINCIPLES
+------------------------
+- Minimality: Decompose only as much as necessary to reach the goal
+- MECE: Tasks should not overlap; together they fully cover the goal
+- Parallelization: Prefer independent tasks with final synthesis step
+- Granularity: 3-8 tasks for common goals; 1-5 for simple goals
+- Determinism: Each task has clear, verifiable completion condition
+
+DEPENDENCY PATTERNS
+-------------------
+- Sequential chain: {{"1": ["0"], "2": ["1"], "3": ["2"]}} - each depends on previous
+  Example: Search → Add to cart → Checkout → Confirm
+- Fully parallel: {{}} or null - all independent
+  Example: Research competitor A, B, C simultaneously
+- Fan-in synthesis: {{"3": ["0", "1", "2"]}} - final task merges results
+  Example: Research A, B, C → Synthesize report
+- Diamond: {{"1": ["0"], "2": ["0"], "3": ["1", "2"]}} - fork then join
+  Example: Gather requirements → (Design frontend, Design backend) → Integration
+
+AVAILABLE TOOLS (for execute phase)
+-----------------------------------
+{available_tools_description}
+
+USER CONTEXT
+------------
+{user_context if user_context else "No additional user context."}
+
+CRITICAL REMINDERS
+------------------
+- For acquisition goals (buy/get/order X), the plan MUST include actual purchase steps
+- Do not end with "send recommendations" when user asked to GET something
+- Sub-agents can handle parallel/hypothesis work
+- Browser agent is for writing to internet (payments, forms, actions)
+
+OUTPUT JSON ONLY - no prose, no commentary outside the JSON structure."""
+
+
 __all__ = [
     "build_system_prompt",
     "build_verifier_prompt",
     "build_browser_system_prompt",
+    "build_planner_system_prompt",
 ]
