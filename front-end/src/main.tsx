@@ -5,6 +5,29 @@ import { Toaster as Sonner } from '@/components/ui/sonner'
 import { IntegrationHandlersProvider } from '@/contexts/IntegrationHandlersContext'
 import './index.css'
 
+// Dev-only console log capture (sends to backend for file logging)
+if (import.meta.env.DEV) {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+
+  const sendLog = (level: string, args: unknown[]) => {
+    fetch('http://localhost:3001/api/dev/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level,
+        args: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a))
+      })
+    }).catch(() => {}); // Silently fail if backend unavailable
+  };
+
+  console.log = (...args) => { originalLog(...args); sendLog('log', args); };
+  console.warn = (...args) => { originalWarn(...args); sendLog('warn', args); };
+  console.error = (...args) => { originalError(...args); sendLog('error', args); };
+}
+
 // Amplitude Analytics
 import * as amplitude from '@amplitude/analytics-browser';
 import { sessionReplayPlugin } from '@amplitude/plugin-session-replay-browser';

@@ -119,6 +119,20 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Dev-only: Frontend console log capture endpoint
+if (process.env.NODE_ENV !== 'production') {
+  const fs = require('fs');
+  const path = require('path');
+  const logPath = path.join(process.cwd(), '..', 'front-end', 'frontend-logs.log');
+
+  app.post('/api/dev/log', (req, res) => {
+    const { timestamp, level, args } = req.body;
+    const line = `[${timestamp}] [${level.toUpperCase()}] ${args.join(' ')}\n`;
+    fs.appendFileSync(logPath, line);
+    res.status(204).send();
+  });
+}
+
 // Public routes (no auth required)
 app.use('/api/auth', authRouter);  // OTP send/verify (creates user + $5 credit)
 app.use('/api/waitlist', waitlistRouter);
