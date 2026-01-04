@@ -1303,23 +1303,33 @@ async def fetch_agent_response_schema(agent_id: str) -> Optional[Dict[str, Any]]
     Returns:
         The response schema dict, or None if not set
     """
+    logger.info("fetch_agent_response_schema CALLED", agent_id=agent_id)
     _safe_heartbeat("Fetching response schema")
     config = load_config()
+    logger.info("fetch_agent_response_schema config loaded", api_url=config.backend.api_url)
 
     try:
+        url = f"{config.backend.api_url}/api/agents/{agent_id}"
+        logger.info("Fetching response schema", url=url, agent_id=agent_id)
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                f"{config['api_base_url']}/api/agents/{agent_id}",
-                headers={"x-internal-api-key": config.get("internal_api_key", "")}
+                url,
+                headers={"X-API-Key": config.backend.api_key or ""}
             )
+            logger.info("Response schema fetch result", status=response.status_code, agent_id=agent_id)
+
             if response.status_code == 200:
                 data = response.json()
-                return data.get("response_schema")
+                schema = data.get("agent", {}).get("response_schema")
+                logger.info("Retrieved response schema", agent_id=agent_id, schema=schema)
+                return schema
             else:
                 logger.warning(
                     "Failed to fetch agent response schema",
                     agent_id=agent_id,
-                    status=response.status_code
+                    status=response.status_code,
+                    response_text=response.text[:500] if response.text else None
                 )
                 return None
     except Exception as e:

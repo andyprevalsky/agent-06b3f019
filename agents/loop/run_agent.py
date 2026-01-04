@@ -853,11 +853,27 @@ async def _run_verifier(
     
     score = result.get("score", 0.0)
     reasoning = result.get("reasoning", "")
-    
+    structured_response = result.get("structured_response")
+
+    # Format message with structured output if present
+    message_text = reasoning
+    if structured_response and isinstance(structured_response, dict) and len(structured_response) > 0:
+        output_lines = ["\n\n**Extracted Output:**"]
+        for key, value in structured_response.items():
+            # Convert snake_case to Title Case
+            formatted_key = key.replace("_", " ").title()
+            # Format value (handle arrays)
+            if isinstance(value, list):
+                formatted_value = ", ".join(str(v) for v in value)
+            else:
+                formatted_value = str(value) if value is not None else ""
+            output_lines.append(f"- **{formatted_key}:** {formatted_value}")
+        message_text = reasoning + "\n".join(output_lines)
+
     # Post FINISHED
     if post_message:
         await post_message(
-            reasoning,
+            message_text,
             "TOOL",
             {
                 "toolCallId": verifier_call_id,

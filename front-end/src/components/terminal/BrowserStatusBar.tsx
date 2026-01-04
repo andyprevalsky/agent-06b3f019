@@ -93,7 +93,7 @@ function SchemaChip({
           <div className="rounded-lg border border-border p-3 shadow-lg bg-background/80" style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}>
             <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Output Schema</div>
             {hasSchema ? (
-              <div className="space-y-1.5">
+              <div className="space-y-1.5 max-h-[300px] overflow-y-auto">
                 {outputSchema.fields.map((field, idx) => (
                   <div key={idx} className="text-xs">
                     <div className="flex items-center gap-1.5">
@@ -227,12 +227,9 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
               <div className={cn("h-2 w-2 rounded-full", isDisconnected ? "bg-yellow-500" : "bg-green-500 animate-pulse")} />
               <span className="text-sm font-medium">{isDisconnected ? "Disconnected" : "Active"}</span>
             </div>
-            <div className="flex items-center gap-1">
-              <SchemaChip outputSchema={outputSchema} size="md" tooltipPosition="bottom" />
-              <button onClick={handleFullscreenToggle} className="p-2 rounded hover:bg-muted transition-colors">
-                <X className="h-5 w-5 text-muted-foreground" />
-              </button>
-            </div>
+            <button onClick={handleFullscreenToggle} className="p-2 rounded hover:bg-muted transition-colors">
+              <X className="h-5 w-5 text-muted-foreground" />
+            </button>
           </div>
           <div className="flex-1 relative bg-white">
             <iframe src={browserUrl} className="w-full h-full border-0"

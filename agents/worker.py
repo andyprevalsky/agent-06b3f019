@@ -64,6 +64,7 @@ from helpers import (
     fetch_agent_config,
     check_user_usage,
     get_user_context,
+    fetch_agent_response_schema,
 )
 from helpers.save_tool_usage import save_tool_usage
 from helpers.update_tokens import update_agent_tokens_activity
@@ -195,6 +196,7 @@ async def main():
             check_user_usage,
             get_user_context,
             update_agent_tokens_activity,
+            fetch_agent_response_schema,
         ],
         max_concurrent_activities=config.temporal.max_concurrent_activities,
         max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,

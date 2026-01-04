@@ -22,6 +22,11 @@ const TEST_PROMPTS: TestPrompt[] = [
     description: 'Tests recursive sub-agent spawning with depth parameter',
     prompt: 'Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 4, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10 and you are complete.',
   },
+  {
+    title: 'Test Web Search',
+    description: 'Tests web search tool with a news query',
+    prompt: 'Get me the latest news.',
+  },
 ];
 
 interface TestPromptsSelectorProps {
