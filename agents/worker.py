@@ -64,7 +64,6 @@ from helpers import (
     fetch_agent_config,
     check_user_usage,
     get_user_context,
-    fetch_agent_response_schema,
 )
 from helpers.llm import call_planner_llm_activity
 from helpers.messages import update_agent_tree_state
@@ -202,7 +201,6 @@ async def main():
             check_user_usage,
             get_user_context,
             update_agent_tokens_activity,
-            fetch_agent_response_schema,
             update_agent_tree_state,
         ],
         max_concurrent_activities=config.temporal.max_concurrent_activities,

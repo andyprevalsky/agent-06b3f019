@@ -1,5 +1,5 @@
 from textwrap import dedent
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from tools.base import ToolSchema
 from helpers.tool_schemas import TOOL_MODELS
@@ -11,16 +11,18 @@ def build_system_prompt(
     disabled_tools: List[Union[str, Dict]] = None,
     user_context_section: str = "",
     is_first_call: bool = False,
+    response_schema: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Build system prompt for the LLM.
-    
+
     Args:
         phase: "PLAN" or "EXECUTE"
         enabled_tools: List of tool names (str) or tool dicts
         disabled_tools: List of tool names (str) or tool dicts
         user_context_section: Optional user context to include
         is_first_call: True for first iteration (no tools)
+        response_schema: Optional structured output schema the agent should return
     """
     disabled_tools = disabled_tools or []
     system_prompt = ""
@@ -268,6 +270,23 @@ def build_system_prompt(
             """
         )
 
+    # REQUIRED OUTPUT SCHEMA (if defined)
+    if response_schema and response_schema.get("fields"):
+        fields_desc = "\n".join([
+            f"  - {f['name']} ({f['type']}, {'required' if f.get('required') else 'optional'}): {f['description']}"
+            for f in response_schema["fields"]
+        ])
+        system_prompt += dedent(
+            f"""
+    REQUIRED OUTPUT SCHEMA
+    ----------------------
+    When your goal is complete, you must have gathered the following information:
+{fields_desc}
+
+    The verifier will extract these fields from your work. Ensure you explicitly surface this data in tool results or your response before calling attempt_completion.
+            """
+        )
+
     # OUTPUT CONTRACT
     system_prompt += dedent(
         """
@@ -466,6 +485,7 @@ Today's date is {current_date}."""
 def build_planner_system_prompt(
     available_tools_description: str,
     user_context: str = "",
+    response_schema: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Build system prompt for the dedicated planner LLM.
@@ -476,7 +496,24 @@ def build_planner_system_prompt(
     Args:
         available_tools_description: Description of tools available in execute phase
         user_context: Optional user context for personalization
+        response_schema: Optional structured output schema the agent should return
     """
+    # Build response schema section if defined
+    response_schema_section = ""
+    if response_schema and response_schema.get("fields"):
+        fields_desc = "\n".join([
+            f"  - {f['name']} ({f['type']}, {'required' if f.get('required') else 'optional'}): {f['description']}"
+            for f in response_schema["fields"]
+        ])
+        response_schema_section = f"""
+
+REQUIRED OUTPUT SCHEMA
+----------------------
+The final plan must ensure the following data is gathered:
+{fields_desc}
+
+Plan tasks to explicitly capture this information before completion."""
+
     return f"""ROLE
 ----
 Plan a goal into minimal, parallelizable tasks with a precise, acyclic dependency graph.
@@ -539,7 +576,7 @@ AVAILABLE TOOLS (for execute phase)
 USER CONTEXT
 ------------
 {user_context if user_context else "No additional user context."}
-
+{response_schema_section}
 CRITICAL REMINDERS
 ------------------
 - For acquisition goals (buy/get/order X), the plan MUST include actual purchase steps

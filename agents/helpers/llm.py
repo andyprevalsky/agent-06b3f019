@@ -1303,51 +1303,6 @@ async def check_progress(
 
 
 @activity.defn
-async def fetch_agent_response_schema(agent_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Fetch the response schema for an agent from the database.
-
-    Args:
-        agent_id: The agent ID
-
-    Returns:
-        The response schema dict, or None if not set
-    """
-    logger.info("fetch_agent_response_schema CALLED", agent_id=agent_id)
-    _safe_heartbeat("Fetching response schema")
-    config = load_config()
-    logger.info("fetch_agent_response_schema config loaded", api_url=config.backend.api_url)
-
-    try:
-        url = f"{config.backend.api_url}/api/agents/{agent_id}"
-        logger.info("Fetching response schema", url=url, agent_id=agent_id)
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                url,
-                headers={"X-API-Key": config.backend.api_key or ""}
-            )
-            logger.info("Response schema fetch result", status=response.status_code, agent_id=agent_id)
-
-            if response.status_code == 200:
-                data = response.json()
-                schema = data.get("agent", {}).get("response_schema")
-                logger.info("Retrieved response schema", agent_id=agent_id, schema=schema)
-                return schema
-            else:
-                logger.warning(
-                    "Failed to fetch agent response schema",
-                    agent_id=agent_id,
-                    status=response.status_code,
-                    response_text=response.text[:500] if response.text else None
-                )
-                return None
-    except Exception as e:
-        logger.error("Error fetching response schema", agent_id=agent_id, error=str(e))
-        return None
-
-
-@activity.defn
 async def call_llm_activity(
     messages: List[Dict[str, str]],
     model: str,
@@ -1484,6 +1439,7 @@ async def call_planner_llm_activity(
     model: str,
     tools_description: str,
     user_context: str,
+    response_schema: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Temporal activity for calling the dedicated planner LLM.
@@ -1496,6 +1452,7 @@ async def call_planner_llm_activity(
         model: LLM model to use
         tools_description: Description of tools available in execute phase
         user_context: User context for personalization
+        response_schema: Optional structured output schema the agent should return
 
     Returns:
         Dict from PlannerResponse.model_dump() with title, content, tasks, dependencies_graph, join
@@ -1506,7 +1463,7 @@ async def call_planner_llm_activity(
     _safe_heartbeat("Calling planner LLM")
 
     # Build system prompt for planner
-    system_prompt = build_planner_system_prompt(tools_description, user_context)
+    system_prompt = build_planner_system_prompt(tools_description, user_context, response_schema=response_schema)
 
     # Prepend system message
     full_messages = [{"role": "system", "content": system_prompt}] + messages

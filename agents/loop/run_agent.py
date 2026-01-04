@@ -22,7 +22,7 @@ import uuid
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from pydantic import BaseModel
-from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity, fetch_agent_response_schema
+from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity
 from helpers.tool_schemas import create_agent_action_model
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import compress_context
@@ -93,6 +93,9 @@ async def run_agent(
     
     # PLAN phase mode - requires set_plan before completion, posts "sit back" message
     is_plan_loop: bool = False,
+
+    # Response schema for structured output extraction (passed from agent config)
+    response_schema: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -598,18 +601,7 @@ async def run_agent(
                         context_snapshot=str(context)[:2000],
                     )
 
-                # Fetch response schema from DB for structured response extraction
-                response_schema = None
-                try:
-                    response_schema = await execute_activity(
-                        fetch_agent_response_schema,
-                        args=[agent_id],
-                        start_to_close_timeout=timedelta(seconds=10),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to fetch response schema (non-fatal): {e}")
-
+                # Use response_schema passed from caller (already fetched with agent config)
                 verifier_result = await _run_verifier(
                     execute_activity=execute_activity,
                     context=context,

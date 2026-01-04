@@ -29,7 +29,7 @@ with workflow.unsafe.imports_passed_through():
         mark_finished,
         get_user_context,
         check_user_usage,
-        fetch_agent_response_schema,
+        fetch_agent_config,
     )
     from helpers.messages import broadcast_to_bus, update_agent_tree_state
     from helpers.prompts import build_system_prompt, build_verifier_prompt
@@ -130,6 +130,9 @@ class AgentWorkflow:
 
         # Context - kept in sync with run_agent for tools that check it
         self.context: List[Dict] = []
+
+        # Response schema for structured output (fetched from agent config)
+        self.response_schema: Optional[Dict[str, Any]] = None
 
         # Sub-agent tracking
         self.parent_workflow_id: Optional[str] = None
@@ -323,6 +326,21 @@ class AgentWorkflow:
                     )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
+
+        # Fetch response schema from agent config (for system prompts and verifier)
+        response_schema = None
+        try:
+            agent_config = await workflow.execute_activity(
+                fetch_agent_config,
+                args=[agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3)
+            )
+            response_schema = agent_config.get("response_schema")
+            self.response_schema = response_schema  # Store on instance for tools like set_plan
+            workflow.logger.info(f"Fetched response_schema: {response_schema is not None}")
+        except Exception as e:
+            workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
         
         # =====================================================================
         # Define tool lists for both phases upfront
@@ -363,8 +381,8 @@ class AgentWorkflow:
         plan_result = await run_agent(
             agent_id=agent_id,
             user_id=user_id,
-            system_prompt=build_system_prompt("PLAN", plan_tools, disabled_tools=execute_tools, user_context_section=user_context_section),
-            verifier_prompt=build_verifier_prompt("PLAN", self.verifier.get("llmJudgePrompt", "")),
+            system_prompt=build_system_prompt("PLAN", plan_tools, disabled_tools=execute_tools, user_context_section=user_context_section, response_schema=response_schema),
+            verifier_prompt=build_verifier_prompt("PLAN", self.verifier.get("llmJudgePrompt", ""), response_schema=response_schema),
             model=model,
             tools=plan_tools,
             is_inside_temporal_activity=False,
@@ -379,6 +397,7 @@ class AgentWorkflow:
             max_context_tokens=self.max_context_tokens,
             reasoning_max_tokens=reasoning_max_tokens,
             is_plan_loop=True,  # PLAN phase: requires set_plan, posts "sit back" message
+            response_schema=response_schema,
         )
         
         self._track_tokens(plan_result)
@@ -396,8 +415,8 @@ class AgentWorkflow:
         execute_result = await run_agent(
             agent_id=agent_id,
             user_id=user_id,
-            system_prompt=build_system_prompt("EXECUTE", execute_tools, user_context_section=user_context_section),
-            verifier_prompt=build_verifier_prompt("EXECUTE", self.verifier.get("llmJudgePrompt", "")),
+            system_prompt=build_system_prompt("EXECUTE", execute_tools, user_context_section=user_context_section, response_schema=response_schema),
+            verifier_prompt=build_verifier_prompt("EXECUTE", self.verifier.get("llmJudgePrompt", ""), response_schema=response_schema),
             model=model,
             tools=execute_tools,
             is_inside_temporal_activity=False,
@@ -412,6 +431,7 @@ class AgentWorkflow:
             max_context_tokens=self.max_context_tokens,
             reasoning_max_tokens=reasoning_max_tokens,
             skip_blueprint_query=True,  # Already queried in PLAN phase
+            response_schema=response_schema,
         )
         
         self._track_tokens(execute_result)

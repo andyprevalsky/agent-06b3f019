@@ -199,6 +199,7 @@ class SetPlanManager(ToolManager):
         # 4. Build context for planner activity
         tools_description = _get_execute_phase_tools_description()
         user_context = getattr(workflow_instance, 'user_context_section', '')
+        response_schema = getattr(workflow_instance, 'response_schema', None)
 
         # 5. Call planner with retry on validation failure
         planner_result = None
@@ -217,7 +218,7 @@ class SetPlanManager(ToolManager):
             try:
                 planner_result = await workflow.execute_activity(
                     call_planner_llm_activity,
-                    args=[messages_for_planner, workflow_instance.model, tools_description, user_context],
+                    args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
