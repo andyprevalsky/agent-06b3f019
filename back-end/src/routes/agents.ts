@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
 import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
@@ -680,7 +681,7 @@ router.patch('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
         contextSize: body.contextSize,
         messageCount: body.messageCount,
         ...(body.structuredResponse !== undefined && {
-          structuredResponse: body.structuredResponse,
+          structuredResponse: body.structuredResponse as Prisma.InputJsonValue,
         }),
         updatedAt: new Date(),
       },
