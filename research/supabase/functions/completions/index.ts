@@ -593,7 +593,7 @@ ${bs.dom_tree}${historyDesc}`;
 async function callBrowserUseLLM(
   req: BrowserUseRequest,
   apiKey: string
-): Promise<{ response: any; ttftMs: number }> {
+): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   const { messages } = transformToBrowserUseFormat(req);
   
   console.log('📤 browser-use request messages:', JSON.stringify(messages, null, 2));
@@ -629,7 +629,13 @@ async function callBrowserUseLLM(
   
   const data = await response.json();
   console.log('📥 browser-use raw response:', JSON.stringify(data, null, 2));
-  return { response: data, ttftMs };
+  // Extract usage if available (browser-use API uses OpenAI format)
+  const usage = data.usage ? {
+    prompt_tokens: data.usage.prompt_tokens || 0,
+    completion_tokens: data.usage.completion_tokens || 0,
+    total_tokens: data.usage.total_tokens || 0
+  } : undefined;
+  return { response: data, ttftMs, usage };
 }
 
 // ============================================
@@ -754,7 +760,7 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
 async function callYutoriLLM(
   req: BrowserUseRequest,
   apiKey: string
-): Promise<{ response: any; ttftMs: number }> {
+): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   const { messages } = transformToYutoriFormat(req);
   
   console.log('📤 Yutori request messages count:', messages.length);
@@ -789,7 +795,13 @@ async function callYutoriLLM(
   
   const data = await response.json();
   console.log('📥 Yutori raw response:', JSON.stringify(data, null, 2));
-  return { response: data, ttftMs };
+  // Extract usage if available (Yutori API uses OpenAI format)
+  const usage = data.usage ? {
+    prompt_tokens: data.usage.prompt_tokens || 0,
+    completion_tokens: data.usage.completion_tokens || 0,
+    total_tokens: data.usage.total_tokens || 0
+  } : undefined;
+  return { response: data, ttftMs, usage };
 }
 
 // Normalize Yutori response to unified action format
@@ -1076,7 +1088,7 @@ function mapToCUAAction(action: string, params?: Record<string, any>): any {
 async function callAnthropicCUA(
   req: BrowserUseRequest,
   apiKey: string
-): Promise<{ response: any; ttftMs: number }> {
+): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   const { messages, tools } = transformToAnthropicCUAFormat(req);
   
   console.log('📤 Anthropic CUA request messages count:', messages.length);
@@ -1114,7 +1126,13 @@ async function callAnthropicCUA(
   
   const data = await response.json();
   console.log('📥 Anthropic CUA raw response:', JSON.stringify(data, null, 2));
-  return { response: data, ttftMs };
+  // Extract usage from Anthropic response (uses input_tokens/output_tokens)
+  const usage = data.usage ? {
+    prompt_tokens: data.usage.input_tokens || 0,
+    completion_tokens: data.usage.output_tokens || 0,
+    total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
+  } : undefined;
+  return { response: data, ttftMs, usage };
 }
 
 // Normalize Anthropic CUA response to unified action format
@@ -1202,7 +1220,7 @@ async function callGenericLLM(
   model: string,
   openRouterKey: string,
   supabaseUrl: string
-): Promise<{ response: any; ttftMs: number }> {
+): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   // Check if this is a DOM-only model (no vision needed)
   const isDomOnly = DOM_ONLY_MODELS.includes(model);
   
@@ -1254,10 +1272,18 @@ async function callGenericLLM(
   } catch {
     completion = { action: [], thinking: content };
   }
-  
-  return { 
-    response: { completion }, 
-    ttftMs 
+
+  // Extract usage from OpenRouter response
+  const usage = data.usage ? {
+    prompt_tokens: data.usage.prompt_tokens || 0,
+    completion_tokens: data.usage.completion_tokens || 0,
+    total_tokens: data.usage.total_tokens || 0
+  } : undefined;
+
+  return {
+    response: { completion },
+    ttftMs,
+    usage
   };
 }
 
@@ -2130,8 +2156,9 @@ async function raceModels(
       }
       
       const decoder = new TextDecoder();
-      let buffer = '';
-      
+      let buffer = '';  // For parsing - holds incomplete line
+      let allData = ''; // Accumulate ALL data for firstData (needed for Anthropic message_start)
+
       // Read until we get a real data line (not just ": OPENROUTER PROCESSING")
       while (true) {
         // Check if aborted while waiting for content
@@ -2140,16 +2167,18 @@ async function raceModels(
           reader.cancel();
           return null;
         }
-        
+
         const { done, value } = await reader.read();
         if (done) {
           console.error(`❌ ${model} stream ended before data`);
           return null;
         }
-        
-        buffer += decoder.decode(value, { stream: true });
+
+        const chunk = decoder.decode(value, { stream: true });
+        allData += chunk;  // Accumulate everything for firstData
+        buffer += chunk;
         const lines = buffer.split('\n');
-        
+
         for (const line of lines) {
           // Look for actual data line with CONTENTFUL tokens (not just heartbeats)
           if (line.startsWith('data:') && !line.includes('[DONE]')) {
@@ -2157,24 +2186,24 @@ async function raceModels(
               const jsonStr = line.slice(5).trim(); // Remove "data:" prefix
               if (jsonStr) {
                 const parsed = JSON.parse(jsonStr);
-                
+
                 // Handle both OpenRouter/OpenAI format and Anthropic format
                 let hasContent = false;
                 if (parsed.choices?.[0]?.delta) {
                   // OpenRouter/OpenAI format
                   const delta = parsed.choices[0].delta;
                   hasContent = delta.content || delta.reasoning;
-                } else if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-                  // Anthropic streaming format
+                } else if (parsed.type === 'content_block_delta' && (parsed.delta?.text || parsed.delta?.partial_json)) {
+                  // Anthropic streaming format (text or structured output)
                   hasContent = true;
                 }
-                
+
                 if (hasContent) {
                   const ttftMs = Date.now() - startTime;
                   timings[`${modelKey}_ttft`] = ttftMs;
                   timings[`${modelKey}_first_data`] = Date.now() - raceInternalStart;
                   console.log(`✅ ${model} FIRST CONTENTFUL TOKEN in ${ttftMs}ms at t=${timings[`${modelKey}_first_data`]}ms`);
-                  
+
                   // IMMEDIATELY abort all other racing models to save API costs
                   // Don't wait for promise resolution - kill them NOW
                   controllers.forEach((controller, i) => {
@@ -2183,10 +2212,10 @@ async function raceModels(
                       controller.abort();
                     }
                   });
-                  
+
                   // Return the reader (not response) since we've already started reading
-                  // Also return the buffer with data we've read so far
-                  return { model, reader, ttftMs, index, firstData: buffer };
+                  // Return allData (includes all events like message_start) not just buffer
+                  return { model, reader, ttftMs, index, firstData: allData };
                 }
               }
             } catch (e) {
@@ -2194,8 +2223,8 @@ async function raceModels(
             }
           }
         }
-        
-        // Keep incomplete line in buffer
+
+        // Keep incomplete line in buffer for next iteration
         buffer = lines[lines.length - 1] || '';
       }
     } catch (error) {
@@ -2687,10 +2716,35 @@ async function handleStreaming(
         const decoder = new TextDecoder();
         let buffer = '';
 
+        // Anthropic usage tracking - capture from message_start and message_delta
+        let anthropicInputTokens = 0;
+        let anthropicOutputTokens = 0;
+
         while (true) {
           const { done, value } = await reader.read();
-          
+
           if (done) {
+            // For Anthropic models, emit final usage chunk before [DONE]
+            if (isAnthropicModel(actualModel) && (anthropicInputTokens > 0 || anthropicOutputTokens > 0)) {
+              const usageChunk = {
+                choices: [{
+                  index: 0,
+                  delta: {},
+                  finish_reason: 'stop'
+                }],
+                usage: {
+                  prompt_tokens: anthropicInputTokens,
+                  completion_tokens: anthropicOutputTokens,
+                  total_tokens: anthropicInputTokens + anthropicOutputTokens
+                },
+                requested_model: requestedModel,
+                actual_model: actualModel,
+                pool_name: poolName,
+                pool_size: poolSize
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(usageChunk)}\n\n`));
+              console.log(`📊 Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}`);
+            }
             controller.enqueue(encoder.encode('data: [DONE]\n\n'));
             controller.close();
             break;
@@ -2706,17 +2760,31 @@ async function handleStreaming(
               if (data === '[DONE]') {
                 continue;
               }
-              
+
               try {
                 const parsed = JSON.parse(data);
-                
+
                 // Transform Anthropic streaming events to OpenAI format
                 if (isAnthropicModel(actualModel)) {
-                  // Skip non-content events
+                  // Capture input tokens from message_start
+                  if (parsed.type === 'message_start' && parsed.message?.usage?.input_tokens) {
+                    anthropicInputTokens = parsed.message.usage.input_tokens;
+                    console.log(`📊 Anthropic input_tokens captured: ${anthropicInputTokens}`);
+                    continue;
+                  }
+
+                  // Capture output tokens from message_delta
+                  if (parsed.type === 'message_delta' && parsed.usage?.output_tokens) {
+                    anthropicOutputTokens = parsed.usage.output_tokens;
+                    console.log(`📊 Anthropic output_tokens captured: ${anthropicOutputTokens}`);
+                    continue;
+                  }
+
+                  // Skip other non-content events
                   if (parsed.type !== 'content_block_delta') {
                     continue;
                   }
-                  
+
                   // Transform to OpenAI format
                   // Handle both delta.text (normal) and delta.partial_json (JSON schema output)
                   const openAIFormat = {
@@ -2841,9 +2909,9 @@ serve(async (req) => {
       
       // Helper to call a specific provider with full request/response logging
       async function callProvider(
-        provider: string, 
+        provider: string,
         providerIndex: number
-      ): Promise<{ action: UnifiedAction; ttftMs: number; actualModel: string }> {
+      ): Promise<{ action: UnifiedAction; ttftMs: number; actualModel: string; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
         // Log the full request (with truncated screenshots)
         console.log(`\n📤 [${provider}] FULL REQUEST:`);
         console.log(JSON.stringify(truncateForLogging({
@@ -2854,90 +2922,94 @@ serve(async (req) => {
           action_history: browserUseReq.action_history,
           model_seed: browserUseReq.model_seed,
         }), null, 2));
-        
+
         if (provider === 'browser-use') {
           const browserUseApiKey = Deno.env.get('BROWSER_USE_API_KEY');
           if (!browserUseApiKey) throw new Error('BROWSER_USE_API_KEY not configured');
-          
+
           const result = await callBrowserUseLLM(browserUseReq, browserUseApiKey);
           const normalizedAction = normalizeBrowserUseResponse(result.response);
-          
+
           console.log(`\n📥 [${provider}] FULL RESPONSE:`);
           console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
           console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
           console.log(JSON.stringify(normalizedAction, null, 2));
-          
+
           return {
             action: normalizedAction,
             ttftMs: result.ttftMs,
-            actualModel: 'browser-use/bu-1-0'
+            actualModel: 'browser-use/bu-1-0',
+            usage: result.usage
           };
-          
+
         } else if (provider === 'yutori/n1') {
           const yutoriApiKey = Deno.env.get('YUTORI_API_KEY');
           if (!yutoriApiKey) throw new Error('YUTORI_API_KEY not configured');
           if (!browserUseReq.browser_state.screenshot) {
             throw new Error('Yutori requires screenshot');
           }
-          
+
           const result = await callYutoriLLM(browserUseReq, yutoriApiKey);
-          
+
           console.log(`\n📥 [${provider}] FULL RESPONSE:`);
           console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
-          
+
           const normalizedAction = normalizeYutoriResponse(result.response, browserUseReq.browser_state.viewport);
-          
+
           console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
           console.log(JSON.stringify(normalizedAction, null, 2));
-          
+
           return {
             action: normalizedAction,
             ttftMs: result.ttftMs,
-            actualModel: 'yutori/n1-preview-2025-11'
+            actualModel: 'yutori/n1-preview-2025-11',
+            usage: result.usage
           };
-          
+
         } else if (provider === 'anthropic/claude-cua') {
           const anthropicApiKey = Deno.env.get('ANTHROPIC_API_KEY');
           if (!anthropicApiKey) throw new Error('ANTHROPIC_API_KEY not configured');
           if (browserUseReq.browser_state.screenshot?.startsWith('http')) {
             throw new Error('Anthropic CUA requires base64 screenshot');
           }
-          
+
           const result = await callAnthropicCUA(browserUseReq, anthropicApiKey);
-          
+
           console.log(`\n📥 [${provider}] FULL RESPONSE:`);
           console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
-          
+
           const normalizedAction = normalizeAnthropicCUAResponse(result.response);
-          
+
           console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
           console.log(JSON.stringify(normalizedAction, null, 2));
-          
+
           return {
             action: normalizedAction,
             ttftMs: result.ttftMs,
-            actualModel: 'anthropic/claude-sonnet-4-cua'
+            actualModel: 'anthropic/claude-sonnet-4-cua',
+            usage: result.usage
           };
-          
+
         } else {
           // Generic LLM via OpenRouter
           const openRouterKey = Deno.env.get('OPENROUTER_API_KEY');
           if (!openRouterKey) throw new Error('OPENROUTER_API_KEY not configured');
-          
+
           const result = await callGenericLLM(browserUseReq, provider, openRouterKey, supabaseUrl);
-          
+
           console.log(`\n📥 [${provider}] FULL RESPONSE:`);
           console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
-          
+
           const normalizedAction = normalizeBrowserUseResponse(result.response);
-          
+
           console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
           console.log(JSON.stringify(normalizedAction, null, 2));
-          
+
           return {
             action: normalizedAction,
             ttftMs: result.ttftMs,
-            actualModel: provider
+            actualModel: provider,
+            usage: result.usage
           };
         }
       }
@@ -2962,9 +3034,9 @@ serve(async (req) => {
         
         try {
           const result = await callProvider(selectedProvider, providerIndex);
-          
+
           console.log(`✅ Browser-use response: action=${result.action.action}, index=${result.action.index}`);
-          
+
           return new Response(JSON.stringify({
             action: result.action,
             requested_model: browserUseReq.model,
@@ -2973,11 +3045,12 @@ serve(async (req) => {
             pool_size: browserPool.length,
             provider_index: providerIndex,
             ttft_ms: result.ttftMs,
+            usage: result.usage,
           }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
             status: 200,
           });
-          
+
         } catch (error) {
           console.error(`❌ Browser-use (seeded) failed:`, error);
           return new Response(JSON.stringify({ 
@@ -3008,9 +3081,9 @@ serve(async (req) => {
             BROWSER_USE_TIMEOUT_MS,
             selectedProvider
           );
-          
+
           console.log(`✅ Browser-use response: action=${result.action.action}, index=${result.action.index}`);
-          
+
           return new Response(JSON.stringify({
             action: result.action,
             requested_model: browserUseReq.model,
@@ -3019,11 +3092,12 @@ serve(async (req) => {
             pool_size: browserPool.length,
             provider_index: providerIndex,
             ttft_ms: result.ttftMs,
+            usage: result.usage,
           }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
             status: 200,
           });
-          
+
         } catch (error) {
           lastError = error instanceof Error ? error.message : 'Unknown error';
           console.log(`⏱️ ${selectedProvider} failed: ${lastError}, trying next...`);
@@ -3392,35 +3466,57 @@ serve(async (req) => {
               // Start with the buffer we already read during racing
               let buffer = firstData;
               let firstEnqueueTime: number | null = null;
-              
+
+              // Anthropic usage tracking - capture from message_start and message_delta
+              let anthropicInputTokens = 0;
+              let anthropicOutputTokens = 0;
+
               // Process the firstData buffer immediately
               console.log(`⏱️ TIMING: processing firstData buffer (${firstData.length} chars)`);
-              
+
               // Helper to process buffer lines
               const processBuffer = () => {
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
                 return lines;
               };
-              
+
               // Helper to process a single line
               const processLine = (line: string) => {
-                if (line.startsWith('data: ')) {
-                  const data = line.slice(6);
+                // Handle both "data: " (with space) and "data:" (no space) formats
+                if (line.startsWith('data:')) {
+                  // Extract data after "data:" - handle optional space
+                  const data = line.startsWith('data: ') ? line.slice(6) : line.slice(5).trim();
                   if (data === '[DONE]') {
                     return;
                   }
-                  
+
                   try {
                     const parsed = JSON.parse(data);
-                    
+
                     // Transform Anthropic streaming events to OpenAI format (same as handleStreaming)
                     if (isAnthropicModel(winningModel)) {
-                      // Skip non-content events (message_start, content_block_start, etc.)
+                      // Capture input tokens from message_start
+                      if (parsed.type === 'message_start') {
+                        if (parsed.message?.usage?.input_tokens) {
+                          anthropicInputTokens = parsed.message.usage.input_tokens;
+                          console.log(`📊 Anthropic input_tokens captured: ${anthropicInputTokens}`);
+                        }
+                        return;
+                      }
+
+                      // Capture output tokens from message_delta
+                      if (parsed.type === 'message_delta' && parsed.usage?.output_tokens) {
+                        anthropicOutputTokens = parsed.usage.output_tokens;
+                        console.log(`📊 Anthropic output_tokens captured: ${anthropicOutputTokens}`);
+                        return;
+                      }
+
+                      // Skip other non-content events (content_block_start, etc.)
                       if (parsed.type !== 'content_block_delta') {
                         return;
                       }
-                      
+
                       // Transform to OpenAI format
                       const openAIFormat: any = {
                         choices: [{
@@ -3436,7 +3532,7 @@ serve(async (req) => {
                         racing_ttft_ms: ttftMs,
                         models_raced: modelsRaced
                       };
-                      
+
                       // Track first enqueue timing
                       if (firstEnqueueTime === null) {
                         firstEnqueueTime = Date.now() - streamStartTime;
@@ -3444,11 +3540,11 @@ serve(async (req) => {
                         console.log(`⏱️ TIMING: first_enqueue_to_client=${firstEnqueueTime}ms`);
                       }
                       openAIFormat.timings = timings;
-                      
+
                       controller.enqueue(encoder.encode(`data: ${JSON.stringify(openAIFormat)}\n\n`));
                       return;
                     }
-                    
+
                     // Non-Anthropic models (OpenRouter/Cerebras) - pass through with metadata
                     parsed.requested_model = model;
                     parsed.actual_model = winningModel;
@@ -3456,7 +3552,7 @@ serve(async (req) => {
                     parsed.pool_size = pool.length;
                     parsed.racing_ttft_ms = ttftMs;
                     parsed.models_raced = modelsRaced;
-                    
+
                     // Track first enqueue timing
                     if (firstEnqueueTime === null) {
                       firstEnqueueTime = Date.now() - streamStartTime;
@@ -3464,36 +3560,60 @@ serve(async (req) => {
                       console.log(`⏱️ TIMING: first_enqueue_to_client=${firstEnqueueTime}ms`);
                     }
                     parsed.timings = timings;
-                    
+
                     // Adjust usage to reflect TRUE cost (all racing models consumed input tokens)
                     if (parsed.usage && parsed.usage.prompt_tokens) {
                       const winnerPromptTokens = parsed.usage.prompt_tokens;
                       const winnerCompletionTokens = parsed.usage.completion_tokens || 0;
                       parsed.usage.prompt_tokens = winnerPromptTokens * modelsRaced;
                       parsed.usage.total_tokens = parsed.usage.prompt_tokens + winnerCompletionTokens;
-                      parsed.usage.winner_prompt_tokens = winnerPromptTokens;
-                      parsed.usage.winner_completion_tokens = winnerCompletionTokens;
                       console.log(`📊 Usage adjusted: ${winnerPromptTokens} input × ${modelsRaced} models = ${parsed.usage.prompt_tokens} total input tokens`);
                     }
-                    
+
                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
                   } catch (e) {
                     controller.enqueue(encoder.encode(`${line}\n`));
                   }
                 }
               };
-              
+
               // Process any complete lines already in firstData buffer
               let lines = processBuffer();
               for (const line of lines) {
                 processLine(line);
               }
-              
+
               // Continue reading from the stream
               while (true) {
                 const { done, value } = await reader.read();
-                
+
                 if (done) {
+                  // For Anthropic models, emit final usage chunk before [DONE]
+                  if (isAnthropicModel(winningModel) && (anthropicInputTokens > 0 || anthropicOutputTokens > 0)) {
+                    // Adjust for racing - all models consumed input tokens
+                    const adjustedInputTokens = anthropicInputTokens * modelsRaced;
+                    const usageChunk = {
+                      choices: [{
+                        index: 0,
+                        delta: {},
+                        finish_reason: 'stop'
+                      }],
+                      usage: {
+                        prompt_tokens: adjustedInputTokens,
+                        completion_tokens: anthropicOutputTokens,
+                        total_tokens: adjustedInputTokens + anthropicOutputTokens
+                      },
+                      requested_model: model,
+                      actual_model: winningModel,
+                      pool_name: poolName,
+                      pool_size: pool.length,
+                      racing_ttft_ms: ttftMs,
+                      models_raced: modelsRaced,
+                      timings
+                    };
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(usageChunk)}\n\n`));
+                    console.log(`📊 Anthropic usage adjusted: ${anthropicInputTokens} input × ${modelsRaced} models = ${adjustedInputTokens} total input tokens`);
+                  }
                   controller.enqueue(encoder.encode('data: [DONE]\n\n'));
                   controller.close();
                   break;
@@ -3501,7 +3621,7 @@ serve(async (req) => {
 
                 buffer += decoder.decode(value, { stream: true });
                 lines = processBuffer();
-                
+
                 for (const line of lines) {
                   processLine(line);
                 }

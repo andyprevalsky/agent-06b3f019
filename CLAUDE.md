@@ -21,7 +21,6 @@ mac-app/       → Electron desktop app (macOS only)
 - `agents/workflows/agent_workflow.py` - Core agent logic
 - `back-end/prisma/schema.prisma` - Database schema (source of truth)
 - `research/supabase/functions/completions/index.ts` - Rose model racing endpoint
-- `research/supabase/functions/cost/index.ts` - Cost calculation
 - `mac-app/main/index.ts` - Electron main process
 
 ## Development
@@ -84,3 +83,9 @@ curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1
 - **ORM:** Prisma
 - **RLS:** Enabled on all tables - users only see their own data
 - Schema changes: Edit `back-end/prisma/schema.prisma`, then migrate
+
+## Rose API
+
+- `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite
+- `research/supabase/functions/completions/test-browser-use-usage.mjs` - rose-1-browser-use test
+

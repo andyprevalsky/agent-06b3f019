@@ -325,6 +325,7 @@ async def call_llm_structured_streaming(
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": True,  # Enable SSE streaming
+            "stream_options": {"include_usage": True},  # Get token usage in final chunk
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -356,6 +357,7 @@ async def call_llm_structured_streaming(
         pool_size = 0
         was_cancelled = False
         chunk_count = 0
+        stream_usage = None  # Captured from final chunk with stream_options
         
         # Tool detection tracking (for early IN_PROGRESS messages)
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
@@ -461,7 +463,12 @@ async def call_llm_structured_streaming(
                                 pool_name = chunk_data["pool_name"]
                             if chunk_data.get("pool_size"):
                                 pool_size = chunk_data["pool_size"]
-                            
+
+                            # Capture usage from final chunk (sent when stream_options.include_usage=true)
+                            if chunk_data.get("usage"):
+                                stream_usage = chunk_data["usage"]
+                                logger.info(f"📊 Usage received: prompt={stream_usage.get('prompt_tokens', 0)} completion={stream_usage.get('completion_tokens', 0)}")
+
                             # Extract delta content
                             delta = chunk_data.get("choices", [{}])[0].get("delta", {})
                             
@@ -592,15 +599,27 @@ async def call_llm_structured_streaming(
                 "response": "",
                 "tool_calls": []
             })
-            usage = {
-                "prompt_tokens": 0,
-                "completion_tokens": token_count,
-                "total_tokens": token_count,
-                "actual_model": actual_model,
-                "pool_name": pool_name,
-                "pool_size": pool_size,
-                "cancelled": True
-            }
+            # Use stream_usage if captured before cancellation, otherwise estimate
+            if stream_usage:
+                usage = {
+                    "prompt_tokens": stream_usage.get("prompt_tokens", 0),
+                    "completion_tokens": stream_usage.get("completion_tokens", 0),
+                    "total_tokens": stream_usage.get("total_tokens", 0),
+                    "actual_model": actual_model,
+                    "pool_name": pool_name,
+                    "pool_size": pool_size,
+                    "cancelled": True
+                }
+            else:
+                usage = {
+                    "prompt_tokens": 0,
+                    "completion_tokens": token_count,
+                    "total_tokens": token_count,
+                    "actual_model": actual_model,
+                    "pool_name": pool_name,
+                    "pool_size": pool_size,
+                    "cancelled": True
+                }
             return empty_response, usage, detected_tools_ordered
         
         logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars")
@@ -666,15 +685,30 @@ async def call_llm_structured_streaming(
             logger.error(f"Failed to parse streaming Rose response: json={accumulated_json[:500]}", error=str(e))
             raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {str(e)}")
         
-        usage = {
-            "prompt_tokens": 0,  # Not available in streaming mode
-            "completion_tokens": token_count,
-            "total_tokens": token_count,
-            "actual_model": actual_model,
-            "pool_name": pool_name,
-            "pool_size": pool_size,
-            "cancelled": False
-        }
+        # Use captured stream usage if available, otherwise fall back to estimates
+        if stream_usage:
+            usage = {
+                "prompt_tokens": stream_usage.get("prompt_tokens", 0),
+                "completion_tokens": stream_usage.get("completion_tokens", 0),
+                "total_tokens": stream_usage.get("total_tokens", 0),
+                "actual_model": actual_model,
+                "pool_name": pool_name,
+                "pool_size": pool_size,
+                "cancelled": False,
+                # Include racing-adjusted values if present
+                "winner_prompt_tokens": stream_usage.get("winner_prompt_tokens"),
+                "winner_completion_tokens": stream_usage.get("winner_completion_tokens"),
+            }
+        else:
+            usage = {
+                "prompt_tokens": 0,  # Fallback if stream_options not supported
+                "completion_tokens": token_count,
+                "total_tokens": token_count,
+                "actual_model": actual_model,
+                "pool_name": pool_name,
+                "pool_size": pool_size,
+                "cancelled": False
+            }
         
         return response, usage, detected_tools_ordered
     

@@ -363,7 +363,18 @@ async def call_rose_browser_use(
         "action_history": action_history,
         "available_actions": AVAILABLE_ACTIONS,
     }
-    
+
+    # Log full request for debugging (truncate screenshot to avoid huge logs)
+    log_body = {
+        **request_body,
+        "browser_state": {
+            **browser_state,
+            "screenshot": f"<base64 {len(browser_state.get('screenshot', ''))} chars>" if browser_state.get('screenshot') else None,
+            "dom_tree": f"<{len(browser_state.get('dom_tree', ''))} chars>" if browser_state.get('dom_tree') else None,
+        }
+    }
+    logger.info("📤 Rose browser-use request", request=json.dumps(log_body, indent=2, default=str))
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             config.rose.api_url,
@@ -379,8 +390,10 @@ async def call_rose_browser_use(
             error_text = response.text
             logger.error(f"Rose API error: {response.status_code} - {error_text}")
             raise RuntimeError(f"Rose API error: {response.status_code}")
-        
-        return response.json()
+
+        result = response.json()
+        logger.info("📥 Rose browser-use response", response=json.dumps(result, indent=2, default=str))
+        return result
 
 
 # ========================================
