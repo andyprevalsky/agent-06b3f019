@@ -7,64 +7,75 @@ import { AuthService } from '../services/auth';
 import { IMessageSender } from '../services/iMessageSender';
 import { IMessageSync } from '../services/iMessageSync';
 import { CookieSync } from '../services/cookieSync';
+import { logIpc, logConsole, logConsoleError } from '../base/logger';
 
 export function registerHandlers() {
   // Auth handlers
   ipcMain.handle('auth:check', async () => {
+    logIpc('IN', 'auth:check');
     const session = await AuthService.getSession();
-    console.log('[IPC Auth] check() called, has session:', !!session);
+    logConsole('IPC Auth', 'check() called', { hasSession: !!session });
+    logIpc('OUT', 'auth:check', { hasSession: !!session });
     return session;
   });
-  
+
   ipcMain.handle('auth:save', (_, session) => {
-    console.log('[IPC Auth] 💾 save() called');
-    console.log('[IPC Auth] Token preview:', session?.access_token?.substring(0, 20) + '...');
-    console.log('[IPC Auth] Expires at:', session?.expires_at, session?.expires_at ? new Date(session.expires_at * 1000) : 'N/A');
+    logIpc('IN', 'auth:save', { tokenPreview: session?.access_token?.substring(0, 20) + '...' });
+    logConsole('IPC Auth', 'save() called', { expiresAt: session?.expires_at });
     AuthService.setSession(session);
-    console.log('[IPC Auth] ✅ Session saved to store');
-    
+    logConsole('IPC Auth', 'Session saved to store');
+
     // Trigger syncs after successful auth
-    IMessageSync.sync().catch(err => console.error('[IPC Auth] Post-auth iMessage sync error:', err));
-    CookieSync.sync().catch(err => console.error('[IPC Auth] Post-auth cookie sync error:', err));
-    
+    IMessageSync.sync().catch(err => logConsoleError('IPC Auth', 'Post-auth iMessage sync error', err));
+    CookieSync.sync().catch(err => logConsoleError('IPC Auth', 'Post-auth cookie sync error', err));
+
+    logIpc('OUT', 'auth:save', { success: true });
     return { success: true };
   });
-  
+
   ipcMain.handle('auth:clear', () => {
-    console.log('[IPC Auth] 🗑️ clear() called');
+    logIpc('IN', 'auth:clear');
+    logConsole('IPC Auth', 'clear() called');
     AuthService.clearSession();
+    logIpc('OUT', 'auth:clear', { success: true });
     return { success: true };
   });
   
   // iMessage handlers
   ipcMain.handle('imessage:checkAccess', () => {
-    return IMessageReader.checkAccess();
+    logIpc('IN', 'imessage:checkAccess');
+    const hasAccess = IMessageReader.checkAccess();
+    logIpc('OUT', 'imessage:checkAccess', { hasAccess });
+    return hasAccess;
   });
-  
+
   ipcMain.handle('imessage:startUpload', async (event) => {
-    console.log('[IPC] Starting iMessage upload process...');
-    
+    logIpc('IN', 'imessage:startUpload');
+    logConsole('IPC', 'Starting iMessage upload process...');
+
     // Check access
     if (!IMessageReader.checkAccess()) {
-      console.error('[IPC] No access to iMessage database');
+      logConsoleError('IPC', 'No access to iMessage database');
+      logIpc('OUT', 'imessage:startUpload', { success: false, message: 'Full Disk Access required' });
       return { success: false, message: 'Full Disk Access required' };
     }
-    
+
     // Check auth
     const session = await AuthService.getSession();
     if (!session) {
-      console.error('[IPC] ❌ Not authenticated');
+      logConsoleError('IPC', 'Not authenticated');
+      logIpc('OUT', 'imessage:startUpload', { success: false, message: 'Not authenticated' });
       return { success: false, message: 'Not authenticated' };
     }
-    
-      console.log('[IPC] Reading messages from database...');
-      const messages = await IMessageReader.readMessages();
-      console.log(`[IPC] ✅ Read ${messages.length} messages from database`);
-    
+
+    logConsole('IPC', 'Reading messages from database...');
+    const messages = await IMessageReader.readMessages();
+    logConsole('IPC', `Read ${messages.length} messages from database`);
+
     // Count unique contacts
     const contacts = new Set(messages.map((m: any) => m.contact_id));
-    console.log(`[IPC] 📊 Sending ${messages.length} messages from ${contacts.size} contacts to backend for processing`);
-    
+    logConsole('IPC', `Sending ${messages.length} messages from ${contacts.size} contacts to backend`);
+
     const window = BrowserWindow.fromWebContents(event.sender);
     const result = await BatchUploader.uploadInBatches(
       'imessage',
@@ -72,70 +83,55 @@ export function registerHandlers() {
       session.access_token,
       window
     );
-    
-    console.log('[IPC] 🏁 Upload complete:', result);
+
+    logConsole('IPC', 'Upload complete', result);
+    logIpc('OUT', 'imessage:startUpload', result);
     return result;
   });
 
   ipcMain.handle('imessage:sendDirect', async (_, payload: { to: string; message: string }) => {
+    logIpc('IN', 'imessage:sendDirect', { to: payload.to });
     try {
       await IMessageSender.send(payload);
+      logIpc('OUT', 'imessage:sendDirect', { success: true });
       return { success: true };
     } catch (error: any) {
-      console.error('[IPC] Failed to send direct iMessage:', error);
+      logConsoleError('IPC', 'Failed to send direct iMessage', error);
+      logIpc('OUT', 'imessage:sendDirect', { success: false, message: error?.message });
       return { success: false, message: error?.message || 'Failed to send iMessage' };
     }
   });
   
   // Cookie handlers
   ipcMain.handle('cookies:readChrome', async () => {
+    logIpc('IN', 'cookies:readChrome');
     const cookies = await CookieReader.readCookies();
-    
-    // Debug: dump raw cookies to file
-    const fs = require('fs');
-    const path = require('path');
-    const { app } = require('electron');
-    const dumpPath = path.join(app.getPath('desktop'), 'cookies_dump.txt');
-    
-    const amazonCookies = cookies.filter((c: any) => 
-      c.host_key?.includes('amazon')
-    );
-    
-    let dump = `=== RAW COOKIES DUMP ===\n`;
-    dump += `Total cookies: ${cookies.length}\n`;
-    dump += `Amazon cookies: ${amazonCookies.length}\n\n`;
-    dump += `=== AMAZON COOKIES ===\n`;
-    
-    for (const c of amazonCookies) {
-      dump += `\nName: ${c.name}\n`;
-      dump += `Host: ${c.host_key}\n`;
-      dump += `Path: ${c.path}\n`;
-      dump += `Value Length: ${c.value?.length || 0}\n`;
-      dump += `Value (raw): ${c.value}\n`;
-      dump += `---\n`;
-    }
-    
-    fs.writeFileSync(dumpPath, dump, 'utf8');
-    console.log(`[CookieReader] Dumped ${amazonCookies.length} Amazon cookies to ${dumpPath}`);
-    
+    logConsole('CookieReader', `Read ${cookies.length} cookies`);
+    logIpc('OUT', 'cookies:readChrome', { count: cookies.length });
     return cookies;
   });
-  
+
   ipcMain.handle('cookies:upload', async (event, data) => {
+    logIpc('IN', 'cookies:upload', { count: data?.length });
     const session = await AuthService.getSession();
     if (!session) {
+      logIpc('OUT', 'cookies:upload', { success: false, message: 'Not authenticated' });
       return { success: false, message: 'Not authenticated' };
     }
-    
+
     const window = BrowserWindow.fromWebContents(event.sender);
     // Use batch uploader for cookies too
-    return await BatchUploader.uploadInBatches('chrome_cookies', data, session.access_token, window);
+    const result = await BatchUploader.uploadInBatches('chrome_cookies', data, session.access_token, window);
+    logIpc('OUT', 'cookies:upload', result);
+    return result;
   });
-  
+
   // System handlers
   ipcMain.handle('system:openFullDiskAccess', async () => {
+    logIpc('IN', 'system:openFullDiskAccess');
     // Opens directly to Full Disk Access pane
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
+    logIpc('OUT', 'system:openFullDiskAccess', { success: true });
     return { success: true };
   });
 }
@@ -145,11 +141,11 @@ registerHandlers();
 
 // Initialize iMessage sync on startup
 // Run initial sync (if already authenticated) and start background sync
-IMessageSync.sync().catch(err => console.error('[Startup] Initial iMessage sync error:', err));
+IMessageSync.sync().catch(err => logConsoleError('Startup', 'Initial iMessage sync error', err));
 IMessageSync.startBackgroundSync();
 
 // Initialize cookie sync on startup
 // Run initial sync (if already authenticated and connected) and start background sync
-CookieSync.sync().catch(err => console.error('[Startup] Initial cookie sync error:', err));
+CookieSync.sync().catch(err => logConsoleError('Startup', 'Initial cookie sync error', err));
 CookieSync.startBackgroundSync();
 

@@ -39,6 +39,8 @@ Check these when errors occur:
 - **Agents:** `agents/navi-worker-log.txt`
 - **Backend:** `back-end/backend-logs.log`
 - **Frontend:** `front-end/frontend-logs.log`
+- **Mac App (console):** `mac-app/mac-app-console-logs.log`
+- **Mac App (IPC):** `mac-app/mac-app-ipc-logs.log`
 
 ## Critical Rules
 

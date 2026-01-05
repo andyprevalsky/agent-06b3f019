@@ -2,25 +2,95 @@ import React, { useEffect, useState, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../index.css';
 import type { QuickQueryToggleState } from '../../shared/types/ipc';
-import { cn } from '@/lib/utils';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from '@/components/ui/command';
-import { AppDataProvider, useAppData } from '@/hooks/useAppData';
-import { ChevronDown } from 'lucide-react';
+import { AppDataProvider } from '@/hooks/useAppData';
+import LiquidWhiteButton from '@/components/ui/liquid-white-button';
+import { ArrowUp } from 'lucide-react';
+import { liquidMetalFragmentShader, ShaderMount } from '@paper-design/shaders';
 
-// Add drag styles
+// Liquid metal shader component - fills parent container
+const ShaderTile = ({ size }: { size: number }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const shaderRef = useRef<ShaderMount | null>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    if (shaderRef.current) {
+      shaderRef.current.dispose();
+      shaderRef.current = null;
+    }
+
+    shaderRef.current = new ShaderMount(
+      container,
+      liquidMetalFragmentShader,
+      {
+        u_repetition: 0.5,
+        u_softness: 0.8,
+        u_shiftRed: 0.15,
+        u_shiftBlue: 0.15,
+        u_distortion: 0,
+        u_contour: 0,
+        u_angle: 90,
+        u_scale: 1.5,
+        u_shape: 0,
+        u_offsetX: 0,
+        u_offsetY: 0,
+      },
+      undefined,
+      0.5
+    );
+
+    return () => {
+      if (shaderRef.current) {
+        shaderRef.current.dispose();
+        shaderRef.current = null;
+      }
+    };
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: '100%',
+        height: size,
+        maskImage: 'linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%)',
+        WebkitMaskImage: 'linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%)',
+        pointerEvents: 'none',
+      }}
+    />
+  );
+};
+
+// Styles - must override Tailwind's bg-background
 const style = document.createElement('style');
 style.textContent = `
-  body, #root {
-    margin: 0;
-    padding: 0;
+  html, body, #root {
+    margin: 0 !important;
+    padding: 0 !important;
     background: transparent !important;
+    background-color: transparent !important;
+    width: 100% !important;
+    height: 100% !important;
   }
-  body > div:first-child {
+  body {
+    background: transparent !important;
+    background-color: transparent !important;
+  }
+  .drag-region {
     -webkit-app-region: drag;
   }
   button, input, textarea, select {
     -webkit-app-region: no-drag;
+  }
+  .placeholder-input::placeholder {
+    color: rgba(39, 39, 37, 0.5);
   }
 `;
 document.head.appendChild(style);
@@ -28,29 +98,23 @@ document.head.appendChild(style);
 const Launcher = () => {
   const [query, setQuery] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-lite');
-  const [showModelPicker, setShowModelPicker] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { models } = useAppData();
-
-  // Auto-resize textarea based on content
-  useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px';
-    }
-  }, [query]);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const toggleHandler = (state: QuickQueryToggleState) => {
       if (state.open) {
         setQuery('');
         setSubmitting(false);
-        setTimeout(() => textareaRef.current?.focus(), 100);
+        setTimeout(() => inputRef.current?.focus(), 100);
       }
     };
 
     window.api.onQuickQueryToggle(toggleHandler);
+
+    // Listen for focus-input events from main process
+    window.api.onFocusInput(() => {
+      inputRef.current?.focus();
+    });
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -76,147 +140,98 @@ const Launcher = () => {
         query: query.trim(),
         submittedAt: Date.now(),
       });
-      // Query is sent to main window, close the launcher
-      // The main window will receive it and handle it
     } catch (err) {
       setSubmitting(false);
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
       e.preventDefault();
       handleSubmit();
     }
   };
 
   return (
-    <div className="relative h-full w-full rounded-xl border p-2 shadow-lg overflow-hidden"
-      style={{
-        backdropFilter: 'blur(24px) saturate(1.09) brightness(1.09)',
-        WebkitBackdropFilter: 'blur(24px) saturate(1.09) brightness(1.09)',
-        backgroundColor: 'rgba(255, 255, 255, 0.98)',
-        borderColor: 'rgba(218, 218, 218, 0.615)',
-        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.04), 0 0 2.56px rgba(126, 87, 194, 0.0128), inset 0 1px 1px rgba(255,255,255,0.315)',
-      }}
-    >
-      {/* Marble gradient background - soft white with pastel hints */}
-      <div 
-        className="absolute inset-0 pointer-events-none"
+    <div className="drag-region" style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <div
+        className="drag-region"
         style={{
-          background: `radial-gradient(circle at 15% 30%, rgba(255, 248, 245, 0.021) 0%, transparent 45%), 
-                       radial-gradient(circle at 85% 70%, rgba(248, 245, 255, 0.018) 0%, transparent 45%),
-                       radial-gradient(circle at 50% 50%, rgba(255, 250, 255, 0.015) 0%, transparent 55%),
-                       radial-gradient(circle at 30% 80%, rgba(252, 248, 255, 0.0165) 0%, transparent 50%)`,
-          opacity: 0.265,
-          zIndex: -1,
+          position: 'absolute',
+          top: 8,
+          left: 8,
+          right: 8,
+          bottom: 8,
+          borderRadius: 9999,
+          boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1)',
         }}
-      />
-      <form
-        onSubmit={handleSubmit}
-        className="relative z-10 flex h-full flex-col justify-between"
       >
-          <div className="flex flex-col justify-between h-full">
-                {/* Textarea */}
-                <div className="relative px-2">
-                  <textarea
-                    ref={textareaRef}
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    disabled={submitting}
-                    placeholder="Enter your goal"
-                    className={cn(
-                      'w-full resize-none border-none bg-transparent py-1 text-base leading-6 text-gray-900 placeholder:text-gray-400 focus:outline-none dark:text-gray-100 dark:placeholder:text-gray-500'
-                    )}
-                    rows={1}
-                    style={{ 
-                      WebkitAppRegion: 'no-drag',
-                      minHeight: '28px',
-                      maxHeight: '120px',
-                      overflow: 'hidden'
-                    } as React.CSSProperties}
-                  />
-                </div>
+        {/* Shader background */}
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          borderRadius: 9999,
+          overflow: 'hidden'
+        }}>
+          <ShaderTile size={52} />
+        </div>
 
-                {/* Bottom bar */}
-                <div className="flex items-center justify-between gap-2 px-2 pt-0.5">
-                  <Popover open={showModelPicker} onOpenChange={setShowModelPicker}>
-                    <PopoverTrigger asChild>
-                      <button
-                        type="button"
-                        className="flex items-center gap-1.5 rounded-lg border border-gray-300 bg-gray-100 px-2 py-1 text-xs text-gray-700 shadow-sm hover:bg-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-                      >
-                        <span>{selectedModel}</span>
-                        <ChevronDown className="h-3 w-3" />
-                      </button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-[300px] p-0 z-[10000]" align="start">
-                      <Command className="bg-white dark:bg-gray-900">
-                        <CommandInput placeholder="Search models..." />
-                        <CommandList className="max-h-[400px]">
-                          <CommandEmpty>No models available.</CommandEmpty>
-                          <CommandGroup heading="⭐ Featured">
-                            {models.slice(0, 6).map((model) => (
-                              <CommandItem
-                                key={model.id}
-                                onSelect={() => {
-                                  setSelectedModel(model.id);
-                                  setShowModelPicker(false);
-                                }}
-                              >
-                                <div className="flex items-center justify-between w-full">
-                                  <div className="flex flex-col gap-0.5">
-                                    <span className="font-medium">{model.name}</span>
-                                    <span className="text-xs text-gray-500">{model.provider}</span>
-                                  </div>
-                                  {model.id === selectedModel && (
-                                    <span className="text-primary">✓</span>
-                                  )}
-                                </div>
-                              </CommandItem>
-                            ))}
-                          </CommandGroup>
-                          {models.length > 6 && (
-                            <CommandGroup heading="All Models">
-                              {models.slice(6).map((model) => (
-                                <CommandItem
-                                  key={model.id}
-                                  onSelect={() => {
-                                    setSelectedModel(model.id);
-                                    setShowModelPicker(false);
-                                  }}
-                                >
-                                  <div className="flex items-center justify-between w-full">
-                                    <div className="flex flex-col gap-0.5">
-                                      <span className="text-sm">{model.name}</span>
-                                      <span className="text-xs text-gray-500">{model.provider}</span>
-                                    </div>
-                                    {model.id === selectedModel && (
-                                      <span className="text-primary">✓</span>
-                                    )}
-                                  </div>
-                                </CommandItem>
-                              ))}
-                            </CommandGroup>
-                          )}
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
+        {/* Inner content */}
+        <div
+          style={{
+            position: 'absolute',
+            top: 2,
+            left: 2,
+            right: 2,
+            bottom: 2,
+            borderRadius: 9999,
+            backgroundColor: '#f5f5f5',
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          <form
+            onSubmit={handleSubmit}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              width: '100%',
+              height: '100%',
+              gap: 12,
+              paddingLeft: 16,
+              paddingRight: 4,
+            }}
+          >
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={submitting}
+              placeholder="What do you want to do?"
+              className="placeholder-input"
+              style={{
+                flex: 1,
+                minWidth: 0,
+                background: 'transparent',
+                fontSize: 13,
+                color: '#272725',
+                border: 'none',
+                outline: 'none',
+              } as React.CSSProperties}
+            />
 
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className="flex items-center gap-1 rounded-lg border border-gray-300 bg-gray-100 px-2 py-1 text-xs text-gray-700 shadow-sm hover:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-                  >
-                    <span className="font-mono text-[17px] leading-none">⌘</span>
-                    <span className="font-mono text-xs">+</span>
-                    <span className="font-mono text-xs">Enter</span>
-                  </button>
-                </div>
-          </div>
-      </form>
+            <LiquidWhiteButton
+              onClick={() => handleSubmit()}
+              disabled={submitting}
+              size="sm"
+            >
+              <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
+            </LiquidWhiteButton>
+          </form>
+        </div>
+      </div>
     </div>
   );
 };
@@ -228,5 +243,3 @@ createRoot(document.getElementById('root')!).render(
     </AppDataProvider>
   </React.StrictMode>
 );
-
-

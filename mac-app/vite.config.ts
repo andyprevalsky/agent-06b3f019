@@ -5,6 +5,9 @@ import path from 'path';
 export default defineConfig({
   plugins: [react()],
   base: './',
+  server: {
+    port: 5174,
+  },
   build: {
     outDir: 'dist/ui',
     rollupOptions: {

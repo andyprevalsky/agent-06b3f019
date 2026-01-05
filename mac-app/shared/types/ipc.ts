@@ -24,6 +24,7 @@ export interface IPC {
   onQuickQuerySubmit: (callback: (payload: QuickQueryPayload) => void) => void;
   onUpdateStatus: (callback: (payload: UpdateStatusPayload) => void) => void;
   onUpdateProgress: (callback: (percent: number) => void) => void;
+  onFocusInput: (callback: () => void) => void;
 
   // Quick query actions
   submitQuickQuery: (payload: string | QuickQueryPayload) => Promise<{ success: boolean }>;

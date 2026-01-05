@@ -9,14 +9,6 @@ import '@/index.css';
 import React, { useEffect } from 'react';
 import type { QuickQueryPayload } from '../shared/types/ipc';
 
-// Add electron-specific window dragging styles
-const style = document.createElement('style');
-style.textContent = `
-  aside { -webkit-app-region: drag; }
-  button, a, input, textarea, select { -webkit-app-region: no-drag; }
-`;
-document.head.appendChild(style);
-
 // Electron-specific integration handlers
 const electronHandlers = {
   iMessage: {

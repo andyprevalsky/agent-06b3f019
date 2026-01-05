@@ -1,5 +1,7 @@
 import { app, BrowserWindow, nativeImage, globalShortcut, ipcMain, screen, Menu } from 'electron';
+import { exec } from 'child_process';
 import path from 'path';
+import Store from 'electron-store';
 import { config } from './base/config';
 import './handlers/registry'; // Register IPC handlers
 import {
@@ -12,8 +14,52 @@ import {
 
 app.name = 'Rose';
 
+// Window state persistence
+interface WindowState {
+  x?: number;
+  y?: number;
+  width: number;
+  height: number;
+  isMaximized?: boolean;
+}
+
+const windowStateStore = new Store<{ mainWindow?: WindowState }>({
+  name: 'window-state',
+  defaults: {},
+});
+
+function getWindowState(): WindowState {
+  const saved = windowStateStore.get('mainWindow');
+  return saved || { width: 1800, height: 800 };
+}
+
+function saveWindowState(win: BrowserWindow): void {
+  if (!win || win.isDestroyed()) return;
+  const bounds = win.getBounds();
+  windowStateStore.set('mainWindow', {
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
+    isMaximized: win.isMaximized(),
+  });
+}
+
 let mainWindow: BrowserWindow | null = null;
 let quickQueryWindow: BrowserWindow | null = null;
+let quickQueryBlurEnabled = false;
+
+// Listen for parent process death (stdin close) - quit when Conductor dies
+// Use process.exit(0) instead of app.quit() because app.quit() can hang on macOS
+process.stdin.resume();
+process.stdin.on('close', () => {
+  console.log('[App] Shutting down: stdin closed (parent died)');
+  // Save window state before exiting since process.exit() bypasses close events
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    saveWindowState(mainWindow);
+  }
+  process.exit(0);
+});
 
 function getIconPaths() {
   const iconBasePath = config.isDev
@@ -33,10 +79,13 @@ function getIconPaths() {
 
 function createMainWindow() {
   const { iconPath, macIcnsPath, macPngPath } = getIconPaths();
+  const windowState = getWindowState();
 
   mainWindow = new BrowserWindow({
-    width: 1800,
-    height: 800,
+    x: windowState.x,
+    y: windowState.y,
+    width: windowState.width,
+    height: windowState.height,
     minWidth: 1500,
     minHeight: 600,
     titleBarStyle: 'hiddenInset',
@@ -49,6 +98,11 @@ function createMainWindow() {
     },
   });
 
+  // Restore maximized state
+  if (windowState.isMaximized) {
+    mainWindow.maximize();
+  }
+
   // Set dock icon for macOS (BrowserWindow icon is ignored on macOS)
   if (process.platform === 'darwin') {
     const icon = nativeImage.createFromPath(config.isDev ? macPngPath : macIcnsPath);
@@ -56,11 +110,16 @@ function createMainWindow() {
   }
 
   if (config.isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadURL('http://localhost:5174');
     mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../ui/index.html'));
   }
+
+  // Save window state on resize/move
+  mainWindow.on('resize', () => saveWindowState(mainWindow!));
+  mainWindow.on('move', () => saveWindowState(mainWindow!));
+  mainWindow.on('close', () => saveWindowState(mainWindow!));
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -69,12 +128,12 @@ function createMainWindow() {
 
 function createQuickQueryWindow() {
   quickQueryWindow = new BrowserWindow({
-    width: 500,
-    minHeight: 100,
-    height: 100,
-    maxHeight: 400,
+    width: 400,
+    minHeight: 88,
+    height: 88,
+    maxHeight: 88,
     resizable: false,
-    movable: false,
+    movable: true,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
@@ -83,9 +142,9 @@ function createQuickQueryWindow() {
     skipTaskbar: true,
     transparent: true,
     backgroundColor: '#00000000',
-    titleBarStyle: 'hidden',
     alwaysOnTop: true,
-    vibrancy: 'under-window',
+    hasShadow: false,
+    roundedCorners: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -100,13 +159,19 @@ function createQuickQueryWindow() {
   }
 
   if (config.isDev) {
-    quickQueryWindow.loadURL('http://localhost:5173/launcher.html');
+    quickQueryWindow.loadURL('http://localhost:5174/launcher.html');
   } else {
     quickQueryWindow.loadFile(path.join(__dirname, '../../ui/launcher.html'));
   }
 
   quickQueryWindow.on('blur', () => {
-    hideQuickQueryWindow();
+    if (quickQueryBlurEnabled) {
+      hideQuickQueryWindow();
+    }
+  });
+
+  quickQueryWindow.on('focus', () => {
+    // Window gained focus - blur handler can be enabled
   });
 
   quickQueryWindow.on('closed', () => {
@@ -139,14 +204,78 @@ function positionQuickQueryWindow() {
 
 function showQuickQueryWindow() {
   if (!quickQueryWindow) return;
+  quickQueryBlurEnabled = false; // Disable blur while showing
+
   positionQuickQueryWindow();
+
+  // Ensure app has focus before showing window (helps on macOS)
+  app.focus({ steal: true });
+
   quickQueryWindow.show();
   quickQueryWindow.focus();
+  quickQueryWindow.focusOnWebView();
+
+  // Nuclear option: Use AppleScript to send Escape (closes ChatGPT) and activate our app
+  if (process.platform === 'darwin') {
+    // Send Escape key to dismiss any other popups (like ChatGPT)
+    exec(`osascript -e 'tell application "System Events" to key code 53'`);
+    // Small delay then activate our app
+    setTimeout(() => {
+      exec(`osascript -e 'tell application "Rose" to activate'`);
+    }, 50);
+  }
+
+  // Aggressively grab focus multiple times to beat other apps
+  const focusAttempts = [10, 50, 100, 150, 300, 500, 1000];
+  focusAttempts.forEach((delay) => {
+    setTimeout(() => {
+      if (quickQueryWindow && !quickQueryWindow.isDestroyed()) {
+        app.focus({ steal: true });
+        quickQueryWindow.moveTop();
+        quickQueryWindow.focus();
+        quickQueryWindow.focusOnWebView();
+        quickQueryWindow.webContents.focus();
+
+        // Send a synthetic mouse click to the input area to capture keyboard focus
+        const bounds = quickQueryWindow.getBounds();
+        quickQueryWindow.webContents.sendInputEvent({
+          type: 'mouseDown',
+          x: Math.round(bounds.width / 2),
+          y: Math.round(bounds.height / 2),
+          button: 'left',
+          clickCount: 1,
+        });
+        quickQueryWindow.webContents.sendInputEvent({
+          type: 'mouseUp',
+          x: Math.round(bounds.width / 2),
+          y: Math.round(bounds.height / 2),
+          button: 'left',
+          clickCount: 1,
+        });
+
+        // Also focus the input directly via JS
+        quickQueryWindow.webContents.executeJavaScript(`
+          const input = document.querySelector('input');
+          if (input) {
+            input.click();
+            input.focus();
+          }
+        `).catch(() => {});
+      }
+    }, delay);
+  });
+
   emitQuickQueryToggle(true);
+
+  // Enable blur after window has focus and a small delay
+  setTimeout(() => {
+    quickQueryBlurEnabled = true;
+  }, 200);
 }
 
 function hideQuickQueryWindow({ focusMain }: { focusMain?: boolean } = {}) {
   if (!quickQueryWindow) return;
+  quickQueryBlurEnabled = false; // Disable blur when hiding
   if (!quickQueryWindow.isDestroyed()) {
     quickQueryWindow.hide();
     emitQuickQueryToggle(false);
@@ -159,14 +288,22 @@ function hideQuickQueryWindow({ focusMain }: { focusMain?: boolean } = {}) {
 }
 
 function registerGlobalShortcuts() {
-  globalShortcut.register('Alt+Shift+Space', () => {
+  const toggleQuickQuery = () => {
     if (!quickQueryWindow) return;
     if (quickQueryWindow.isVisible()) {
       hideQuickQueryWindow({ focusMain: true });
     } else {
       showQuickQueryWindow();
     }
-  });
+  };
+
+  // Try to register Alt+Space - if it fails (another app has it), fall back to Alt+Shift+Space only
+  const altSpaceRegistered = globalShortcut.register('Alt+Space', toggleQuickQuery);
+  if (!altSpaceRegistered) {
+    console.log('[App] Alt+Space shortcut is already taken by another app');
+  }
+
+  globalShortcut.register('Alt+Shift+Space', toggleQuickQuery);
 }
 
 function registerQuickQueryIpc() {
@@ -295,6 +432,10 @@ app.on('activate', () => {
 });
 
 app.on('will-quit', () => {
+  // Save window state before quitting as a safety net
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    saveWindowState(mainWindow);
+  }
   globalShortcut.unregisterAll();
 });
 

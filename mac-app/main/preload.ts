@@ -50,6 +50,9 @@ const api: IPC = {
   onUpdateProgress: (callback: (percent: number) => void) => {
     ipcRenderer.on('update:progress', (_, data) => callback((data as { percent: number }).percent));
   },
+  onFocusInput: (callback: () => void) => {
+    ipcRenderer.on('focus-input', () => callback());
+  },
   submitQuickQuery: (payload: string | QuickQueryPayload) =>
     ipcRenderer.invoke('quick-query:submit', payload) as Promise<{ success: boolean }>,
   hideQuickQuery: () => ipcRenderer.invoke('quick-query:hide') as Promise<{ success: boolean }>,

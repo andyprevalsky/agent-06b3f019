@@ -130,7 +130,7 @@ const applyRoseGradient = (data: XmlFrameData | null): XmlFrameData | null => {
 export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAnimationProps>(
   (
     {
-      dataUrl = '/thinking_animations.txt',
+      dataUrl = './thinking_animations.txt',
       data,
       autoplay = true,
       loop = true,
