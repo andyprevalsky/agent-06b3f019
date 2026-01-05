@@ -66,6 +66,16 @@ Check these when errors occur:
 - Error handling: catch → format → yield error event → **don't raise**
 - See `agents/tools/base.py` for ToolManager pattern
 
+## Logging Guidelines
+
+Always log these events (use `[Component]` prefix, include IDs, truncate payloads to 200 chars):
+1. **HTTP requests** - method, path, body, response status, duration
+2. **External calls** - Temporal, LLM, third-party APIs (request + response)
+3. **Workflow events** - phase transitions, signals, completion/failure
+4. **Tool execution** - tool name, input summary, output summary, duration
+5. **DB mutations** - table, operation, record ID
+6. **Errors** - message, stack, context (agentId, userId)
+
 ## Test Credentials (Dev)
 
 - Supabase URL: `https://kzlurqihzaolhzsbkctf.supabase.co`
