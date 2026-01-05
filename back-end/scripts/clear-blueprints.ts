@@ -4,17 +4,21 @@
  * Usage: npm run clear:blueprints
  */
 
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
 async function clearBlueprints() {
   try {
-    console.log('🗑️  Clearing all blueprints from database...');
-    
-    const result = await prisma.goalBlueprint.deleteMany({});
-    
-    console.log(`✅ Deleted ${result.count} blueprint(s)`);
+    console.log('🗑️  Clearing blueprints without feedback from database...');
+
+    const result = await prisma.goalBlueprint.deleteMany({
+      where: {
+        metadata: { equals: Prisma.DbNull },
+      },
+    });
+
+    console.log(`✅ Deleted ${result.count} blueprint(s) (preserved blueprints with feedback)`);
     
   } catch (error) {
     console.error('❌ Error clearing blueprints:', error);

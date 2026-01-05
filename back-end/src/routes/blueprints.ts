@@ -169,6 +169,44 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 /**
+ * Find blueprint by goal text (for feedback association)
+ * GET /api/blueprints/by-goal?goal=...
+ * Auth: JWT
+ */
+router.get('/by-goal', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?.id;
+    const { goal } = req.query;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (!goal || typeof goal !== 'string') {
+      return res.status(400).json({ error: 'Goal is required' });
+    }
+
+    // Find the most recent blueprint with matching title (goal)
+    const blueprint = await prisma.goalBlueprint.findFirst({
+      where: {
+        userId,
+        title: goal,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!blueprint) {
+      return res.status(404).json({ error: 'Blueprint not found' });
+    }
+
+    res.json(blueprint);
+  } catch (error) {
+    console.error('Blueprint lookup error:', error);
+    res.status(500).json({ error: 'Failed to find blueprint' });
+  }
+});
+
+/**
  * Delete a blueprint
  * DELETE /api/blueprints/:id
  */
@@ -198,6 +236,60 @@ router.delete('/:id', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Blueprint delete error:', error);
     res.status(500).json({ error: 'Failed to delete blueprint' });
+  }
+});
+
+/**
+ * Submit feedback for a blueprint
+ * PATCH /api/blueprints/:id/feedback
+ * Auth: JWT
+ */
+router.patch('/:id/feedback', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.id;
+    const { rating, issueType, comment, helpImprove, agentId } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+    }
+
+    // Verify ownership
+    const blueprint = await prisma.goalBlueprint.findFirst({
+      where: { id, userId },
+    });
+
+    if (!blueprint) {
+      return res.status(404).json({ error: 'Blueprint not found' });
+    }
+
+    // Update metadata with feedback
+    const existingMetadata = (blueprint.metadata as Record<string, unknown>) || {};
+    const updatedMetadata = {
+      ...existingMetadata,
+      feedback: {
+        rating,
+        issueType: issueType || null,
+        comment: comment || null,
+        helpImprove: helpImprove ?? true,
+        agentId,
+        submittedAt: new Date().toISOString(),
+      },
+    };
+
+    const updated = await prisma.goalBlueprint.update({
+      where: { id },
+      data: { metadata: updatedMetadata },
+    });
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Blueprint feedback error:', error);
+    res.status(500).json({ error: 'Failed to submit feedback' });
   }
 });
 

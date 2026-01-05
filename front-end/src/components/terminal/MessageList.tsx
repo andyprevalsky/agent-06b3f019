@@ -7,6 +7,7 @@ import MessageBubble from './MessageBubble';
 import { PlanChip } from './PlanChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { Button } from '@/components/ui/button';
+import { FeedbackBanner, FeedbackData } from './FeedbackBanner';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // StreamingMarkdown - Renders text with fade-in animation for each chunk
@@ -147,6 +148,8 @@ interface MessageListProps {
   onAddCredits?: () => void;
   /** Callback when navigating to a sub-agent */
   onNavigateToAgent?: (agentId: string) => void;
+  /** Callback when user submits feedback */
+  onSubmitFeedback?: (feedback: FeedbackData) => Promise<void>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -161,6 +164,7 @@ export function MessageList({
   compact = false,
   onAddCredits,
   onNavigateToAgent,
+  onSubmitFeedback,
 }: MessageListProps) {
   const {
     agent,
@@ -497,8 +501,11 @@ export function MessageList({
             </div>
           )}
           
-          {/* Completed */}
-          {agent?.status === 'COMPLETED' && (
+          {/* Completed - with Feedback Banner */}
+          {agent?.status === 'COMPLETED' && onSubmitFeedback && (
+            <FeedbackBanner onSubmit={onSubmitFeedback} />
+          )}
+          {agent?.status === 'COMPLETED' && !onSubmitFeedback && (
             <div className="flex gap-3">
               <div className="flex-shrink-0 w-8 hidden md:block" />
               <p className="text-sm text-muted-foreground">your goal is complete</p>

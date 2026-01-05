@@ -93,12 +93,7 @@ async function cleanupAllAgents() {
     console.log(`📊 Found ${agents.length} active agents`);
     console.log(`📊 Found ${softDeletedAgents.length} soft-deleted agents\n`);
 
-    if (agents.length === 0 && softDeletedAgents.length === 0) {
-      console.log('✅ No agents to clean up!');
-      return;
-    }
-
-    // Initialize Temporal client
+    // Initialize Temporal client (only if there are agents to process)
     let temporalClient;
     try {
       temporalClient = await getTemporalClient();
@@ -170,10 +165,15 @@ async function cleanupAllAgents() {
       console.log(`✅ Hard-deleted ${hardDeletedCount} soft-deleted agent(s)`);
     }
 
-    // Also clear all blueprints
-    console.log('\n🗑️  Clearing all blueprints...');
-    const deletedBlueprints = await prisma.goalBlueprint.deleteMany({});
-    console.log(`✅ Deleted ${deletedBlueprints.count} blueprint(s)`);
+    // Clear blueprints that don't have feedback metadata
+    console.log('\n🗑️  Clearing blueprints without feedback...');
+    const { Prisma } = await import('@prisma/client');
+    const deletedBlueprints = await prisma.goalBlueprint.deleteMany({
+      where: {
+        metadata: { equals: Prisma.DbNull },
+      },
+    });
+    console.log(`✅ Deleted ${deletedBlueprints.count} blueprint(s) (preserved blueprints with feedback)`);
 
     // Clear all attention requests
     console.log('\n🗑️  Clearing all attention requests...');

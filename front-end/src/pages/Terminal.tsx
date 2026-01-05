@@ -19,12 +19,15 @@ import {
   checkAndRespondToAttentionRequest,
   getMyInviteCode,
   fetchAncestors,
+  findBlueprintByGoal,
+  submitBlueprintFeedback,
   InviteCodeInfo,
   Agent,
   AgentDetail,
   Message,
   CreateAgentPayload,
   AncestorNode,
+  BlueprintFeedback,
 } from '@/lib/api';
 import { getClientSource } from '@/lib/clientSource';
 import CreateAgentModal from '@/components/terminal/CreateAgentModal';
@@ -910,6 +913,27 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     }
   };
 
+  const handleSubmitFeedback = useCallback(async (feedback: BlueprintFeedback) => {
+    if (!agentDetail) return;
+
+    try {
+      // Find the blueprint for this goal
+      const blueprint = await findBlueprintByGoal(agentDetail.goal);
+
+      if (blueprint) {
+        await submitBlueprintFeedback(blueprint.id, {
+          ...feedback,
+          agentId: agentDetail.agent_id,
+        });
+      } else {
+        console.warn('No blueprint found for feedback');
+      }
+    } catch (error) {
+      console.error('Failed to submit feedback:', error);
+      throw error;
+    }
+  }, [agentDetail]);
+
   const handleCreateAgent = async (data: CreateAgentPayload) => {
     const newAgent = await createAgentAPI({ ...data, source: clientSource });
     await loadAgents();
@@ -1746,9 +1770,10 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
                   zIndex: 20, // Above blur overlay (15) and ASCII loader (18)
                 }}
               >
-                <MessageList 
+                <MessageList
                   onAddCredits={() => setShowCreditModal(true)}
                   onNavigateToAgent={handleSelectAgent}
+                  onSubmitFeedback={handleSubmitFeedback}
                 />
                 <div ref={messagesEndRef} />
               </div>

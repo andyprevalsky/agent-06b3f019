@@ -93,9 +93,9 @@ curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1
 - **ORM:** Prisma
 - **RLS:** Enabled on all tables - users only see their own data
 - Schema changes: Edit `back-end/prisma/schema.prisma`, then migrate
+- **Query DB:** `npx tsx back-end/scripts/query-db.ts` (modify script as needed)
 
 ## Rose API
 
 - `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite
 - `research/supabase/functions/completions/test-browser-use-usage.mjs` - rose-1-browser-use test
-

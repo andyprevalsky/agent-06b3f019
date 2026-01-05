@@ -114,6 +114,7 @@ model GoalBlueprint {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
   embedding Json?
+  metadata  Json?
 
   @@index([userId])
   @@index([createdAt])
