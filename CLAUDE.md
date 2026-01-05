@@ -11,6 +11,7 @@ front-end/     → React/TypeScript/Vite (Vercel)
 back-end/      → Express/TypeScript/Prisma (Render)
 agents/        → Python Temporal workers (Fly.io)
 research/      → Model development (rose-1-lite, rose-1-ultra)
+mac-app/       → Electron desktop app (macOS only)
 ```
 
 **Key entry points:**
@@ -21,6 +22,7 @@ research/      → Model development (rose-1-lite, rose-1-ultra)
 - `back-end/prisma/schema.prisma` - Database schema (source of truth)
 - `research/supabase/functions/completions/index.ts` - Rose model racing endpoint
 - `research/supabase/functions/cost/index.ts` - Cost calculation
+- `mac-app/main/index.ts` - Electron main process
 
 ## Development
 

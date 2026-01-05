@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "setup": "cd back-end && npm install && cd ../front-end && npm install && cd ../agents && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && cd .. && ln -sf \"$CONDUCTOR_ROOT_PATH/back-end/.env\" back-end/.env && ln -sf \"$CONDUCTOR_ROOT_PATH/agents/.env\" agents/.env && ln -sf \"$CONDUCTOR_ROOT_PATH/front-end/.env\" front-end/.env && ln -sf \"$CONDUCTOR_ROOT_PATH/research/.env\" research/.env",
+    "setup": "cd back-end && npm install && cd ../front-end && npm install && cd ../mac-app && npm install && cd ../agents && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && cd .. && ln -sf \"$CONDUCTOR_ROOT_PATH/back-end/.env\" back-end/.env && ln -sf \"$CONDUCTOR_ROOT_PATH/agents/.env\" agents/.env && ln -sf \"$CONDUCTOR_ROOT_PATH/front-end/.env\" front-end/.env && ln -sf \"$CONDUCTOR_ROOT_PATH/research/.env\" research/.env && ln -sf \"$CONDUCTOR_ROOT_PATH/mac-app/.env\" mac-app/.env",
     "run": "(cd back-end && rm -f backend-logs.log && npx tsx watch src/server.ts 2>&1 | tee backend-logs.log) & (cd front-end && rm -f frontend-logs.log && npx vite 2>&1 | tee frontend-logs.log) & (cd agents && source venv/bin/activate && ./scripts/run_local_worker.sh) & wait"
   },
   "runScriptMode": "nonconcurrent"
