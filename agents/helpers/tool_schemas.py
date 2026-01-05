@@ -710,7 +710,8 @@ def create_agent_action_model(
             str,
             Field(
                 description="Thinking/reasoning about what to do next. Explain your observations "
-                           "and strategy. This is shown to the user as 'Thinking...' text."
+                           "and strategy. This is shown to the user as 'Thinking...' text. "
+                           "Write in plain prose. No markup, no bullet prefixes, no special formatting symbols."
             ),
         ),
         tool_calls=tool_calls_field,
