@@ -22,6 +22,10 @@ import { AgentDetail } from '@/lib/api';
 import RoseToolSetChip from './RoseToolSetChip';
 import TestPromptsSelector from './TestPromptsSelector';
 import AgentSettingsDialog from './AgentSettingsDialog';
+// Button styles
+import LiquidBlackButton from '@/components/ui/liquid-black-button';
+import RoseWhiteButton from '@/components/ui/rose-white-button';
+import LiquidWhiteButton from '@/components/ui/liquid-white-button';
 
 interface DripStyles {
   blur: number;
@@ -446,22 +450,15 @@ export default function QueryInput({
 
             {/* Submit/Stop Button - dual state */}
             {canSubmit ? (
-              // UpArrow circle - submit mode
               <Tooltip delayDuration={200}>
                 <TooltipTrigger asChild>
-                  <button
+                  <LiquidWhiteButton
                     onClick={onSubmit}
                     disabled={disabled}
-                    className={cn(
-                      "flex items-center justify-center w-10 h-10 rounded-full border border-gray-300 dark:border-gray-700 transition-all",
-                      "bg-gray-100 dark:bg-gray-800 shadow-md",
-                      disabled 
-                        ? "opacity-50 cursor-not-allowed" 
-                        : "hover:brightness-95 cursor-pointer"
-                    )}
+                    size="md"
                   >
-                    <ArrowUp className="w-5 h-5 text-gray-700 dark:text-gray-300" />
-                  </button>
+                    <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
+                  </LiquidWhiteButton>
                 </TooltipTrigger>
                 <TooltipContent side="top" sideOffset={8}>
                   <p className="text-xs flex items-center gap-1">
@@ -473,26 +470,19 @@ export default function QueryInput({
                 </TooltipContent>
               </Tooltip>
             ) : (
-              // Stop square - stop mode
               <Tooltip delayDuration={200}>
                 <TooltipTrigger asChild>
-                  <button
+                  <LiquidWhiteButton
                     onClick={onPause}
                     disabled={isPausing}
-                    className={cn(
-                      "flex items-center justify-center w-10 h-10 rounded-full border border-gray-300 dark:border-gray-700 transition-all",
-                      "bg-gray-100 dark:bg-gray-800 shadow-md",
-                      isPausing 
-                        ? "opacity-50 cursor-not-allowed" 
-                        : "hover:brightness-95 cursor-pointer"
-                    )}
+                    size="md"
                   >
                     {isPausing ? (
-                      <Loader2 className="w-5 h-5 text-gray-700 dark:text-gray-300 animate-spin" />
+                      <Loader2 className="w-5 h-5 animate-spin" />
                     ) : (
-                      <Square className="w-4 h-4 text-gray-700 dark:text-gray-300" fill="currentColor" />
+                      <Square className="w-4 h-4" fill="currentColor" />
                     )}
-                  </button>
+                  </LiquidWhiteButton>
                 </TooltipTrigger>
                 <TooltipContent side="top" sideOffset={8}>
                   <p className="text-xs">Stop</p>

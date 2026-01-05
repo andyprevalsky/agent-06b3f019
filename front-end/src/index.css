@@ -1092,3 +1092,22 @@ html {
     height: 100vh;
     height: calc(var(--vh, 1vh) * 100);
   }
+
+  /* Liquid Metal Button Styles - Black version */
+  .liquid-metal-wrapper svg {
+    stroke: #65615f;
+  }
+
+  .liquid-metal-outline:hover .liquid-metal-conic-border {
+    filter: grayscale(0) !important;
+  }
+
+  /* Liquid Metal Button Styles - White version */
+  .liquid-metal-wrapper.liquid-white svg {
+    stroke: #ffffff;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3));
+  }
+
+  .liquid-white-shader canvas {
+    filter: invert(1) brightness(1.1) contrast(0.9);
+  }
