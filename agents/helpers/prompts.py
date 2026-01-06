@@ -228,6 +228,8 @@ def build_system_prompt(
         - "reasoning": internal scratchpad (never shown to user).
         - "response": internal running log for continuity and assumptions; it may or may not be surfaced by the UI, so never rely on it for critical communication.
         - Multiple tools can be issued per turn—they execute in parallel.
+        - CRITICAL: If tool B depends on tool A's result, do NOT emit both in the same turn. Only emit tool A, wait for results, then emit tool B in the next turn.
+        - NEVER include `attempt_completion` with other tools in the same response. It must always be the only tool call in its response.
 
     User-visible communication:
         - PLAN phase only: `send_message_to_user({"message": "<user-visible markdown>", "is_question": true|false})` guarantees the user sees the message exactly as written.
@@ -249,6 +251,8 @@ def build_system_prompt(
         2. Repeating failed approaches instead of pivoting.
         3. Giving up when a creative path exists.
         4. Forgetting that tools execute in parallel.
+        5. Emitting tools with causal dependencies in the same turn (they run in parallel, so B won't see A's result).
+        6. Grouping `attempt_completion` with other tools.
         """
     ).strip()
 

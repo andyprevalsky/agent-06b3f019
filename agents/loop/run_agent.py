@@ -473,12 +473,19 @@ async def run_agent(
         # 10. Execute tool calls (tool_calls is always List[dict] at this point)
         # Track which detected tools have been used (for matching multiple same-name tools in order)
         detected_tool_usage_count: Dict[str, int] = {}
-        
+
+        # Pre-process tool calls to assign IDs and separate special tools
+        processed_tools = []
+        attempt_completion_tool = None
+
         for tc_dict in tool_calls:
             tc_dict = tc_dict.copy()  # Don't mutate original
             tool_name = tc_dict.pop("tool", "")
             tool_args = tc_dict
-            
+
+            if not tool_name:
+                continue
+
             # Try to get pre-assigned tool_call_id from detected_tools_ordered
             # This ensures early IN_PROGRESS broadcast matches actual execution
             tool_call_id = None
@@ -489,54 +496,157 @@ async def run_agent(
                 if current_usage < len(matches):
                     tool_call_id = matches[current_usage][1]  # Get the tool_call_id
                     detected_tool_usage_count[tool_name] = current_usage + 1
-            
+
             # Fallback to new UUID if no pre-assigned ID found
             if not tool_call_id:
                 tool_call_id = str(uuid.uuid4())
-            
-            if not tool_name:
-                continue
-            
+
             # Special: set_plan - track that it was called (for is_plan_loop)
             if tool_name == "set_plan":
                 set_plan_called = True
-            
-            # Special: attempt_completion - run verifier after (unless skipped)
+
+            # Special: attempt_completion - handle separately (should be alone due to llm.py filtering)
             if tool_name == "attempt_completion":
-                reasoning = tool_args.get("reasoning", "")
-                
-                # PLAN phase: require set_plan to have been called
-                if is_plan_loop and not set_plan_called:
-                    error_msg = "You must call set_plan before attempt_completion in PLAN phase"
-                    logger.warning(error_msg)
-                    
-                    # Emit error via handle_tool_event (poll_messages will pick it up next iteration)
-                    await handle_tool_event(
-                        event=ToolEvent(
-                            type=EventType.POST_MESSAGE,
-                            title="❌ Plan required",
-                            message=error_msg,
-                            status=MessageStatus.ERROR,
-                        ),
-                        agent_id=agent_id,
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
-                        execute_activity=execute_activity,
-                        user_id=user_id,
-                    )
+                attempt_completion_tool = (tool_name, tool_args, tool_call_id)
+                continue
+
+            processed_tools.append((tool_name, tool_args, tool_call_id))
+
+        # Execute regular tools in parallel
+        if processed_tools and execute_tool:
+            async def execute_single_tool(tool_name: str, tool_args: dict, tool_call_id: str):
+                """Execute a single tool and return result with metadata."""
+                try:
+                    result = await execute_tool(tool_name, tool_args, tool_call_id)
+                    return {"tool_name": tool_name, "tool_call_id": tool_call_id, "result": result, "error": None}
+                except Exception as e:
+                    logger.error(f"Tool {tool_name} failed: {e}")
+                    return {"tool_name": tool_name, "tool_call_id": tool_call_id, "result": None, "error": e}
+
+            # Execute all tools in parallel
+            tasks = [
+                execute_single_tool(tool_name, tool_args, tool_call_id)
+                for tool_name, tool_args, tool_call_id in processed_tools
+            ]
+            tool_results = await asyncio.gather(*tasks)
+
+            # Process results in order (for determinism)
+            for tool_result in tool_results:
+                tool_name = tool_result["tool_name"]
+                tool_call_id = tool_result["tool_call_id"]
+                result = tool_result["result"]
+                error = tool_result["error"]
+
+                if error:
+                    # Tool failed - add error to context
+                    if is_inside_temporal_activity and post_message:
+                        await post_message(
+                            str(error),
+                            "TOOL",
+                            {
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolStatus": "ERROR",
+                                "title": f"{tool_name} failed",
+                                "error": True,
+                                "subAgentId": task_id,
+                            }
+                        )
+                    context.append({
+                        "role": "TOOL",
+                        "text": f"Error executing {tool_name}: {str(error)}",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "metadata": {"toolName": tool_name, "error": True}
+                    })
                     continue
-                
+
+                # Check for special status returns (used by browser agent)
+                if isinstance(result, dict):
+                    result_status = result.get("status", "").lower()
+
+                    if result_status == "needs_user_help":
+                        return {
+                            "status": "needs_user_help",
+                            "context": context,
+                            "tokens_in": tokens_in,
+                            "tokens_out": tokens_out,
+                            "token_count": token_count,
+                            **result,
+                        }
+
+                    if result_status == "completed":
+                        return {
+                            "status": "completed",
+                            "context": context,
+                            "tokens_in": tokens_in,
+                            "tokens_out": tokens_out,
+                            "token_count": token_count,
+                            **result,
+                        }
+
+                # Add successful result to context
+                is_error = isinstance(result, dict) and result.get("error", False)
+                result_message = result.get("message", "") if isinstance(result, dict) else str(result)
+
+                if is_error:
+                    new_msg = {
+                        "role": "TOOL",
+                        "text": f"Error: {result_message}",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "metadata": {"toolName": tool_name, "error": True}
+                    }
+                else:
+                    new_msg = {
+                        "role": "TOOL",
+                        "text": result_message,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "metadata": {"toolName": tool_name}
+                    }
+                context.append(new_msg)
+                logger.info(
+                    f"🔍 DEBUG: Added tool result to context",
+                    tool_name=tool_name,
+                    context_len=len(context),
+                    none_count=sum(1 for m in context if m is None),
+                )
+
+        # Handle attempt_completion separately (should be alone due to llm.py filtering)
+        if attempt_completion_tool:
+            tool_name, tool_args, tool_call_id = attempt_completion_tool
+            reasoning = tool_args.get("reasoning", "")
+
+            # PLAN phase: require set_plan to have been called
+            if is_plan_loop and not set_plan_called:
+                error_msg = "You must call set_plan before attempt_completion in PLAN phase"
+                logger.warning(error_msg)
+
+                # Emit error via handle_tool_event (poll_messages will pick it up next iteration)
+                await handle_tool_event(
+                    event=ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title="❌ Plan required",
+                        message=error_msg,
+                        status=MessageStatus.ERROR,
+                    ),
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    execute_activity=execute_activity,
+                    user_id=user_id,
+                )
+                # Continue to next iteration (don't process attempt_completion)
+            else:
                 # Execute the tool first (it posts its own IN_PROGRESS/FINISHED)
                 if execute_tool:
                     try:
                         await execute_tool(tool_name, tool_args, tool_call_id)
                     except Exception as e:
                         logger.warning(f"attempt_completion tool error (non-fatal): {e}")
-                
+
                 # PLAN phase: post "sit back, relax" message and complete
                 if is_plan_loop:
                     logger.info("✅ PLAN phase complete")
-                    
+
                     # Extract goal from first USER message in context
                     goal = "your goal"
                     for msg in context:
@@ -544,7 +654,7 @@ async def run_agent(
                             full_goal = msg.get("text", "your goal")
                             goal = full_goal[:300] + "..." if len(full_goal) > 300 else full_goal
                             break
-                    
+
                     fyi_message = f"Looks like I have everything I need in order to accomplish your goal - **{goal}**\n\nWe will now proceed to fulfill your request, just sit back, relax, and let us figure out the rest :)"
                     await post_message(
                         fyi_message,
@@ -563,7 +673,7 @@ async def run_agent(
                             },
                         }
                     )
-                    
+
                     return {
                         "status": "completed",
                         "context": context,
@@ -572,7 +682,7 @@ async def run_agent(
                         "token_count": token_count,
                         "message": reasoning,
                     }
-                
+
                 # Skip LLM verification if requested
                 if skip_verification:
                     logger.info("⏭️ Skipping LLM verification")
@@ -584,7 +694,7 @@ async def run_agent(
                         "token_count": token_count,
                         "message": reasoning,
                     }
-                
+
                 # Run verifier
                 # DEBUG: Log context state before verifier
                 logger.info(
@@ -612,13 +722,13 @@ async def run_agent(
                     post_message=post_message,
                     response_schema=response_schema,
                 )
-                
+
                 # Track verifier tokens
                 v_usage = verifier_result.get("usage", {})
                 tokens_in += v_usage.get("prompt_tokens", 0)
                 tokens_out += v_usage.get("completion_tokens", 0)
                 token_count += v_usage.get("total_tokens", 0)
-                
+
                 score = verifier_result.get("score", 0.0)
                 v_reasoning = verifier_result.get("reasoning", "")
                 structured_response = verifier_result.get("structured_response")
@@ -644,7 +754,7 @@ async def run_agent(
                         "score": score,
                         "structured_response": structured_response,
                     }
-                
+
                 # Not complete - add feedback to context
                 context.append({
                     "role": "TOOL",
@@ -652,98 +762,6 @@ async def run_agent(
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "metadata": {"verifierMessage": True}
                 })
-                continue
-            
-            # Regular tool execution
-            # execute_tool callbacks are responsible for their own messaging (IN_PROGRESS/FINISHED)
-            # - Workflow context: Tools emit ToolEvents via handle_tool_event
-            # - Activity context (browser): execute_tool_callback posts via save_browser_action_message
-            if execute_tool:
-                try:
-                    result = await execute_tool(tool_name, tool_args, tool_call_id)
-                    
-                    # Check for special status returns (used by browser agent)
-                    # These allow tools to signal loop termination
-                    if isinstance(result, dict):
-                        result_status = result.get("status", "").lower()
-                        
-                        if result_status == "needs_user_help":
-                            # Tool signals user attention needed (e.g., send_message_to_user in browser)
-                            return {
-                                "status": "needs_user_help",
-                                "context": context,
-                                "tokens_in": tokens_in,
-                                "tokens_out": tokens_out,
-                                "token_count": token_count,
-                                **result,  # Include tool's data (session_id, browser_url, etc.)
-                            }
-                        
-                        if result_status == "completed":
-                            # Tool signals task complete (e.g., verifier passed in browser)
-                            return {
-                                "status": "completed",
-                                "context": context,
-                                "tokens_in": tokens_in,
-                                "tokens_out": tokens_out,
-                                "token_count": token_count,
-                                **result,
-                            }
-                    
-                    # Check if tool errored
-                    is_error = isinstance(result, dict) and result.get("error", False)
-                    result_message = result.get("message", "") if isinstance(result, dict) else str(result)
-                    
-                    # Add to context
-                    new_msg = None
-                    if is_error:
-                        new_msg = {
-                            "role": "TOOL",
-                            "text": f"Error: {result_message}",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "metadata": {"toolName": tool_name, "error": True}
-                        }
-                    else:
-                        new_msg = {
-                            "role": "TOOL",
-                            "text": result_message,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "metadata": {"toolName": tool_name}
-                        }
-                    context.append(new_msg)
-                    # DEBUG: Log context state after adding tool result
-                    logger.info(
-                        f"🔍 DEBUG: Added tool result to context",
-                        tool_name=tool_name,
-                        context_len=len(context),
-                        none_count=sum(1 for m in context if m is None),
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"Tool {tool_name} failed: {e}")
-                    
-                    # In activity context, post error (workflow tools handle via _handle_tool_event)
-                    if is_inside_temporal_activity and post_message:
-                        await post_message(
-                            str(e),
-                            "TOOL",
-                            {
-                                "toolCallId": tool_call_id,
-                                "toolName": tool_name,
-                                "toolStatus": "ERROR",
-                                "title": f"{tool_name} failed",
-                                "error": True,
-                                "subAgentId": task_id,
-                            }
-                        )
-                    
-                    context.append({
-                        "role": "TOOL",
-                        "text": f"Error executing {tool_name}: {str(e)}",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {"toolName": tool_name, "error": True}
-                    })
-            else:
-                logger.warning(f"No execute_tool provided, skipping: {tool_name}")
     
     # Max iterations reached
     logger.warning(f"Max iterations reached: {max_iterations}")

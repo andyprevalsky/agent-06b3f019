@@ -509,7 +509,7 @@ async def call_llm_structured_streaming(
                             # Detect any tool calls and emit early IN_PROGRESS
                             # Look for "tool": "tool_name" patterns in the JSON content
                             # Skip tools that shouldn't show early IN_PROGRESS (direct user communication)
-                            SKIP_EARLY_PROGRESS = {"send_message_to_user"}
+                            SKIP_EARLY_PROGRESS = {"send_message_to_user", "attempt_completion"}
                             
                             if on_tool_detected and '"tool_calls"' in accumulated_json:
                                 tool_matches = re.findall(r'"tool"\s*:\s*"([^"]+)"', accumulated_json)
@@ -709,7 +709,29 @@ async def call_llm_structured_streaming(
                 "pool_size": pool_size,
                 "cancelled": False
             }
-        
+
+        # Filter out attempt_completion if grouped with other tools (silently drop it)
+        # This ensures it never gets an IN_PROGRESS message or executes when batched
+        # Only applies to models with tool_calls (e.g., AgentAction, not PlannerResponse)
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            has_other_tools = any(
+                tc.tool != "attempt_completion"
+                for tc in response.tool_calls if tc
+            )
+            if has_other_tools:
+                original_count = len(response.tool_calls)
+                response.tool_calls = [
+                    tc for tc in response.tool_calls
+                    if tc and tc.tool != "attempt_completion"
+                ]
+                # Also filter from detected_tools_ordered
+                detected_tools_ordered = [
+                    (name, tid, ts) for name, tid, ts in detected_tools_ordered
+                    if name != "attempt_completion"
+                ]
+                if original_count != len(response.tool_calls):
+                    logger.info(f"🔇 Silently dropped attempt_completion (was grouped with {original_count - 1} other tools)")
+
         return response, usage, detected_tools_ordered
     
     # For OpenRouter models, use Instructor's partial streaming
@@ -794,7 +816,23 @@ async def call_llm_structured_streaming(
     
     if final_response is None:
         raise ValueError(f"Streaming LLM returned no response (model={model})")
-    
+
+    # Filter out attempt_completion if grouped with other tools (silently drop it)
+    # Only applies to models with tool_calls (e.g., AgentAction, not PlannerResponse)
+    if hasattr(final_response, 'tool_calls') and final_response.tool_calls:
+        has_other_tools = any(
+            tc.tool != "attempt_completion"
+            for tc in final_response.tool_calls if tc
+        )
+        if has_other_tools:
+            original_count = len(final_response.tool_calls)
+            final_response.tool_calls = [
+                tc for tc in final_response.tool_calls
+                if tc and tc.tool != "attempt_completion"
+            ]
+            if original_count != len(final_response.tool_calls):
+                logger.info(f"🔇 Silently dropped attempt_completion (was grouped with {original_count - 1} other tools)")
+
     # Usage not available in Instructor streaming, estimate from content
     estimated_tokens = len(accumulated_text) // 4
     usage = {
@@ -803,7 +841,7 @@ async def call_llm_structured_streaming(
         "total_tokens": estimated_tokens,
         "cancelled": False
     }
-    
+
     return final_response, usage, []  # No tool detection in OpenRouter path
 
 
