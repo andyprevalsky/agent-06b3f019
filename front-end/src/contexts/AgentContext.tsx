@@ -58,31 +58,34 @@ export interface AgentContextValue {
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>;
   selectedAgentId: string | null;
   setSelectedAgentId: (id: string | null) => void;
-  
+
   // Messages (history, not buffer - buffer is in MessageList)
   messages: Message[];
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
-  
+
   // Streaming state (shared across MessageLists, each filters by subAgentId)
   streamingBubbles: Map<string, StreamingBubble>;
   streamingPlan: StreamingPlan | null;
   streamingAttention: StreamingAttention | null;
   streamingTools: Map<string, StreamingTool>;  // tool_call_id -> streaming tool
-  
+
   // Streamed texts - used by MessageList to skip animation for already-streamed content
   streamedTextsRef: React.MutableRefObject<Set<string>>;
-  
+
   // Message routing - MessageList instances register handlers
   registerMessageHandler: (subAgentId: string | null, handler: MessageHandler) => () => void;
-  
+
   // Actions
   sendMessage: (text: string) => Promise<void>;
-  
+
   // Loading state
   isLoadingAgent: boolean;
-  
+
   // Force resubscribe trigger
   forceResubscribe: () => void;
+
+  // Chat mode state - true when agent has no Temporal workflow (chat mode), false when in agent mode
+  isChatMode: boolean;
 }
 
 const AgentContext = createContext<AgentContextValue | null>(null);
@@ -112,6 +115,9 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
   const [streamingPlan, setStreamingPlan] = useState<StreamingPlan | null>(null);
   const [streamingAttention, setStreamingAttention] = useState<StreamingAttention | null>(null);
   const [streamingTools, setStreamingTools] = useState<Map<string, StreamingTool>>(new Map());
+
+  // Chat mode state - derived from agent.temporal_workflow_id being null
+  const [isChatMode, setIsChatMode] = useState(true);
   
   // Realtime refs
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -174,6 +180,8 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
       const data = await getAgent(agentId);
       setAgent(data.agent);
       setMessages(data.messages);
+      // Set chat mode based on whether agent has a Temporal workflow
+      setIsChatMode(!data.agent.temporal_workflow_id);
       // Mark initial load as done for this agent to avoid double-fetch in subscription setup
       initialLoadDoneRef.current = agentId;
     } catch (error) {
@@ -199,6 +207,7 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
       setStreamingBubbles(new Map());
       setStreamingPlan(null);
       setStreamingAttention(null);
+      setIsChatMode(true); // Reset to chat mode default
       // Reset initial load tracking
       initialLoadDoneRef.current = null;
     }
@@ -474,6 +483,11 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
               return newMap;
             });
           },
+
+          onAgentModeStarted: () => {
+            console.log(`🚀 AgentContext AGENT_MODE_STARTED`);
+            setIsChatMode(false);
+          },
         });
 
         channelRef.current = channel;
@@ -571,6 +585,7 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
     sendMessage,
     isLoadingAgent,
     forceResubscribe,
+    isChatMode,
   };
 
   return (

@@ -7,6 +7,8 @@ import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
 import { getX402Endpoints } from '../lib/x402Endpoints';
 import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSchema';
+import { handleChatMessage, broadcastAgentModeStarted } from '../lib/chat';
+import { createMessage } from '../lib/messages';
 
 const router = Router();
 
@@ -272,42 +274,79 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       return { agent: newAgent, goalMessage };
     });
 
-    // Start Temporal workflow with initial context containing goal message
+    // Determine if this is a sub-agent (has parent) or root agent
+    const isSubAgent = !!body.parent_agent_id;
     let workflowId: string | null = null;
-    try {
-      workflowId = await startAgentWorkflow({
+
+    if (isSubAgent) {
+      // ============================================
+      // SUB-AGENT: Start Temporal workflow immediately
+      // Sub-agents always run in agent mode
+      // ============================================
+      try {
+        workflowId = await startAgentWorkflow({
+          agentId: agent.agent.id,
+          userId,
+          goal: body.goal,
+          model: body.model,
+          reasoningMaxTokens: body.reasoning_max_tokens,
+          verifier: {
+            type: verifier.type,
+            llmJudgePrompt: verifier.llm_judge_prompt,
+          },
+          ...(body.task_queue ? { taskQueue: body.task_queue } : {}),
+          ...(body.parent_workflow_id ? { parentWorkflowId: body.parent_workflow_id } : {}),
+          ...(body.parent_agent_id ? { parentAgentId: body.parent_agent_id } : {}),
+          ...(body.depth !== undefined ? { depth: body.depth } : {}),
+          ...(body.bus_id ? { busId: body.bus_id } : {}),
+        });
+
+        // Update agent with workflow ID
+        await prisma.agent.update({
+          where: { id: agent.agent.id },
+          data: { temporalWorkflowId: workflowId },
+        });
+
+        console.log('✅ Sub-agent workflow started', {
+          agentId: agent.agent.id,
+          workflowId,
+          parentAgentId: body.parent_agent_id,
+        });
+      } catch (error) {
+        console.error('❌ Failed to start sub-agent workflow', {
+          agentId: agent.agent.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+
+        // Mark agent as failed
+        await prisma.agent.update({
+          where: { id: agent.agent.id },
+          data: {
+            status: 'FAILED',
+            statusMessage: 'Failed to start workflow: ' + (error instanceof Error ? error.message : String(error)),
+          },
+        });
+
+        throw error;
+      }
+    } else {
+      // ============================================
+      // ROOT AGENT: Start in Chat Mode
+      // Run chat handler, may escalate to agent mode automatically
+      // ============================================
+      console.log('💬 Starting root agent in chat mode', {
         agentId: agent.agent.id,
-        userId,
-        goal: body.goal,
-        model: body.model,
-        reasoningMaxTokens: body.reasoning_max_tokens,
-        verifier: {
-          type: verifier.type,
-          llmJudgePrompt: verifier.llm_judge_prompt,
-        },
-        ...(body.task_queue ? { taskQueue: body.task_queue } : {}),
-        ...(body.parent_workflow_id ? { parentWorkflowId: body.parent_workflow_id } : {}),
-        ...(body.parent_agent_id ? { parentAgentId: body.parent_agent_id } : {}),
-        ...(body.depth !== undefined ? { depth: body.depth } : {}),
-        ...(body.bus_id ? { busId: body.bus_id } : {}),
+        goal: body.goal.substring(0, 100),
       });
 
-      // Update agent with workflow ID
+      // Update status to ACTIVE for chat mode (not STARTING_UP)
       await prisma.agent.update({
         where: { id: agent.agent.id },
-        data: { temporalWorkflowId: workflowId },
-      });
-
-      console.log('✅ Agent workflow started', {
-        agentId: agent.agent.id,
-        workflowId,
-        taskQueue: body.task_queue || 'default',
+        data: { status: 'ACTIVE' },
       });
 
       // Fire-and-forget: generate response schema in background
-      // Only for ROOT agents (no parent) and when no schema was provided
-      // Sub-agents get their schema from the parent's tool call
-      if (!body.parent_agent_id && !body.response_schema) {
+      if (!body.response_schema) {
         console.log('🎯 Starting response schema generation for root agent', { agentId: agent.agent.id });
         setResponseSchema(agent.agent.id).catch((err) => {
           console.error('❌ Failed to set response schema (background)', {
@@ -315,32 +354,34 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
             error: err instanceof Error ? err.message : String(err),
           });
         });
-      } else {
-        console.log('⏭️ Skipping schema generation', {
-          agentId: agent.agent.id,
-          hasParent: !!body.parent_agent_id,
-          hasSchema: !!body.response_schema
-        });
       }
-    } catch (error) {
-      console.error('❌ Failed to start workflow', {
+
+      // Handle chat message (non-blocking for response)
+      // Run in background so we can return the agent immediately
+      handleChatMessage({
         agentId: agent.agent.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      
-      // Mark agent as failed
-      await prisma.agent.update({
-        where: { id: agent.agent.id },
-        data: {
-          status: 'FAILED',
-          statusMessage: 'Failed to start workflow: ' + (error instanceof Error ? error.message : String(error)),
-        },
+        userId,
+        model: body.model,
+      }).catch((err) => {
+        console.error('❌ Chat handler error', {
+          agentId: agent.agent.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Update agent status to failed
+        prisma.agent.update({
+          where: { id: agent.agent.id },
+          data: {
+            status: 'FAILED',
+            statusMessage: 'Chat handler error: ' + (err instanceof Error ? err.message : String(err)),
+          },
+        }).catch(console.error);
       });
 
-      throw error;
+      // Note: workflowId remains null for chat mode agents
+      // It gets set later if chat escalates to agent mode
     }
 
-    // Return agent with updated workflow ID and available endpoints for discoverability
+    // Return agent (workflow ID may be null for chat mode)
     res.status(201).json({
       agent_id: agent.agent.id,
       progress: agent.agent.progress,
@@ -348,9 +389,9 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       model: agent.agent.model,
       source: body.source,
       reasoning_max_tokens: body.reasoning_max_tokens,
-      status: agent.agent.status,
+      status: isSubAgent ? agent.agent.status : 'ACTIVE',
       status_message: agent.agent.statusMessage,
-      temporal_workflow_id: workflowId, // Use the workflow ID we just got
+      temporal_workflow_id: workflowId,
       created_at: agent.agent.createdAt,
       updated_at: agent.agent.updatedAt,
       available_endpoints: getX402Endpoints(agent.agent.id),
@@ -578,27 +619,45 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
       }
     }
 
-    // Create message
-    const message = await prisma.message.create({
-      data: {
-        agentId,
-        text: body.message,
-        role,
-        metadata: body.metadata || undefined,
-        timestamp: new Date(),
-      },
+    // Create message using shared helper
+    const message = await createMessage({
+      agentId,
+      text: body.message,
+      role,
+      metadata: body.metadata,
     });
 
-    // If this is a USER message, signal the workflow to unblock any waiting attention request
+    // If this is a USER message, either signal workflow or run chat handler
     if (role === 'USER') {
-      try {
-        const { getTemporalClient } = await import('../lib/temporal');
-        const client = await getTemporalClient();
-        const handle = client.workflow.getHandle(agentId);
-        await handle.signal('receive_user_response', body.message);
-      } catch (error) {
-        // Don't fail the request if signaling fails - workflow will eventually poll
-        console.error('Failed to signal workflow:', error);
+      // Re-fetch agent to check for workflow
+      const agentForChat = await prisma.agent.findUnique({
+        where: { id: agentId },
+      });
+
+      if (agentForChat?.temporalWorkflowId) {
+        // Agent mode: signal Temporal workflow
+        try {
+          const { getTemporalClient } = await import('../lib/temporal');
+          const client = await getTemporalClient();
+          const handle = client.workflow.getHandle(agentForChat.temporalWorkflowId);
+          await handle.signal('receive_user_response', body.message);
+        } catch (error) {
+          // Don't fail the request if signaling fails - workflow will eventually poll
+          console.error('Failed to signal workflow:', error);
+        }
+      } else if (agentForChat) {
+        // Chat mode: handle message with fixed LLM call sequence
+        // Run in background so we can return response immediately
+        handleChatMessage({
+          agentId,
+          userId: agentForChat.userId,
+          model: agentForChat.model,
+        }).catch((err) => {
+          console.error('❌ Chat handler error in message route', {
+            agentId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
       }
     }
 
@@ -646,6 +705,83 @@ router.get('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
   } catch (error) {
     console.error('Get agent status error:', error);
     res.status(500).json({ error: 'Failed to get agent status' });
+  }
+});
+
+// POST /api/agents/:id/start-agent - Manually escalate from chat mode to agent mode
+router.post('/:id/start-agent', hybridAuth, async (req: HybridAuthRequest, res) => {
+  try {
+    const agentId = req.params.id;
+    const userId = req.userId;
+
+    // Verify agent belongs to user
+    const agent = await prisma.agent.findFirst({
+      where: {
+        id: agentId,
+        userId,
+        deletedAt: null,
+      },
+      include: {
+        verifier: true,
+      },
+    });
+
+    if (!agent) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+
+    // Check if already in agent mode
+    if (agent.temporalWorkflowId) {
+      res.status(400).json({ error: 'Agent is already in agent mode' });
+      return;
+    }
+
+    if (!agent.verifier) {
+      res.status(400).json({ error: 'Agent has no verifier configured' });
+      return;
+    }
+
+    console.log('🚀 Manual escalation to agent mode', {
+      agentId,
+      goal: agent.goal.substring(0, 100),
+    });
+
+    // Start Temporal workflow with original goal
+    const workflowId = await startAgentWorkflow({
+      agentId,
+      userId: agent.userId,
+      goal: agent.goal,
+      model: agent.model,
+      reasoningMaxTokens: agent.reasoningMaxTokens,
+      verifier: {
+        type: agent.verifier.type,
+        llmJudgePrompt: agent.verifier.llmJudgePrompt,
+      },
+    });
+
+    // Update agent with workflow ID
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { temporalWorkflowId: workflowId },
+    });
+
+    // Broadcast that agent mode started
+    await broadcastAgentModeStarted(agentId);
+
+    console.log('✅ Escalated to agent mode', {
+      agentId,
+      workflowId,
+    });
+
+    res.json({
+      success: true,
+      agent_id: agentId,
+      workflow_id: workflowId,
+    });
+  } catch (error) {
+    console.error('Start agent error:', error);
+    res.status(500).json({ error: 'Failed to start agent mode' });
   }
 });
 

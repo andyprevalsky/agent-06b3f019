@@ -127,6 +127,7 @@ export interface AgentHandlers {
   onPlanStream?: (payload: PlanStreamPayload) => void;
   onAttentionStream?: (payload: AttentionStreamPayload) => void;
   onToolStream?: (payload: ToolStreamPayload) => void;
+  onAgentModeStarted?: () => void;
 }
 
 /**
@@ -204,6 +205,11 @@ export async function subscribeToAgent(
           title: record.title,
         });
       }
+    };
+  }
+  if (handlers.onAgentModeStarted) {
+    eventHandlers['AGENT_MODE_STARTED'] = () => {
+      handlers.onAgentModeStarted!();
     };
   }
 

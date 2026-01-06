@@ -291,6 +291,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     streamingAttention: contextStreamingAttention,
     isLoadingAgent,
     forceResubscribe: forceResubscribeContext,
+    isChatMode,
   } = useAgentContext();
 
   // View state - which pane to show
@@ -1876,7 +1877,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
                 setCurrentView('agents');
                 loadAgents();
               }}
-              canSubmit={!selectedAgentId || hasActiveAttentionRequest || agentDetail?.status === 'PAUSED'}
+              canSubmit={!selectedAgentId || hasActiveAttentionRequest || agentDetail?.status === 'PAUSED' || isChatMode}
               onPause={handlePauseAgent}
               isPausing={isPausing}
             />

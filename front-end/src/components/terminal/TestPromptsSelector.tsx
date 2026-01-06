@@ -13,6 +13,11 @@ interface TestPrompt {
 
 const TEST_PROMPTS: TestPrompt[] = [
   {
+    title: 'Test Chat Mode',
+    description: 'Tests chat mode web search flow',
+    prompt: 'whats the latest news?',
+  },
+  {
     title: 'Test Browser Agent',
     description: 'Tests browser agent with Amazon shopping task',
     prompt: 'Get me a black beanie < 35$ and well-made',

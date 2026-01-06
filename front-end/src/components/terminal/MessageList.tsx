@@ -2,12 +2,14 @@ import { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } fr
 import { motion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { useAgentContext, StreamingBubble } from '@/contexts/AgentContext';
-import { Message } from '@/lib/api';
+import { Message, startAgent } from '@/lib/api';
 import MessageBubble from './MessageBubble';
 import { PlanChip } from './PlanChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { Button } from '@/components/ui/button';
 import { FeedbackBanner, FeedbackData } from './FeedbackBanner';
+import { Copy } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // StreamingMarkdown - Renders text with fade-in animation for each chunk
@@ -177,7 +179,10 @@ export function MessageList({
     registerMessageHandler,
     sendMessage,
     selectedAgentId,
+    isChatMode,
   } = useAgentContext();
+
+  const { toast } = useToast();
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LOCAL BUFFER STATE (independent per MessageList instance)
@@ -439,8 +444,8 @@ export function MessageList({
     <div ref={containerRef} className={containerClassName}>
       {/* Messages */}
       {filteredMessages.map((message) => (
-        <MessageBubble 
-          key={message.message_id} 
+        <MessageBubble
+          key={message.message_id}
           message={message}
           shouldType={message.message_id === currentAnimatingId}
           onTypingComplete={handleAnimationComplete}
@@ -450,7 +455,76 @@ export function MessageList({
           compact={compact}
         />
       ))}
-      
+
+      {/* Chat Mode Actions - show copy + Start Agent when in chat mode after tool response */}
+      {showStatusBanners && subAgentId === undefined && isChatMode && (() => {
+        const lastMessage = filteredMessages[filteredMessages.length - 1];
+        const isToolFinished = lastMessage?.role === 'TOOL' &&
+          lastMessage.metadata?.toolStatus === 'FINISHED';
+        const notStreaming = filteredStreamingBubbles.size === 0 && filteredStreamingTools.size === 0;
+        const notAnimating = !isAnimating && messageBuffer.length === 0;
+
+        if (isToolFinished && notStreaming && notAnimating && agent?.status === 'ACTIVE') {
+          const handleCopy = async () => {
+            // Copy the last assistant/tool response to clipboard
+            const lastAssistant = [...filteredMessages].reverse().find(m =>
+              m.role === 'ASSISTANT' || (m.role === 'TOOL' && m.metadata?.toolStatus === 'FINISHED' && m.text)
+            );
+            if (lastAssistant?.text) {
+              await navigator.clipboard.writeText(lastAssistant.text);
+              toast({ title: 'Copied to clipboard' });
+            }
+          };
+
+          const handleStartAgent = async () => {
+            if (!selectedAgentId) return;
+            try {
+              await startAgent(selectedAgentId);
+              toast({ title: 'Agent mode started' });
+            } catch (error) {
+              toast({
+                title: 'Failed to start agent',
+                description: error instanceof Error ? error.message : 'Unknown error',
+                variant: 'destructive'
+              });
+            }
+          };
+
+          return (
+            <div className="flex gap-3 animate-in fade-in duration-300">
+              <div className="flex-shrink-0 w-8 hidden md:block" />
+              <div className="flex items-center gap-3 text-muted-foreground">
+                {/* Copy button */}
+                <button
+                  onClick={handleCopy}
+                  className="p-1.5 hover:bg-muted/50 rounded transition-colors"
+                  title="Copy response"
+                >
+                  <Copy className="w-4 h-4" />
+                </button>
+
+                {/* Separator */}
+                <div className="w-px h-4 bg-border" />
+
+                {/* Start Agent button */}
+                <button
+                  onClick={handleStartAgent}
+                  className="flex items-center gap-2 px-2 py-1 hover:bg-muted/50 rounded transition-colors text-sm"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="1" />
+                    <path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z" />
+                    <path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z" />
+                  </svg>
+                  Start agent
+                </button>
+              </div>
+            </div>
+          );
+        }
+        return null;
+      })()}
+
       {/* Status Banners (only for main chat) */}
       {showStatusBanners && subAgentId === undefined && (
         <>
@@ -520,9 +594,13 @@ export function MessageList({
         // 1. We have active streaming bubbles, OR
         // 2. showThinkingLoader is true AND the last message is NOT an ASSISTANT (we're waiting for response)
         // This prevents the flash when INSERT arrives before showThinkingLoader is updated
-        (filteredStreamingBubbles.size > 0 || 
-         (showThinkingLoader && filteredMessages[filteredMessages.length - 1]?.role !== 'ASSISTANT')) && 
-        agent?.status !== 'PAUSED' && (
+        // In chat mode, don't show thinking indicator when last message is a finished tool (chat is waiting for user)
+        (filteredStreamingBubbles.size > 0 ||
+         (showThinkingLoader && filteredMessages[filteredMessages.length - 1]?.role !== 'ASSISTANT')) &&
+        agent?.status !== 'PAUSED' &&
+        // Hide thinking in chat mode when last message is finished tool (waiting for user input)
+        !(isChatMode && filteredMessages[filteredMessages.length - 1]?.role === 'TOOL' &&
+          filteredMessages[filteredMessages.length - 1]?.metadata?.toolStatus === 'FINISHED') && (
           <div className={cn("flex", !compact && "gap-3")}>
             {!compact && <div className="flex-shrink-0 w-8 hidden md:block" />}
             <div className="flex flex-col gap-2">

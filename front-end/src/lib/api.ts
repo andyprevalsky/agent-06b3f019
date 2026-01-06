@@ -545,6 +545,23 @@ export async function signalSignupDismissed(agentId: string): Promise<void> {
   }
 }
 
+/**
+ * Start agent mode - escalate from chat mode to full Temporal workflow
+ */
+export async function startAgent(agentId: string): Promise<void> {
+  const headers = await getAuthHeaders();
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/start-agent`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to start agent');
+  }
+}
+
 // =============================================================================
 // Sub-agent Tree
 // =============================================================================
