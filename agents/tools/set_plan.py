@@ -157,13 +157,17 @@ class SetPlanManager(ToolManager):
         The planner receives conversation context and generates tasks with dependencies.
         On validation failure, retries once with the error as context.
 
+        Also generates the response schema in parallel if not already present (for root agents).
+        Sub-agents get their schema at spawn time from the parent.
+
         Yields:
             - IN_PROGRESS while planner is thinking
             - Plan data on success
             - Error if validation fails after retries
         """
+        import asyncio
         # Import activity here to avoid circular imports
-        from helpers.llm import call_planner_llm_activity
+        from helpers.llm import call_planner_llm_activity, set_response_schema_activity
 
         # 1. Yield in-progress status
         yield ToolEvent(
@@ -173,12 +177,16 @@ class SetPlanManager(ToolManager):
             status=MessageStatus.IN_PROGRESS
         )
 
-        # 2. Extract goal from first USER message
-        goal = "Complete the user's request"
+        # 2. Extract all USER messages from context
+        user_messages = []
         for msg in workflow_instance.context:
             if msg.get("role") == "USER":
-                goal = msg.get("text", goal)
-                break
+                text = msg.get("text", "")
+                if text:
+                    user_messages.append(text)
+
+        # Use first user message as primary goal for planner prompt
+        goal = user_messages[0] if user_messages else "Complete the user's request"
 
         # 3. Build conversation history for planner
         base_messages = [
@@ -202,6 +210,7 @@ class SetPlanManager(ToolManager):
         response_schema = getattr(workflow_instance, 'response_schema', None)
 
         # 5. Call planner with retry on validation failure
+        # Also run schema generation in parallel if schema is NULL
         planner_result = None
         last_error = None
 
@@ -216,12 +225,39 @@ class SetPlanManager(ToolManager):
                 })
 
             try:
-                planner_result = await workflow.execute_activity(
-                    call_planner_llm_activity,
-                    args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
-                    start_to_close_timeout=timedelta(seconds=120),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
+                # On first attempt, run schema generation in parallel with planner
+                # (only if schema is NULL - sub-agents already have schema from parent)
+                if attempt == 0 and response_schema is None:
+                    # Run both activities in parallel
+                    planner_task = workflow.execute_activity(
+                        call_planner_llm_activity,
+                        args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
+                        start_to_close_timeout=timedelta(seconds=120),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    schema_task = workflow.execute_activity(
+                        set_response_schema_activity,
+                        args=[workflow_instance.agent_id, user_messages],
+                        start_to_close_timeout=timedelta(seconds=90),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+
+                    # Wait for both to complete
+                    planner_result, generated_schema = await asyncio.gather(planner_task, schema_task)
+
+                    # Update workflow instance with generated schema
+                    if generated_schema:
+                        workflow_instance.response_schema = generated_schema
+                        workflow_instance.output_schema = generated_schema
+                        workflow.logger.info(f"✅ Generated response schema with {len(generated_schema.get('fields', []))} fields")
+                else:
+                    # Retry or schema already exists - just call planner
+                    planner_result = await workflow.execute_activity(
+                        call_planner_llm_activity,
+                        args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
+                        start_to_close_timeout=timedelta(seconds=120),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
             except Exception as e:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,

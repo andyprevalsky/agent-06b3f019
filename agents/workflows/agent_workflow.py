@@ -706,10 +706,10 @@ class AgentWorkflow:
         workflow.logger.info("✓ Marking task complete")
 
         try:
-            # Generate summary
+            # Generate summary - pass structured_response and output_schema so summarizer includes them
             summary_result = await workflow.execute_activity(
                 generate_completion_summary,
-                args=[context, self.goal, self.model],
+                args=[context, self.goal, self.model, structured_response, self.output_schema],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
@@ -719,7 +719,20 @@ class AgentWorkflow:
                                "token_count": summary_result.get("usage", {}).get("total_tokens", 0)})
 
             if summary:
-                await self._post_message(summary, "ASSISTANT", {"isFinalSummary": True})
+                # Post as user attention message (like send_message_to_user) instead of ASSISTANT
+                await self._post_message(summary, "TOOL", {
+                    "isFinalSummary": True,
+                    "isUserAttentionMessage": True,
+                    "attentionMessage": summary,
+                    "sendMessageToUser": {
+                        "isQuestion": False,
+                        "attentionKind": "info",
+                        "isWaitingForUser": False,
+                    },
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "title": "✅ Task Complete",
+                })
 
             # Save blueprint
             await save_blueprint(self, self.user_id, context)

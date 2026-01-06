@@ -345,15 +345,16 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         data: { status: 'ACTIVE' },
       });
 
-      // Fire-and-forget: generate response schema in background
-      if (!body.response_schema) {
-        console.log('🎯 Starting response schema generation for root agent', { agentId: agent.agent.id });
-        setResponseSchema(agent.agent.id).catch((err) => {
-          console.error('❌ Failed to set response schema (background)', {
-            agentId: agent.agent.id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
+      // Response schema generation:
+      // - Sub-agents: get schema passed via spawn_sub_agents tool call (stored in responseSchema)
+      // - Root agents: schema is generated during set_plan tool execution (not at creation)
+      // This defers expensive LLM call until planning phase when goal context is richer
+      if (body.parent_agent_id && body.response_schema) {
+        console.log('✅ Sub-agent has schema from parent', { agentId: agent.agent.id });
+      } else if (body.parent_agent_id) {
+        console.log('⚠️ Sub-agent spawned without schema', { agentId: agent.agent.id });
+      } else {
+        console.log('⏳ Root agent - schema will be generated during set_plan', { agentId: agent.agent.id });
       }
 
       // Handle chat message (non-blocking for response)
@@ -1091,18 +1092,20 @@ const updateAgentSchema = z.object({
   tools_in_use: z.array(z.string()).optional(), // For tree state updates
   progress: z.number().min(0).max(1).optional(), // For tree state updates
   message_count: z.number().int().min(0).optional(), // For tree state updates
+  response_schema: ResponseSchemaSchema.optional(), // For storing generated schema during set_plan
 });
 
 router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
-    const userId = req.userId;
+    // Support both user auth (userId) and internal auth (API key)
+    const userId = req.isInternal ? undefined : req.userId;
     const agentId = req.params.id;
     const body = updateAgentSchema.parse(req.body);
 
     const agent = await prisma.agent.findFirst({
       where: {
         id: agentId,
-        userId,
+        ...(userId ? { userId } : {}), // Only filter by userId for user auth
         deletedAt: null,
       },
       include: {
@@ -1131,6 +1134,9 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
     }
     if (body.message_count !== undefined) {
       agentUpdateData.messageCount = body.message_count;
+    }
+    if (body.response_schema !== undefined) {
+      agentUpdateData.responseSchema = body.response_schema;
     }
     if (Object.keys(agentUpdateData).length > 0) {
       await prisma.agent.update({

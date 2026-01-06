@@ -3,9 +3,6 @@
 from typing import List, Dict, Any
 from temporalio import activity
 import structlog
-from openai import AsyncOpenAI
-
-from config import load_config
 
 logger = structlog.get_logger()
 
@@ -18,30 +15,27 @@ async def compress_context(
 ) -> str:
     """
     Use LLM to compress context into key learnings.
-    
+
     Args:
         context: Full message history (first USER message is the goal)
         iteration_count: Current iteration number
         model: LLM model to use for compression
-        
+
     Returns:
         Compressed learnings as a string (for system message)
     """
     try:
         activity.heartbeat(f"Compressing {len(context)} messages into learnings")
-        
-        config = load_config()
-        client = AsyncOpenAI(
-            api_key=config.openrouter.api_key,
-            base_url=config.openrouter.base_url
-        )
-        
+
+        # Import here to avoid circular dependency
+        from helpers.llm import call_llm
+
         # Build full context
         full_context = "\n".join([
             f"[{msg.get('role', 'unknown')}] {msg.get('text', '')}"
             for msg in context
         ])
-        
+
         prompt = f"""You are analyzing an autonomous AI agent's execution history to extract key learnings.
 
 EXECUTION HISTORY ({len(context)} messages, {iteration_count} iterations):
@@ -61,34 +55,33 @@ Format your response as:
 - [specific successful action/strategy]
 - [another success]
 
-### ❌ What Didn't Work  
+### ❌ What Didn't Work
 - [specific mistake/failure]
 - [another mistake]
 
 ### 💡 Recommended Approach Going Forward
 - [concrete next steps based on learnings]
 """
-        
-        response = await client.chat.completions.create(
+
+        # Use call_llm which handles Rose model routing automatically
+        result = await call_llm(
+            messages=[{"role": "user", "content": prompt}],
             model=model,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,  # Lower temp for consistent analysis
-            max_tokens=1000
+            temperature=0.3,
+            max_tokens=1000,
         )
-        
-        learnings = response.choices[0].message.content
-        
+
+        learnings = result.get("content", "")
+
         logger.info(
             "Context compressed",
             original_messages=len(context),
             learnings_length=len(learnings),
-            tokens_used=response.usage.total_tokens
+            tokens_used=result.get("usage", {}).get("total_tokens", 0)
         )
-        
+
         return learnings
-        
+
     except Exception as e:
         logger.error("Failed to compress context", error=str(e))
         # Fallback: just return a simple summary
@@ -102,19 +95,23 @@ Continue working toward the task with a fresh start."""
 async def generate_completion_summary(
     context: List[Dict[str, Any]],
     goal: str,
-    model: str = "anthropic/claude-sonnet-4.5"
+    model: str = "anthropic/claude-sonnet-4.5",
+    structured_response: Dict[str, Any] = None,
+    output_schema: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """
     Generate a summary of what the agent accomplished.
-    
+
     Called when agent reaches 100% completion to create a comprehensive
     summary of the work done, findings, and results.
-    
+
     Args:
         context: Full message history
         goal: Original agent goal
         model: LLM model to use
-        
+        structured_response: Extracted structured output values from verifier
+        output_schema: Schema definition with field descriptions
+
     Returns:
         Dict with:
             - summary: Text summary of work completed (up to 1000 tokens)
@@ -122,19 +119,30 @@ async def generate_completion_summary(
     """
     try:
         activity.heartbeat("Generating completion summary")
-        
-        config = load_config()
-        client = AsyncOpenAI(
-            api_key=config.openrouter.api_key,
-            base_url=config.openrouter.base_url
-        )
-        
+
         # Import here to avoid circular dependency
-        from helpers.llm import convert_context_to_messages
-        
+        from helpers.llm import convert_context_to_messages, call_llm
+
+        # Build structured output section if available
+        structured_output_section = ""
+        if structured_response and isinstance(structured_response, dict) and len(structured_response) > 0:
+            structured_output_section = "\n\n## EXTRACTED STRUCTURED OUTPUT (MUST BE INCLUDED IN SUMMARY):\n"
+            for key, value in structured_response.items():
+                # Convert snake_case to Title Case for display
+                formatted_key = key.replace("_", " ").title()
+                # Format value (handle arrays)
+                if isinstance(value, list):
+                    formatted_value = ", ".join(str(v) for v in value)
+                else:
+                    formatted_value = str(value) if value is not None else ""
+                structured_output_section += f"- **{formatted_key}:** {formatted_value}\n"
+
+            structured_output_section += "\nIMPORTANT: You MUST include ALL of the above structured output values in your summary. These are the key deliverables the user is expecting."
+
         system_prompt = f"""You are summarizing the work completed by an AI agent.
 
 ORIGINAL GOAL: {goal}
+{structured_output_section}
 
 Review the conversation history and provide a clear, comprehensive summary of:
 1. What the agent accomplished
@@ -142,44 +150,46 @@ Review the conversation history and provide a clear, comprehensive summary of:
 3. Any important decisions or actions taken
 4. Final status/outcome
 
+{"CRITICAL: Your summary MUST prominently feature the EXTRACTED STRUCTURED OUTPUT values listed above. These are the primary deliverables." if structured_output_section else ""}
+
 Be thorough but concise. Focus on actionable information and concrete results.
 Maximum length: ~1000 tokens."""
-        
+
         # Convert context to messages (exclude system messages like blueprints)
         # Summarization needs assistant messages to see what the agent accomplished
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(convert_context_to_messages(context, include_system=False, include_assistant=True))
         messages.append({
-            "role": "user", 
-            "content": "Provide a comprehensive summary of what was accomplished."
+            "role": "user",
+            "content": "Provide a comprehensive summary of what was accomplished." + (
+                " Make sure to prominently include the structured output values." if structured_output_section else ""
+            )
         })
-        
-        response = await client.chat.completions.create(
-            model=model,
+
+        # Use call_llm which handles Rose model routing automatically
+        result = await call_llm(
             messages=messages,
-            temperature=0.3,  # Low temperature for factual summary
-            max_tokens=1500,  # Allow up to 1500 tokens for summary
+            model=model,
+            temperature=0.3,
+            max_tokens=1500,
         )
-        
-        summary = response.choices[0].message.content
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens
-        }
-        
+
+        summary = result.get("content", "")
+        usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+
         logger.info(
             "Summary generated",
             goal=goal[:50],
             summary_length=len(summary),
-            tokens=usage["total_tokens"]
+            tokens=usage.get("total_tokens", 0),
+            has_structured_output=bool(structured_response),
         )
-        
+
         return {
             "summary": summary,
             "usage": usage
         }
-        
+
     except Exception as e:
         logger.error("Failed to generate summary", error=str(e), goal=goal)
         # Return empty summary with zero usage on error
