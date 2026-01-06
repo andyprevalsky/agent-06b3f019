@@ -48,6 +48,8 @@ function saveWindowState(win: BrowserWindow): void {
 let mainWindow: BrowserWindow | null = null;
 let quickQueryWindow: BrowserWindow | null = null;
 let quickQueryBlurEnabled = false;
+let quickQueryLastHiddenAt = 0;
+let quickQueryFocusTimeouts: NodeJS.Timeout[] = [];
 
 // Listen for parent process death (stdin close) - quit when Conductor dies
 // Use process.exit(0) instead of app.quit() because app.quit() can hang on macOS
@@ -204,6 +206,16 @@ function positionQuickQueryWindow() {
 
 function showQuickQueryWindow() {
   if (!quickQueryWindow) return;
+
+  // Debounce: ignore show requests within 2 seconds of hiding
+  const timeSinceHide = Date.now() - quickQueryLastHiddenAt;
+  console.log(`[QuickQuery] showQuickQueryWindow called, timeSinceHide=${timeSinceHide}ms, lastHiddenAt=${quickQueryLastHiddenAt}`);
+  if (timeSinceHide < 2000) {
+    console.log(`[QuickQuery] BLOCKED show request (within 2s debounce)`);
+    return;
+  }
+
+  console.log(`[QuickQuery] Showing window`);
   quickQueryBlurEnabled = false; // Disable blur while showing
 
   positionQuickQueryWindow();
@@ -225,10 +237,14 @@ function showQuickQueryWindow() {
     }, 50);
   }
 
+  // Clear any pending focus timeouts from previous show
+  quickQueryFocusTimeouts.forEach(t => clearTimeout(t));
+  quickQueryFocusTimeouts = [];
+
   // Aggressively grab focus multiple times to beat other apps
   const focusAttempts = [10, 50, 100, 150, 300, 500, 1000];
   focusAttempts.forEach((delay) => {
-    setTimeout(() => {
+    const timeout = setTimeout(() => {
       if (quickQueryWindow && !quickQueryWindow.isDestroyed()) {
         app.focus({ steal: true });
         quickQueryWindow.moveTop();
@@ -263,6 +279,7 @@ function showQuickQueryWindow() {
         `).catch(() => {});
       }
     }, delay);
+    quickQueryFocusTimeouts.push(timeout);
   });
 
   emitQuickQueryToggle(true);
@@ -275,7 +292,15 @@ function showQuickQueryWindow() {
 
 function hideQuickQueryWindow({ focusMain }: { focusMain?: boolean } = {}) {
   if (!quickQueryWindow) return;
+  console.log(`[QuickQuery] hideQuickQueryWindow called, focusMain=${focusMain}`);
+
+  // Cancel all pending focus timeouts to prevent them from re-showing the window
+  quickQueryFocusTimeouts.forEach(t => clearTimeout(t));
+  quickQueryFocusTimeouts = [];
+
   quickQueryBlurEnabled = false; // Disable blur when hiding
+  quickQueryLastHiddenAt = Date.now(); // Record hide time to debounce show
+  console.log(`[QuickQuery] Set lastHiddenAt=${quickQueryLastHiddenAt}`);
   if (!quickQueryWindow.isDestroyed()) {
     quickQueryWindow.hide();
     emitQuickQueryToggle(false);

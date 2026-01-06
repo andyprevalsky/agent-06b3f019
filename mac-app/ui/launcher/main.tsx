@@ -209,7 +209,7 @@ const Launcher = () => {
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
               disabled={submitting}
-              placeholder="What do you want to do?"
+              placeholder="Enter any desire"
               className="placeholder-input"
               style={{
                 flex: 1,
