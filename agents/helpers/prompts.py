@@ -521,7 +521,7 @@ Plan tasks to explicitly capture this information before completion."""
     return f"""ROLE
 ----
 Plan a goal into minimal, parallelizable tasks with a precise, acyclic dependency graph.
-Do not execute; only plan.
+Each task maps to exactly ONE tool call. Do not execute; only plan.
 
 OUTPUT CONTRACT (STRICT)
 ------------------------
@@ -530,7 +530,7 @@ Return ONLY valid JSON matching this schema:
     "title": "<short plan title>",
     "content": "<markdown explanation of the plan>",
     "tasks": [
-        {{"goal": "<imperative task description>", "depends_on": [<indices>]}}
+        {{"goal": "<brief task objective>", "action_type": "<tool_name or 'reasoning'>", "depends_on": [<indices>]}}
     ],
     "dependencies_graph": {{"<task_idx>": ["<dep_idx>", ...]}},
     "join": "all" | "any"

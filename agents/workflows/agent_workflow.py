@@ -34,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.messages import broadcast_to_bus, update_agent_tree_state
     from helpers.prompts import build_system_prompt, build_verifier_prompt
     from helpers.handle_tool_event import handle_tool_event
+    from helpers.tool_schemas import PLAN_PHASE_TOOLS, EXECUTE_PHASE_TOOLS
     from tools.base import ToolEvent, EventType, MessageStatus
     # Tool executors (map tool name → workflow helper)
     from tools.deep_research import deep_research
@@ -343,35 +344,10 @@ class AgentWorkflow:
             workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
         
         # =====================================================================
-        # Define tool lists for both phases upfront
+        # Tool lists from centralized source of truth
         # =====================================================================
-        plan_tools = [
-            "web_search",
-            # "search_user_network_for_people",
-            # "read_message_history_with_person",
-            "send_message_to_user",
-            # "search_x402_bazaar",
-            "set_plan",
-            "attempt_completion",
-        ]
-        
-        execute_tools = [
-            "spawn_browser_agent",
-            "spawn_sub_agents",
-            "wait_seconds",
-            # "find_all",
-            # "enrich",
-            # "monitor",
-            # "check_monitor_events",
-            # "search_user_network_for_people",
-            # "read_message_history_with_person",
-            # "message_person",
-            "web_search",
-            # "search_x402_bazaar",
-            # "pay_for_x402_bazaar_service",
-            "send_message_to_user_execute_phase",
-            "attempt_completion",
-        ]
+        plan_tools = PLAN_PHASE_TOOLS
+        execute_tools = EXECUTE_PHASE_TOOLS
 
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)

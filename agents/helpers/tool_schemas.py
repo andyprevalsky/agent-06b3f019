@@ -11,13 +11,45 @@ logger = structlog.get_logger(__name__)
 
 
 # ============================================================================
+# Phase Tool Lists (source of truth for agent phases)
+# Must be defined early so PlanActionType can be used in PlannerTask
+# ============================================================================
+
+# Tools available during PLAN phase (research + create execution plan)
+PLAN_PHASE_TOOLS = [
+    "web_search",
+    "send_message_to_user",
+    "set_plan",
+    "attempt_completion",
+]
+
+# Tools available during EXECUTE phase (run the plan)
+EXECUTE_PHASE_TOOLS = [
+    "spawn_browser_agent",
+    "spawn_sub_agents",
+    "wait_seconds",
+    "web_search",
+    "send_message_to_user_execute_phase",
+    "attempt_completion",
+]
+
+# Build enum dynamically from EXECUTE_PHASE_TOOLS + "reasoning"
+PlanActionType = Enum(
+    "PlanActionType",
+    {name: name for name in EXECUTE_PHASE_TOOLS + ["reasoning"]},
+    type=str,
+)
+
+
+# ============================================================================
 # Planner LLM Response Models
 # ============================================================================
 
 
 class PlannerTask(BaseModel):
     """A single task in the planner output."""
-    goal: str = Field(description="Imperative description of what this task accomplishes")
+    goal: str = Field(description="Brief description of task objective")
+    action_type: PlanActionType = Field(description="The tool to execute for this task, or 'reasoning' for thinking/analysis")
     depends_on: List[int] = Field(default_factory=list, description="Indices of tasks this depends on (empty = no deps)")
 
 

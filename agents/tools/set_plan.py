@@ -14,7 +14,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
-from helpers.tool_schemas import TOOL_MODELS
+from helpers.tool_schemas import TOOL_MODELS, EXECUTE_PHASE_TOOLS
 
 
 def validate_dependencies(tasks: List[str], deps: Dict[str, List[str]]) -> Optional[str]:
@@ -88,13 +88,8 @@ def validate_dependencies(tasks: List[str], deps: Dict[str, List[str]]) -> Optio
 
 def _get_execute_phase_tools_description() -> str:
     """Get description of tools available in execute phase for planner context."""
-    execute_tools = [
-        "web_search", "deep_research", "spawn_browser_agent", "spawn_code_agent",
-        "spawn_sub_agents", "send_sms_as_user", "find_all", "enrich", "monitor",
-        "search_user_network_for_people", "message_person", "read_message_history_with_person"
-    ]
     lines = []
-    for name in execute_tools:
+    for name in EXECUTE_PHASE_TOOLS:
         if name in TOOL_MODELS:
             model = TOOL_MODELS[name]
             doc = model.__doc__ or ""
