@@ -57,6 +57,7 @@ export async function startAgentWorkflow(params: {
   parentAgentId?: string; // Optional: parent agent ID for tree structure
   depth?: number; // Optional: nesting depth
   busId?: string; // Optional: shared bus channel ID for sub-agent tree updates
+  startPhase?: 'plan' | 'execute'; // Optional: 'plan' (default) runs PLAN→EXECUTE, 'execute' skips PLAN
 }): Promise<string> {
   const client = await getTemporalClient();
   // Use provided task queue or default to environment-specific queue
@@ -86,6 +87,7 @@ export async function startAgentWorkflow(params: {
       params.parentAgentId || null, // Parent agent ID for tree structure
       params.depth || 0, // Nesting depth
       params.busId || null, // Shared bus channel ID for tree updates
+      params.startPhase || 'plan', // Starting phase: 'plan' runs PLAN→EXECUTE, 'execute' skips PLAN
     ],
   });
 

@@ -31,6 +31,7 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
     action: z.literal('start_superintelligence'),
     reasoning: z.string(),
     goal: z.string(),
+    mode: z.enum(['plan', 'execute']),  // plan for 3+ tool calls, execute for 1-2
   }),
 ]);
 
@@ -67,6 +68,11 @@ const ROUTER_JSON_SCHEMA = {
     goal: {
       type: 'string',
       description: 'Task goal (required if action is start_superintelligence)',
+    },
+    mode: {
+      type: 'string',
+      enum: ['plan', 'execute'],
+      description: 'plan for 3+ tool calls, execute for 1-2 tool calls (required if action is start_superintelligence)',
     },
   },
   required: ['reasoning', 'action'],
@@ -260,6 +266,7 @@ export async function callRouterLlm(params: {
     action: 'direct_answer' | 'web_search' | 'start_superintelligence';
     query?: string;
     goal?: string;
+    mode?: 'plan' | 'execute';
   };
 
   // Validate action-specific fields
@@ -280,7 +287,13 @@ export async function callRouterLlm(params: {
       decision = { action: 'web_search', reasoning: raw.reasoning, query: raw.query! };
       break;
     case 'start_superintelligence':
-      decision = { action: 'start_superintelligence', reasoning: raw.reasoning, goal: raw.goal! };
+      // Default to 'plan' if mode not provided (backward compatibility)
+      decision = {
+        action: 'start_superintelligence',
+        reasoning: raw.reasoning,
+        goal: raw.goal!,
+        mode: raw.mode || 'plan',
+      };
       break;
     default:
       throw new Error(`Unknown action: ${raw.action}`);

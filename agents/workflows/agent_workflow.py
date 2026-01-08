@@ -263,8 +263,9 @@ class AgentWorkflow:
         parent_agent_id: Optional[str] = None,
         depth: int = 0,
         bus_id: Optional[str] = None,
+        start_phase: str = "plan",  # "plan" runs PLAN→EXECUTE, "execute" skips PLAN
     ) -> Dict:
-        """Execute agent task: PLAN phase → EXECUTE phase."""
+        """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         self.agent_id = agent_id
         self.user_id = user_id
         self.goal = goal
@@ -349,45 +350,51 @@ class AgentWorkflow:
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = EXECUTE_PHASE_TOOLS
 
+        # Determine whether to skip PLAN phase
+        skip_plan = (start_phase == "execute")
+
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)
         # =====================================================================
-        workflow.logger.info(f"▶ PLAN phase: {len(plan_tools)} tools")
-        
-        plan_result = await run_agent(
-            agent_id=agent_id,
-            user_id=user_id,
-            system_prompt=build_system_prompt("PLAN", plan_tools, disabled_tools=execute_tools, user_context_section=user_context_section, response_schema=response_schema),
-            verifier_prompt=build_verifier_prompt("PLAN", self.verifier.get("llmJudgePrompt", ""), response_schema=response_schema),
-            model=model,
-            tools=plan_tools,
-            is_inside_temporal_activity=False,
-            check_paused=lambda: asyncio.sleep(0, result=self.is_paused),
-            wait_for_messages=self._wait_for_messages,
-            on_context_overflow=self._handle_context_overflow,
-            check_credits=self._check_credits,
-            post_message=self._post_message,
-            poll_messages=self._poll_messages,
-            execute_tool=self._execute_tool,
-            update_tree_state=self._update_tree_state,
-            max_context_tokens=self.max_context_tokens,
-            reasoning_max_tokens=reasoning_max_tokens,
-            is_plan_loop=True,  # PLAN phase: requires set_plan, posts "sit back" message
-            response_schema=response_schema,
-        )
-        
-        self._track_tokens(plan_result)
-        
-        if plan_result["status"] != "completed":
-            return await self._handle_incomplete(plan_result, "PLAN")
-        
-        workflow.logger.info("✓ PLAN complete, starting EXECUTE")
+        if not skip_plan:
+            workflow.logger.info(f"▶ PLAN phase: {len(plan_tools)} tools")
+
+            plan_result = await run_agent(
+                agent_id=agent_id,
+                user_id=user_id,
+                system_prompt=build_system_prompt("PLAN", plan_tools, disabled_tools=execute_tools, user_context_section=user_context_section, response_schema=response_schema),
+                verifier_prompt=build_verifier_prompt("PLAN", self.verifier.get("llmJudgePrompt", ""), response_schema=response_schema),
+                model=model,
+                tools=plan_tools,
+                is_inside_temporal_activity=False,
+                check_paused=lambda: asyncio.sleep(0, result=self.is_paused),
+                wait_for_messages=self._wait_for_messages,
+                on_context_overflow=self._handle_context_overflow,
+                check_credits=self._check_credits,
+                post_message=self._post_message,
+                poll_messages=self._poll_messages,
+                execute_tool=self._execute_tool,
+                update_tree_state=self._update_tree_state,
+                max_context_tokens=self.max_context_tokens,
+                reasoning_max_tokens=reasoning_max_tokens,
+                is_plan_loop=True,  # PLAN phase: requires set_plan, posts "sit back" message
+                response_schema=response_schema,
+            )
+
+            self._track_tokens(plan_result)
+
+            if plan_result["status"] != "completed":
+                return await self._handle_incomplete(plan_result, "PLAN")
+
+            workflow.logger.info("✓ PLAN complete, starting EXECUTE")
+        else:
+            workflow.logger.info("⏭️ Skipping PLAN phase, starting EXECUTE directly")
         
         # =====================================================================
         # PHASE 2: EXECUTE (run the plan with full tool access)
         # =====================================================================
         workflow.logger.info(f"▶ EXECUTE phase: {len(execute_tools)} tools")
-        
+
         execute_result = await run_agent(
             agent_id=agent_id,
             user_id=user_id,
@@ -406,7 +413,7 @@ class AgentWorkflow:
             update_tree_state=self._update_tree_state,
             max_context_tokens=self.max_context_tokens,
             reasoning_max_tokens=reasoning_max_tokens,
-            skip_blueprint_query=True,  # Already queried in PLAN phase
+            skip_blueprint_query=not skip_plan,  # Only skip if we ran PLAN phase
             response_schema=response_schema,
         )
         

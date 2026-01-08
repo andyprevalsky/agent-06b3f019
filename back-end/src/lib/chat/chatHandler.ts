@@ -84,6 +84,7 @@ export async function handleChatMessage(config: {
   if (decision.action === 'start_superintelligence') {
     console.log('[ChatHandler] Escalating to superintelligence', {
       goal: decision.goal,
+      mode: decision.mode,
     });
 
     // Insert ASSISTANT message with router's reasoning before escalation
@@ -95,10 +96,12 @@ export async function handleChatMessage(config: {
     });
 
     // Start Temporal workflow immediately - NO more LLM calls
+    // Pass mode to determine whether to skip PLAN phase
     await startTemporalWorkflowForChat(
       config.agentId,
       config.userId,
-      decision.goal
+      decision.goal,
+      decision.mode  // 'plan' or 'execute'
     );
 
     return { status: 'escalated', decision };
@@ -247,7 +250,8 @@ export async function handleChatMessage(config: {
 async function startTemporalWorkflowForChat(
   agentId: string,
   userId: string,
-  goal: string
+  goal: string,
+  startPhase: 'plan' | 'execute' = 'plan'
 ): Promise<void> {
   // Fetch agent to get model and verifier
   const agent = await prisma.agent.findUnique({
@@ -274,6 +278,7 @@ async function startTemporalWorkflowForChat(
       type: agent.verifier.type,
       llmJudgePrompt: agent.verifier.llmJudgePrompt,
     },
+    startPhase,  // 'plan' or 'execute' - determines whether to skip PLAN phase
   });
 
   // Update agent with workflow ID
