@@ -732,6 +732,34 @@ async def call_llm_structured_streaming(
                 if original_count != len(response.tool_calls):
                     logger.info(f"🔇 Silently dropped attempt_completion (was grouped with {original_count - 1} other tools)")
 
+        # Deduplicate single-call-per-step tools (keep only first occurrence)
+        # These tools should never be called more than once in the same response
+        SINGLE_CALL_TOOLS = {"send_message_to_user", "send_message_to_user_execute_phase"}
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            seen_single_call = set()
+            deduplicated_tools = []
+            for tc in response.tool_calls:
+                if tc and tc.tool in SINGLE_CALL_TOOLS:
+                    if tc.tool in seen_single_call:
+                        logger.info(f"🔇 Deduplicated {tc.tool} (only one allowed per step)")
+                        continue
+                    seen_single_call.add(tc.tool)
+                deduplicated_tools.append(tc)
+
+            if len(deduplicated_tools) != len(response.tool_calls):
+                # Also deduplicate from detected_tools_ordered
+                seen_for_detection = set()
+                new_detected = []
+                for name, tid, ts in detected_tools_ordered:
+                    if name in SINGLE_CALL_TOOLS:
+                        if name in seen_for_detection:
+                            continue
+                        seen_for_detection.add(name)
+                    new_detected.append((name, tid, ts))
+                detected_tools_ordered = new_detected
+
+            response.tool_calls = deduplicated_tools
+
         return response, usage, detected_tools_ordered
     
     # For OpenRouter models, use Instructor's partial streaming
@@ -832,6 +860,21 @@ async def call_llm_structured_streaming(
             ]
             if original_count != len(final_response.tool_calls):
                 logger.info(f"🔇 Silently dropped attempt_completion (was grouped with {original_count - 1} other tools)")
+
+    # Deduplicate single-call-per-step tools (keep only first occurrence)
+    # These tools should never be called more than once in the same response
+    SINGLE_CALL_TOOLS = {"send_message_to_user", "send_message_to_user_execute_phase"}
+    if hasattr(final_response, 'tool_calls') and final_response.tool_calls:
+        seen_single_call = set()
+        deduplicated_tools = []
+        for tc in final_response.tool_calls:
+            if tc and tc.tool in SINGLE_CALL_TOOLS:
+                if tc.tool in seen_single_call:
+                    logger.info(f"🔇 Deduplicated {tc.tool} (only one allowed per step)")
+                    continue
+                seen_single_call.add(tc.tool)
+            deduplicated_tools.append(tc)
+        final_response.tool_calls = deduplicated_tools
 
     # Usage not available in Instructor streaming, estimate from content
     estimated_tokens = len(accumulated_text) // 4

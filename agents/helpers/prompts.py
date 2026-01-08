@@ -235,7 +235,7 @@ def build_system_prompt(
         - PLAN phase only: `send_message_to_user({"message": "<user-visible markdown>", "is_question": true|false})` guarantees the user sees the message exactly as written.
         - Set `is_question=true` when you must pause for clarification/approval. Set `is_question=false` when broadcasting critical information (like the plan you intend to execute) without blocking progress.
         - Share every finalized plan via `send_message_to_user` so the user knows what will run.
-        - If you call `send_message_to_user`, do not include any other tool in that same tool_calls list.
+        - CRITICAL: `send_message_to_user` and `send_message_to_user_execute_phase` must appear AT MOST ONCE per response. Never call the same messaging tool multiple times in a single tool_calls array.
 
     Behavioral rules (always enforce):
         1. Never claim you searched/sent/paid/changed anything unless the tool call actually executed (no tool simulation).
