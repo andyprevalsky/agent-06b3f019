@@ -422,6 +422,31 @@ model RoseConversationModel {
   @@index([conversationId])
 }
 
+model GoalHistory {
+  id                        String       @id @default(uuid())
+  originalAgentId           String
+  userId                    String
+  goal                      String
+  status                    AgentStatus
+  statusMessage             String?
+  model                     String
+  contextSize               Int
+  messageCount              Int
+  tokenCount                Int
+  tokensIn                  Int
+  tokensOut                 Int
+  source                    AgentSource
+  depth                     Int
+  agentCreatedAt            DateTime
+  agentUpdatedAt            DateTime
+  agentDeletedAt            DateTime?
+  archivedAt                DateTime     @default(now())
+
+  @@index([userId])
+  @@index([archivedAt])
+  @@index([originalAgentId])
+}
+
 enum AgentStatus {
   STARTING_UP
   ACTIVE

@@ -2,15 +2,18 @@
 
 /**
  * Cleanup Script: Delete All Agents, Terminate Workflows, Clear Blueprints, and Attention Requests
- * 
+ *
  * This script will:
  * 1. Kill any local workers running on the test queue
  * 2. Find all active (non-deleted) agents in the database
- * 3. Terminate their Temporal workflows
- * 4. Soft-delete them from the database
- * 5. Find all soft-deleted agents and hard-delete them
- * 6. Clear all blueprints from the knowledge base
- * 7. Clear all attention requests
+ * 3. Archive goals from other users to GoalHistory table
+ * 4. Terminate their Temporal workflows
+ * 5. Soft-delete them from the database
+ * 6. Find all soft-deleted agents and hard-delete them
+ * 7. Clear all blueprints from the knowledge base
+ * 8. Clear all attention requests
+ *
+ * Set MY_USER_ID environment variable to skip archiving your own agents' goals.
  */
 
 import { prisma } from '../src/lib/prisma';
@@ -19,6 +22,8 @@ import * as dotenv from 'dotenv';
 import { execSync } from 'child_process';
 
 dotenv.config();
+
+const MY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
 async function killTestQueueWorkers() {
   // Kill workers on test queue
@@ -68,18 +73,43 @@ async function cleanupAllAgents() {
           userId: true,
           goal: true,
           status: true,
+          statusMessage: true,
+          model: true,
+          contextSize: true,
+          messageCount: true,
+          tokenCount: true,
+          tokensIn: true,
+          tokensOut: true,
+          source: true,
+          depth: true,
+          createdAt: true,
+          updatedAt: true,
+          deletedAt: true,
           temporalWorkflowId: true,
         },
       });
-      
-      // Get already soft-deleted agents for hard deletion
+
+      // Get already soft-deleted agents for hard deletion (also need full data for archiving)
       softDeletedAgents = await prisma.agent.findMany({
         where: {
           deletedAt: { not: null },
         },
         select: {
           id: true,
+          userId: true,
           goal: true,
+          status: true,
+          statusMessage: true,
+          model: true,
+          contextSize: true,
+          messageCount: true,
+          tokenCount: true,
+          tokensIn: true,
+          tokensOut: true,
+          source: true,
+          depth: true,
+          createdAt: true,
+          updatedAt: true,
           deletedAt: true,
         },
       });
@@ -92,6 +122,49 @@ async function cleanupAllAgents() {
 
     console.log(`📊 Found ${agents.length} active agents`);
     console.log(`📊 Found ${softDeletedAgents.length} soft-deleted agents\n`);
+
+    // Archive goals from other users to GoalHistory
+    let archivedCount = 0;
+    const allAgentsToArchive = [...agents, ...softDeletedAgents].filter(
+      (agent) => MY_USER_ID && agent.userId !== MY_USER_ID
+    );
+
+    if (MY_USER_ID) {
+      console.log(`🔒 MY_USER_ID is set: ${MY_USER_ID}`);
+      console.log(`📦 Archiving ${allAgentsToArchive.length} goals from other users to GoalHistory...\n`);
+
+      for (const agent of allAgentsToArchive) {
+        try {
+          await prisma.goalHistory.create({
+            data: {
+              originalAgentId: agent.id,
+              userId: agent.userId,
+              goal: agent.goal,
+              status: agent.status,
+              statusMessage: agent.statusMessage,
+              model: agent.model,
+              contextSize: agent.contextSize,
+              messageCount: agent.messageCount,
+              tokenCount: agent.tokenCount,
+              tokensIn: agent.tokensIn,
+              tokensOut: agent.tokensOut,
+              source: agent.source,
+              depth: agent.depth,
+              agentCreatedAt: agent.createdAt,
+              agentUpdatedAt: agent.updatedAt,
+              agentDeletedAt: agent.deletedAt,
+            },
+          });
+          console.log(`   📦 Archived goal from user ${agent.userId}: ${agent.goal.substring(0, 50)}...`);
+          archivedCount++;
+        } catch (archiveError: any) {
+          console.log(`   ⚠️  Failed to archive agent ${agent.id}: ${archiveError.message}`);
+        }
+      }
+      console.log(`✅ Archived ${archivedCount} goals to GoalHistory\n`);
+    } else {
+      console.log('ℹ️  MY_USER_ID not set - skipping goal archiving (all goals will be deleted)\n');
+    }
 
     // Initialize Temporal client (only if there are agents to process)
     let temporalClient;
@@ -182,6 +255,7 @@ async function cleanupAllAgents() {
 
     console.log('\n' + '='.repeat(60));
     console.log('📈 Cleanup Summary:');
+    console.log(`   Goals archived to GoalHistory: ${archivedCount}`);
     console.log(`   Active agents processed: ${agents.length}`);
     console.log(`   Successfully soft-deleted: ${successCount}`);
     console.log(`   Failed: ${failCount}`);
