@@ -98,6 +98,10 @@ curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1
 - Schema changes: Edit `back-end/prisma/schema.prisma`, then migrate
 - **Query DB:** `npx tsx back-end/scripts/query-db.ts` (modify script as needed)
 
+## Supabase Realtime Messages
+
+All realtime and tool message types are defined in `front-end/src/lib/realtime-types.ts`.
+
 ## Rose API
 
 - `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite

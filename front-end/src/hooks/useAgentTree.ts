@@ -1,7 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { fetchTreeState, AgentTreeNode, Agent, OutputSchema } from '@/lib/api';
-import { subscribeToBus, unsubscribe } from '@/lib/realtime';
+import {
+  subscribeToBus,
+  unsubscribe,
+  type AgentStateChangedPayload,
+} from '@/lib/realtime';
 
 // Re-export the type with frontend-friendly naming
 export interface TreeNode {
@@ -126,10 +130,10 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
 
       // Subscribe to bus channel
       subscribeToBus(busId, {
-        onAgentStateChanged: (payload) => {
-          console.log('[useAgentTree] Received AGENT_STATE_CHANGED:', payload);
-          const data = payload.payload?.record;
-          if (!data?.agentId) {
+        onAgentStateChanged: (data: AgentStateChangedPayload) => {
+          // data is already extracted from wrapper by subscribeToBus
+          console.log('[useAgentTree] Received AGENT_STATE_CHANGED:', data);
+          if (!data.agentId) {
             console.warn('[useAgentTree] Missing agentId in payload');
             return;
           }

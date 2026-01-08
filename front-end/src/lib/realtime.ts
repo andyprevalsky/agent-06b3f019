@@ -1,52 +1,98 @@
 import { supabase } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
-/**
- * Streaming chunk payload from ASSISTANT_STREAM events
- * Note: Worker sends DELTAS (not accumulated text) for efficiency
- */
-export interface StreamChunkPayload {
-  stream_id: string;
-  delta: string;  // The new text chunk (delta, not accumulated)
-  done: boolean;
-  sequence: number;
-  subAgentId?: string;  // For routing to browser panel's MessageList
-}
+// Import and re-export all types from realtime-types.ts
+export {
+  // Raw wrapper
+  type RealtimeBroadcastWrapper,
+  // Event type unions
+  type AgentChannelEvent,
+  type BusChannelEvent,
+  type UserChannelEvent,
+  // Agent channel payloads
+  type MessageRole,
+  type ToolStatus,
+  type MessageMetadata,
+  type BrowserActionType,
+  type CodeActionType,
+  type InsertMessagePayload,
+  type UpdateAgentPayload,
+  type DeleteMessagePayload,
+  type AssistantStreamPayload,
+  type PlanStreamPayload,
+  type ToolStreamPayload,
+  type AttentionStreamPayload,
+  type AgentModeStartedPayload,
+  // Tool-specific metadata types
+  type ToolName,
+  type BaseToolMetadata,
+  type SpawnBrowserAgentMetadata,
+  type SpawnCodeAgentMetadata,
+  type SpawnSubAgentsMetadata,
+  type SetPlanMetadata,
+  type PlanArtifactData,
+  type SendMessageToUserMetadata,
+  type RequestUserSignupMetadata,
+  type RequestUserApprovalMetadata,
+  type EnableWritePermissionsMetadata,
+  type ReadMessageHistoryMetadata,
+  type ProgressToolMetadata,
+  type SimpleToolMetadata,
+  type ToolMessageMetadata,
+  type ToolMessagePayload,
+  // Bus channel payloads
+  type AgentStateChangedPayload,
+  // User channel payloads (deprecated)
+  type AttentionRequestPayload,
+  // Handler types
+  type AgentChannelHandlers,
+  type BusChannelHandlers,
+  type UserChannelHandlers,
+  // Type guards
+  isInsertMessagePayload,
+  isAssistantStreamPayload,
+  isAgentStateChangedPayload,
+  isToolMessage,
+  isSpawnBrowserAgentMessage,
+  isSpawnCodeAgentMessage,
+  isSetPlanMessage,
+  isSendMessageToUserMessage,
+  isRequestUserSignupMessage,
+  // Strict extractors (with validation + error logging)
+  extractInsertPayload,
+  extractUpdatePayload,
+  extractDeletePayload,
+  extractAssistantStreamPayload,
+  extractPlanStreamPayload,
+  extractToolStreamPayload,
+  extractAttentionStreamPayload,
+  extractAgentStateChangedPayload,
+  // Legacy utility (deprecated)
+  extractRecord,
+} from './realtime-types';
 
-/**
- * Plan streaming payload from PLAN_STREAM events
- * Ephemeral (not persisted to DB) - shows PlanChip with shimmer during LLM streaming
- */
-export interface PlanStreamPayload {
-  stream_id: string;
-  tool_call_id: string;
-  title: string;
-}
+import {
+  type AssistantStreamPayload,
+  type PlanStreamPayload,
+  type ToolStreamPayload,
+  type AttentionStreamPayload,
+  type InsertMessagePayload,
+  type UpdateAgentPayload,
+  type DeleteMessagePayload,
+  type AgentStateChangedPayload,
+  extractInsertPayload,
+  extractUpdatePayload,
+  extractDeletePayload,
+  extractAssistantStreamPayload,
+  extractPlanStreamPayload,
+  extractToolStreamPayload,
+  extractAttentionStreamPayload,
+  extractAgentStateChangedPayload,
+} from './realtime-types';
 
-/**
- * Attention message streaming payload from ATTENTION_STREAM events
- * Used for streaming send_message_to_user content progressively
- */
-export interface AttentionStreamPayload {
-  stream_id: string;
-  tool_call_id: string;
-  message: string;  // Accumulated message content (not delta)
-  is_question: boolean;
-  done: boolean;
-  sequence: number;
-}
-
-/**
- * Tool streaming payload from TOOL_STREAM events
- * Ephemeral (not persisted to DB) - shows tool indicator during LLM streaming
- * before actual tool execution starts
- */
-export interface ToolStreamPayload {
-  stream_id: string;
-  tool_call_id: string;
-  tool_name: string;
-  title: string;
-}
+// Legacy type aliases for backward compatibility
+/** @deprecated Use AssistantStreamPayload instead */
+export type StreamChunkPayload = AssistantStreamPayload;
 
 /**
  * Generic event handler type
@@ -117,13 +163,14 @@ export async function subscribeToChannel(
 }
 
 /**
- * Handlers for agent channel events
+ * Handlers for agent channel events.
+ * Uses typed payloads from realtime-types.ts.
  */
 export interface AgentHandlers {
-  onInsert?: (payload: any) => void;
-  onUpdate?: (payload: any) => void;
-  onDelete?: (payload: any) => void;
-  onAssistantStream?: (payload: StreamChunkPayload) => void;
+  onInsert?: (payload: InsertMessagePayload) => void;
+  onUpdate?: (payload: UpdateAgentPayload) => void;
+  onDelete?: (payload: DeleteMessagePayload) => void;
+  onAssistantStream?: (payload: AssistantStreamPayload) => void;
   onPlanStream?: (payload: PlanStreamPayload) => void;
   onAttentionStream?: (payload: AttentionStreamPayload) => void;
   onToolStream?: (payload: ToolStreamPayload) => void;
@@ -131,11 +178,14 @@ export interface AgentHandlers {
 }
 
 /**
- * Subscribe to a specific agent's channel
- * Receives broadcasts for messages and agent updates
+ * Subscribe to a specific agent's channel.
+ * Receives broadcasts for messages and agent updates.
+ *
+ * All payloads are extracted from the Supabase broadcast wrapper and typed.
+ * See realtime-types.ts for payload documentation.
  *
  * @param agentId - The agent ID to subscribe to
- * @param handlers - Callbacks for INSERT/UPDATE/DELETE events
+ * @param handlers - Typed callbacks for channel events
  * @returns The realtime channel (call unsubscribe to clean up)
  */
 export async function subscribeToAgent(
@@ -145,66 +195,45 @@ export async function subscribeToAgent(
   const eventHandlers: EventHandlers = {};
 
   if (handlers.onInsert) {
-    eventHandlers['INSERT'] = handlers.onInsert;
+    eventHandlers['INSERT'] = (wrapper: unknown) => {
+      const record = extractInsertPayload(wrapper);
+      if (record) handlers.onInsert!(record);
+    };
   }
   if (handlers.onUpdate) {
-    eventHandlers['UPDATE'] = handlers.onUpdate;
+    eventHandlers['UPDATE'] = (wrapper: unknown) => {
+      const record = extractUpdatePayload(wrapper);
+      if (record) handlers.onUpdate!(record);
+    };
   }
   if (handlers.onDelete) {
-    eventHandlers['DELETE'] = handlers.onDelete;
+    eventHandlers['DELETE'] = (wrapper: unknown) => {
+      const record = extractDeletePayload(wrapper);
+      if (record) handlers.onDelete!(record);
+    };
   }
   if (handlers.onAssistantStream) {
-    eventHandlers['ASSISTANT_STREAM'] = (payload) => {
-      const record = payload?.payload?.record;
-      if (record) {
-        handlers.onAssistantStream!({
-          stream_id: record.stream_id,
-          delta: record.delta,
-          done: record.done,
-          sequence: record.sequence,
-          subAgentId: record.subAgentId,
-        });
-      }
+    eventHandlers['ASSISTANT_STREAM'] = (wrapper: unknown) => {
+      const record = extractAssistantStreamPayload(wrapper);
+      if (record) handlers.onAssistantStream!(record);
     };
   }
   if (handlers.onPlanStream) {
-    eventHandlers['PLAN_STREAM'] = (payload) => {
-      const record = payload?.payload?.record;
-      if (record) {
-        handlers.onPlanStream!({
-          stream_id: record.stream_id,
-          tool_call_id: record.tool_call_id,
-          title: record.title,
-        });
-      }
+    eventHandlers['PLAN_STREAM'] = (wrapper: unknown) => {
+      const record = extractPlanStreamPayload(wrapper);
+      if (record) handlers.onPlanStream!(record);
     };
   }
   if (handlers.onAttentionStream) {
-    eventHandlers['ATTENTION_STREAM'] = (payload) => {
-      const record = payload?.payload?.record;
-      if (record) {
-        handlers.onAttentionStream!({
-          stream_id: record.stream_id,
-          tool_call_id: record.tool_call_id,
-          message: record.message,
-          is_question: record.is_question,
-          done: record.done,
-          sequence: record.sequence,
-        });
-      }
+    eventHandlers['ATTENTION_STREAM'] = (wrapper: unknown) => {
+      const record = extractAttentionStreamPayload(wrapper);
+      if (record) handlers.onAttentionStream!(record);
     };
   }
   if (handlers.onToolStream) {
-    eventHandlers['TOOL_STREAM'] = (payload) => {
-      const record = payload?.payload?.record;
-      if (record) {
-        handlers.onToolStream!({
-          stream_id: record.stream_id,
-          tool_call_id: record.tool_call_id,
-          tool_name: record.tool_name,
-          title: record.title,
-        });
-      }
+    eventHandlers['TOOL_STREAM'] = (wrapper: unknown) => {
+      const record = extractToolStreamPayload(wrapper);
+      if (record) handlers.onToolStream!(record);
     };
   }
   if (handlers.onAgentModeStarted) {
@@ -252,17 +281,20 @@ export async function subscribeToAttentionRequests(
 }
 
 /**
- * Handlers for bus channel events (sub-agent tree state)
+ * Handlers for bus channel events (sub-agent tree state).
+ * Uses typed payloads from realtime-types.ts.
  */
 export interface BusHandlers {
-  onAgentStateChanged?: (payload: any) => void;
+  onAgentStateChanged?: (payload: AgentStateChangedPayload) => void;
 }
 
 /**
- * Subscribe to a bus channel for sub-agent tree state updates
+ * Subscribe to a bus channel for sub-agent tree state updates.
+ *
+ * See realtime-types.ts for AgentStateChangedPayload documentation.
  *
  * @param busId - The bus ID (typically root agent's ID)
- * @param handlers - Callbacks for AGENT_STATE_CHANGED events
+ * @param handlers - Typed callbacks for AGENT_STATE_CHANGED events
  * @returns The realtime channel (call unsubscribe to clean up)
  */
 export async function subscribeToBus(
@@ -272,7 +304,10 @@ export async function subscribeToBus(
   const eventHandlers: EventHandlers = {};
 
   if (handlers.onAgentStateChanged) {
-    eventHandlers['AGENT_STATE_CHANGED'] = handlers.onAgentStateChanged;
+    eventHandlers['AGENT_STATE_CHANGED'] = (wrapper: unknown) => {
+      const record = extractAgentStateChangedPayload(wrapper);
+      if (record) handlers.onAgentStateChanged!(record);
+    };
   }
 
   return subscribeToChannel(`bus:${busId}`, eventHandlers, 'Bus');

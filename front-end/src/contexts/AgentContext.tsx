@@ -1,18 +1,21 @@
 import React, { createContext, useContext, useState, useRef, useCallback, useEffect } from 'react';
 import { RealtimeChannel } from '@supabase/supabase-js';
-import { 
-  subscribeToAgent, 
-  unsubscribe, 
-  StreamChunkPayload, 
-  PlanStreamPayload, 
-  AttentionStreamPayload,
-  ToolStreamPayload,
+import {
+  subscribeToAgent,
+  unsubscribe,
+  // Typed payloads from realtime-types.ts
+  type AssistantStreamPayload,
+  type PlanStreamPayload,
+  type AttentionStreamPayload,
+  type ToolStreamPayload,
+  type InsertMessagePayload,
+  type UpdateAgentPayload,
 } from '@/lib/realtime';
-import { 
-  getAgent, 
+import {
+  getAgent,
   postMessage as postMessageAPI,
-  AgentDetail, 
-  Message 
+  AgentDetail,
+  Message
 } from '@/lib/api';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -307,19 +310,14 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
     const setupRealtime = async () => {
       try {
         const channel = await subscribeToAgent(selectedAgentId, {
-          onInsert: (payload) => {
-            const data = payload.payload?.record;
-            if (!data) {
-              console.warn('⚠️ INSERT payload missing record:', payload);
-              return;
-            }
-            
+          onInsert: (data: InsertMessagePayload) => {
+            // data is already extracted from wrapper by subscribeToAgent
             const message: Message = {
               message_id: data.id,
               timestamp: data.timestamp,
               text: data.text,
               role: data.role,
-              metadata: data.metadata,
+              metadata: data.metadata ?? undefined,
             };
             
             console.log(`📥 AgentContext INSERT:`, {
@@ -379,10 +377,8 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
             dispatchMessage(message);
           },
           
-          onUpdate: (payload) => {
-            const updated = payload.record || payload.payload?.record;
-            if (!updated) return;
-            
+          onUpdate: (updated: UpdateAgentPayload) => {
+            // updated is already extracted from wrapper by subscribeToAgent
             setAgent(prev => {
               if (!prev) return prev;
               return {
@@ -399,11 +395,11 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
                 updated_at: updated.updatedAt ?? prev.updated_at,
               };
             });
-            
+
             onLoadAgents?.();
           },
           
-          onAssistantStream: (chunk: StreamChunkPayload) => {
+          onAssistantStream: (chunk: AssistantStreamPayload) => {
             console.log(`📡 AgentContext STREAM:`, {
               stream_id: chunk.stream_id,
               sequence: chunk.sequence,
