@@ -613,7 +613,6 @@ async def run_agent(
         # Handle attempt_completion separately (should be alone due to llm.py filtering)
         if attempt_completion_tool:
             tool_name, tool_args, tool_call_id = attempt_completion_tool
-            reasoning = tool_args.get("reasoning", "")
 
             # PLAN phase: require set_plan to have been called
             if is_plan_loop and not set_plan_called:
@@ -680,7 +679,7 @@ async def run_agent(
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
                         "token_count": token_count,
-                        "message": reasoning,
+                        "message": "",
                     }
 
                 # Skip LLM verification if requested
@@ -692,7 +691,7 @@ async def run_agent(
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
                         "token_count": token_count,
-                        "message": reasoning,
+                        "message": "",
                     }
 
                 # Run verifier

@@ -821,15 +821,14 @@ async def execute_action(
             return {"success": True, "done": True, "message": text}
         
         elif action_name == "attempt_completion":
-            reasoning = params.get("reasoning", "")
             await action_history.record_action(
                 dom_service=dom_service,
                 action="attempt_completion",
                 thinking=thinking,
-                params={"reasoning": reasoning},
+                params={},
                 result={"success": True}
             )
-            return {"success": True, "attempt_completion": True, "message": reasoning}
+            return {"success": True, "attempt_completion": True}
         
         elif action_name == "send_message_to_user":
             message = params.get("message", "")

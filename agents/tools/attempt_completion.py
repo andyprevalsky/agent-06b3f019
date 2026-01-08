@@ -37,27 +37,25 @@ class AttemptCompletionManager(ToolManager):
     ) -> Dict[str, Any]:
         """
         Signal that the agent believes its task/phase is complete.
-        
+
         The workflow/activity will run the verifier after this to confirm.
         If verification passes, the loop exits. If not, the agent continues.
-        
+
         Args:
             execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
-            tool_call: Dict with optional 'reasoning' field
+            tool_call: Dict (no parameters required)
             tool_call_id: Unique ID for this tool call
             agent_id: Agent ID for event routing
             user_id: User ID for usage tracking
-            
+
         Returns:
             Dict indicating completion was attempted
         """
-        reasoning = tool_call.get("reasoning", "")
-        
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="✓ Attempting completion",
-                message=reasoning or "Running verifier to check completion...",
+                message="Running verifier to check completion...",
                 status=MessageStatus.FINISHED
             ),
             agent_id=agent_id,
@@ -66,8 +64,8 @@ class AttemptCompletionManager(ToolManager):
             execute_activity=execute_activity,
             user_id=user_id,
         )
-        
-        return {"attempted": True, "reasoning": reasoning}
+
+        return {"attempted": True}
 
 
 _manager: Optional[AttemptCompletionManager] = None
@@ -89,14 +87,14 @@ async def attempt_completion(
 ) -> Dict[str, Any]:
     """
     Execute attempt_completion tool.
-    
+
     Args:
         execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
-        tool_call: Tool call dict with optional 'reasoning' parameter
+        tool_call: Tool call dict (no parameters required)
         tool_call_id: Unique ID for this tool call
         agent_id: Agent ID for event routing
         user_id: User ID for usage tracking
-        
+
     Returns:
         Dict indicating completion was attempted
     """

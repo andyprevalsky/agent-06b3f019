@@ -71,7 +71,7 @@ async def execute_browser_tool(
         elif tool_name == "done":
             return {"success": True, "done": True, "text": tool_args.get("text", "")}
         elif tool_name == "attempt_completion":
-            return {"success": True, "attempt_completion": True, "reasoning": tool_args.get("reasoning", "")}
+            return {"success": True, "attempt_completion": True}
         elif tool_name == "send_message_to_user":
             return {
                 "success": True, 

@@ -556,19 +556,15 @@ class ProgressToAutonomousExecutionPhaseTool(BaseModel):
 class AttemptCompletionTool(BaseModel):
     """
     Signal that you believe your current phase/task is complete.
-    
+
     In PLAN phase: Call when plan is ready and you no longer need clarifications.
     In EXECUTE phase: Call when you believe the goal has been fully accomplished.
-    
+
     A verifier will run to confirm completion. If verification passes, the loop exits.
     If not, you'll receive feedback and can continue working.
     """
 
     tool: Literal["attempt_completion"]
-    reasoning: Optional[str] = Field(
-        default=None,
-        description="Summary of what was accomplished or why you believe the phase is complete."
-    )
 
 
 class SpawnSubAgentsTool(BaseModel):

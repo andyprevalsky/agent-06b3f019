@@ -437,13 +437,13 @@ NAVIGATION:
 - wait(timeMs) → Wait
 
 COMPLETION:
-- attempt_completion(reasoning) → Signal task complete for verification
+- attempt_completion() → Signal task complete for verification
 
 IMPORTANT RULES:
 1. ALWAYS call observe() first to get a selector before clicking/typing
 2. Use fill() for login/forms (clears existing text)
 3. Use type() for search boxes (doesn't clear, triggers autocomplete)
 4. Verify actions worked with screenshot or ariaTree
-5. When done, call attempt_completion with a summary - a verifier will confirm
+5. When done, call attempt_completion - a verifier will confirm
 
 Today's date is {current_date}. You're currently on: {current_url}"""

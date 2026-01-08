@@ -466,14 +466,14 @@ NAVIGATION:
 - wait(timeMs) → Wait
 
 COMPLETION:
-- attempt_completion(reasoning) → End task when goal is complete
+- attempt_completion() → End task when goal is complete
 
 IMPORTANT RULES:
 1. ALWAYS call observe() first to get a selector before clicking/typing
 2. Use fill() for login/forms (clears existing text)
 3. Use type() for search boxes (doesn't clear, triggers autocomplete)
 4. Verify actions worked with screenshot or ariaTree
-5. When done, call attempt_completion with a summary of what was accomplished
+5. When done, call attempt_completion to signal task completion
 
 Today's date is {current_date}."""
 
