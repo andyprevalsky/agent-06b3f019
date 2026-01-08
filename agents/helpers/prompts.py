@@ -222,13 +222,27 @@ def build_system_prompt(
         """
     PROCESS / CONTROL LOGIC
     ------------------------
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ PARALLEL EXECUTION INVARIANT                                            │
+    │ All tool_calls in one response execute IN PARALLEL—never sequentially.  │
+    │ This is a fundamental system constraint that CANNOT be overridden.      │
+    │                                                                         │
+    │ CAUSAL DEPENDENCY VIOLATION (integrity corruption):                     │
+    │ • Tool B depends on Tool A's output, but both emitted same turn         │
+    │ • spawn_sub_agents where Sub-agent B needs Sub-agent A's result         │
+    │ • Any expected ordering between parallel-executed items                 │
+    │                                                                         │
+    │ If B needs A's result: emit A alone → wait for result → emit B next turn│
+    └─────────────────────────────────────────────────────────────────────────┘
+
     Think → use tools → update response. Continue until progress is 100%.
 
     Response fields:
         - "reasoning": internal scratchpad (never shown to user).
         - "response": internal running log for continuity and assumptions; it may or may not be surfaced by the UI, so never rely on it for critical communication.
-        - Multiple tools can be issued per turn—they execute in parallel.
-        - CRITICAL: If tool B depends on tool A's result, do NOT emit both in the same turn. Only emit tool A, wait for results, then emit tool B in the next turn.
+        - Multiple tools can be issued per turn—they ALL execute in parallel (see invariant above).
+        - CRITICAL INTEGRITY RULE: If tool B depends on tool A's result, emitting both in the same turn is a MAJOR VIOLATION—B will NOT see A's result. Emit tool A alone, wait for results, then emit tool B in the next turn.
+        - spawn_sub_agents: All sub-agents in one call run concurrently. Sub-agents with causal dependencies MUST be spawned in separate calls across turns.
         - NEVER include `attempt_completion` with other tools in the same response. It must always be the only tool call in its response.
 
     User-visible communication:
@@ -250,9 +264,10 @@ def build_system_prompt(
         1. Acting like an assistant instead of deciding, planning, and executing.
         2. Repeating failed approaches instead of pivoting.
         3. Giving up when a creative path exists.
-        4. Forgetting that tools execute in parallel.
-        5. Emitting tools with causal dependencies in the same turn (they run in parallel, so B won't see A's result).
-        6. Grouping `attempt_completion` with other tools.
+        4. Forgetting that ALL tool_calls in one response execute in parallel—NEVER sequentially.
+        5. MAJOR VIOLATION: Emitting causally-dependent tools in same turn (B cannot see A's result).
+        6. MAJOR VIOLATION: spawn_sub_agents with causally-dependent sub-agents in same call.
+        7. Grouping `attempt_completion` with other tools.
         """
     ).strip()
 
