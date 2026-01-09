@@ -122,6 +122,30 @@ export type CodeActionType =
   | 'code_error'
   | 'code_deployed';
 
+/**
+ * Claude Code agent action types.
+ * See agents/tools/spawn_claude_code_agent.py:save_claude_code_message
+ */
+export type ClaudeCodeActionType =
+  | 'claude_code_started'  // Init message (new sandbox session)
+  | 'task_started'
+  | 'agent_observation'    // Periodic status updates
+  | 'system'               // Verifier messages
+  | 'task_complete'
+  | 'session_cancelled'
+  | 'error';
+
+/**
+ * WebSocket message types from Claude Code sandbox.
+ * See e2b-templates/claude-code/ws-server.mjs
+ */
+export type ClaudeCodeWsMessage =
+  | { type: 'buffer'; data: string }   // Full history buffer on connect
+  | { type: 'stdout'; data: string }   // Live stdout chunk
+  | { type: 'stderr'; data: string }   // Live stderr chunk
+  | { type: 'exit'; code: number }     // Process exited
+  | { type: 'error'; data: string };   // Server error
+
 // =============================================================================
 // Tool-Specific Metadata Types
 // =============================================================================
@@ -151,7 +175,7 @@ export type ToolName =
   | 'send_email'
   | 'set_plan'
   | 'spawn_browser_agent'
-  | 'spawn_code_agent'
+  | 'spawn_claude_code_agent'
   | 'spawn_sub_agents'
   | 'web_search'
   | 'search_x402_bazaar'
@@ -191,14 +215,23 @@ export interface SpawnBrowserAgentMetadata extends BaseToolMetadata {
 }
 
 /**
- * Metadata for spawn_code_agent tool messages.
+ * Metadata for spawn_claude_code_agent tool messages.
+ * See agents/tools/spawn_claude_code_agent.py:save_claude_code_message
  */
-export interface SpawnCodeAgentMetadata extends BaseToolMetadata {
-  toolName: 'spawn_code_agent';
+export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
+  toolName: 'spawn_claude_code_agent';
+  /** Unique task ID for this Claude Code session */
   task_id: string;
-  preview_url?: string;
-  action_type?: CodeActionType;
-  subAgentId: string;
+  /** WebSocket URL for terminal streaming */
+  ws_url?: string;
+  /** Type of action performed */
+  action_type?: ClaudeCodeActionType | string;
+  /** Routes to Claude Code panel's MessageList (same as task_id for sub-actions) */
+  subAgentId?: string;
+  /** Indicates an error occurred */
+  error?: boolean;
+  /** Output schema for init message */
+  output_schema?: OutputSchema;
 }
 
 /**
@@ -334,7 +367,7 @@ export interface SimpleToolMetadata extends BaseToolMetadata {
  */
 export type ToolMessageMetadata =
   | SpawnBrowserAgentMetadata
-  | SpawnCodeAgentMetadata
+  | SpawnClaudeCodeAgentMetadata
   | SpawnSubAgentsMetadata
   | SetPlanMetadata
   | SendMessageToUserMetadata
@@ -396,12 +429,12 @@ export function isSpawnBrowserAgentMessage(
 }
 
 /**
- * Type guard for spawn_code_agent messages.
+ * Type guard for spawn_claude_code_agent messages.
  */
-export function isSpawnCodeAgentMessage(
+export function isSpawnClaudeCodeAgentMessage(
   msg: InsertMessagePayload
-): msg is ToolMessagePayload<SpawnCodeAgentMetadata> {
-  return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'spawn_code_agent';
+): msg is ToolMessagePayload<SpawnClaudeCodeAgentMetadata> {
+  return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'spawn_claude_code_agent';
 }
 
 /**

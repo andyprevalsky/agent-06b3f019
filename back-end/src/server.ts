@@ -23,6 +23,7 @@ import peopleRouter from './routes/people';
 import integrationsRouter from './routes/integrations';
 import authRouter from './routes/auth';
 import x402Router from './routes/x402';
+import claudeCodeRouter from './routes/claudeCode';
 import { prisma } from './lib/prisma';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
@@ -31,6 +32,7 @@ const SYSTEM_TOOLS = [
   { name: "deep_research", description: "Conduct deep, comprehensive research on a topic" },
   { name: "spawn_sub_agents", description: "Spawn up to 10,000 parallel sub-agents for complex tasks" },
   { name: "spawn_browser_agent", description: "Spawn autonomous browser agent for web tasks" },
+  { name: "spawn_claude_code_agent", description: "Spawn Claude Code agent in E2B sandbox for coding tasks" },
   { name: "find_all", description: "Discover entities matching criteria using natural language" },
   { name: "enrich", description: "Enrich entity data from the web" },
   { name: "monitor", description: "Monitor the web for changes on a schedule" },
@@ -223,6 +225,7 @@ app.use('/api/tool-usage', toolUsageRouter);
 app.use('/api/invite-codes', inviteCodesRouter);
 app.use('/api/send-sms', sendSmsRouter);
 app.use('/api/browser-session', browserSessionRouter);
+app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/people', peopleRouter);
 app.use('/api/integrations', integrationsRouter);
 

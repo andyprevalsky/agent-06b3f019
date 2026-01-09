@@ -26,6 +26,7 @@ PLAN_PHASE_TOOLS = [
 # Tools available during EXECUTE phase (run the plan)
 EXECUTE_PHASE_TOOLS = [
     "spawn_browser_agent",
+    "spawn_claude_code_agent",
     "spawn_sub_agents",
     "wait_seconds",
     "web_search",
@@ -240,12 +241,25 @@ class SpawnBrowserAgentTool(BaseModel):
     )
 
 
-class SpawnCodeAgentTool(BaseModel):
-    """Spawn an autonomous code agent to write and deploy code using Cursor Cloud Agents. The code agent can create React apps, Python scripts, visualizations, and any other code-based projects. Code is automatically pushed to GitHub and deployed via Vercel for instant preview. Provide a complete, high-level goal - the code agent will autonomously write, test, and deploy the code."""
+class SpawnClaudeCodeAgentTool(BaseModel):
+    """Spawn an autonomous Claude Code agent to complete coding tasks in an ephemeral E2B sandbox.
 
-    tool: Literal["spawn_code_agent"]
+    The Claude Code agent has access to a full Linux environment with:
+    - File system (read, write, edit files)
+    - Terminal (run any bash commands)
+    - Git (clone repos, create branches, commit)
+    - Package managers (npm, pip, etc.)
+
+    Provide a complete, high-level coding goal. Note: Sandboxes are ephemeral -
+    files don't persist after the session ends. Use git to push changes to preserve work.
+    """
+
+    tool: Literal["spawn_claude_code_agent"]
     goal: str = Field(
-        description="Complete, high-level goal for the autonomous code agent to accomplish. Examples: 'Create a React dashboard showing real-time crypto prices with charts', 'Build a Python script that scrapes Hacker News and generates a summary', 'Create an interactive data visualization of US population by state', 'Build a landing page for a SaaS product with pricing tiers and email signup'"
+        description="Complete coding goal for Claude Code to accomplish. Examples: 'Clone the repo at https://github.com/user/project, add TypeScript support, and push changes to a new branch', 'Create a Python script that analyzes CSV data and generates a report', 'Set up a new React project with Tailwind CSS and create a landing page component'"
+    )
+    output_schema: ResponseSchemaConfig = Field(
+        description="Structured output schema defining what data the Claude Code agent must return when complete"
     )
 
 
@@ -660,7 +674,7 @@ TOOL_MODELS = {
     "enable_write_permissions": EnableWritePermissionsTool,
     "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
-    "spawn_code_agent": SpawnCodeAgentTool,
+    "spawn_claude_code_agent": SpawnClaudeCodeAgentTool,
     "spawn_sub_agents": SpawnSubAgentsTool,
     "search_user_network_for_people": SearchUserNetworkTool,
     "find_all": FindAllTool,
@@ -776,7 +790,7 @@ __all__ = [
     "ReadMessageHistoryTool",
     "MessagePersonTool",
     "SpawnBrowserAgentTool",
-    "SpawnCodeAgentTool",
+    "SpawnClaudeCodeAgentTool",
     "SpawnSubAgentsTool",
     "SearchUserNetworkTool",
     "FindAllTool",

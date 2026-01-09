@@ -37,6 +37,11 @@ const TEST_PROMPTS: TestPrompt[] = [
     description: 'Tests parallel execution of multiple tools in one turn',
     prompt: 'Do 10 parallel web_searches to get data for the best of each of these items\n1. tomatoe\n2. potatoe\n3. computer\n4. ram\n5. Coding agent\n6. Cities to live in in your 20s\n7. place to vacation\n8. places in austin\n9. Content creators in NYC\n10. Presidents of the world\n\nno questions ask\nstart in agent mode\nno sub agents',
   },
+  {
+    title: 'Test Claude Code Agent',
+    description: 'Tests Claude Code agent in ephemeral E2B sandbox',
+    prompt: 'Starting from 27, how many steps does it take to reach 1 in the Collatz sequence? List all the numbers. Use Claude Code and no sub agents',
+  },
 ];
 
 interface TestPromptsSelectorProps {

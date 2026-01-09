@@ -7,9 +7,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import SubAgentToolBubble from './SubAgentToolBubble';
 import SignupPromptBubble from './SignupPromptBubble';
 import SubAgentTree from './SubAgentTree';
+import ClaudeCodeChip from './ClaudeCodeChip';
 import { MarkdownText } from './MarkdownText';
 import { PlanChip } from './PlanChip';
-import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
+import { getToolIcon, isX402Tool, x402IconSrc, isClaudeCodeTool, claudeCodeIconSrc } from '@/lib/toolIcons';
 import { useToast } from '@/hooks/use-toast';
 import ThinkingAnimation from '../ThinkingAnimation';
 
@@ -287,10 +288,16 @@ const ToolMessage = memo(function ToolMessage({
             <div className="h-4 w-4 flex-shrink-0" />
           )
         ) : data.toolName && isX402Tool(data.toolName) ? (
-          <img 
-            src={x402IconSrc} 
-            alt="x402" 
-            className="h-4 w-4 flex-shrink-0 opacity-60 dark:invert dark:opacity-70" 
+          <img
+            src={x402IconSrc}
+            alt="x402"
+            className="h-4 w-4 flex-shrink-0 opacity-60 dark:invert dark:opacity-70"
+          />
+        ) : data.toolName && isClaudeCodeTool(data.toolName) ? (
+          <img
+            src={claudeCodeIconSrc}
+            alt="Claude Code"
+            className="h-4 w-4 flex-shrink-0"
           />
         ) : (
           <ToolIcon className={cn(
@@ -532,6 +539,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // Check if this is a set_plan tool message (render as PlanChip)
   const isSetPlanTool = isTool && message.metadata?.toolName === 'set_plan';
 
+  // Check if this is a spawn_claude_code_agent tool message (render as ClaudeCodeChip)
+  const isClaudeCodeTool = isTool && message.metadata?.toolName === 'spawn_claude_code_agent';
+
   // Memoize tool data to prevent flickers on re-renders
   const toolData = useMemo(() => {
     // Streaming messages should NOT render as "Thought" tool cards
@@ -715,6 +725,35 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
             }}
             toolStatus={toolStatus}
           />
+        </div>
+      </div>
+    );
+  }
+
+  // spawn_claude_code_agent tool: render as ClaudeCodeChip
+  // - IN_PROGRESS (toolStatus) shows spinning_up state
+  // - claude_code_started shows live terminal
+  // - task_complete shows completed/failed state with expandable terminal
+  const isClaudeCodeInProgress = isClaudeCodeTool && message.metadata?.toolStatus === 'IN_PROGRESS';
+  const isClaudeCodeStarted = isClaudeCodeTool && message.metadata?.action_type === 'claude_code_started';
+  const isClaudeCodeComplete = isClaudeCodeTool && message.metadata?.action_type === 'task_complete';
+
+  if (isClaudeCodeInProgress || isClaudeCodeStarted || isClaudeCodeComplete) {
+    const taskId = (message.metadata?.task_id as string) || 'pending';
+    const wsUrl = message.metadata?.ws_url as string | undefined;
+
+    // Call onTypingComplete immediately since ClaudeCodeChip handles its own state
+    if (shouldType && onTypingComplete) {
+      requestAnimationFrame(() => {
+        onTypingComplete();
+      });
+    }
+
+    return (
+      <div className="flex gap-3 animate-in fade-in duration-300">
+        <div className="flex-shrink-0 w-8 hidden md:block" />
+        <div className="flex-1">
+          <ClaudeCodeChip taskId={taskId} wsUrl={wsUrl} />
         </div>
       </div>
     );

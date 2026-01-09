@@ -61,6 +61,8 @@ Check these when errors occur:
 
 6. **Search before implementing** - When adding new features, first search the codebase for similar patterns (e.g., when adding a new tool, study existing tools)
 
+7. **No fallbacks during development** - When testing a new integration, don't add fallback paths; they obscure whether the primary path actually works
+
 ## Temporal/Agent Patterns
 
 - Workflows must be **deterministic** - no random, no wall-clock time, use `workflow.now()`

@@ -22,6 +22,9 @@ python-dotenv>=1.0.0
 pydantic>=2.5.0
 python-dateutil>=2.9.0
 
+# Terminal emulator for Claude Code output filtering
+pyte>=0.8.0
+
 # Encryption for payment data
 cryptography>=42.0.0
 

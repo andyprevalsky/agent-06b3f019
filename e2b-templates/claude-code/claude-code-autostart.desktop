@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Claude Code Terminal
+Comment=Auto-start terminal with Claude Code
+Exec=/home/user/start-claude-code.sh
+OnlyShowIn=XFCE;
+StartupNotify=true
+Terminal=false
+Hidden=false

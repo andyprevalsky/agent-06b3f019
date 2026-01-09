@@ -249,6 +249,22 @@ model BrowserSession {
   @@index([status])
 }
 
+model ClaudeCodeSession {
+  id        String                  @id @default(uuid())
+  agentId   String
+  sandboxId String                  @unique
+  streamUrl String?
+  goal      String
+  status    ClaudeCodeSessionStatus @default(ACTIVE)
+  output    String?                 @db.Text // Full terminal output buffer, persisted on clean shutdown
+  createdAt DateTime                @default(now())
+  closedAt  DateTime?
+
+  @@index([agentId])
+  @@index([sandboxId])
+  @@index([status])
+}
+
 model MessageRecord {
   id        String         @id @default(uuid())
   personId  String
@@ -479,6 +495,13 @@ enum BrowserSessionStatus {
   CLOSED
   ERROR
   PAUSED
+}
+
+enum ClaudeCodeSessionStatus {
+  ACTIVE
+  COMPLETED
+  CLOSED
+  ERROR
 }
 
 enum MessageChannel {

@@ -1566,6 +1566,9 @@ async def set_response_schema_activity(
     Returns:
         The generated schema dict with 'fields' array, or None on failure
     """
+    import time
+    activity_start = time.perf_counter()
+
     config = load_config()
     backend_url = config.backend.api_url.rstrip('/')
     api_key = config.backend.api_key
@@ -1582,10 +1585,12 @@ async def set_response_schema_activity(
         return None
 
     _safe_heartbeat("Generating response schema via backend API")
+    logger.info(f"[TIMING] Starting response schema generation for agent {agent_id}")
 
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
             # 1. Generate schema using Rose Ultra
+            api_start = time.perf_counter()
             schema_response = await client.post(
                 f"{backend_url}/api/agents/generate-response-schema",
                 headers={
@@ -1596,6 +1601,8 @@ async def set_response_schema_activity(
             )
             schema_response.raise_for_status()
             schema_data = schema_response.json()
+            api_elapsed = time.perf_counter() - api_start
+            logger.info(f"[TIMING] Schema generation API call: {api_elapsed*1000:.1f}ms ({api_elapsed:.2f}s)")
 
             schema = schema_data.get("schema")
             tokens_in = schema_data.get("tokensIn", 0)
@@ -1614,6 +1621,7 @@ async def set_response_schema_activity(
             )
 
             # 2. Save schema to agent record
+            save_start = time.perf_counter()
             save_response = await client.patch(
                 f"{backend_url}/api/agents/{agent_id}",
                 headers={
@@ -1622,6 +1630,8 @@ async def set_response_schema_activity(
                 },
                 json={"response_schema": schema}
             )
+            save_elapsed = time.perf_counter() - save_start
+            logger.info(f"[TIMING] Schema save API call: {save_elapsed*1000:.1f}ms")
 
             if not save_response.is_success:
                 logger.warning(
@@ -1632,6 +1642,8 @@ async def set_response_schema_activity(
             else:
                 logger.info("Saved response schema to agent", agent_id=agent_id)
 
+            activity_elapsed = time.perf_counter() - activity_start
+            logger.info(f"[TIMING] Total response schema activity: {activity_elapsed*1000:.1f}ms ({activity_elapsed:.2f}s)")
             return schema
 
     except httpx.HTTPStatusError as e:
@@ -1675,22 +1687,30 @@ async def call_planner_llm_activity(
     Returns:
         Dict from PlannerResponse.model_dump() with title, content, tasks, dependencies_graph, join
     """
+    import time
     from helpers.prompts import build_planner_system_prompt
     from helpers.tool_schemas import PlannerResponse
 
+    activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")
 
     # Build system prompt for planner
+    prompt_start = time.perf_counter()
     system_prompt = build_planner_system_prompt(tools_description, user_context, response_schema=response_schema)
+    prompt_elapsed = time.perf_counter() - prompt_start
+    logger.info(f"[TIMING] Planner system prompt build: {prompt_elapsed*1000:.1f}ms")
 
     # Prepend system message
     full_messages = [{"role": "system", "content": system_prompt}] + messages
+    total_chars = sum(len(m.get("content", "")) for m in full_messages)
+    logger.info(f"[TIMING] Planner input: {len(full_messages)} messages, {total_chars} chars total")
 
     # No-op callback - planner doesn't stream to frontend
     async def noop(text: str, count: int):
         _safe_heartbeat(f"Planner thinking... {len(text)} chars")
 
     try:
+        llm_start = time.perf_counter()
         result, usage, _ = await call_llm_structured_streaming(
             messages=full_messages,
             model=model,
@@ -1699,6 +1719,8 @@ async def call_planner_llm_activity(
             response_model=PlannerResponse,
             on_chunk=noop,
         )
+        llm_elapsed = time.perf_counter() - llm_start
+        activity_elapsed = time.perf_counter() - activity_start
 
         logger.info(
             "Planner LLM completed",
@@ -1707,6 +1729,7 @@ async def call_planner_llm_activity(
             join=result.join,
             tokens=usage.get("total_tokens", 0)
         )
+        logger.info(f"[TIMING] Planner LLM API call: {llm_elapsed*1000:.1f}ms ({llm_elapsed:.2f}s), total activity: {activity_elapsed*1000:.1f}ms")
 
         return result.model_dump()
 

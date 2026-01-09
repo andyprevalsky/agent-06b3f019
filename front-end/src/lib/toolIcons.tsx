@@ -36,18 +36,32 @@ import {
   Layers,
   X,
   Plus,
+  Terminal,
+  Brain,
+  FilePen,
   type LucideIcon
 } from 'lucide-react';
 
 // x402 brand icon for bazaar tools
 import x402Icon from '@/assets/x402-brand-kit/icon/x402-icon-black.png';
 
+// Claude Code icon
+import claudeIcon from '@/assets/claude-color.svg';
+
 // Tools that use the x402 brand icon instead of Lucide
 export const X402_TOOLS = ['search_x402_bazaar', 'pay_for_x402_bazaar_service', 'x402'];
 export const x402IconSrc = x402Icon;
 
+// Tools that use the Claude icon instead of Lucide
+export const CLAUDE_CODE_TOOLS = ['spawn_claude_code_agent', 'claude_code_started'];
+export const claudeCodeIconSrc = claudeIcon;
+
 export function isX402Tool(toolName: string): boolean {
   return X402_TOOLS.includes(toolName);
+}
+
+export function isClaudeCodeTool(toolName: string): boolean {
+  return CLAUDE_CODE_TOOLS.includes(toolName);
 }
 
 /**
@@ -57,7 +71,6 @@ export function isX402Tool(toolName: string): boolean {
 export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
   'spawn_browser_agent': Globe,
-  'spawn_code_agent': Code,
   'send_sms': MessageSquare,
   'send_sms_as_user': MessageSquare,
   'send_email': Mail,
@@ -145,16 +158,16 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'close_tab': X,
   'open_new_tab': Plus,
   
-  // Code agent action_type mappings (from spawn_code_agent)
-  'code_started': Code,
-  'vercel_setup': Settings,
-  'cursor_working': Code,
-  'cursor_status': Code,
-  'code_written': FileText,
-  'vercel_deploying': Globe,
-  'code_deployed': CheckCircle,
-  'code_complete': CheckCircle,
-  'code_error': XCircle,
+  // Claude Code action_type mappings (from spawn_claude_code_agent)
+  'spawn_claude_code_agent': Terminal,
+  'claude_code_started': Terminal,
+  'agent_observation': Eye,
+  'agent_decision': Brain,
+  'agent_intervention': Brain,
+  'code_read_file': FileText,
+  'code_write_file': FilePen,
+  'code_bash': Terminal,
+  'code_thinking': Brain,
 };
 
 /**
@@ -203,7 +216,3 @@ export function getToolIcon(toolName: string): LucideIcon {
 
   return Info;
 }
-
-
-
-

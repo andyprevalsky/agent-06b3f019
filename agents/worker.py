@@ -28,6 +28,7 @@ from tools.request_user_approval import create_approval_request_activity
 from tools.send_sms import send_sms_activity
 from tools.send_email import send_email_activity
 from tools.spawn_browser_agent_v3 import spawn_browser_agent_activity_v3  # V3: browser-use + Rose API
+from tools.spawn_claude_code_agent import spawn_claude_code_activity  # Claude Code in E2B sandbox
 # New event-driven tools
 from tools.deep_research import deep_research_activity
 from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
@@ -161,6 +162,7 @@ async def main():
             create_approval_request_activity,
             send_sms_activity,
             spawn_browser_agent_activity_v3,  # V3: browser-use + Rose API
+            spawn_claude_code_activity,  # Claude Code in E2B sandbox
             send_email_activity,
             # New event-driven tool activities
             deep_research_activity,

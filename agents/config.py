@@ -150,9 +150,25 @@ class CursorConfig:
 @dataclass
 class VercelConfig:
     """Vercel API configuration for preview deployments."""
-    
+
     token: str = ""  # Vercel API token for creating projects and fetching deployments
     team_id: Optional[str] = None  # Optional team ID for team-owned projects
+
+
+@dataclass
+class E2BConfig:
+    """E2B sandbox configuration for Claude Code."""
+
+    api_key: str = ""  # E2B API key
+    template_id: str = ""  # Custom template with Claude Code pre-installed
+    default_timeout: int = 600  # 10 minutes
+
+
+@dataclass
+class AnthropicConfig:
+    """Anthropic API configuration for Claude Code in E2B sandboxes."""
+
+    api_key: str = ""  # Rose's Anthropic API key (never exposed to users)
 
 
 @dataclass
@@ -173,7 +189,9 @@ class AppConfig:
     x402: X402Config
     cursor: CursorConfig
     vercel: VercelConfig
-    
+    e2b: E2BConfig
+    anthropic: AnthropicConfig
+
     health_check_port: int = 3000
     log_level: str = "INFO"
     environment: str = "production"
@@ -275,7 +293,17 @@ def load_config() -> AppConfig:
         token=os.getenv("VERCEL_TOKEN", ""),
         team_id=os.getenv("VERCEL_TEAM_ID"),
     )
-    
+
+    e2b = E2BConfig(
+        api_key=os.getenv("E2B_API_KEY", ""),
+        template_id=os.getenv("E2B_CLAUDE_CODE_TEMPLATE_ID", ""),
+        default_timeout=int(os.getenv("E2B_TIMEOUT", "600")),
+    )
+
+    anthropic = AnthropicConfig(
+        api_key=os.getenv("ANTHROPIC_API_KEY", ""),  # For Claude Code in E2B
+    )
+
     return AppConfig(
         temporal=temporal,
         backend=backend,
@@ -291,6 +319,8 @@ def load_config() -> AppConfig:
         x402=x402,
         cursor=cursor,
         vercel=vercel,
+        e2b=e2b,
+        anthropic=anthropic,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

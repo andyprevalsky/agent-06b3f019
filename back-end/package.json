@@ -45,6 +45,7 @@
     "adm-zip": "^0.5.16",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "e2b": "^2.9.0",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "jwks-rsa": "^3.2.0",
@@ -62,6 +63,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@e2b/desktop": "^2.2.2",
     "@types/adm-zip": "^0.5.7",
     "@types/node-cron": "^3.0.11",
     "tsx": "^4.19.1",
