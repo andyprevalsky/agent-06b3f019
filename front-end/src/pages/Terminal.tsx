@@ -317,12 +317,20 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
   // Ancestor chain for breadcrumb navigation
   const [ancestors, setAncestors] = useState<AncestorNode[]>([]);
   
-  // Message input state
-  const [messageInput, setMessageInput] = useState(
-    import.meta.env.DEV
+  // Message input state - onboarding prefill takes priority over DEV default
+  const [messageInput, setMessageInput] = useState(() => {
+    // Check for onboarding prefill first (takes priority)
+    const onboardingPrefill = localStorage.getItem('onboarding_prefill_query');
+    if (onboardingPrefill) {
+      // Clear it after reading so it only applies once
+      localStorage.removeItem('onboarding_prefill_query');
+      return onboardingPrefill;
+    }
+    // Fall back to DEV default if no prefill
+    return import.meta.env.DEV
       ? `Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 4, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10 and you are complete.`
-      : ''
-  );
+      : '';
+  });
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-lite');
   
@@ -1438,7 +1446,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         {Array.from(tileColors.entries()).map(([key, colorId]) => {
           const [row, col] = key.split(',').map(Number);
           const color = colorPalette[colorId];
-          
+
           const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0;
           const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 0;
           const centerX = viewportWidth / 2;
@@ -1446,15 +1454,15 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
           const tileSize = 143;
           const largeTileSize = 429;
           const largeTileHalf = largeTileSize / 2;
-          
+
           const tilesLeft = Math.floor((centerX - largeTileHalf) / tileSize);
           const tilesUp = Math.floor((centerY - largeTileHalf) / tileSize);
           const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize);
           const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize);
-          
+
           const x = gridOriginX + col * tileSize;
           const y = gridOriginY + row * tileSize;
-          
+
           return (
             <rect
               key={key}
@@ -1463,10 +1471,6 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
               width={tileSize}
               height={tileSize}
               fill={colorId === 0 ? 'transparent' : color.hex}
-              style={{
-                // TEMP DEBUG: Remove transition to see instant changes
-                // transition: 'fill 0.3s ease-in-out'
-              }}
             />
           );
         })}
@@ -1482,7 +1486,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         {/* Top-left corner with circle and perfectly smooth geometric diamond shape */}
         <circle cx="0" cy="0" r="25" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
         <path d="M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z" fill="url(#rose-gradient)" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
-        
+
         {/* Top-right corner with circle and perfectly smooth geometric diamond shape */}
         <circle cx="0" cy="0" r="25" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
         <path d="M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z" fill="url(#rose-gradient)" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
@@ -1530,18 +1534,12 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
           />
         )}
         <div className="flex items-center space-x-1">
-          <button 
+          <button
             type="button"
             onClick={handleCreateNewAgent}
             className="flex items-center space-x-2.5 px-1 cursor-pointer hover:opacity-80 transition-opacity"
           >
-            <div
-              className="w-8 h-8 rounded-lg flex-shrink-0"
-              style={{
-                background:
-                  'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)',
-              }}
-            ></div>
+            <div className="w-8 h-8 rounded-lg" style={{ background: 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)' }}></div>
             <span className="text-base font-semibold tracking-tight">Rose</span>
           </button>
         </div>

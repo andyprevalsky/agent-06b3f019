@@ -1,9 +1,33 @@
+// Shortcut configuration
+export interface ShortcutConfig {
+  modifiers: string[];
+  key: string;
+}
+
 // IPC method signatures
 export interface IPC {
   auth: {
     check: () => Promise<AuthSession | null>;
     save: (session: AuthSession) => Promise<{ success: boolean }>;
     clear: () => Promise<{ success: boolean }>;
+  };
+
+  // Shortcut configuration
+  shortcut?: {
+    get: () => Promise<ShortcutConfig | null>;
+    set: (config: ShortcutConfig) => Promise<{ success: boolean }>;
+    validate: (config: ShortcutConfig) => Promise<{ available: boolean }>;
+    enable: () => Promise<{ success: boolean; enabled: boolean }>;
+    disable: () => Promise<{ success: boolean; enabled: boolean }>;
+    isEnabled: () => Promise<{ enabled: boolean }>;
+  };
+
+  // Onboarding state
+  onboarding?: {
+    isComplete: () => Promise<boolean>;
+    setComplete: (complete: boolean) => Promise<{ success: boolean }>;
+    getLastAuthProvider: () => Promise<string | null>;
+    setLastAuthProvider: (provider: string) => Promise<{ success: boolean }>;
   };
 
   // iMessage

@@ -4,6 +4,7 @@ import path from 'path';
 import Store from 'electron-store';
 import { config } from './base/config';
 import './handlers/registry'; // Register IPC handlers
+import { getOnboardingComplete } from './handlers/registry';
 import {
   initAutoUpdater,
   manualCheckForUpdates,
@@ -207,6 +208,12 @@ function positionQuickQueryWindow() {
 function showQuickQueryWindow() {
   if (!quickQueryWindow) return;
 
+  // Don't show quick launcher during onboarding
+  if (!getOnboardingComplete()) {
+    console.log('[QuickQuery] Blocked show - onboarding not complete');
+    return;
+  }
+
   // Debounce: ignore show requests within 2 seconds of hiding
   const timeSinceHide = Date.now() - quickQueryLastHiddenAt;
   console.log(`[QuickQuery] showQuickQueryWindow called, timeSinceHide=${timeSinceHide}ms, lastHiddenAt=${quickQueryLastHiddenAt}`);
@@ -312,9 +319,21 @@ function hideQuickQueryWindow({ focusMain }: { focusMain?: boolean } = {}) {
   }
 }
 
+let shortcutsEnabled = false;
+
 function registerGlobalShortcuts() {
+  // Don't register if already enabled
+  if (shortcutsEnabled) return;
+
   const toggleQuickQuery = () => {
     if (!quickQueryWindow) return;
+
+    // Don't toggle quick launcher during onboarding
+    if (!getOnboardingComplete()) {
+      console.log('[QuickQuery] Blocked - onboarding not complete');
+      return;
+    }
+
     if (quickQueryWindow.isVisible()) {
       hideQuickQueryWindow({ focusMain: true });
     } else {
@@ -329,6 +348,15 @@ function registerGlobalShortcuts() {
   }
 
   globalShortcut.register('Alt+Shift+Space', toggleQuickQuery);
+  shortcutsEnabled = true;
+  console.log('[App] Global shortcuts registered');
+}
+
+function unregisterGlobalShortcuts() {
+  if (!shortcutsEnabled) return;
+  globalShortcut.unregisterAll();
+  shortcutsEnabled = false;
+  console.log('[App] Global shortcuts unregistered');
 }
 
 function registerQuickQueryIpc() {
@@ -354,6 +382,21 @@ function registerQuickQueryIpc() {
   ipcMain.handle('quick-query:hide', () => {
     hideQuickQueryWindow({ focusMain: true });
     return { success: true };
+  });
+
+  // Enable/disable shortcuts (used during onboarding)
+  ipcMain.handle('shortcut:enable', () => {
+    registerGlobalShortcuts();
+    return { success: true, enabled: shortcutsEnabled };
+  });
+
+  ipcMain.handle('shortcut:disable', () => {
+    unregisterGlobalShortcuts();
+    return { success: true, enabled: shortcutsEnabled };
+  });
+
+  ipcMain.handle('shortcut:isEnabled', () => {
+    return { enabled: shortcutsEnabled };
   });
 }
 
@@ -432,10 +475,18 @@ app.whenReady().then(() => {
   createAppMenu();
   createMainWindow();
   createQuickQueryWindow();
-  registerGlobalShortcuts();
   registerQuickQueryIpc();
   registerUpdateIpc();
-  
+
+  // Only register global shortcuts if onboarding is complete
+  // During onboarding, shortcuts are disabled so user can configure them
+  const onboardingComplete = getOnboardingComplete();
+  if (onboardingComplete) {
+    registerGlobalShortcuts();
+  } else {
+    console.log('[App] Onboarding not complete - shortcuts disabled');
+  }
+
   // Initialize auto-updater
   if (mainWindow) {
     initAutoUpdater(mainWindow);

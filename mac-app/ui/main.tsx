@@ -5,6 +5,7 @@ import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/contexts/IntegrationHandlersContext';
 import { dispatchQuickQueryEvent } from '@/lib/quickQuery';
+import './fonts.css';
 import '@/index.css';
 import React, { useEffect } from 'react';
 import type { QuickQueryPayload } from '../shared/types/ipc';

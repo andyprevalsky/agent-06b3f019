@@ -673,6 +673,7 @@ router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res
     const codeChallenge = createCodeChallenge(codeVerifier);
     const state = generateStateToken();
 
+    // Get or create integration for this provider
     const integration = await prisma.integration.upsert({
       where: {
         userId_name: {
@@ -693,39 +694,26 @@ router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res
       },
       update: {
         status: IntegrationStatus.SYNCING,
-        isActive: false,
       },
     });
 
-    await prisma.emailIntegrationCredential.upsert({
-      where: {
-        userId_provider: {
-          userId,
-          provider: config.provider,
-        },
-      },
-      create: {
+    // Create a new credential for this OAuth attempt (email is null until callback)
+    // This allows multiple emails per provider since the unique constraint is now (userId, provider, email)
+    const credential = await prisma.emailIntegrationCredential.create({
+      data: {
         userId,
         provider: config.provider,
         integrationId: integration.id,
+        email: null, // Will be set after OAuth callback when we know the email
         pkceVerifier: codeVerifier,
         stateToken: state,
-        scopes: config.scopes,
-      },
-      update: {
-        integrationId: integration.id,
-        pkceVerifier: codeVerifier,
-        stateToken: state,
-        accessToken: null,
-        refreshToken: null,
-        expiresAt: null,
         scopes: config.scopes,
       },
     });
 
     const authUrl = buildAuthUrl(providerKey, { state, codeChallenge });
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-    return res.json({ authUrl, state, expiresAt });
+    return res.json({ authUrl, state, expiresAt, credentialId: credential.id });
   } catch (error) {
     console.error('Error starting email OAuth flow:', error);
     return res.status(500).json({
@@ -780,9 +768,47 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
 
     const expiresAt = tokenResult.expiresIn ? new Date(Date.now() + tokenResult.expiresIn * 1000) : null;
 
+    // Check if this email is already connected for this user
+    if (tokenResult.userEmail) {
+      const existingCredential = await prisma.emailIntegrationCredential.findFirst({
+        where: {
+          userId: credential.userId,
+          provider: config.provider,
+          email: tokenResult.userEmail,
+          id: { not: credential.id }, // Exclude the current pending credential
+        },
+      });
+
+      if (existingCredential) {
+        // Email already connected - delete the pending credential and update the existing one
+        await prisma.emailIntegrationCredential.delete({
+          where: { id: credential.id },
+        });
+
+        // Update the existing credential with fresh tokens
+        await prisma.emailIntegrationCredential.update({
+          where: { id: existingCredential.id },
+          data: {
+            accessToken: tokenResult.accessToken,
+            refreshToken: tokenResult.refreshToken ?? existingCredential.refreshToken,
+            expiresAt,
+            scopes: tokenResult.scopes,
+            metadata: mergeJson(existingCredential.metadata ?? null, tokenResult.metadata),
+          },
+        });
+
+        return sendOAuthResultPage(res, {
+          success: true,
+          message: `${tokenResult.userEmail} was already connected. Tokens refreshed.`,
+        });
+      }
+    }
+
+    // Update the credential with tokens and email
     await prisma.emailIntegrationCredential.update({
       where: { id: credential.id },
       data: {
+        email: tokenResult.userEmail, // Set the email now that we know it
         accessToken: tokenResult.accessToken,
         refreshToken: tokenResult.refreshToken ?? credential.refreshToken,
         expiresAt,
@@ -792,6 +818,18 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
         stateToken: null,
       },
     });
+
+    // Get all connected emails for this user/provider to update integration config
+    const allCredentials = await prisma.emailIntegrationCredential.findMany({
+      where: {
+        userId: credential.userId,
+        provider: config.provider,
+        email: { not: null },
+        accessToken: { not: null },
+      },
+      select: { email: true },
+    });
+    const connectedEmails = allCredentials.map(c => c.email).filter(Boolean) as string[];
 
     const integration = await prisma.integration.findUnique({
       where: { id: credential.integrationId },
@@ -808,7 +846,8 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
           provider: providerKey,
           lastConnectedAt: new Date().toISOString(),
           scopes: tokenResult.scopes,
-          connectedEmail: tokenResult.userEmail,
+          connectedEmail: tokenResult.userEmail, // Keep for backward compatibility
+          connectedEmails, // New field with all emails
         }),
       },
     });
@@ -1223,16 +1262,19 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
       return res.status(400).json({ error: 'Missing required field: body' });
     }
 
-    // Check if user has Gmail credentials
-    const credential = await prisma.emailIntegrationCredential.findUnique({
+    // Check if user has Gmail credentials - find the first one with a valid access token
+    // TODO: In the future, could accept an optional email parameter to select a specific account
+    const credential = await prisma.emailIntegrationCredential.findFirst({
       where: {
-        userId_provider: {
-          userId,
-          provider: EmailProvider.GMAIL,
-        },
+        userId,
+        provider: EmailProvider.GMAIL,
+        accessToken: { not: null },
       },
       include: {
         integration: true,
+      },
+      orderBy: {
+        updatedAt: 'desc', // Use most recently updated credential
       },
     });
 
@@ -1265,9 +1307,9 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
       accessToken = newToken;
     }
 
-    // Get sender email from integration config
+    // Get sender email from credential (preferred) or integration config (fallback)
     const integrationConfig = (credential.integration?.config as Record<string, unknown>) || {};
-    const senderEmail = (integrationConfig.connectedEmail as string) || req.user!.email;
+    const senderEmail = credential.email || (integrationConfig.connectedEmail as string) || req.user!.email;
 
     if (!senderEmail) {
       return res.status(400).json({

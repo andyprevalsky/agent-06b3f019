@@ -1,4 +1,5 @@
-import { ipcMain, BrowserWindow, shell } from 'electron';
+import { ipcMain, BrowserWindow, shell, globalShortcut } from 'electron';
+import Store from 'electron-store';
 import { IMessageReader } from '../services/iMessageReader';
 import { CookieReader } from '../services/cookieReader';
 import { Uploader } from '../services/uploader';
@@ -8,6 +9,48 @@ import { IMessageSender } from '../services/iMessageSender';
 import { IMessageSync } from '../services/iMessageSync';
 import { CookieSync } from '../services/cookieSync';
 import { logIpc, logConsole, logConsoleError } from '../base/logger';
+import type { ShortcutConfig } from '../../shared/types/ipc';
+
+// Stores for onboarding and shortcuts
+interface OnboardingState {
+  isComplete: boolean;
+  lastAuthProvider: string | null;
+}
+
+const onboardingStore = new Store<OnboardingState>({
+  name: 'onboarding',
+  defaults: {
+    isComplete: false,
+    lastAuthProvider: null,
+  },
+});
+
+const shortcutStore = new Store<{ quickLauncher?: ShortcutConfig }>({
+  name: 'shortcuts',
+  defaults: {},
+});
+
+// Helper to convert ShortcutConfig to Electron accelerator string
+const configToAccelerator = (config: ShortcutConfig): string => {
+  const modMap: Record<string, string> = {
+    Meta: 'CommandOrControl',
+    Alt: 'Alt',
+    Control: 'Control',
+    Shift: 'Shift',
+  };
+
+  const mods = config.modifiers.map(m => modMap[m] || m).join('+');
+  return `${mods}+${config.key}`;
+};
+
+// Export for use in index.ts
+export const getShortcutConfig = (): ShortcutConfig | null => {
+  return shortcutStore.get('quickLauncher') ?? null;
+};
+
+export const getOnboardingComplete = (): boolean => {
+  return onboardingStore.get('isComplete', false);
+};
 
 export function registerHandlers() {
   // Auth handlers
@@ -132,6 +175,71 @@ export function registerHandlers() {
     // Opens directly to Full Disk Access pane
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
     logIpc('OUT', 'system:openFullDiskAccess', { success: true });
+    return { success: true };
+  });
+
+  // Shortcut handlers
+  ipcMain.handle('shortcut:get', () => {
+    logIpc('IN', 'shortcut:get');
+    const config = shortcutStore.get('quickLauncher') ?? null;
+    logIpc('OUT', 'shortcut:get', { config });
+    return config;
+  });
+
+  ipcMain.handle('shortcut:set', (_, config: ShortcutConfig) => {
+    logIpc('IN', 'shortcut:set', { config });
+    shortcutStore.set('quickLauncher', config);
+    logConsole('Shortcut', 'Saved new shortcut config', { config });
+    logIpc('OUT', 'shortcut:set', { success: true });
+    return { success: true };
+  });
+
+  ipcMain.handle('shortcut:validate', (_, config: ShortcutConfig) => {
+    logIpc('IN', 'shortcut:validate', { config });
+    try {
+      const accelerator = configToAccelerator(config);
+      // Try registering temporarily to check availability
+      const available = globalShortcut.register(accelerator, () => {});
+      if (available) {
+        globalShortcut.unregister(accelerator);
+      }
+      logIpc('OUT', 'shortcut:validate', { available });
+      return { available };
+    } catch (err) {
+      logConsoleError('Shortcut', 'Validation error', err);
+      logIpc('OUT', 'shortcut:validate', { available: false });
+      return { available: false };
+    }
+  });
+
+  // Onboarding handlers
+  ipcMain.handle('onboarding:isComplete', () => {
+    logIpc('IN', 'onboarding:isComplete');
+    const isComplete = onboardingStore.get('isComplete', false);
+    logIpc('OUT', 'onboarding:isComplete', { isComplete });
+    return isComplete;
+  });
+
+  ipcMain.handle('onboarding:setComplete', (_, complete: boolean) => {
+    logIpc('IN', 'onboarding:setComplete', { complete });
+    onboardingStore.set('isComplete', complete);
+    logConsole('Onboarding', 'Set complete', { complete });
+    logIpc('OUT', 'onboarding:setComplete', { success: true });
+    return { success: true };
+  });
+
+  ipcMain.handle('onboarding:getLastAuthProvider', () => {
+    logIpc('IN', 'onboarding:getLastAuthProvider');
+    const provider = onboardingStore.get('lastAuthProvider', null);
+    logIpc('OUT', 'onboarding:getLastAuthProvider', { provider });
+    return provider;
+  });
+
+  ipcMain.handle('onboarding:setLastAuthProvider', (_, provider: string) => {
+    logIpc('IN', 'onboarding:setLastAuthProvider', { provider });
+    onboardingStore.set('lastAuthProvider', provider);
+    logConsole('Onboarding', 'Set last auth provider', { provider });
+    logIpc('OUT', 'onboarding:setLastAuthProvider', { success: true });
     return { success: true };
   });
 }

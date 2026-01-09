@@ -128,7 +128,7 @@ router.post('/send-otp', async (req: Request, res: Response) => {
  */
 router.post('/verify-otp', async (req: Request, res: Response) => {
   try {
-    const { phone, token, anonymousUserId } = req.body;
+    const { phone, token, anonymousUserId, firstName, lastName } = req.body;
 
     if (!phone || !token) {
       return res.status(400).json({ error: 'Phone and OTP token are required' });
@@ -185,15 +185,19 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
         // 1. An anonymous user who just verified phone (their Supabase user was created by signInAnonymously)
         // 2. A brand new user who went straight to phone verification
 
+        // Build the full name from first + last if provided
+        const fullName = [firstName, lastName].filter(Boolean).join(' ') || null;
+
         // Create user record
         await prisma.user.create({
           data: {
             userId,
             phone: userPhone,
+            name: fullName,
             isAnonymous: false, // They just verified phone, so not anonymous anymore
           },
         });
-        console.log(`✅ Created user record for ${userId} with phone ${userPhone}`);
+        console.log(`✅ Created user record for ${userId} with phone ${userPhone}${fullName ? ` and name ${fullName}` : ''}`);
 
         // Give signup bonus credit for completing phone verification
         await createSignupBonusCredit(userId);
@@ -204,11 +208,19 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
           await mergeAnonymousUserAgents(anonymousUserId, userId);
         }
       } else {
-        // User exists - update to mark as non-anonymous and add phone
-        const updates: { phone?: string; isAnonymous?: boolean } = {};
+        // User exists - update to mark as non-anonymous and add phone/name
+        const updates: { phone?: string; name?: string; isAnonymous?: boolean } = {};
 
         if (!existingUser.phone && userPhone) {
           updates.phone = userPhone;
+        }
+
+        // Update name if not already set and we have a new name
+        if (!existingUser.name && (firstName || lastName)) {
+          const fullName = [firstName, lastName].filter(Boolean).join(' ');
+          if (fullName) {
+            updates.name = fullName;
+          }
         }
 
         // If they were anonymous before, mark as non-anonymous and give signup bonus

@@ -227,13 +227,24 @@ export const sendOTP = async (phone: string) => {
   return data;
 };
 
-export const verifyOTP = async (phone: string, token: string, anonymousUserId?: string) => {
+export const verifyOTP = async (
+  phone: string,
+  token: string,
+  anonymousUserId?: string,
+  userInfo?: { firstName?: string; lastName?: string }
+) => {
   const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ phone, token, anonymousUserId }),
+    body: JSON.stringify({
+      phone,
+      token,
+      anonymousUserId,
+      firstName: userInfo?.firstName,
+      lastName: userInfo?.lastName,
+    }),
   });
 
   const data = await response.json();
