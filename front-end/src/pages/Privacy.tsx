@@ -1,3 +1,11 @@
+/**
+ * STATE MACHINE: Privacy
+ *
+ * This component is stateless - displays static privacy policy content.
+ *
+ * [MOUNTED] --> renders static content
+ */
+
 import NaviHeader from "@/components/NaviHeader";
 import NaviFooter from "@/components/NaviFooter";
 

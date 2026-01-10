@@ -1,3 +1,22 @@
+/**
+ * STATE MACHINE: PlanChip
+ *
+ * EXPANSION STATE:
+ * [COLLAPSED] <-- isExpanded: false (shows title only)
+ *     |
+ *     | (click)
+ *     v
+ * [EXPANDED] <-- isExpanded: true (shows full plan with tasks)
+ *     |
+ *     | (click)
+ *     v
+ * [COLLAPSED]
+ *
+ * Props determine visual state:
+ * - plan.status: 'planning' | 'ready' | 'executing' | 'complete'
+ * - toolStatus: 'IN_PROGRESS' | 'FINISHED' (shimmer effect)
+ */
+
 import { memo, useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, FileText } from 'lucide-react';

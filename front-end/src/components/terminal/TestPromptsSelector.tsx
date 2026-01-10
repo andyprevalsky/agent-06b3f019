@@ -1,3 +1,22 @@
+/**
+ * STATE MACHINE: TestPromptsSelector
+ *
+ * [CLOSED] <-- isOpen: false
+ *     |
+ *     | (click trigger)
+ *     v
+ * [OPEN] <-- isOpen: true (shows test prompts popover)
+ *     |
+ *     | (select prompt or click outside)
+ *     v
+ * [CLOSED]
+ *
+ * State:
+ * - isOpen: boolean (popover open state)
+ *
+ * Only visible in development mode.
+ */
+
 import {
   Popover,
   PopoverContent,

@@ -1,3 +1,28 @@
+/**
+ * STATE MACHINE: useAppData (AppDataContext)
+ *
+ * MODELS LOADING:
+ * [LOADING_MODELS] <-- modelsLoading: true
+ *     |
+ *     v (fetch complete)
+ * [MODELS_READY] <-- modelsLoading: false, models: Model[]
+ *   or
+ * [MODELS_ERROR] <-- modelsError: string
+ *
+ * TOOLS LOADING:
+ * [LOADING_TOOLS] <-- toolsLoading: true
+ *     |
+ *     v (fetch complete)
+ * [TOOLS_READY] <-- toolsLoading: false, tools: Tool[]
+ *   or
+ * [TOOLS_ERROR] <-- toolsError: string
+ *
+ * Provides:
+ * - models: Model[] (available LLM models)
+ * - tools: Tool[] (available agent tools)
+ * - refreshModels(), refreshTools() for manual refresh
+ */
+
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { getTools, Tool as ApiTool } from '@/lib/api';
 

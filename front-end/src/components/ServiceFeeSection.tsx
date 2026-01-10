@@ -1,3 +1,11 @@
+/**
+ * STATE MACHINE: ServiceFeeSection
+ *
+ * This component is stateless - displays static service fee information.
+ *
+ * [MOUNTED] --> renders static content
+ */
+
 const ServiceFeeSection = () => {
   return (
     <section id="service-fee" className="py-16 bg-background">

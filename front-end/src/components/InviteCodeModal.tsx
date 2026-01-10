@@ -1,3 +1,22 @@
+/**
+ * STATE MACHINE: InviteCodeModal
+ *
+ * [CLOSED] <-- open: false (controlled by parent)
+ *     |
+ *     v (open=true)
+ * [LOADING] <-- loading: true, inviteInfo: null
+ *     |
+ *     v (API response)
+ * [READY] <-- loading: false, inviteInfo: InviteCodeInfo
+ *     |
+ *     | (click copy)
+ *     v
+ * [COPIED] <-- copied: true
+ *     |
+ *     v (setTimeout 2s)
+ * [READY] <-- copied: false
+ */
+
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";

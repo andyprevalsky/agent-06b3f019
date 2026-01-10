@@ -1,3 +1,11 @@
+/**
+ * STATE MACHINE: Research
+ *
+ * This component is stateless - displays static research content with charts.
+ *
+ * [MOUNTED] --> renders charts and content
+ */
+
 import { Link } from 'react-router-dom';
 import PerformanceChart from '@/components/research/PerformanceChart';
 import AccuracyOverTimeChart from '@/components/research/AccuracyOverTimeChart';

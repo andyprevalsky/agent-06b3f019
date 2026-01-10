@@ -1,3 +1,18 @@
+/**
+ * STATE MACHINE: CustomDesignForm
+ *
+ * [IDLE] <-- isSubmitting: false
+ *   |
+ *   | (form submit)
+ *   v
+ * [SUBMITTING] <-- isSubmitting: true
+ *   |
+ *   +--> (success) --> toast success --> [IDLE] (form reset)
+ *   +--> (error) --> toast error --> [IDLE]
+ *
+ * Form validation via react-hook-form + zod schema
+ */
+
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";

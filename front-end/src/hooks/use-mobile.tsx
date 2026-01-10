@@ -1,3 +1,20 @@
+/**
+ * STATE MACHINE: useIsMobile
+ *
+ * [UNKNOWN] <-- isMobile: undefined (initial)
+ *     |
+ *     v (useEffect measures window)
+ * [MOBILE] <-- isMobile: true (width < 768px)
+ *   or
+ * [DESKTOP] <-- isMobile: false (width >= 768px)
+ *     |
+ *     | (window resize event)
+ *     v
+ * [MOBILE] or [DESKTOP]
+ *
+ * Returns boolean indicating mobile viewport.
+ */
+
 import * as React from "react"
 
 const MOBILE_BREAKPOINT = 768

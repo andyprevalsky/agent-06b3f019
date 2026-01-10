@@ -1,3 +1,11 @@
+/**
+ * STATE MACHINE: ProductShowcase
+ *
+ * This component is stateless - displays static product showcase content.
+ *
+ * [MOUNTED] --> renders static content
+ */
+
 const ProductShowcase = () => {
   return (
     <section className="py-24 bg-gradient-to-b from-background to-surface relative overflow-hidden">

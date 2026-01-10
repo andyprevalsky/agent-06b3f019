@@ -1,9 +1,33 @@
 /**
- * ThinkingAnimation - plays back recorded SVG animations
- * 
+ * STATE MACHINE: ThinkingAnimation
+ *
+ * ThinkingAnimation - plays back recorded SVG animations.
  * Supports two data formats:
  * 1. XML Frame format: { meta?: {...}, frames: [{ t, xml }] } - full SVG per frame
  * 2. Delta format: { attrs, base, frames: [{ t, changed }] } - requires separate SVG file
+ *
+ * DATA LOADING:
+ * [LOADING] <-- data loading from URL
+ *     |
+ *     v (data loaded)
+ * [READY]
+ *
+ * PLAYBACK STATE (via useXmlFrameReplay hook):
+ * [STOPPED] <-- autoplay: false, not playing
+ *     |
+ *     | (play())
+ *     v
+ * [PLAYING] <-- requestAnimationFrame loop running
+ *     |
+ *     +--> currentFrameIndex advances through frames
+ *     |
+ *     | (pause() or end)
+ *     v
+ * [STOPPED] or [LOOPING] (if loop: true)
+ *
+ * State:
+ * - svgRef: current frame SVG content
+ * - isPlaying, play(), pause() from hook
  */
 
 import {

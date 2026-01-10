@@ -1,3 +1,21 @@
+/**
+ * STATE MACHINE: main.tsx (Entry Point)
+ *
+ * This is the app entry point - no component state.
+ * Initializes external services and renders the root React tree.
+ *
+ * [INIT] --> Initialize Amplitude analytics
+ *   |
+ *   v
+ * [SET_VH] --> Set CSS viewport height variable
+ *   |
+ *   v
+ * [RENDER] --> Mount <App /> and <Toaster /> to DOM
+ *   |
+ *   v
+ * [LISTENING] --> Event listeners for resize/orientation/visibility
+ */
+
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
 import { Toaster } from '@/components/ui/toaster'

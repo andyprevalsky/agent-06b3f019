@@ -1,3 +1,15 @@
+/**
+ * STATE MACHINE: ProtectedRoute
+ *
+ * [LOADING] <-- loading: true
+ *     |
+ *     v (auth check complete)
+ * [CHECKING_AUTH]
+ *     |
+ *     +--> user exists --> [AUTHORIZED] --> renders children
+ *     +--> no user --> [REDIRECTING] --> navigate('/') --> returns null
+ */
+
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';

@@ -1,3 +1,12 @@
+/**
+ * STATE MACHINE: NotFound
+ *
+ * This component is stateless - displays static 404 error content.
+ * Only side effect: logs 404 error on mount.
+ *
+ * [MOUNTED] --> logs error --> renders static content
+ */
+
 import { useLocation } from "react-router-dom";
 import { useEffect } from "react";
 

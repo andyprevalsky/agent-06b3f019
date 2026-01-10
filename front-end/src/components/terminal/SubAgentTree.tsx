@@ -1,3 +1,27 @@
+/**
+ * STATE MACHINE: SubAgentTree
+ *
+ * EXPANSION STATE:
+ * [COLLAPSED] <-- isExpanded: false (shows just agent title)
+ *     |
+ *     | (click)
+ *     v
+ * [EXPANDED] <-- isExpanded: true (shows full tree with children)
+ *     |
+ *     | (click)
+ *     v
+ * [COLLAPSED]
+ *
+ * OUTPUT CHIP STATE (per agent with output):
+ * [HIDDEN] <-- showOutput: false
+ *     |
+ *     v (click JSON button)
+ * [VISIBLE] <-- showOutput: true (shows formatted JSON output)
+ *
+ * Tree data comes from useAgentTree hook via AgentContext.
+ * Visual state (circle color, status text) derived from agent status.
+ */
+
 import { useMemo, useState, memo } from 'react';
 import { ChevronRight, FileJson } from 'lucide-react';
 import { cn } from '@/lib/utils';

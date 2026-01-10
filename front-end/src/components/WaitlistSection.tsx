@@ -1,4 +1,14 @@
-
+/**
+ * STATE MACHINE: WaitlistSection
+ *
+ * This component is stateless - renders child components (WaitlistForm, VideoPlayer).
+ * State is managed by child components.
+ *
+ * Props:
+ * - customOnly: boolean (controls which form variant to show)
+ *
+ * [MOUNTED] --> renders section with WaitlistForm and VideoPlayer
+ */
 
 import { Card, CardContent } from "@/components/ui/card";
 import WaitlistForm from "./WaitlistForm";

@@ -1,3 +1,36 @@
+/**
+ * STATE MACHINE: Settings
+ *
+ *                    [LOADING]
+ *                        |
+ *                        v (loadSettings)
+ *         +---------[IDLE/READY]---------+
+ *         |              |               |
+ *         | (edit)       | (save)        | (payment btn)
+ *         v              v               v
+ *    [EDITING]      [SAVING]      [PAYMENT_FORM_OPEN]
+ *         |         saving=true   showPaymentForm=true
+ *         |              |               |
+ *         |              v               | (save payment)
+ *         |         [SAVED]              v
+ *         |         saved=true     [SAVING_PAYMENT]
+ *         |              |         savingPayment=true
+ *         |              v               |
+ *         +---------[IDLE/READY]<--------+
+ *
+ * States:
+ * - loading: true --> LOADING
+ * - saving: true --> SAVING (personal info)
+ * - saved: true --> SAVED (success indicator)
+ * - showPaymentForm: true --> PAYMENT_FORM_OPEN
+ * - savingPayment: true --> SAVING_PAYMENT
+ * - savedPayment: true --> payment saved success
+ * - error: string | null (shown as banner)
+ * - userData: user profile data
+ * - paymentData: card form data
+ * - paymentErrors: validation errors
+ */
+
 import { useState, useEffect } from 'react';
 import { getStoredSession } from '../lib/supabase';
 import { Button } from '../components/ui/button';

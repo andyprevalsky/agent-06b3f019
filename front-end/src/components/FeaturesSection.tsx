@@ -1,3 +1,22 @@
+/**
+ * STATE MACHINE: FeaturesSection
+ *
+ * ACTIVE FEATURE TRACKING:
+ * [FEATURE_0] <-> [FEATURE_1] <-> [FEATURE_2] <-> [FEATURE_3] <-> [FEATURE_4]
+ *        ^                                                              |
+ *        └──────────────── scroll or click navigation ──────────────────┘
+ *
+ * States:
+ * - activeFeature: 0-4 (which feature is highlighted)
+ * - featuresClipPath: CSS clip-path for reveal animation
+ * - gridOffsetX: horizontal offset for grid alignment
+ * - isNarrowPhone: responsive state for small screens
+ * - isShortHeight: responsive state for short viewports
+ *
+ * Scroll-driven: IntersectionObserver updates activeFeature based on scroll position
+ * Click-driven: scrollSpyPauseUntilRef temporarily disables scroll updates
+ */
+
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import FeatureVideoStage from "./FeatureVideoStage";

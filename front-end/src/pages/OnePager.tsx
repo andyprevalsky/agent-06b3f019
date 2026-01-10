@@ -1,3 +1,12 @@
+/**
+ * STATE MACHINE: OnePager
+ *
+ * This component is stateless - displays static investor one-pager content.
+ * Only side effect: sets document title and meta tags on mount.
+ *
+ * [MOUNTED] --> sets meta tags --> renders static content
+ */
+
 import { Link } from 'react-router-dom';
 import { useEffect } from 'react';
 

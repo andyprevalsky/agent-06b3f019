@@ -1,3 +1,33 @@
+/**
+ * STATE MACHINE: FeedbackBanner
+ *
+ * FEEDBACK FLOW:
+ * [RATING] <-- step: 'rating'
+ *     |
+ *     | (select 1-5 stars)
+ *     v
+ * [DETAILS] <-- step: 'details' (if rating < 5)
+ *     |         - issueType: string
+ *     |         - comment: string
+ *     |         - helpImprove: boolean
+ *     |
+ *     | (submit)
+ *     v
+ * [SUBMITTING] <-- isSubmitting: true
+ *     |
+ *     v (success)
+ * [THANK_YOU] <-- step: 'thankyou'
+ *
+ * OR (if rating = 5):
+ * [RATING] --> [SUBMITTING] --> [THANK_YOU]
+ *
+ * States:
+ * - step: 'rating' | 'details' | 'thankyou'
+ * - rating: number (1-5)
+ * - isSubmitting: boolean
+ * - issueType, comment, helpImprove (detail fields)
+ */
+
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Check, Star } from 'lucide-react';

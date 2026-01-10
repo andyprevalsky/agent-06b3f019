@@ -1,3 +1,42 @@
+/**
+ * STATE MACHINE: QueryInput
+ *
+ * INPUT STATE:
+ * [EMPTY] <-- inputValue: ''
+ *     |
+ *     | (type)
+ *     v
+ * [HAS_TEXT] <-- inputValue: string
+ *     |
+ *     | (clear or submit)
+ *     v
+ * [EMPTY]
+ *
+ * MODEL SELECTOR:
+ * [CLOSED] <-- openModelSelector: false
+ *     |
+ *     v
+ * [OPEN] <-- openModelSelector: true
+ *
+ * SUBMISSION:
+ * [IDLE] <-- not submitting (controlled by parent isLoading)
+ *     |
+ *     | (submit)
+ *     v
+ * [SUBMITTING] <-- isLoading: true (shows spinner)
+ *     |
+ *     v
+ * [IDLE]
+ *
+ * States:
+ * - inputValue: string
+ * - openModelSelector: boolean
+ * - isFocused: boolean (styling)
+ * - selectedModel: Model | null (controlled by parent)
+ *
+ * Supports stopping agent via onStop prop.
+ */
+
 import { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ArrowUp, Square, Loader2 } from 'lucide-react';
 import * as amplitude from '@amplitude/analytics-browser';

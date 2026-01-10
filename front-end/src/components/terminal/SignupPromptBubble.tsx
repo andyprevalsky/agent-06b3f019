@@ -1,9 +1,33 @@
 /**
- * SignupPromptBubble Component
+ * STATE MACHINE: SignupPromptBubble
  *
  * Displays a signup prompt from the agent when request_user_signup tool is called.
  * Shows the reason text, a "Login / Signup" button, and a "Continue as Guest" option.
  * The agent blocks waiting for the user's choice.
+ *
+ * ACTION STATE:
+ * [WAITING] <-- isWaiting: true (prop), neither button clicked
+ *     |
+ *     +--> (click signup) --> [SIGNALING_SIGNUP] <-- isSignalingSignup: true
+ *     |         |
+ *     |         v (API call complete)
+ *     |         --> opens auth modal
+ *     |
+ *     +--> (click continue as guest) --> [SIGNALING_DISMISS] <-- isSignalingDismiss: true
+ *               |
+ *               v (API call complete)
+ *               --> agent continues without signup
+ *
+ * TYPING ANIMATION:
+ * [TYPING] <-- typing animation in progress
+ *     |
+ *     v
+ * [COMPLETE] --> calls onComplete
+ *
+ * States:
+ * - isSignalingSignup: boolean
+ * - isSignalingDismiss: boolean
+ * - typingComplete: boolean
  */
 
 import { useState, useEffect, useRef, memo } from 'react';

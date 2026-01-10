@@ -1,3 +1,16 @@
+/**
+ * STATE MACHINE: SubAgentToolBubble
+ *
+ * This component is stateless - receives all state via props.
+ * Renders a sub-agent tool call with progress indicator.
+ *
+ * Props-driven visual states:
+ * - status: 'IN_PROGRESS' | 'FINISHED'
+ * - progress: 0.0-1.0 (for progress bar)
+ *
+ * Click handler navigates to sub-agent via onNavigate callback.
+ */
+
 import { ChevronRight } from 'lucide-react';
 import { memo, useMemo } from 'react';
 import { cn } from '@/lib/utils';

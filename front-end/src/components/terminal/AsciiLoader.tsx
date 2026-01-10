@@ -1,3 +1,15 @@
+/**
+ * STATE MACHINE: AsciiLoader
+ *
+ * [ANIMATING] --> cycles through ASCII frames
+ *     |
+ *     +--> frameIndex: 0..N (cycles via setInterval)
+ *     +--> dotCount: 1..3 (loading dots animation)
+ *
+ * Animation runs continuously while component is mounted.
+ * Frame set determined by variant prop ('default' | 'engine').
+ */
+
 import { useEffect, useState } from 'react';
 import asciiFramesData from './ascii-frames.json';
 import asciiFramesEngineData from './ascii-frames-engine.json';

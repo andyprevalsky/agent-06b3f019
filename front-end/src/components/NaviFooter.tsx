@@ -1,3 +1,17 @@
+/**
+ * STATE MACHINE: NaviFooter
+ *
+ * [IDLE] <-- contactModalOpen: false
+ *   |
+ *   | (click contact link)
+ *   v
+ * [CONTACT_MODAL_OPEN] <-- contactModalOpen: true
+ *   |
+ *   | (close modal)
+ *   v
+ * [IDLE]
+ */
+
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import ContactModal from "./ContactModal";

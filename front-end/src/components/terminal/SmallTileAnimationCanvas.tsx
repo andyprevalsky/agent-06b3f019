@@ -1,11 +1,21 @@
 /**
- * Canvas overlay for rendering small tile animations
- * 
- * This component renders:
- * - Dots on tiles that have EVER been part of the animation
- * - Animated patterns on actively animating tiles
- * - Border overlay for animations
- * 
+ * STATE MACHINE: SmallTileAnimationCanvas
+ *
+ * Canvas overlay for rendering small tile animations.
+ *
+ * ANIMATION LIFECYCLE:
+ * [DISABLED] <-- enabled: false OR tileAnimationComplete: false
+ *     |
+ *     v (enabled + tileAnimationComplete)
+ * [INITIALIZING] --> sets up canvases, calculates grid
+ *     |
+ *     v
+ * [ANIMATING] --> requestAnimationFrame loop
+ *     |
+ *     +--> animatingTiles: Set<TileKey> (from useSmallTileAnimations hook)
+ *     +--> everAnimatedTiles: Set<TileKey> (all tiles that ever animated)
+ *     +--> renders dots, animations, borders on separate canvases
+ *
  * Layer structure (bottom to top):
  * 1. Root container (z-[2]) - Animation canvases
  *    - Canvas: Dots (z-[-3]) - BELOW animations
@@ -13,6 +23,10 @@
  *    - Canvas: Borders (z-[-1]) - ABOVE animations
  * 2. SVG tile borders/pattern (z-[3]) - Above animations
  * 3. Page content (z-[4]) - Above everything
+ *
+ * States:
+ * - everAnimatedTiles: Set<string> (persisted across animation cycles)
+ * - Animation state managed by useSmallTileAnimations hook
  */
 
 import { useEffect, useRef, useState } from 'react';

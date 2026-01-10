@@ -1,3 +1,26 @@
+/**
+ * STATE MACHINE: SeamlessConversations
+ *
+ * CONVERSATION CYCLING:
+ * [PAIR_0] --> [PAIR_1] --> [PAIR_2] --> [PAIR_3] --> [PAIR_0] ...
+ *        ^                                              |
+ *        └────────────── auto-advance loop ─────────────┘
+ *
+ * States:
+ * - currentPair: number (0 to PAIRS.length-1)
+ * - isTransitioning: boolean (fade in/out animation)
+ * - isUserShowing: boolean (user message visible)
+ * - isNaviShowing: boolean (navi response visible)
+ *
+ * Animation sequence per pair:
+ * 1. isUserShowing=true (user message fades in)
+ * 2. isNaviShowing=true (navi message fades in after delay)
+ * 3. pause
+ * 4. isTransitioning=true (both fade out)
+ * 5. currentPair++ (advance to next)
+ * 6. reset and repeat
+ */
+
 import { useEffect, useRef, useState } from "react";
 
 type ConversationPair = {

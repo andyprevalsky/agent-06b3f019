@@ -1,3 +1,26 @@
+/**
+ * STATE MACHINE: VideoPlayer
+ *
+ * VIDEO LOADING:
+ * [LOADING] <-- isLoaded: false, hasError: false
+ *     |
+ *     +--> (loadeddata event) --> [READY] <-- isLoaded: true
+ *     +--> (error event) --> [ERROR] <-- hasError: true
+ *
+ * [READY]
+ *     |
+ *     +--> triggers onLoad callback
+ *     +--> triggers onFirstFrame when first frame paints
+ *
+ * [ERROR]
+ *     |
+ *     +--> renders fallbackContent if provided
+ *
+ * States:
+ * - isLoaded: boolean
+ * - hasError: boolean
+ */
+
 import { useEffect, useRef, useState, forwardRef, isValidElement, cloneElement } from "react";
 
 interface VideoPlayerProps {

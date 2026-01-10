@@ -1,3 +1,16 @@
+/**
+ * STATE MACHINE: IntegrationHandlersContext
+ *
+ * This context is stateless - provides integration handlers from Mac app.
+ * Handlers are passed in via props from main.tsx.
+ *
+ * [MOUNTED] --> provides handlers: { iMessage?, chromeCookies? }
+ *
+ * Each handler has:
+ * - onClick: async function to execute integration
+ * - isAvailable: boolean (whether feature is available in current environment)
+ */
+
 import { createContext, useContext, ReactNode } from 'react';
 
 export interface IntegrationHandler {

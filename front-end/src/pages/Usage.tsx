@@ -1,3 +1,16 @@
+/**
+ * STATE MACHINE: Usage
+ *
+ * [LOADING] <-- loading: true
+ *     |
+ *     v (fetchUsageData)
+ * [READY] <-- loading: false
+ *     |
+ *     +--> usage: UsageData | null
+ *     +--> topModels: ModelStats[]
+ *     +--> totalTokens: number
+ */
+
 import { useEffect, useState } from 'react';
 import { getStoredSession } from '@/lib/supabase';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';

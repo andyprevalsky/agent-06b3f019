@@ -1,3 +1,20 @@
+/**
+ * STATE MACHINE: RoseToolSetChip
+ *
+ * [CLOSED] <-- isOpen: false
+ *     |
+ *     | (click chip)
+ *     v
+ * [OPEN] <-- isOpen: true (shows tool list popover)
+ *     |
+ *     | (click outside or select)
+ *     v
+ * [CLOSED]
+ *
+ * State:
+ * - isOpen: boolean (popover open state)
+ */
+
 import { Badge } from '@/components/ui/badge';
 import {
   Popover,

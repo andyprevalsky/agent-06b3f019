@@ -1,3 +1,35 @@
+/**
+ * STATE MACHINE: CreateAgentModal
+ *
+ * [CLOSED] <-- open: false
+ *     |
+ *     v (open=true)
+ * [OPEN]
+ *     |
+ *     +--> [EDITING] <-- isLoading: false
+ *     |       |
+ *     |       +--> goal: string (required)
+ *     |       +--> selectedModel: string
+ *     |       +--> selectedReasoningEffort: 'off'|'low'|'medium'|'high'
+ *     |       +--> showAdvanced: boolean (toggles advanced options)
+ *     |       |
+ *     |       | (submit)
+ *     |       v
+ *     |   [SUBMITTING] <-- isLoading: true
+ *     |       |
+ *     |       +--> (success) --> close modal
+ *     |       +--> (error) --> toast error --> [EDITING]
+ *
+ * States:
+ * - goal: string
+ * - selectedModel: string | null
+ * - selectedReasoningEffort: string
+ * - isLoading: boolean
+ * - showAdvanced: boolean
+ * - toolsLoading: boolean
+ * - tools: Tool[]
+ */
+
 import { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';

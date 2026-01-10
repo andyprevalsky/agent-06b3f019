@@ -1,3 +1,19 @@
+/**
+ * STATE MACHINE: MemoryGraphAnimation
+ *
+ * [IDLE] <-- hasTriggered: false
+ *   |
+ *   | (IntersectionObserver triggers OR restart prop)
+ *   v
+ * [PLAYING] <-- hasTriggered: true, video playing
+ *   |
+ *   v (video ends)
+ * [COMPLETE]
+ *
+ * Props:
+ * - restart: boolean (force restart video playback)
+ */
+
 import { useEffect, useRef, useState } from "react";
 import VideoPlayer from "./VideoPlayer";
 

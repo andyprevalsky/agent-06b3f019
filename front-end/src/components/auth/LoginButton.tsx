@@ -1,3 +1,24 @@
+/**
+ * STATE MACHINE: LoginButton
+ *
+ * [LOADING] <-- loading: true (from useAuth)
+ *     |
+ *     v (auth check complete)
+ * [READY]
+ *     |
+ *     +--> user exists --> click navigates to /terminal
+ *     +--> no user --> click opens auth modal
+ *
+ * MODAL STATE:
+ * [CLOSED] <-- modalOpen: false
+ *     |
+ *     v (click when no user)
+ * [OPEN] <-- modalOpen: true
+ *     |
+ *     v (auth complete or close)
+ * [CLOSED]
+ */
+
 import { useState, useRef } from "react";
 import PhoneAuthModal from "./PhoneAuthModal";
 import { useAuth } from "@/hooks/useAuth";

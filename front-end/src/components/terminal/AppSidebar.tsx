@@ -1,3 +1,37 @@
+/**
+ * STATE MACHINE: AppSidebar
+ *
+ * COLLAPSE STATE:
+ * [EXPANDED] <-- isCollapsed: false
+ *     |
+ *     | (toggle button or screen resize)
+ *     v
+ * [COLLAPSED] <-- isCollapsed: true
+ *     |
+ *     v
+ * [EXPANDED]
+ *
+ * CREDITS LOADING:
+ * [LOADING_CREDITS] <-- isLoadingCredits: true
+ *     |
+ *     v
+ * [CREDITS_LOADED]
+ *
+ * SUBSCRIPTION MODAL:
+ * [MODAL_CLOSED] <-- showSubscriptionModal: false
+ *     |
+ *     v
+ * [MODAL_OPEN] <-- showSubscriptionModal: true
+ *
+ * States:
+ * - isCollapsed: boolean (sidebar width)
+ * - isLoadingCredits: boolean
+ * - credits: { used, total, remaining, tier }
+ * - showSubscriptionModal: boolean
+ *
+ * Most state is controlled by parent (currentView, agents, selectedAgentId, etc.)
+ */
+
 import { useState, useEffect, useRef } from 'react';
 import { Plus, LogOut, Settings as SettingsIcon, BarChart3, Plug, Network, ChevronLeft, ChevronRight, Loader2, CreditCard } from 'lucide-react';
 import { Button } from '@/components/ui/button';

@@ -1,3 +1,11 @@
+/**
+ * STATE MACHINE: Download
+ *
+ * This component is stateless - displays a static "Coming Soon" message.
+ *
+ * [MOUNTED] --> renders static content
+ */
+
 // import { useEffect } from "react";
 
 // Always downloads the latest release (filename is version-agnostic)

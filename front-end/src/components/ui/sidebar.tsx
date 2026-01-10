@@ -1,3 +1,33 @@
+/**
+ * STATE MACHINE: Sidebar (shadcn/ui)
+ *
+ * DESKTOP MODE:
+ * [EXPANDED] <-- state: 'expanded', open: true
+ *     |
+ *     | (toggle)
+ *     v
+ * [COLLAPSED] <-- state: 'collapsed', open: false
+ *     |
+ *     | (toggle)
+ *     v
+ * [EXPANDED]
+ *
+ * MOBILE MODE (uses Sheet):
+ * [CLOSED] <-- openMobile: false
+ *     |
+ *     v
+ * [OPEN] <-- openMobile: true (full-screen sheet)
+ *
+ * State via SidebarProvider context:
+ * - state: 'expanded' | 'collapsed'
+ * - open: boolean (desktop)
+ * - openMobile: boolean (mobile sheet)
+ * - isMobile: boolean (viewport detection)
+ *
+ * Keyboard shortcut: Ctrl/Cmd+B to toggle
+ * State persisted to cookie 'sidebar:state'
+ */
+
 import * as React from "react"
 import { Slot } from "@radix-ui/react-slot"
 import { VariantProps, cva } from "class-variance-authority"

@@ -1,3 +1,16 @@
+/**
+ * STATE MACHINE: AgentListItem
+ *
+ * This component is stateless - receives all state via props.
+ * Renders agent status visualization (progress wheel, status indicators).
+ *
+ * Props-driven states:
+ * - isSelected: boolean (highlight styling)
+ * - isResuming: boolean (shows loading spinner on play button)
+ * - agent.status: 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED' | etc
+ * - agent.progress: number (0-1 for progress wheel)
+ */
+
 import { Agent } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Play, Loader2, CreditCard, Bot } from 'lucide-react';

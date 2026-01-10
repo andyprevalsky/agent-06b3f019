@@ -1,3 +1,20 @@
+/**
+ * STATE MACHINE: useModels
+ *
+ * [LOADING] <-- loading: true
+ *     |
+ *     v (fetch /api/models)
+ * [READY] <-- loading: false, models: Model[]
+ *   or
+ * [ERROR] <-- error: string
+ *
+ * Returns:
+ * - models: Model[] (available LLM models)
+ * - loading: boolean
+ * - error: string | null
+ * - refresh(): manual refresh function
+ */
+
 import { useState, useEffect } from 'react';
 
 export interface Model {

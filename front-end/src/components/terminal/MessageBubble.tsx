@@ -1,3 +1,34 @@
+/**
+ * STATE MACHINE: MessageBubble
+ *
+ * TOOL EXPANSION (for tool messages):
+ * [COLLAPSED] <-- toolExpanded: false
+ *     |
+ *     v (click to expand)
+ * [EXPANDED] <-- toolExpanded: true
+ *
+ * RESPONSE INPUT (for attention_request messages):
+ * [HIDDEN] <-- showResponseInput: false
+ *     |
+ *     v (click respond)
+ * [VISIBLE] <-- showResponseInput: true, responseText: string
+ *     |
+ *     | (submit)
+ *     v
+ * [SUBMITTING] <-- isSubmittingResponse: true
+ *     |
+ *     v (success)
+ * [HIDDEN]
+ *
+ * States:
+ * - toolExpanded: boolean
+ * - showResponseInput: boolean
+ * - responseText: string
+ * - isSubmittingResponse: boolean
+ *
+ * Renders different content based on message.role and message.type.
+ */
+
 import { Message, respondToAttentionRequest } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';

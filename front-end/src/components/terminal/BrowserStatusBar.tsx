@@ -1,3 +1,34 @@
+/**
+ * STATE MACHINE: BrowserStatusBar
+ *
+ * EXPANSION STATE:
+ * [COLLAPSED] <-- isExpanded: false
+ *     |
+ *     | (click to expand)
+ *     v
+ * [EXPANDED] <-- isExpanded: true
+ *     |
+ *     | (click to collapse)
+ *     v
+ * [COLLAPSED]
+ *
+ * FULLSCREEN STATE:
+ * [NORMAL] <-- isFullscreen: false
+ *     |
+ *     | (click fullscreen button)
+ *     v
+ * [FULLSCREEN] <-- isFullscreen: true (renders via portal)
+ *     |
+ *     | (click close or Escape)
+ *     v
+ * [NORMAL]
+ *
+ * States:
+ * - isExpanded: boolean
+ * - isFullscreen: boolean
+ * - expandedHeight: number (dynamic based on content)
+ */
+
 import React, { memo, useState, useCallback, useMemo, useRef, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronUp, ChevronDown, Maximize2, X, FileJson } from 'lucide-react';

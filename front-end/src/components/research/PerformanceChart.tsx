@@ -1,3 +1,12 @@
+/**
+ * STATE MACHINE: PerformanceChart
+ *
+ * This component is stateless - renders data visualization from static data.
+ * Uses useMemo for computed values but no useState.
+ *
+ * [MOUNTED] --> renders SVG chart with scatter plot
+ */
+
 import { useMemo } from 'react';
 
 interface ModelData {

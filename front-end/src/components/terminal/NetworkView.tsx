@@ -1,3 +1,41 @@
+/**
+ * STATE MACHINE: NetworkView
+ *
+ * DATA LOADING:
+ * [LOADING] <-- loading: true
+ *     |
+ *     v (fetch complete)
+ * [READY] <-- loading: false
+ *     |
+ *     +--> (error) --> [ERROR] <-- error: string
+ *     +--> (success) --> data: PeoplePaginatedResponse
+ *
+ * PAGINATION:
+ * [PAGE_N] <-- currentPage: N
+ *     |
+ *     | (prev/next)
+ *     v
+ * [PAGE_M] --> triggers new fetch
+ *
+ * PERSON DETAIL:
+ * [LIST_VIEW] <-- selectedPerson: null
+ *     |
+ *     | (click person)
+ *     v
+ * [DETAIL_VIEW] <-- selectedPerson: Person
+ *     |
+ *     | (close)
+ *     v
+ * [LIST_VIEW]
+ *
+ * States:
+ * - data: PeoplePaginatedResponse | null
+ * - loading: boolean
+ * - error: string | null
+ * - currentPage: number
+ * - selectedPerson: Person | null
+ */
+
 import { useState, useEffect } from 'react';
 import { getPeople, Person, PeoplePaginatedResponse } from '@/lib/api';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';

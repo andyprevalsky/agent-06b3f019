@@ -1,3 +1,36 @@
+/**
+ * STATE MACHINE: PreOrderSection
+ *
+ * VIDEO LAZY LOADING (per video: black/white):
+ * [NOT_IN_VIEW] --> inView: false
+ *   |
+ *   | (IntersectionObserver triggers)
+ *   v
+ * [IN_VIEW] --> inView: true (video loads)
+ *
+ * VIDEO PLAYBACK (per video):
+ * [PAUSED] --> visible: false
+ *   |
+ *   | (visibility enters threshold)
+ *   v
+ * [PLAYING] --> visible: true
+ *   |
+ *   | (visibility exits)
+ *   v
+ * [PAUSED]
+ *
+ * POPOVER (per card):
+ * [CLOSED] --> popoverOpen: false
+ *   |
+ *   v
+ * [OPEN] --> popoverOpen: true
+ *
+ * States:
+ * - isSafari: boolean (browser detection)
+ * - blackPopoverOpen, whitePopoverOpen: boolean
+ * - blackInView, whiteInView: boolean (lazy load trigger)
+ * - blackVisible, whiteVisible: boolean (play/pause trigger)
+ */
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";

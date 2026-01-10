@@ -1,3 +1,21 @@
+/**
+ * STATE MACHINE: App
+ *
+ * This component is stateless - it only provides routing and context providers.
+ *
+ * [MOUNTED] --> renders route based on URL path
+ *   |
+ *   +--> "/" --> <Terminal />
+ *   +--> "/privacy" --> <Privacy />
+ *   +--> "/terms" --> <Terms />
+ *   +--> "/about" --> <About />
+ *   +--> "/terminal" --> <Index />
+ *   +--> "/research" --> <Research />
+ *   +--> "/download" --> <Download />
+ *   +--> "/onepager" --> <OnePager />
+ *   +--> "*" --> <NotFound />
+ */
+
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";

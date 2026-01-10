@@ -1,3 +1,12 @@
+/**
+ * STATE MACHINE: CostComparisonChart
+ *
+ * This component is stateless - renders data visualization from static data.
+ * Uses useMemo for computed values but no useState.
+ *
+ * [MOUNTED] --> renders SVG chart with bar graph
+ */
+
 import { useMemo } from "react";
 
 interface CostData {

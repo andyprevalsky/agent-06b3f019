@@ -1,3 +1,14 @@
+/**
+ * STATE MACHINE: FloatingParticles
+ *
+ * [INIT] --> particles: [] (empty)
+ *   |
+ *   v (useEffect on mount)
+ * [READY] --> particles: Array<{id, left, delay}>
+ *   |
+ *   +--> CSS animations handle particle movement
+ */
+
 import { useEffect, useState } from "react";
 
 const FloatingParticles = () => {

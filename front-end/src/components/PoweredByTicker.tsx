@@ -1,3 +1,11 @@
+/**
+ * STATE MACHINE: PoweredByTicker
+ *
+ * This component is stateless - displays a CSS-animated logo ticker.
+ *
+ * [MOUNTED] --> renders ticker with CSS animations
+ */
+
 import openaiLogo from "@/assets/openai-logo.png";
 import anthropicLogo from "@/assets/anthropic-logo.png";
 import cerebrasLogo from "@/assets/cerebras-logo.png";

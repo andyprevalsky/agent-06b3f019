@@ -1,3 +1,22 @@
+/**
+ * STATE MACHINE: Carousel (shadcn/ui)
+ *
+ * SCROLL STATE (managed by Embla):
+ * [AT_START] <-- canScrollPrev: false
+ *     |
+ *     | (scroll)
+ *     v
+ * [MIDDLE] <-- canScrollPrev: true, canScrollNext: true
+ *     |
+ *     | (scroll)
+ *     v
+ * [AT_END] <-- canScrollNext: false
+ *
+ * State via useEmblaCarousel hook + context:
+ * - canScrollPrev, canScrollNext: boolean
+ * - orientation: 'horizontal' | 'vertical'
+ */
+
 import * as React from "react"
 import useEmblaCarousel, {
   type UseEmblaCarouselType,

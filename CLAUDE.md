@@ -63,6 +63,8 @@ Check these when errors occur:
 
 7. **No fallbacks during development** - When testing a new integration, don't add fallback paths; they obscure whether the primary path actually works
 
+8. **Frontend state diagrams required** - All frontend components must have a state machine diagram as a comment at the top of the file; reference and keep this diagram up to date when modifying state flow
+
 ## Temporal/Agent Patterns
 
 - Workflows must be **deterministic** - no random, no wall-clock time, use `workflow.now()`

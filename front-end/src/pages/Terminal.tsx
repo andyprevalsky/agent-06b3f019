@@ -1,3 +1,49 @@
+/**
+ * STATE MACHINE: Terminal (Main App View)
+ *
+ * HIGH-LEVEL VIEW STATES:
+ * ┌─────────────────────────────────────────────────────────────────────┐
+ * │                      currentView                                    │
+ * │  'agents' | 'integrations' | 'settings' | 'usage' | 'network'      │
+ * └─────────────────────────────────────────────────────────────────────┘
+ *
+ * AGENT SELECTION FLOW:
+ * ┌──────────────────┐     selectAgent(id)    ┌──────────────────────┐
+ * │  NO_AGENT        │ ────────────────────> │  AGENT_SELECTED      │
+ * │  selectedAgentId │                        │  selectedAgentId=id  │
+ * │  = null          │ <──────────────────── │  messages, agentDetail│
+ * └──────────────────┘    handleCreateNewAgent └──────────────────────┘
+ *
+ * OPENING ANIMATION (when NO_AGENT):
+ * [REVEALING] --> revealProgress=100 --> [PAUSED] --> pauseDuration --> [FADING]
+ *      ^                                                                    |
+ *      └──────────── currentMessageIndex++ ────────────────────────────────┘
+ *      ...until isTypingComplete=true (last message shown)
+ *
+ * MESSAGE SENDING FLOW:
+ * ┌────────────────┐                      ┌─────────────────────┐
+ * │  IDLE          │ ──── submit ───────> │  SENDING            │
+ * │  isSendingMsg  │                      │  isSendingMessage   │
+ * │  = false       │ <─── success/error ─ │  = true             │
+ * └────────────────┘                      └─────────────────────┘
+ *
+ * AGENT STATUS (from agentDetail.status):
+ * - STARTING_UP: Show "Loading AI Network..."
+ * - ACTIVE: Show messages, can pause
+ * - PAUSED: Can resume or send message
+ * - COMPLETED: Show completion UI
+ * - FAILED: Dimmed input
+ * - OUT_OF_CREDITS: Show credit modal
+ *
+ * MODAL STATES:
+ * - createModalOpen: Create agent modal
+ * - loginModalOpen: Phone auth modal
+ * - showCreditModal: Subscription modal
+ *
+ * DRIPPINESS CONTROLS (persisted to localStorage):
+ * - backgroundColors, blur, shadowIntensity, borderColor (0-100 each)
+ */
+
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate, Link } from 'react-router-dom';

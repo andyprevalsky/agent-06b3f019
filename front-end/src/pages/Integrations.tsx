@@ -1,3 +1,30 @@
+/**
+ * STATE MACHINE: Integrations
+ *
+ *                              [LOADING]
+ *                                  |
+ *                                  v (fetchIntegrations)
+ *       +-------------------[IDLE/READY]-------------------+
+ *       |                      |    |                      |
+ *       | (file upload)        |    |  (connect provider)  | (handler click)
+ *       v                      |    v                      v
+ * [FILE_UPLOADING]             |  [CONNECTING_PROVIDER]  [HANDLER_UPLOADING]
+ *   uploading=name             |    connectingProvider     uploading=name
+ *       |                      |         |                      |
+ *       v (success/error)      |         v (popup closes)       v
+ *       +----------------------+---------+----------------------+
+ *                              v
+ *                         [IDLE/READY]
+ *
+ * States:
+ * - loadingIntegrations: true --> LOADING
+ * - uploading: string | null --> FILE_UPLOADING or HANDLER_UPLOADING
+ * - connectingProvider: 'gmail' | null --> CONNECTING_PROVIDER
+ * - error: string | null (shown as banner)
+ * - success: string | null (shown as banner)
+ * - connectedIntegrations: list of connected integrations
+ */
+
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Linkedin, Twitter, MessageSquare, Mail, MessageCircle, Send, Instagram, Facebook, Chrome, Loader2, Users, Upload, RefreshCw, type LucideIcon } from 'lucide-react';

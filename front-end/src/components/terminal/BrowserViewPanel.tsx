@@ -1,3 +1,30 @@
+/**
+ * STATE MACHINE: BrowserViewPanel
+ *
+ * EXPANSION STATE:
+ * [COLLAPSED] <-- isExpanded: false
+ *     |
+ *     v
+ * [EXPANDED] <-- isExpanded: true
+ *
+ * FULLSCREEN STATE:
+ * [NORMAL] <-- isFullscreen: false
+ *     |
+ *     v
+ * [FULLSCREEN] <-- isFullscreen: true (renders via portal)
+ *
+ * STREAMING STATE:
+ * [POLLING] --> fetches browser screenshot periodically
+ *     |
+ *     +--> imgSrc: string (current screenshot URL with cache-bust)
+ *     +--> agentStatus determines poll interval
+ *
+ * States:
+ * - isExpanded: boolean
+ * - isFullscreen: boolean
+ * - imgSrc: string
+ */
+
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { Maximize2, X, CheckCircle2, XCircle } from 'lucide-react';

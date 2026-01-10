@@ -1,3 +1,37 @@
+/**
+ * STATE MACHINE: PhoneAuthModal
+ *
+ * MODAL VISIBILITY:
+ * [CLOSED] <-- open: false
+ *     |
+ *     v (parent sets open=true)
+ * [OPEN]
+ *
+ * AUTH FLOW (step state):
+ * [PHONE_STEP] <-- step: 'phone'
+ *     |
+ *     | (submit phone)
+ *     v
+ * [LOADING] <-- loading: true
+ *     |
+ *     v (OTP sent)
+ * [OTP_STEP] <-- step: 'otp'
+ *     |
+ *     | (submit OTP)
+ *     v
+ * [LOADING] <-- loading: true
+ *     |
+ *     +--> (success) --> onAuthComplete() --> [CLOSED]
+ *     +--> (error) --> toast error --> [OTP_STEP]
+ *
+ * States:
+ * - step: 'phone' | 'otp'
+ * - phone: string (formatted phone number)
+ * - otp: string (6-digit code)
+ * - loading: boolean
+ * - modalPosition: { top, left } (positioned relative to trigger)
+ */
+
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect, RefObject } from "react";

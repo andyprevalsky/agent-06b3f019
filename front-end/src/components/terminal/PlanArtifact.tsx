@@ -1,4 +1,26 @@
 /**
+ * STATE MACHINE: PlanArtifact (DEPRECATED - use PlanChip instead)
+ *
+ * EXPANSION STATE:
+ * [COLLAPSED] <-- expanded: false
+ *     |
+ *     v
+ * [EXPANDED] <-- expanded: true
+ *
+ * FEEDBACK SENDING:
+ * [IDLE] <-- feedbackSending: false
+ *     |
+ *     v
+ * [SENDING] <-- feedbackSending: true
+ *     |
+ *     v (success)
+ * [SENT]
+ *
+ * States:
+ * - expanded: boolean
+ * - feedbackSending: boolean
+ * - feedbackSent: 'approved' | 'revised' | null
+ *
  * @deprecated This component is deprecated. Use PlanChip.tsx instead.
  * 
  * PlanChip renders plans inline in the conversation as an expandable chip,

@@ -1,3 +1,12 @@
+/**
+ * STATE MACHINE: VideoLoadingAnimation
+ *
+ * This is a stateless presentational component.
+ *
+ * [VISIBLE] <-- isVisible: true --> renders animated loading dots
+ * [HIDDEN] <-- isVisible: false --> returns null
+ */
+
 import React from 'react';
 
 interface VideoLoadingAnimationProps {

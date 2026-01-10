@@ -1,3 +1,15 @@
+/**
+ * STATE MACHINE: ErrorBoundary (Class Component)
+ *
+ * [NORMAL] <-- hasError: false
+ *   |
+ *   | (child throws error)
+ *   v
+ * [ERROR_CAUGHT] <-- hasError: true, error: Error, errorInfo: ErrorInfo
+ *   |
+ *   +--> renders fallback or error UI
+ */
+
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 
 interface Props {

@@ -1,3 +1,15 @@
+/**
+ * STATE MACHINE: SubscriptionModal
+ *
+ * [CLOSED] <-- open: false (controlled by parent)
+ *     |
+ *     v (parent sets open=true)
+ * [OPEN] <-- open: true
+ *     |
+ *     +--> displays current tier and upgrade options
+ *     +--> user clicks upgrade --> navigates to Stripe URL
+ */
+
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Check } from "lucide-react";

@@ -1,3 +1,24 @@
+/**
+ * STATE MACHINE: MarkdownText
+ *
+ * ANIMATION STATE (when shouldAnimate=true):
+ * [ANIMATING] <-- isAnimating: true
+ *     |
+ *     +--> visibleCharCount: 0..N (increments each frame)
+ *     |
+ *     v (all characters revealed)
+ * [COMPLETE] <-- isAnimating: false
+ *     |
+ *     +--> calls onComplete callback
+ *
+ * When shouldAnimate=false:
+ * [STATIC] --> renders full markdown immediately
+ *
+ * States:
+ * - visibleCharCount: number
+ * - isAnimating: boolean
+ */
+
 import React, { memo, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';

@@ -1,3 +1,15 @@
+/**
+ * STATE MACHINE: CustomizableAnimation
+ *
+ * [ANIMATING] <-- component manages canvas animation state internally
+ *   |
+ *   +--> centerIndices: number[] (which emblem is centered in each column)
+ *   +--> targetCenters: number[] (target positions for animation)
+ *   +--> imagesLoaded: boolean (wait for images before rendering)
+ *
+ * Animation loop runs continuously via requestAnimationFrame
+ */
+
 import { useEffect, useRef, useState } from "react";
 
 interface EmblemData {

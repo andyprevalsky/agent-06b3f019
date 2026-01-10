@@ -1,3 +1,37 @@
+/**
+ * STATE MACHINE: WaitlistForm
+ *
+ * EXPANSION STATE:
+ * [COLLAPSED] <-- isExpanded: false
+ *     |
+ *     | (click to expand)
+ *     v
+ * [EXPANDED] <-- isExpanded: true
+ *
+ * SUBMISSION FLOW:
+ * [IDLE] <-- isLoading: false, isSuccess: false
+ *     |
+ *     | (form submit)
+ *     v
+ * [LOADING] <-- isLoading: true
+ *     |
+ *     +--> (success) --> [SUCCESS] <-- isSuccess: true
+ *     +--> (error) --> [ERROR] <-- submitError: string
+ *     |                    |
+ *     |                    v (retry)
+ *     +------<-------------+
+ *     v
+ * [IDLE]
+ *
+ * States:
+ * - isExpanded: boolean
+ * - isLoading: boolean
+ * - isSuccess: boolean
+ * - formData: { name, email }
+ * - emailError: string (validation)
+ * - submitError: string (API error)
+ */
+
 "use client";
 import React, { useState } from "react";
 import { Button } from "@/components/ui/button";

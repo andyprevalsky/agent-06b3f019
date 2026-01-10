@@ -1,3 +1,11 @@
+/**
+ * STATE MACHINE: Terms
+ *
+ * This component is stateless - displays static terms of service content.
+ *
+ * [MOUNTED] --> renders static content
+ */
+
 import NaviHeader from "@/components/NaviHeader";
 import NaviFooter from "@/components/NaviFooter";
 

@@ -1,3 +1,17 @@
+/**
+ * STATE MACHINE: About
+ *
+ * [CLOSED] <-- contactOpen: false
+ *   |
+ *   | (click "Get in touch")
+ *   v
+ * [CONTACT_MODAL_OPEN] <-- contactOpen: true
+ *   |
+ *   | (close modal)
+ *   v
+ * [CLOSED]
+ */
+
 import { useEffect, useState } from "react";
 import NaviHeader from "@/components/NaviHeader";
 import NaviFooter from "@/components/NaviFooter";

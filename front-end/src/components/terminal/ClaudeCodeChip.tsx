@@ -1,3 +1,33 @@
+/**
+ * STATE MACHINE: ClaudeCodeChip
+ *
+ * EXPANSION STATE:
+ * [COLLAPSED] <-- isExpanded: false
+ *     |
+ *     v
+ * [EXPANDED] <-- isExpanded: true (shows terminal output)
+ *
+ * FULLSCREEN STATE:
+ * [NORMAL] <-- isFullscreen: false
+ *     |
+ *     v
+ * [FULLSCREEN] <-- isFullscreen: true (renders via portal)
+ *
+ * TERMINAL STATE:
+ * [IDLE] --> terminalReady: false
+ *     |
+ *     v (xterm initialized)
+ * [READY] --> terminalReady: true
+ *     |
+ *     +--> terminal output streams via realtime subscription
+ *
+ * States:
+ * - isExpanded: boolean
+ * - isFullscreen: boolean
+ * - terminalReady: boolean
+ * - xterm Terminal instance (via ref)
+ */
+
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Maximize2, X, FileJson } from 'lucide-react';
 import { createPortal } from 'react-dom';

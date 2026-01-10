@@ -1,3 +1,21 @@
+/**
+ * STATE MACHINE: ProgressiveImage
+ *
+ * [LOW_RES] --> lowSrc loaded, src=lowSrc
+ *   |
+ *   | (medSrc loaded)
+ *   v
+ * [MED_RES] --> src=medSrc
+ *   |
+ *   | (highSrc loaded)
+ *   v
+ * [HIGH_RES] --> src=highSrc
+ *
+ * State:
+ * - src: string (current image source, progresses through quality levels)
+ * - isTransitioning: boolean (fade animation)
+ */
+
 import { useState, useEffect, useRef } from 'react';
 
 interface ProgressiveImageProps {

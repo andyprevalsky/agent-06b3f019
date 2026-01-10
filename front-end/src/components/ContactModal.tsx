@@ -1,3 +1,19 @@
+/**
+ * STATE MACHINE: ContactModal
+ *
+ * [CLOSED] <-- open: false (controlled by parent)
+ *     |
+ *     v (parent sets open=true)
+ * [OPEN] <-- open: true
+ *     |
+ *     | (click copy email)
+ *     v
+ * [COPIED] <-- copied: true
+ *     |
+ *     v (setTimeout 2s)
+ * [OPEN] <-- copied: false
+ */
+
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";

@@ -1,3 +1,20 @@
+/**
+ * STATE MACHINE: BrowserStatusBarCarousel
+ *
+ * [SINGLE_BROWSER] <-- browsers.length <= 1
+ *     |
+ *     v (multiple browsers)
+ * [CAROUSEL_MODE] <-- browsers.length > 1
+ *     |
+ *     +--> activeIndex: 0..N (which browser tab is shown)
+ *     +--> navigate via up/down arrows
+ *
+ * State:
+ * - activeIndex: number (current browser index)
+ *
+ * Auto-adjusts activeIndex when browsers array changes.
+ */
+
 import { memo, useState, useCallback, useEffect } from 'react';
 import { ChevronUp, ChevronDown } from 'lucide-react';
 import BrowserStatusBar from './BrowserStatusBar';

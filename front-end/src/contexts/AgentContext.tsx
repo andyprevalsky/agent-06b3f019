@@ -1,3 +1,48 @@
+/**
+ * STATE MACHINE: AgentContext
+ *
+ * Central state management for agent conversations and real-time updates.
+ *
+ * AGENT SELECTION:
+ * [NO_AGENT] <-- selectedAgentId: null
+ *     |
+ *     v (setSelectedAgentId)
+ * [LOADING_AGENT] <-- fetch agent detail + subscribe to realtime
+ *     |
+ *     v (fetch complete)
+ * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[]
+ *     |
+ *     | (change agent)
+ *     v
+ * [NO_AGENT] or [LOADING_AGENT]
+ *
+ * REALTIME STREAMING:
+ * [IDLE] --> subscribed to Supabase realtime channel
+ *     |
+ *     v (stream event)
+ * [STREAMING] --> updates streamingBubbles, streamingPlans, streamingAttention, streamingTools
+ *     |
+ *     v (stream complete)
+ * [IDLE] --> content moved to messages array
+ *
+ * MESSAGE SENDING:
+ * [IDLE] <-- isSending: false
+ *     |
+ *     v (postMessage)
+ * [SENDING] <-- isSending: true
+ *     |
+ *     v (complete)
+ * [IDLE]
+ *
+ * Key state:
+ * - selectedAgentId: string | null
+ * - agentDetail: AgentDetail | null
+ * - messages: Message[]
+ * - streamingBubbles: Map<string, StreamingBubble>
+ * - streamingPlans, streamingAttention, streamingTools: Maps
+ * - isSending: boolean
+ */
+
 import React, { createContext, useContext, useState, useRef, useCallback, useEffect } from 'react';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import {

@@ -1,3 +1,38 @@
+/**
+ * STATE MACHINE: MessageList
+ *
+ * MESSAGE ANIMATION QUEUE:
+ * [IDLE] --> processes messages one at a time
+ *     |
+ *     v (new message to animate)
+ * [ANIMATING] <-- typingMessageId: string | null
+ *     |
+ *     v (animation complete)
+ * [IDLE]
+ *
+ * AUTO-SCROLL:
+ * [ENABLED] <-- userScrolled: false
+ *     |
+ *     | (user scrolls up)
+ *     v
+ * [DISABLED] <-- userScrolled: true
+ *     |
+ *     | (scroll to bottom)
+ *     v
+ * [ENABLED]
+ *
+ * FEEDBACK BANNER:
+ * [HIDDEN] <-- hideFeedback: true or agent not completed
+ *     |
+ *     v (agent completed)
+ * [VISIBLE] <-- hideFeedback: false, agentDetail.status === 'COMPLETED'
+ *
+ * States:
+ * - typingMessageId: string | null
+ * - userScrolled: boolean
+ * - hideFeedback: boolean
+ */
+
 import { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } from 'react';
 import { motion } from 'framer-motion';
 import { cn } from '@/lib/utils';

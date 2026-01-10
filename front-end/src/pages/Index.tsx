@@ -1,3 +1,14 @@
+/**
+ * STATE MACHINE: Index (Landing Page)
+ *
+ * This component is stateless - computes earlyAccess from utils.
+ *
+ * [MOUNTED]
+ *   |
+ *   +--> earlyAccess=true --> shows PreOrderSection + WaitlistSection(customOnly)
+ *   +--> earlyAccess=false --> shows WaitlistSection only
+ */
+
 import { Toaster } from "@/components/ui/toaster";
 import NaviHeader from "@/components/NaviHeader";
 import HeroSection from "@/components/HeroSection";

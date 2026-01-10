@@ -1,3 +1,39 @@
+/**
+ * STATE MACHINE: useAuth
+ *
+ * AUTH INITIALIZATION:
+ * [LOADING] <-- loading: true
+ *     |
+ *     v (check existing session)
+ * [ANONYMOUS] <-- user exists but isAnonymous: true
+ *   or
+ * [FULLY_SIGNED_IN] <-- isFullySignedIn: true (real user, not anonymous)
+ *   or
+ * [NO_SESSION] <-- user: null
+ *
+ * AUTH FLOW:
+ * [NO_SESSION] or [ANONYMOUS]
+ *     |
+ *     | (user signs in)
+ *     v
+ * [SIGNED_IN] <-- session exists, user exists
+ *     |
+ *     | (check invite code requirement)
+ *     v
+ * [NEEDS_INVITE] <-- needsInviteCode: true (must enter code first)
+ *   or
+ * [FULLY_SIGNED_IN] <-- needsInviteCode: false
+ *
+ * Returns:
+ * - user: User | null
+ * - session: Session | null
+ * - loading: boolean
+ * - isAuthenticated: boolean
+ * - isAnonymous: boolean
+ * - isFullySignedIn: boolean
+ * - needsInviteCode: boolean
+ */
+
 import { useEffect, useState, useCallback, useRef } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
 import {

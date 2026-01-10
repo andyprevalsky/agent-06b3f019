@@ -1,3 +1,29 @@
+/**
+ * STATE MACHINE: FeatureVideoStage
+ *
+ * VIDEO PLAYBACK PHASES:
+ * [LOADING] <-- canPlay: false, markersLoaded: false
+ *     |
+ *     v (video + markers loaded)
+ * [INTRO] --> play intro segment for feature
+ *     |
+ *     v (intro ends)
+ * [CYCLING] --> loop between cycleStart and cycleEnd
+ *     |
+ *     | (feature changes)
+ *     v
+ * [OUTRO] --> play outro segment
+ *     |
+ *     v (outro ends)
+ * [INTRO] (for new feature)
+ *
+ * States:
+ * - canPlay: boolean (video ready)
+ * - markersLoaded: boolean (segment timestamps loaded)
+ * - phase: 'intro' | 'cycle' | 'outro' | null
+ * - showLoading: boolean (loading overlay visibility)
+ */
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import VideoLoadingAnimation from "./VideoLoadingAnimation";
 

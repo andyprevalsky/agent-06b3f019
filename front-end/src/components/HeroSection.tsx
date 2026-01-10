@@ -1,3 +1,33 @@
+/**
+ * STATE MACHINE: HeroSection
+ *
+ * TYPEWRITER EFFECT:
+ * [TYPING] --> typedText grows character by character
+ *   |
+ *   v (text complete)
+ * [TYPED_COMPLETE]
+ *
+ * VIDEO LOADING:
+ * [VIDEO_NOT_LOADED] --> shouldLoadVideo: false
+ *   |
+ *   v (scroll/timeout triggers)
+ * [VIDEO_LOADING] --> shouldLoadVideo: true, isVideoReady: false
+ *   |
+ *   v (video can play)
+ * [VIDEO_READY] --> isVideoReady: true
+ *   |
+ *   v (first frame painted)
+ * [VIDEO_PLAYING] --> hasPaintedFirstFrame: true
+ *
+ * States:
+ * - typedText: string (typewriter text content)
+ * - shouldLoadVideo: boolean
+ * - isVideoReady: boolean
+ * - hasPaintedFirstFrame: boolean
+ * - shouldBePlaying: boolean (play/pause control)
+ * - arrowVisible: boolean (bounce arrow visibility)
+ */
+
 import { Button } from "@/components/ui/button";
 import ProgressiveImage from "./ProgressiveImage";
 import VideoPlayer from "./VideoPlayer";

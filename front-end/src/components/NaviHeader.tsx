@@ -1,3 +1,24 @@
+/**
+ * STATE MACHINE: NaviHeader
+ *
+ * MOBILE BUTTON VISIBILITY (IntersectionObserver):
+ * [HIDDEN] <-- showMobileButton: false
+ *   |
+ *   | (features section enters viewport)
+ *   v
+ * [VISIBLE] <-- showMobileButton: true
+ *   |
+ *   | (features section exits viewport)
+ *   v
+ * [HIDDEN]
+ *
+ * CONTACT MODAL:
+ * [CLOSED] <-- contactModalOpen: false
+ *   |
+ *   v
+ * [OPEN] <-- contactModalOpen: true
+ */
+
 import { Button } from "@/components/ui/button";
 import { isEarlyAccessEnabled } from "@/lib/utils";
 import { useState, useEffect } from "react";

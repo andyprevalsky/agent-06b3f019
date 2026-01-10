@@ -1,3 +1,33 @@
+/**
+ * STATE MACHINE: AttentionInbox
+ *
+ * DATA LOADING:
+ * [LOADING] <-- loading: true
+ *     |
+ *     v (fetch complete)
+ * [READY] <-- loading: false, requests: AttentionRequest[]
+ *
+ * RESPONDING TO REQUEST:
+ * [IDLE] <-- responding: null
+ *     |
+ *     | (click respond)
+ *     v
+ * [RESPONDING] <-- responding: requestId
+ *     |
+ *     | (submit or cancel)
+ *     v
+ * [IDLE]
+ *
+ * States:
+ * - loading: boolean
+ * - requests: AttentionRequest[]
+ * - responding: string | null (currently responding request ID)
+ * - responseText: string
+ * - submitting: boolean
+ *
+ * Realtime: subscribes to attention request updates via Supabase
+ */
+
 import { useState, useEffect, useRef } from 'react';
 import { Bell } from 'lucide-react';
 import { Button } from '@/components/ui/button';
