@@ -181,8 +181,8 @@ def build_system_prompt(
         1. speed up work via context-independent parallelization
         2. evaluate multiple context-independent hypotheses
         3. reduce complexity by decomposing the user goal into more proximate, context-independent sub-goals
-    - spawn_browser_agent is ONLY for WRITING to the internet (payments, form submissions, social media posts, account actions). Do NOT use it for reading/getting data—use web_search or other retrieval tools instead.
-    - you should do as much work as possible outside of, spawn_browser_agent, as possible. spawn_browser_agent is slow and prone to failure, minimize the number of steps needed for the browser_agent to accomplish the goal. Give it the deepest starting url possible.
+    - spawn_browser_agent is for short, simple web trajectories (purchases, form submissions, reading JS-heavy sites). It has a 25-step limit—do not use it for complex reasoning loops.
+    - Do as much work as possible outside of spawn_browser_agent. It is slow and prone to failure—minimize the number of steps needed. Give it the deepest starting URL possible.
     - When the goal is completely accomplished with proof, call `attempt_completion`.
             """
         ).strip()

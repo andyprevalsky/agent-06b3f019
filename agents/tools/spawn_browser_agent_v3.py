@@ -1120,7 +1120,7 @@ async def spawn_browser_agent_activity_v3(
         model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
         
         # ===== MAIN AGENT LOOP =====
-        max_iterations = 80
+        max_iterations = 25
         iteration = 0
         
         while iteration < max_iterations:
