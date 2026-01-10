@@ -14,16 +14,16 @@ const Privacy = () => {
             </h1>
             
             <p className="text-muted-foreground text-center mb-12">
-              Last updated: August 5, 2025
+              Last updated: January 10, 2026
             </p>
             
             <div className="space-y-8">
               <div className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-lg p-6">
                 <p className="text-lg leading-relaxed">
-                  Your privacy is our top priority at Navi (hinavi.ai). This policy explains what we do not collect, how Navi works, and our commitment to your privacy.
+                  Your privacy is our top priority at Rose Labs. This policy explains what we do not collect, how our assistant works, and our commitment to your privacy.
                 </p>
                 <p className="mt-4 text-muted-foreground">
-                  Visit <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">www.hinavi.ai</a> to learn more about our service.
+                  Visit <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">www.roselabs.ai</a> to learn more about our service.
                 </p>
               </div>
 
@@ -38,7 +38,7 @@ const Privacy = () => {
                   </li>
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
-                    <span>All voice interactions are streamed in real time and discarded immediately. Navi only activates and listens when triggered by the wake word "Hi Navi."</span>
+                    <span>All interactions are processed in real time and discarded immediately.</span>
                   </li>
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
@@ -50,19 +50,19 @@ const Privacy = () => {
               <div className="w-full h-px bg-gradient-to-r from-transparent via-border to-transparent"></div>
 
               <section>
-                <h2 className="text-2xl font-semibold mb-4 text-foreground">2. How Navi Operates</h2>
+                <h2 className="text-2xl font-semibold mb-4 text-foreground">2. How Our Assistant Operates</h2>
                 <ul className="space-y-3 text-muted-foreground">
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
-                    <span>Your voice input is never stored or processed by us. Navi serves as a pass-through to frontier AI model providers, exclusively during your active session.</span>
+                    <span>Your input is never stored or processed by us. Our assistant serves as a pass-through to frontier AI model providers, exclusively during your active session.</span>
                   </li>
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
-                    <span>After your interaction ends, no data remains with Navi.</span>
+                    <span>After your interaction ends, no data remains with us.</span>
                   </li>
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
-                    <span>We do not use your voice or interaction data for advertising, marketing, or profiling.</span>
+                    <span>We do not use your interaction data for advertising, marketing, or profiling.</span>
                   </li>
                 </ul>
               </section>
@@ -74,7 +74,7 @@ const Privacy = () => {
                 <ul className="space-y-3 text-muted-foreground">
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
-                    <span>Voice data is securely and anonymously streamed to leading AI model providers strictly to generate your requested response.</span>
+                    <span>Data is securely and anonymously streamed to leading AI model providers strictly to generate your requested response.</span>
                   </li>
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
@@ -103,11 +103,7 @@ const Privacy = () => {
                 <ul className="space-y-3 text-muted-foreground">
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
-                    <span>Navi activates only in response to the wake word "Hi Navi."</span>
-                  </li>
-                  <li className="flex items-start space-x-3">
-                    <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
-                    <span>You can disable listening at any time by turning off your device.</span>
+                    <span>You are in full control of when and how you interact with our assistant.</span>
                   </li>
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
@@ -121,7 +117,7 @@ const Privacy = () => {
               <section>
                 <h2 className="text-2xl font-semibold mb-4 text-foreground">6. Policy Updates</h2>
                 <p className="text-muted-foreground">
-                  We may amend this Privacy Policy occasionally. The latest version will always be available at <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">www.hinavi.ai</a> with the date of last revision.
+                  We may amend this Privacy Policy occasionally. The latest version will always be available at <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">www.roselabs.ai</a> with the date of last revision.
                 </p>
               </section>
 
@@ -133,7 +129,7 @@ const Privacy = () => {
                   Have questions or concerns? Reach out anytime:
                 </p>
                 <p className="text-muted-foreground">
-                  Email: <a href="mailto:andy@hinavi.ai" className="text-primary hover:text-primary/80 underline transition-colors">andy@hinavi.ai</a>
+                  Email: <a href="mailto:andy@roselabs.ai" className="text-primary hover:text-primary/80 underline transition-colors">andy@roselabs.ai</a>
                 </p>
               </section>
 
@@ -141,7 +137,7 @@ const Privacy = () => {
 
               <div className="text-center py-8">
                 <p className="text-lg font-medium text-foreground">
-                  Your privacy is our top priority at Navi. We're here to help—not to watch.
+                  Your privacy is our top priority at Rose Labs. We're here to help, not to watch.
                 </p>
               </div>
             </div>

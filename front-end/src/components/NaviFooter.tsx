@@ -14,10 +14,10 @@ const NaviFooter = () => {
           <div className="md:col-span-2">
             <Link to="/" className="flex items-center space-x-3 mb-4 hover:opacity-80 transition-opacity w-fit">
               <div className="w-8 h-8 rounded-lg" style={{ background: 'linear-gradient(to bottom left, #FE7503, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)' }}></div>
-              <span className="text-xl font-semibold">Navi</span>
+              <span className="text-xl font-semibold">Rose Labs</span>
             </Link>
             <p className="text-primary-foreground/70 max-w-md leading-relaxed">
-              Lighting the way to what matters most. Navi is the first truly customizable AI hardware companion.
+              Your personal superintelligence.
             </p>
           </div>
           
@@ -78,7 +78,7 @@ const NaviFooter = () => {
         <div className="border-t border-primary-foreground/10 pt-8">
           <div className="flex flex-col md:flex-row justify-between items-center">
             <p className="text-primary-foreground/60 text-sm">
-              © 2025 Navi. All rights reserved.
+              © 2026 Rose Labs. All rights reserved.
             </p>
             <div className="flex space-x-6 mt-4 md:mt-0">
               <Link to="/privacy" className="text-primary-foreground/60 hover:text-primary-foreground transition-colors text-sm">
