@@ -1842,8 +1842,6 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
               contextSize={agentDetail?.context_size || 0}
               restartThreshold={agentDetail ? Math.round(getModelContextWindow(agentDetail.model, models) * 0.8) : 100000}
               showModelSelector={!selectedAgentId}
-              agentCompleted={selectedAgentId !== null && agentDetail?.status === 'COMPLETED'}
-              onCreateNewAgent={handleCreateNewAgent}
               dripStyles={dripStyles}
               drippiness={blur}
               agentDetail={agentDetail}
@@ -1854,7 +1852,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
                 setCurrentView('agents');
                 loadAgents();
               }}
-              canSubmit={!selectedAgentId || hasActiveAttentionRequest || agentDetail?.status === 'PAUSED' || isChatMode}
+              canSubmit={!selectedAgentId || hasActiveAttentionRequest || agentDetail?.status === 'PAUSED' || agentDetail?.status === 'COMPLETED' || isChatMode}
               onPause={handlePauseAgent}
               isPausing={isPausing}
             />

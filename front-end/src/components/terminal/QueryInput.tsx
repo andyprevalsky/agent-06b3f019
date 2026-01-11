@@ -94,8 +94,6 @@ interface QueryInputProps {
   contextSize?: number; // Current context size
   restartThreshold?: number; // Threshold for context restart
   showModelSelector?: boolean; // Whether to show the model selector button
-  agentCompleted?: boolean; // Whether the agent is completed
-  onCreateNewAgent?: () => void; // Callback to create a new agent
   dripStyles?: DripStyles; // Drippiness styling
   drippiness?: number; // Drippiness value (0-100)
   // Agent settings props
@@ -122,8 +120,6 @@ export default function QueryInput({
   contextSize = 0,
   restartThreshold = 100000,
   showModelSelector = true,
-  agentCompleted = false,
-  onCreateNewAgent,
   dripStyles = {
     blur: 12,
     bgOpacity: 0.8,
@@ -301,36 +297,23 @@ export default function QueryInput({
             </div>
           </div>
 
-          {/* Textarea Input or Create New Agent Button */}
+          {/* Textarea Input */}
           <div className="relative px-3">
-            {agentCompleted ? (
-              // Show centered "Create New Agent" button when agent is completed
-              <div className="flex items-center justify-center min-h-[56px] py-3">
-                <button
-                  onClick={onCreateNewAgent}
-                  className="px-6 py-2 rounded-lg bg-gradient-to-br from-[#FE7503] via-[#E062CC] to-[#7A6BEC] text-white font-medium text-sm hover:opacity-90 transition-opacity shadow-lg"
-                >
-                  Create New Agent
-                </button>
-              </div>
-            ) : (
-              // Show normal textarea when agent is not completed
-              <textarea
-                ref={textareaRef}
-                value={value}
-                onChange={handleChange}
-                onKeyDown={handleKeyDown}
-                onFocus={handleFocus}
-                disabled={disabled}
-                placeholder={placeholder}
-                className={cn(
-                  'w-full bg-transparent border-none text-foreground placeholder:text-muted-foreground',
-                  'resize-none outline-none min-h-[56px] py-3',
-                  'font-normal text-base leading-6'
-                )}
-                rows={2}
-              />
-            )}
+            <textarea
+              ref={textareaRef}
+              value={value}
+              onChange={handleChange}
+              onKeyDown={handleKeyDown}
+              onFocus={handleFocus}
+              disabled={disabled}
+              placeholder={placeholder}
+              className={cn(
+                'w-full bg-transparent border-none text-foreground placeholder:text-muted-foreground',
+                'resize-none outline-none min-h-[56px] py-3',
+                'font-normal text-base leading-6'
+              )}
+              rows={2}
+            />
           </div>
 
           {/* Bottom Bar */}
