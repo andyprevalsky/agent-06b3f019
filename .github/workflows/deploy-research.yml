@@ -1,0 +1,27 @@
+name: Deploy Research (Supabase Edge Functions)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'research/supabase/functions/**'
+      - 'research/deploy.sh'
+      - '.github/workflows/deploy-research.yml'
+
+jobs:
+  deploy:
+    name: Deploy to Supabase
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy Edge Functions
+        run: ./deploy.sh
+        working-directory: ./research
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

@@ -9,7 +9,10 @@
  * - ROSE_API_KEY
  */
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://kzlurqihzaolhzsbkctf.supabase.co';
+// Use local Supabase functions in development, production URL otherwise
+const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
+  ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
+  : 'http://localhost:54321/functions/v1';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
 const ROSE_API_KEY = process.env.ROSE_API_KEY || '';
 
@@ -60,7 +63,7 @@ export interface CompletionChunk {
 export async function createStreamingCompletion(
   options: CompletionOptions
 ): Promise<AsyncIterable<CompletionChunk>> {
-  const url = `${SUPABASE_URL}/functions/v1/completions`;
+  const url = `${SUPABASE_FUNCTIONS_URL}/completions`;
 
   // Validate required env vars
   if (!SUPABASE_ANON_KEY) {

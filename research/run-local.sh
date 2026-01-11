@@ -9,7 +9,8 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}🚀 Starting Rose Edge Functions Locally${NC}\n"
+echo -e "${GREEN}🚀 [Research] Mode: DEVELOPMENT${NC}"
+echo -e "${GREEN}   Starting Rose Edge Functions Locally${NC}\n"
 
 # Check if .env exists
 if [ ! -f ".env" ]; then
@@ -27,22 +28,19 @@ if ! command -v supabase &> /dev/null; then
     exit 1
 fi
 
-# Check if Supabase is running
+# Check if Supabase local services are running (required for functions serve)
 echo "Checking if Supabase is running..."
-if ! curl -s http://localhost:54321/health &> /dev/null; then
+cd supabase
+if ! supabase status &> /dev/null; then
     echo -e "${YELLOW}⚠️  Local Supabase is not running. Starting it...${NC}\n"
-    
-    # Go to project root to run supabase start
-    cd ..
     supabase start
-    cd research
-    
     echo ""
     echo -e "${GREEN}✅ Supabase started${NC}"
     echo ""
 else
     echo -e "${GREEN}✅ Supabase is already running${NC}\n"
 fi
+cd ..
 
 # Show environment info
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -69,12 +67,13 @@ echo ""
 
 echo -e "${GREEN}🔧 Starting Edge Functions...${NC}\n"
 echo "Functions will be available at:"
-echo "  http://localhost:54321/functions/v1/rose/completions"
-echo "  http://localhost:54321/functions/v1/rose/cost"
-echo "  http://localhost:54321/functions/v1/rose/generate-api-key"
-echo "  http://localhost:54321/functions/v1/rose/api-keys"
-echo "  http://localhost:54321/functions/v1/rose/delete-api-key"
-echo "  http://localhost:54321/functions/v1/rose/rose-bench"
+echo "  http://localhost:54321/functions/v1/completions"
+echo "  http://localhost:54321/functions/v1/chat"
+echo "  http://localhost:54321/functions/v1/cost"
+echo "  http://localhost:54321/functions/v1/api-keys"
+echo "  http://localhost:54321/functions/v1/generate-api-key"
+echo "  http://localhost:54321/functions/v1/delete-api-key"
+echo "  http://localhost:54321/functions/v1/rose-bench"
 echo ""
 echo -e "${YELLOW}Press Ctrl+C to stop${NC}\n"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

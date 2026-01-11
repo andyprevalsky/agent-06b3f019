@@ -252,6 +252,8 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 
 // Start server
 app.listen(PORT, () => {
+  const isProduction = process.env.NODE_ENV === 'production';
+  console.log(`🚀 [Backend] Mode: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`📡 REST API: http://localhost:${PORT}`);
   console.log(`🔐 Auth: JWKS (Supabase)`);

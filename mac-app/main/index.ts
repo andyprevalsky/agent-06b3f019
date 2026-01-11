@@ -15,6 +15,9 @@ import {
 
 app.name = 'Rose';
 
+// Log environment mode at startup
+console.log(`🚀 [Mac App] Mode: ${config.isDev ? 'DEVELOPMENT' : 'PRODUCTION'}`);
+
 // Window state persistence
 interface WindowState {
   x?: number;

@@ -1,0 +1,42 @@
+# Supabase CLI configuration for local edge functions development
+# This project uses cloud database - only edge functions run locally
+
+project_id = "rose-research"
+
+[api]
+enabled = true
+port = 54321
+
+[db]
+port = 54322
+
+[realtime]
+enabled = false
+
+[studio]
+enabled = false
+
+[storage]
+enabled = false
+
+# Edge Functions configuration - disable JWT verification for local dev
+[functions.completions]
+verify_jwt = false
+
+[functions.chat]
+verify_jwt = false
+
+[functions.cost]
+verify_jwt = false
+
+[functions.api-keys]
+verify_jwt = false
+
+[functions.generate-api-key]
+verify_jwt = false
+
+[functions.delete-api-key]
+verify_jwt = false
+
+[functions.rose-bench]
+verify_jwt = false

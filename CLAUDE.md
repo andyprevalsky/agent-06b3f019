@@ -41,6 +41,7 @@ Check these when errors occur:
 - **Frontend:** `front-end/frontend-logs.log`
 - **Mac App (console):** `mac-app/mac-app-console-logs.log`
 - **Mac App (IPC):** `mac-app/mac-app-ipc-logs.log`
+- **Research (edge functions):** `research/research-logs.log`
 
 ## Critical Rules
 
@@ -110,3 +111,7 @@ All realtime and tool message types are defined in `front-end/src/lib/realtime-t
 
 - `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite
 - `research/supabase/functions/completions/test-browser-use-usage.mjs` - rose-1-browser-use test
+
+## Ralph Instructions
+
+- If the next step is to check a log file, make sure to call the tool. NEVER ask the user to check a log file for you.

@@ -104,18 +104,24 @@ logger = structlog.get_logger()
 
 async def main():
     """Main worker entry point."""
-    
+
     # Load configuration
     config = load_config()
-    
+
+    # Log environment mode
+    is_production = config.environment == "production"
+    print(f"🚀 [Agents] Mode: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
+    print(f"   Rose API URL: {config.rose.api_url}")
+
     # Start health check server
     health_thread = run_health_server(config.health_check_port)
     set_worker_status(True)
-    
+
     logger.info(
         "Starting Temporal worker",
         namespace=config.temporal.namespace,
-        task_queue=config.temporal.task_queue
+        task_queue=config.temporal.task_queue,
+        environment=config.environment
     )
     
     # Connect to Temporal Cloud

@@ -109,8 +109,9 @@ class ParallelConfig:
 @dataclass
 class RoseConfig:
     """Rose API configuration for routing Rose models to Supabase edge function."""
-    
-    api_url: str = "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions"
+
+    # URL is set dynamically based on environment in load_config()
+    api_url: str = ""
     api_key: str = ""  # Rose API key (x-api-key header)
     supabase_anon_key: str = ""  # Supabase anon key (Authorization header)
 
@@ -263,8 +264,16 @@ def load_config() -> AppConfig:
         api_key=os.environ["PARRALLEL_API_KEY"],
     )
     
+    # Use local Supabase functions in development, production URL otherwise
+    environment = os.getenv("ENVIRONMENT", "production")
+    rose_functions_url = (
+        "http://localhost:54321/functions/v1"
+        if environment != "production"
+        else "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1"
+    )
+
     rose = RoseConfig(
-        api_url=os.getenv("ROSE_API_URL", "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions"),
+        api_url=os.getenv("ROSE_API_URL", f"{rose_functions_url}/completions"),
         api_key=os.getenv("ROSE_API_KEY", ""),
         supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", ""),
     )

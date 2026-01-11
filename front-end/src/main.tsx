@@ -46,6 +46,9 @@ if (import.meta.env.DEV) {
   console.error = (...args) => { originalError(...args); sendLog('error', args); };
 }
 
+// Log environment mode at startup (after capture setup so it goes to log file)
+console.log(`🚀 [Frontend] Mode: ${import.meta.env.DEV ? 'DEVELOPMENT' : 'PRODUCTION'}`);
+
 // Amplitude Analytics
 import * as amplitude from '@amplitude/analytics-browser';
 import { sessionReplayPlugin } from '@amplitude/plugin-session-replay-browser';
