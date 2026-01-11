@@ -12,6 +12,9 @@ primary_region = "iad"  # Ashburn, Virginia
   # Python configuration
   PYTHONUNBUFFERED = "1"
   PYTHON_VERSION = "3.11"
+
+  # Environment setting - CRITICAL: Must be "production" to use production Supabase URL
+  ENVIRONMENT = "production"
   
   # Temporal Worker Configuration
   # These control concurrency and resource usage
