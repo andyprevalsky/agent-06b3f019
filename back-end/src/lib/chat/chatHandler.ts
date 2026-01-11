@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../prisma';
 import { startAgentWorkflow } from '../temporal';
 import { createMessage } from '../messages';
+import { setResponseSchema } from '../setResponseSchema';
 import { callRouterLlm, RouterDecision } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
 import { executeWebSearch } from './chatTools';
@@ -265,6 +266,19 @@ async function startTemporalWorkflowForChat(
 
   if (!agent.verifier) {
     throw new Error(`Agent ${agentId} has no verifier`);
+  }
+
+  // Generate response schema based on start phase:
+  // - Execute mode: fire-and-forget here (no set_plan phase to generate it)
+  // - Plan mode: schema is generated during set_plan tool execution (in parallel with planner)
+  if (startPhase === 'execute') {
+    console.log('🎯 Starting async response schema generation for execute mode', { agentId });
+    setResponseSchema(agentId).catch((err) => {
+      console.error('❌ Failed to set response schema (background)', {
+        agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   // Start Temporal workflow (existing function)
