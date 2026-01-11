@@ -10,6 +10,15 @@
  *     v (animation complete)
  * [IDLE]
  *
+ * THINKING DISPLAY:
+ * [HIDDEN] <-- no streaming bubbles
+ *     |
+ *     v (streaming starts)
+ * [STREAMING] <-- filteredStreamingBubbles.size > 0
+ *     |         Shows: ThinkingAnimation + "Thinking" + char counter (animated)
+ *     v (streaming ends)
+ * [HIDDEN]
+ *
  * AUTO-SCROLL:
  * [ENABLED] <-- userScrolled: false
  *     |
@@ -43,8 +52,9 @@ import { PlanChip } from './PlanChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { Button } from '@/components/ui/button';
 import { FeedbackBanner, FeedbackData } from './FeedbackBanner';
-import { Copy } from 'lucide-react';
+import { Copy, ArrowDown } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // StreamingMarkdown - Renders text with fade-in animation for each chunk
@@ -226,9 +236,10 @@ export function MessageList({
   const [messageBuffer, setMessageBuffer] = useState<Message[]>([]);
   const [isAnimating, setIsAnimating] = useState(false);
   const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
-  
+
   // Track if this is initial load (skip animation for existing messages)
   const isInitialLoadRef = useRef(true);
+
 
   // ═══════════════════════════════════════════════════════════════════════════
   // FILTER MESSAGES for this subAgentId
@@ -378,11 +389,25 @@ export function MessageList({
   const filteredStreamingTools = useMemo(() => {
     const targetSubAgentId = subAgentId ?? null;
     return new Map(
-      [...streamingTools].filter(([_, tool]) => 
+      [...streamingTools].filter(([_, tool]) =>
         (tool.subAgentId ?? null) === targetSubAgentId
       )
     );
   }, [streamingTools, subAgentId]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THINKING CHAR COUNT - calculate from streaming bubbles
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const streamingCharCount = useMemo(() => {
+    let totalChars = 0;
+    filteredStreamingBubbles.forEach(bubble => {
+      totalChars += bubble.text.length;
+    });
+    return totalChars;
+  }, [filteredStreamingBubbles]);
+
+  const animatedCharCount = useAnimatedCounter(streamingCharCount, 0.3);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // THINKING LOADER state
@@ -623,7 +648,7 @@ export function MessageList({
         </>
       )}
       
-      {/* Thinking indicator with streaming */}
+      {/* Thinking indicator with token counter */}
       {showThinkingIndicator && (
         // Show if:
         // 1. We have active streaming bubbles, OR
@@ -639,7 +664,7 @@ export function MessageList({
           <div className={cn("flex", !compact && "gap-3")}>
             {!compact && <div className="flex-shrink-0 w-8 hidden md:block" />}
             <div className="flex flex-col gap-2">
-              {/* Thinking header */}
+              {/* Thinking header with token counter */}
               <div className="flex items-center gap-2">
                 <ThinkingAnimation
                   dataUrl="./thinking_animations.txt"
@@ -651,17 +676,15 @@ export function MessageList({
                 <span className="text-sm font-medium animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
                   Thinking
                 </span>
+                {/* Char counter */}
+                {streamingCharCount > 0 && (
+                  <span className="flex items-center gap-1 text-xs text-muted-foreground ml-auto">
+                    <ArrowDown className="w-3 h-3" />
+                    <span className="tabular-nums">{animatedCharCount.toLocaleString()}</span>
+                  </span>
+                )}
               </div>
-              
-              {/* Streaming text with max-height and auto-scroll */}
-              {filteredStreamingBubbles.size > 0 && (
-                <div className="pl-6 max-h-[200px] overflow-y-auto scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
-                  {Array.from(filteredStreamingBubbles.entries()).map(([streamId, bubble]) => (
-                    <StreamingMarkdown key={streamId} text={bubble.text} />
-                  ))}
-                </div>
-              )}
-              
+
               {/* Streaming plan */}
               {filteredStreamingPlan && (
                 <div className="pl-6 mt-2">

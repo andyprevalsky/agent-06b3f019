@@ -125,17 +125,16 @@ const roleConfig = {
   },
 };
 
-const ToolMessage = memo(function ToolMessage({ 
-  data, 
-  shouldType = false, 
-  onComplete 
-}: { 
-  data: ToolMessageData; 
+const ToolMessage = memo(function ToolMessage({
+  data,
+  shouldType = false,
+  onComplete
+}: {
+  data: ToolMessageData;
   shouldType?: boolean;
   onComplete?: () => void;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [hasAnimated, setHasAnimated] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null);
   const { toast } = useToast();
@@ -208,25 +207,18 @@ const ToolMessage = memo(function ToolMessage({
     [hasMessage, isExpandable, forceExpanded]
   );
   const shouldBeExpanded = useMemo(
-    () => forceExpanded || (shouldType && !hasAnimated) || isExpanded,
-    [forceExpanded, shouldType, hasAnimated, isExpanded]
+    () => forceExpanded || isExpanded,
+    [forceExpanded, isExpanded]
   );
 
-  // Handle animation completion - collapse after animating
-  const handleAnimationComplete = () => {
-    console.log(`[${performance.now().toFixed(2)}] 🔽 COLLAPSE: Tool message collapsing`);
-    setHasAnimated(true);
-    if (!forceExpanded) {
-      setIsExpanded(false); // Collapse after animation (will reopen on click)
-    }
-    
-    // Use requestAnimationFrame to ensure DOM updates before unlocking queue
-    if (onComplete) {
+  // Call onComplete immediately when shouldType - tools start collapsed, no animation
+  useEffect(() => {
+    if (shouldType && onComplete) {
       requestAnimationFrame(() => {
         onComplete();
       });
     }
-  };
+  }, [shouldType, onComplete]);
 
   // Calculate progress percentage (handle both 0-1 and 0-100 ranges)
   const progressPercent = useMemo(() => {
@@ -419,8 +411,7 @@ const ToolMessage = memo(function ToolMessage({
           <div className="pr-2 pl-4 border-l-2 border-border max-h-[300px] overflow-y-auto scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
             <MarkdownText
               text={data.message}
-              shouldAnimate={(shouldType && !hasAnimated) || forceExpanded}
-              onComplete={handleAnimationComplete}
+              shouldAnimate={false}
               className="text-sm text-muted-foreground"
             />
           </div>
@@ -817,12 +808,12 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   if (toolData) {
     return (
-      <div className={cn("flex animate-in fade-in duration-300", !compact && "gap-3")}>
+      <div className={cn("flex", !compact && "gap-3")}>
         {!compact && <div className="flex-shrink-0 w-8 hidden md:block" />}
 
         <div className="flex-1">
-          <ToolMessage 
-            data={toolData} 
+          <ToolMessage
+            data={toolData}
             shouldType={shouldType}
             onComplete={onTypingComplete}
           />
