@@ -345,16 +345,15 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         data: { status: 'ACTIVE' },
       });
 
-      // Response schema generation:
-      // - Sub-agents: get schema passed via spawn_sub_agents tool call (stored in responseSchema)
-      // - Root agents: schema is generated during set_plan tool execution (not at creation)
-      // This defers expensive LLM call until planning phase when goal context is richer
-      if (body.parent_agent_id && body.response_schema) {
-        console.log('✅ Sub-agent has schema from parent', { agentId: agent.agent.id });
-      } else if (body.parent_agent_id) {
-        console.log('⚠️ Sub-agent spawned without schema', { agentId: agent.agent.id });
-      } else {
-        console.log('⏳ Root agent - schema will be generated during set_plan', { agentId: agent.agent.id });
+      // Fire-and-forget: generate response schema in background
+      if (!body.response_schema) {
+        console.log('🎯 Starting response schema generation for root agent', { agentId: agent.agent.id });
+        setResponseSchema(agent.agent.id).catch((err) => {
+          console.error('❌ Failed to set response schema (background)', {
+            agentId: agent.agent.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
       }
 
       // Handle chat message (non-blocking for response)
