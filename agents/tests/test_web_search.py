@@ -27,23 +27,24 @@ def test_manager_singleton():
 async def test_web_search_success():
     """Test successful web search execution with new execute_activity pattern."""
     manager = get_manager()
-    
+
     # Mock execute_activity callable
     mock_execute_activity = AsyncMock()
-    
+
     # Mock successful web search activity result
     mock_result = {
-        "answer": "Python is a high-level programming language created by Guido van Rossum.",
+        "answer": "**Python**\nPython is a high-level programming language created by Guido van Rossum.",
         "sources": [
             "https://www.python.org",
             "https://en.wikipedia.org/wiki/Python_(programming_language)"
         ],
         "query": "What is Python?",
-        "model": "gpt-4.1"
+        "provider": "parallel-ai"
     }
-    
-    # First call is handle_tool_event (IN_PROGRESS), second is web_search_activity, third is handle_tool_event (FINISHED)
-    mock_execute_activity.side_effect = [None, mock_result, None]
+
+    # execute_activity is only called once (for web_search_activity)
+    # handle_tool_event is mocked separately
+    mock_execute_activity.return_value = mock_result
     
     tool_call = {
         "query": "What is Python?",
@@ -76,7 +77,7 @@ async def test_web_search_success():
         assert second_call.kwargs['event'].status == MessageStatus.FINISHED
         
         # Verify result
-        assert result["answer"] == "Python is a high-level programming language created by Guido van Rossum."
+        assert "Python" in result["answer"]
     
     print("✅ test_web_search_success passed")
 
@@ -87,7 +88,7 @@ async def test_web_search_error():
     
     # Mock execute_activity callable that fails
     mock_execute_activity = AsyncMock()
-    mock_execute_activity.side_effect = Exception("OpenAI API error")
+    mock_execute_activity.side_effect = Exception("API error")
     
     tool_call = {"query": "test", "max_tokens": 1500}
     tool_call_id = "test-error"
@@ -106,7 +107,7 @@ async def test_web_search_error():
         
         # Should return error result (not raise)
         assert "error" in result
-        assert "OpenAI API error" in result["error"]
+        assert "API error" in result["error"]
         
         # Should have called handle_tool_event twice (IN_PROGRESS and ERROR)
         assert mock_handle.call_count == 2
@@ -117,58 +118,71 @@ async def test_web_search_error():
 
 
 async def test_web_search_activity_success():
-    """Test the actual activity with mocked OpenAI client."""
+    """Test the actual activity with mocked httpx client."""
     from tools.web_search import web_search_activity
-    
-    # Mock OpenAI response
-    mock_response = MagicMock()
-    mock_response.output_text = "Python is awesome!"
-    mock_response.sources = ["https://python.org"]
-    
+
+    # Mock Parallel AI response
+    mock_response_data = {
+        "results": [
+            {
+                "url": "https://python.org",
+                "title": "Python",
+                "excerpts": ["Python is awesome!"]
+            }
+        ]
+    }
+
     # Mock config
     mock_config = MagicMock()
-    mock_config.openai.api_key = "test-key"
-    mock_config.openai.model = "gpt-4.1"
-    
+    mock_config.parallel.api_key = "test-key"
+
+    # Create mock response object
+    mock_response = MagicMock()
+    mock_response.json.return_value = mock_response_data
+    mock_response.raise_for_status = MagicMock()
+
     with patch('tools.web_search.load_config', return_value=mock_config):
-        with patch('tools.web_search.AsyncOpenAI') as mock_openai_class:
+        with patch('tools.web_search.httpx.AsyncClient') as mock_client_class:
             mock_client = MagicMock()
-            mock_client.responses.create = AsyncMock(return_value=mock_response)
-            mock_openai_class.return_value = mock_client
-            
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
             with patch('temporalio.activity.heartbeat'):
                 result = await web_search_activity("What is Python?", 1500)
-            
-            assert result["answer"] == "Python is awesome!"
+
+            assert "Python is awesome!" in result["answer"]
             assert result["sources"] == ["https://python.org"]
             assert result["query"] == "What is Python?"
-            assert result["model"] == "gpt-4.1"
-    
+            assert result["provider"] == "parallel-ai"
+
     print("✅ test_web_search_activity_success passed")
 
 
 async def test_web_search_activity_error():
     """Test activity error handling."""
     from tools.web_search import web_search_activity
-    
+
     # Mock config
     mock_config = MagicMock()
-    mock_config.openai.api_key = "test-key"
-    mock_config.openai.model = "gpt-4.1"
-    
+    mock_config.parallel.api_key = "test-key"
+
     with patch('tools.web_search.load_config', return_value=mock_config):
-        with patch('tools.web_search.AsyncOpenAI') as mock_openai_class:
+        with patch('tools.web_search.httpx.AsyncClient') as mock_client_class:
             mock_client = MagicMock()
-            mock_client.responses.create = AsyncMock(side_effect=Exception("API error"))
-            mock_openai_class.return_value = mock_client
-            
+            mock_client.post = AsyncMock(side_effect=Exception("API error"))
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
             with patch('temporalio.activity.heartbeat'):
                 try:
                     await web_search_activity("test query")
                     assert False, "Should have raised exception"
                 except Exception as e:
                     assert "API error" in str(e)
-    
+
     print("✅ test_web_search_activity_error passed")
 
 

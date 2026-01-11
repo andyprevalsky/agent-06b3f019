@@ -5,7 +5,7 @@ from temporalio import activity
 from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
-from openai import AsyncOpenAI
+import httpx
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 from helpers.handle_tool_event import handle_tool_event
@@ -29,7 +29,7 @@ logger = structlog.get_logger()
 
 
 class WebSearchManager(ToolManager):
-    """Manager for web search operations using OpenAI's web search capability."""
+    """Manager for web search operations using Parallel AI's search capability."""
     
     tool_name = "web_search"
     read_only = True  # Research phase tool
@@ -96,7 +96,13 @@ class WebSearchManager(ToolManager):
             
             # 3. Calculate elapsed time and cost
             elapsed_time = _safe_time() - start_time
-            total_cost_cents = 0  # Will need to calculate based on actual API pricing
+            # Parallel AI Search pricing: $5/1000 requests = 0.5 cents base
+            # + $1/1000 additional results beyond 10 = 0.1 cents each
+            results_count = len(result.get("sources", []))
+            base_cost_cents = 0.5  # $0.005 per request
+            additional_results = max(0, results_count - 10)
+            additional_cost_cents = additional_results * 0.1  # $0.001 per extra result
+            total_cost_cents = base_cost_cents + additional_cost_cents
             
             # Format success message using standardized format
             message = format_tool_message(
@@ -206,65 +212,97 @@ async def web_search(
 # TEMPORAL ACTIVITY
 # ========================================
 
+def _format_search_results(results: list) -> str:
+    """Format Parallel AI search results into a readable answer."""
+    if not results:
+        return "No results found."
+
+    formatted_parts = []
+    for r in results:
+        title = r.get("title", "")
+        excerpts = r.get("excerpts", [])
+        excerpt_text = "\n".join(excerpts) if isinstance(excerpts, list) else str(excerpts)
+
+        if title and excerpt_text:
+            formatted_parts.append(f"**{title}**\n{excerpt_text}")
+        elif excerpt_text:
+            formatted_parts.append(excerpt_text)
+
+    return "\n\n".join(formatted_parts) if formatted_parts else "No relevant content found."
+
+
 @activity.defn
 async def web_search_activity(query: str, max_tokens: int = 1500) -> Dict[str, Any]:
     """
     Activity: Perform a web search for quick facts and current information.
-    
-    Uses OpenAI's gpt-4.1 model with web_search tool enabled for real-time web access.
-    
+
+    Uses Parallel AI's search API for real-time web access.
+
     Best for: current events, factual lookups, recent news, latest information.
-    
+
     Args:
         query: Search query or question
         max_tokens: Maximum tokens for response (default: 1500)
-        
+
     Returns:
         Dict with:
             - answer: Answer with real-time web search results
             - sources: List of source URLs (if available)
             - query: Original query
-            - model: Model used
+            - provider: Provider used
     """
     try:
         activity.heartbeat(f"Web searching: {query}")
-        
+
         config = load_config()
-        openai_client = AsyncOpenAI(api_key=config.openai.api_key)
-        model = config.openai.model  # gpt-4.1
-        
-        # Call OpenAI Responses API with web_search tool
-        # Note: Responses API doesn't support max_tokens parameter
-        response = await openai_client.responses.create(
-            model=model,
-            tools=[{"type": "web_search"}],
-            input=query
-        )
-        
-        # Extract answer from response
-        answer = response.output_text
-        
-        # Extract sources if available
-        sources = []
-        if hasattr(response, 'sources'):
-            sources = response.sources
-        
+        api_key = config.parallel.api_key
+
+        headers = {
+            "x-api-key": api_key,
+            "parallel-beta": "search-extract-2025-10-10",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "objective": query,
+            "search_queries": [query],
+            "max_results": 10,
+            "excerpts": {"max_chars_per_result": max_tokens * 4}
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.parallel.ai/v1beta/search",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        results = data.get("results", [])
+
+        # Format results into answer
+        answer = _format_search_results(results)
+
+        # Extract sources
+        sources = [r.get("url") for r in results if r.get("url")]
+
         result = {
             "answer": answer,
             "sources": sources,
             "query": query,
-            "model": model,
+            "provider": "parallel-ai",
         }
-        
+
         logger.info(
             "Web search completed",
             query=query,
             answer_length=len(answer),
-            model=model
+            results_count=len(results)
         )
-        
+
         return result
-        
+
     except Exception as e:
         logger.error("Web search failed", error=str(e), query=query)
         raise
