@@ -152,13 +152,20 @@ class SetPlanManager(ToolManager):
         The planner receives conversation context and generates tasks with dependencies.
         On validation failure, retries once with the error as context.
 
+        Also generates the response schema in parallel if not already present (for root agents).
+        Sub-agents get their schema at spawn time from the parent.
+
         Yields:
             - IN_PROGRESS while planner is thinking
             - Plan data on success
             - Error if validation fails after retries
         """
+        import asyncio
         # Import activity here to avoid circular imports
-        from helpers.llm import call_planner_llm_activity
+        from helpers.llm import call_planner_llm_activity, set_response_schema_activity
+
+        # Use workflow.now() for deterministic timing in workflows
+        total_start = workflow.now()
 
         # 1. Yield in-progress status
         yield ToolEvent(
@@ -168,12 +175,17 @@ class SetPlanManager(ToolManager):
             status=MessageStatus.IN_PROGRESS
         )
 
-        # 2. Extract goal from first USER message
-        goal = "Complete the user's request"
+        # 2. Extract all USER messages from context
+        context_start = workflow.now()
+        user_messages = []
         for msg in workflow_instance.context:
             if msg.get("role") == "USER":
-                goal = msg.get("text", goal)
-                break
+                text = msg.get("text", "")
+                if text:
+                    user_messages.append(text)
+
+        # Use first user message as primary goal for planner prompt
+        goal = user_messages[0] if user_messages else "Complete the user's request"
 
         # 3. Build conversation history for planner
         base_messages = [
@@ -195,12 +207,16 @@ class SetPlanManager(ToolManager):
         tools_description = _get_execute_phase_tools_description()
         user_context = getattr(workflow_instance, 'user_context_section', '')
         response_schema = getattr(workflow_instance, 'response_schema', None)
+        context_elapsed = (workflow.now() - context_start).total_seconds()
+        workflow.logger.info(f"[TIMING] Context building: {context_elapsed*1000:.1f}ms (messages: {len(base_messages)}, has_schema: {response_schema is not None})")
 
         # 5. Call planner with retry on validation failure
+        # Also run schema generation in parallel if schema is NULL
         planner_result = None
         last_error = None
 
         for attempt in range(self.MAX_RETRIES):
+            attempt_start = workflow.now()
             messages_for_planner = base_messages.copy()
 
             # On retry, add the previous error as context
@@ -211,12 +227,47 @@ class SetPlanManager(ToolManager):
                 })
 
             try:
-                planner_result = await workflow.execute_activity(
-                    call_planner_llm_activity,
-                    args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
-                    start_to_close_timeout=timedelta(seconds=120),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
+                # On first attempt, run schema generation in parallel with planner
+                # (only if schema is NULL - sub-agents already have schema from parent)
+                if attempt == 0 and response_schema is None:
+                    workflow.logger.info(f"[TIMING] Starting PARALLEL planner + schema generation (attempt {attempt + 1})")
+                    # Run both activities in parallel
+                    planner_task = workflow.execute_activity(
+                        call_planner_llm_activity,
+                        args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
+                        start_to_close_timeout=timedelta(seconds=120),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    schema_task = workflow.execute_activity(
+                        set_response_schema_activity,
+                        args=[workflow_instance.agent_id, user_messages],
+                        start_to_close_timeout=timedelta(seconds=90),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+
+                    # Wait for both to complete
+                    parallel_start = workflow.now()
+                    planner_result, generated_schema = await asyncio.gather(planner_task, schema_task)
+                    parallel_elapsed = (workflow.now() - parallel_start).total_seconds()
+                    workflow.logger.info(f"[TIMING] Parallel activities completed: {parallel_elapsed*1000:.1f}ms")
+
+                    # Update workflow instance with generated schema
+                    if generated_schema:
+                        workflow_instance.response_schema = generated_schema
+                        workflow_instance.output_schema = generated_schema
+                        workflow.logger.info(f"✅ Generated response schema with {len(generated_schema.get('fields', []))} fields")
+                else:
+                    # Retry or schema already exists - just call planner
+                    workflow.logger.info(f"[TIMING] Starting planner LLM only (attempt {attempt + 1}, schema_exists={response_schema is not None})")
+                    planner_only_start = workflow.now()
+                    planner_result = await workflow.execute_activity(
+                        call_planner_llm_activity,
+                        args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
+                        start_to_close_timeout=timedelta(seconds=120),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    planner_only_elapsed = (workflow.now() - planner_only_start).total_seconds()
+                    workflow.logger.info(f"[TIMING] Planner LLM only completed: {planner_only_elapsed*1000:.1f}ms")
             except Exception as e:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
@@ -227,7 +278,11 @@ class SetPlanManager(ToolManager):
                 return
 
             # Validate the result
+            validation_start = workflow.now()
             validation_error = _validate_planner_result(planner_result)
+            validation_elapsed = (workflow.now() - validation_start).total_seconds()
+            attempt_elapsed = (workflow.now() - attempt_start).total_seconds()
+            workflow.logger.info(f"[TIMING] Validation: {validation_elapsed*1000:.1f}ms, Total attempt {attempt + 1}: {attempt_elapsed*1000:.1f}ms")
             if validation_error is None:
                 break  # Valid plan!
 
@@ -290,6 +345,8 @@ class SetPlanManager(ToolManager):
                 msg = f"**{title}**\n\n{n_tasks} tasks (staged execution with dependencies)."
 
         # 13. Yield event with plan data embedded in message
+        total_elapsed = (workflow.now() - total_start).total_seconds()
+        workflow.logger.info(f"[TIMING] ===== TOTAL set_plan execution: {total_elapsed*1000:.1f}ms ({total_elapsed:.2f}s) =====")
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title=title,

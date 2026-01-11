@@ -66,7 +66,7 @@ from helpers import (
     check_user_usage,
     get_user_context,
 )
-from helpers.llm import call_planner_llm_activity
+from helpers.llm import call_planner_llm_activity, set_response_schema_activity
 from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
 from helpers.update_tokens import update_agent_tokens_activity
@@ -197,6 +197,7 @@ async def main():
             check_progress,
             call_llm_activity,
             call_planner_llm_activity,
+            set_response_schema_activity,
             update_agent_status,
             compress_context,
             generate_completion_summary,
