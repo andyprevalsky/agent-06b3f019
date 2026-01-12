@@ -61,6 +61,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.sms_activities import get_agent_source, send_direct_sms_activity
     from tools.request_user_signup import request_user_signup
     from loop.run_agent import run_agent
+    from loop.dag_executor import extract_plan_from_context, TaskDAG, execute_dag
     from helpers.format_tool_display import format_tool_display
 
 logger = structlog.get_logger()
@@ -393,6 +394,48 @@ class AgentWorkflow:
         # =====================================================================
         workflow.logger.info(f"▶ EXECUTE phase: {len(execute_tools)} tools")
 
+        # Get context from PLAN phase (or poll if skipped)
+        if not skip_plan:
+            execute_context = plan_result.get("context", [])
+        else:
+            # Poll messages to get context if we skipped PLAN
+            execute_context = await workflow.execute_activity(
+                poll_new_messages,
+                args=[agent_id, None],  # No task_id filter
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+        # Try DAG execution if a plan exists
+        plan_data = extract_plan_from_context(execute_context)
+        if plan_data:
+            workflow.logger.info("[DAG] Found plan, attempting DAG execution")
+            dag = TaskDAG(plan_data)
+
+            dag_result = await execute_dag(
+                dag=dag,
+                agent_id=agent_id,
+                user_id=user_id,
+                model=model,
+                context=execute_context,
+                execute_activity=workflow.execute_activity,
+                post_message=self._post_message,
+                execute_tool=self._execute_tool,
+                handle_tool_event_fn=self._handle_tool_event,
+            )
+
+            # DAG completed or failed - both hand off to run_agent
+            # run_agent polls from DB (DAG already posted results there)
+            if dag_result["status"] == "completed":
+                workflow.logger.info("[DAG] Tasks completed, handing off to LLM for attempt_completion")
+            else:
+                workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
+        else:
+            workflow.logger.info("[DAG] No plan found, using LLM-driven execution")
+
+        # LLM-driven execution (after DAG, or if no plan)
+        # Note: Don't pass initial_context - run_agent polls from DB each step
+        # DAG already posted all results to DB via post_message callback
         execute_result = await run_agent(
             agent_id=agent_id,
             user_id=user_id,
@@ -400,6 +443,7 @@ class AgentWorkflow:
             verifier_prompt_generator=self._make_verifier_prompt_generator("EXECUTE", self.verifier.get("llmJudgePrompt", "")),
             model=model,
             tools=execute_tools,
+            initial_context=None,  # Don't pass - run_agent polls from DB
             is_inside_temporal_activity=False,
             check_paused=lambda: asyncio.sleep(0, result=self.is_paused),
             wait_for_messages=self._wait_for_messages,
@@ -495,7 +539,6 @@ class AgentWorkflow:
             goal=self.goal,
             model=self.model,
             reasoning_max_tokens=self.reasoning_max_tokens,
-            tool_ids=[],
             verifier=self.verifier,
             context=compressed_context,
             parent_workflow_id=self.parent_workflow_id,
@@ -705,7 +748,7 @@ class AgentWorkflow:
     async def _handle_incomplete(self, result: Dict, phase: str) -> Dict:
         """Handle non-completed phase result."""
         workflow.logger.info(f"{phase} ended: {result['status']}")
-        
+
         if result["status"] == "paused":
             await workflow.wait_condition(lambda: not self.is_paused)
             workflow.continue_as_new(
@@ -714,7 +757,6 @@ class AgentWorkflow:
                 goal=self.goal,
                 model=self.model,
                 reasoning_max_tokens=self.reasoning_max_tokens,
-                tool_ids=[],
                 verifier=self.verifier,
                 context=result.get("context"),
                 parent_workflow_id=self.parent_workflow_id,

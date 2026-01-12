@@ -34,10 +34,23 @@ EXECUTE_PHASE_TOOLS = [
     "attempt_completion",
 ]
 
-# Build enum dynamically from EXECUTE_PHASE_TOOLS + "reasoning"
-PlanActionType = Enum(
-    "PlanActionType",
-    {name: name for name in EXECUTE_PHASE_TOOLS + ["reasoning"]},
+# Tools the planner can assign to tasks (what shows up in task.tool_name)
+# NOTE: "sub_agent" is a planning concept - DAG executor maps it to spawn_sub_agents(1 agent)
+# NOTE: "spawn_sub_agents" is excluded to avoid confusion - planner uses "sub_agent" instead
+PLANNER_ASSIGNABLE_TOOLS = [
+    "spawn_browser_agent",
+    "spawn_claude_code_agent",
+    "sub_agent",  # Delegate complex task to a sub-agent (maps to spawn_sub_agents with 1 agent)
+    "wait_seconds",
+    "web_search",
+    "send_message_to_user_execute_phase",
+    "reasoning",  # Pure thinking/analysis step (no tool call)
+]
+
+# Build enum dynamically from PLANNER_ASSIGNABLE_TOOLS
+PlanToolName = Enum(
+    "PlanToolName",
+    {name: name for name in PLANNER_ASSIGNABLE_TOOLS},
     type=str,
 )
 
@@ -50,7 +63,7 @@ PlanActionType = Enum(
 class PlannerTask(BaseModel):
     """A single task in the planner output."""
     goal: str = Field(description="Brief description of task objective")
-    action_type: PlanActionType = Field(description="The tool to execute for this task, or 'reasoning' for thinking/analysis")
+    tool_name: PlanToolName = Field(description="The tool to execute for this task, or 'reasoning' for thinking/analysis")
     depends_on: List[int] = Field(default_factory=list, description="Indices of tasks this depends on (empty = no deps)")
 
 

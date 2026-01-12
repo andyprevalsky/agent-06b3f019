@@ -122,6 +122,22 @@ def build_system_prompt(
             """
     CURRENT PHASE: PLAN
 
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ PLAN PHASE CONTROL FLOW                                                 │
+    │                                                                         │
+    │   ┌──────────────────────────────────┐                                  │
+    │   │  RESEARCH ←──→ CLARIFY (loop)    │  ← flexible, any order           │
+    │   └──────────────┬───────────────────┘                                  │
+    │                  │ when ready                                           │
+    │                  ▼                                                      │
+    │   ┌──────────────────────────────────┐                                  │
+    │   │  set_plan() → attempt_completion │  ← STRICT: must be consecutive   │
+    │   └──────────────────────────────────┘                                  │
+    │                                                                         │
+    │ CRITICAL: Once you call set_plan, the ONLY next action is               │
+    │ attempt_completion. No messages, no research, no other tools.           │
+    └─────────────────────────────────────────────────────────────────────────┘
+
     TWO-AXIS PLANNING FRAMEWORK
     ---------------------------
     All progress toward a goal happens along two orthogonal axes:
@@ -133,25 +149,26 @@ def build_system_prompt(
     - If decomposability >= uncertainty → parallelize work
     - Parallelism is only safe when entropy/uncertainty is low
 
-    PLAN GENERATION
-    ---------------
-    Call `set_plan()` when you have gathered enough context and are ready to proceed.
-    A dedicated planner will analyze your research and generate an optimal task structure
-    with proper dependencies.
-
-    Before calling set_plan, use available tools to:
+    PLAN PHASE WORKFLOW
+    -------------------
+    RESEARCH & CLARIFY (flexible, iterate as needed):
     - Research unknowns (web_search, deep_research)
-    - Clarify requirements with user if needed (send_message_to_user)
-    - Understand the problem space
+    - Clarify requirements with user (send_message_to_user with is_question=true)
+    - Go back and forth between research and clarification until ready
 
-    After set_plan, send a concise summary to the user via `send_message_to_user({"message": "...", "is_question": false})` so they can see what will run.
+    WHEN TO CALL set_plan:
+    - You have gathered enough context to create an execution plan
+    - Any critical clarifications have been answered
+    - set_plan is called exactly ONCE per planning phase
 
-    Call `attempt_completion` only when:
-        1. You have called set_plan (REQUIRED - the verifier will check for a plan)
-        2. You no longer need clarifications
-        3. You have a low-energy cost & elegant plan
+    IMMEDIATELY AFTER set_plan (STRICT):
+    - Call attempt_completion() - this is the ONLY allowed next action
+    - Do NOT send additional messages to user
+    - Do NOT do additional research
+    - Do NOT call any other tools
+    - The plan phase is COMPLETE - all remaining work happens in EXECUTE phase
 
-    Once you move to EXECUTE phase, you can no longer get user input, so ask necessary clarifying questions first.
+    Once you move to EXECUTE phase, you can no longer get user input, so ask necessary clarifying questions BEFORE calling set_plan.
 
     PARALLELIZATION GUIDANCE
     ------------------------
@@ -283,9 +300,11 @@ def build_system_prompt(
         system_prompt += dedent(
             """
     You are the planner:
-    - Gather the information required for execution.
-    - Define clear steps that will accomplish the goal.
-    - Decide if work stays single-agent or needs parallel sub-agents.
+    - Gather the information required for execution via research tools.
+    - Ask clarifying questions if requirements are ambiguous.
+    - When research is complete and clarifications are answered: call set_plan() ONCE.
+    - Immediately after set_plan: call attempt_completion() to exit plan phase.
+    - Do NOT do extra work after set_plan - execution happens in EXECUTE phase.
             """
         )
 
@@ -536,7 +555,7 @@ Return ONLY valid JSON matching this schema:
     "title": "<short plan title>",
     "content": "<markdown explanation of the plan>",
     "tasks": [
-        {{"goal": "<brief task objective>", "action_type": "<tool_name or 'reasoning'>", "depends_on": [<indices>]}}
+        {{"goal": "<brief task objective>", "tool_name": "<tool_name or 'reasoning'>", "depends_on": [<indices>]}}
     ],
     "dependencies_graph": {{"<task_idx>": ["<dep_idx>", ...]}},
     "join": "all" | "any"
@@ -565,8 +584,31 @@ DECOMPOSITION PRINCIPLES
 - Minimality: Decompose only as much as necessary to reach the goal
 - MECE: Tasks should not overlap; together they fully cover the goal
 - Parallelization: Prefer independent tasks with final synthesis step
-- Granularity: 3-8 tasks for common goals; 1-5 for simple goals
+- Granularity: 3-8 tasks maximum. If you need more, you're planning at too low a level.
 - Determinism: Each task has clear, verifiable completion condition
+
+TASK COUNT LIMITS
+-----------------
+- Target: 3-8 tasks per plan
+- If you're tempted to add 10+ tasks, use `sub_agent` to delegate complexity
+- Long sequential chains (8+ steps) are a code smell - decompose hierarchically instead
+
+SUB_AGENT TOOL
+--------------
+Use `tool_name: "sub_agent"` when a task is too complex for a single tool call.
+The sub-agent gets its own planning and execution cycle to handle the complexity.
+
+GOOD use of sub_agent:
+  Task 0: sub_agent "Research and book a venue in Austin"  ← complex multi-step task
+  Task 1: sub_agent "Plan team activities"                 ← needs research + decisions
+  Task 2: reasoning "Compile final itinerary"              ← synthesis
+
+BAD (too granular, should use sub_agent):
+  Task 0: web_search "venues in Austin"
+  Task 1: web_search "venue A reviews"
+  Task 2: web_search "venue B reviews"
+  Task 3: reasoning "compare venues"
+  Task 4: spawn_browser_agent "book venue"  ← should be one sub_agent task
 
 DEPENDENCY PATTERNS
 -------------------
@@ -591,8 +633,9 @@ CRITICAL REMINDERS
 ------------------
 - For acquisition goals (buy/get/order X), the plan MUST include actual purchase steps
 - Do not end with "send recommendations" when user asked to GET something
-- Sub-agents can handle parallel/hypothesis work
-- Browser agent is for writing to internet (payments, forms, actions)
+- Use sub_agent for complex tasks that need their own planning cycle
+- spawn_browser_agent is for short web trajectories (purchases, form fills) - 25 step limit
+- Keep plans high-level (3-8 tasks). Delegate complexity to sub_agents, don't micromanage.
 
 OUTPUT JSON ONLY - no prose, no commentary outside the JSON structure."""
 

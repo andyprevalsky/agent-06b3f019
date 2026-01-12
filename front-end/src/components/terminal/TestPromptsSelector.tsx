@@ -61,6 +61,11 @@ const TEST_PROMPTS: TestPrompt[] = [
     description: 'Tests Claude Code agent in ephemeral E2B sandbox',
     prompt: 'Starting from 27, how many steps does it take to reach 1 in the Collatz sequence? List all the numbers. Use Claude Code and no sub agents',
   },
+  {
+    title: 'Test DAG Executor',
+    description: 'Tests DAG executor with plan mode (no web searches during planning)',
+    prompt: 'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno sub agents',
+  },
 ];
 
 interface TestPromptsSelectorProps {

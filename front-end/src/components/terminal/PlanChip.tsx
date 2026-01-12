@@ -22,11 +22,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MarkdownText } from './MarkdownText';
+import { PlanTask } from '@/lib/realtime-types';
 
 interface PlanData {
   title: string;
   content: string;
-  tasks: string[];
+  tasks: PlanTask[];
   dependencies: Record<string, string[]> | null;
   join: 'all' | 'any';
   status: 'planning' | 'ready' | 'executing' | 'complete';
@@ -42,6 +43,7 @@ interface PlanChipProps {
 interface TaskWithDeps {
   originalIndex: number;
   text: string;
+  toolName: string;
   deps: number[];
 }
 
@@ -50,16 +52,17 @@ interface TaskWithDeps {
  * Tasks with no dependencies come first, then tasks whose deps are satisfied.
  */
 function topologicalSort(
-  tasks: string[],
+  tasks: PlanTask[],
   deps: Record<string, string[]> | null
 ): TaskWithDeps[] {
   const n = tasks.length;
   const normalizedDeps = deps || {};
 
   // Build task info with parsed deps
-  const taskInfos: TaskWithDeps[] = tasks.map((text, idx) => ({
+  const taskInfos: TaskWithDeps[] = tasks.map((task, idx) => ({
     originalIndex: idx,
-    text,
+    text: task.goal,
+    toolName: task.tool_name,
     deps: (normalizedDeps[String(idx)] || []).map(d => parseInt(d)),
   }));
 
@@ -126,7 +129,7 @@ function topologicalSort(
 /**
  * Detect structure type from dependencies
  */
-function detectStructure(tasks: string[], deps: Record<string, string[]> | null): 'sequential' | 'parallel' | 'dag' {
+function detectStructure(tasks: PlanTask[], deps: Record<string, string[]> | null): 'sequential' | 'parallel' | 'dag' {
   if (!deps || Object.keys(deps).length === 0) {
     return 'parallel';
   }

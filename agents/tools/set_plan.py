@@ -14,7 +14,13 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
-from helpers.tool_schemas import TOOL_MODELS, EXECUTE_PHASE_TOOLS
+from helpers.tool_schemas import TOOL_MODELS, PLANNER_ASSIGNABLE_TOOLS
+
+# Manual descriptions for planning-only tools (not in TOOL_MODELS)
+PLANNING_TOOL_DESCRIPTIONS = {
+    "sub_agent": "Delegate a complex task to a sub-agent with its own planning/execution cycle. Use for tasks too complex for a single tool call.",
+    "reasoning": "Pure thinking/analysis step with no external tool call. Use for synthesizing results or making decisions.",
+}
 
 
 def validate_dependencies(tasks: List[str], deps: Dict[str, List[str]]) -> Optional[str]:
@@ -86,11 +92,14 @@ def validate_dependencies(tasks: List[str], deps: Dict[str, List[str]]) -> Optio
     return None  # Valid
 
 
-def _get_execute_phase_tools_description() -> str:
-    """Get description of tools available in execute phase for planner context."""
+def _get_planner_tools_description() -> str:
+    """Get description of tools the planner can assign to tasks."""
     lines = []
-    for name in EXECUTE_PHASE_TOOLS:
-        if name in TOOL_MODELS:
+    for name in PLANNER_ASSIGNABLE_TOOLS:
+        # Check manual descriptions first (for planning-only tools)
+        if name in PLANNING_TOOL_DESCRIPTIONS:
+            lines.append(f"- {name}: {PLANNING_TOOL_DESCRIPTIONS[name]}")
+        elif name in TOOL_MODELS:
             model = TOOL_MODELS[name]
             doc = model.__doc__ or ""
             # Get first sentence of docstring
@@ -204,7 +213,7 @@ class SetPlanManager(ToolManager):
                 base_messages.append({"role": "user", "content": f"[{role}]: {text}"})
 
         # 4. Build context for planner activity
-        tools_description = _get_execute_phase_tools_description()
+        tools_description = _get_planner_tools_description()
         user_context = getattr(workflow_instance, 'user_context_section', '')
         response_schema = getattr(workflow_instance, 'output_schema', None)
         context_elapsed = (workflow.now() - context_start).total_seconds()
@@ -306,13 +315,14 @@ class SetPlanManager(ToolManager):
 
         # 6. Extract validated result
         task_objects = planner_result["tasks"]
-        tasks = [t["goal"] for t in task_objects]
+        # Store full task objects with goal and tool_name (for DAG executor)
+        tasks = [{"goal": t["goal"], "tool_name": t["tool_name"]} for t in task_objects]
         deps = planner_result["dependencies_graph"] or {}
         title = planner_result["title"]
         content = planner_result["content"]
         join = planner_result["join"]
 
-        # 7. Build plan data structure for frontend
+        # 7. Build plan data structure for frontend and DAG executor
         plan_data = {
             "type": "plan_artifact",
             "title": title,
