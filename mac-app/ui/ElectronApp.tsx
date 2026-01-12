@@ -4,12 +4,15 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { AppDataProvider } from "@/hooks/useAppData";
 import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/lib/supabase";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import Terminal from "@/pages/Terminal";
 import Privacy from "@/pages/Privacy";
 import Terms from "@/pages/Terms";
 import NotFound from "@/pages/NotFound";
 import Onboarding from "./onboarding/Onboarding";
+
+const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
 
 const queryClient = new QueryClient();
 
@@ -24,25 +27,70 @@ const ElectronAppInner = () => {
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [checkingOnboarding, setCheckingOnboarding] = useState(true);
 
-  // Check onboarding status on mount and when auth changes
+  // Check onboarding status from backend when auth changes
   useEffect(() => {
     const checkOnboarding = async () => {
-      if (window.api?.onboarding?.isComplete) {
-        const complete = await window.api.onboarding.isComplete();
-        setOnboardingComplete(complete);
-      } else {
+      // Only check if user is signed in
+      if (!isFullySignedIn) {
         setOnboardingComplete(false);
+        setCheckingOnboarding(false);
+        return;
       }
-      setCheckingOnboarding(false);
+
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.access_token) {
+          setOnboardingComplete(false);
+          setCheckingOnboarding(false);
+          return;
+        }
+
+        const response = await fetch(`${backendUrl}/api/user-settings`, {
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+          },
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          // onboardingCompletedAt is null if not completed, a date string if completed
+          const complete = !!data.onboardingCompletedAt;
+          setOnboardingComplete(complete);
+
+          // If already completed, enable shortcuts
+          if (complete && window.api?.shortcut?.enable) {
+            await window.api.shortcut.enable();
+          }
+        } else {
+          setOnboardingComplete(false);
+        }
+      } catch (err) {
+        console.error('Failed to check onboarding status:', err);
+        setOnboardingComplete(false);
+      } finally {
+        setCheckingOnboarding(false);
+      }
     };
     checkOnboarding();
   }, [isFullySignedIn]);
 
   const handleOnboardingComplete = async () => {
-    // Mark onboarding as complete in local storage
-    if (window.api?.onboarding?.setComplete) {
-      await window.api.onboarding.setComplete(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token) {
+        // Call backend to mark onboarding complete and send welcome SMS
+        await fetch(`${backendUrl}/api/auth/complete-onboarding`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+        });
+      }
+    } catch (err) {
+      console.error('Failed to complete onboarding on backend:', err);
     }
+
     // Enable global shortcuts now that onboarding is done
     if (window.api?.shortcut?.enable) {
       await window.api.shortcut.enable();

@@ -95,7 +95,7 @@ const VerticalCarousel = () => {
   const cycleDuration = BASE_CAPABILITIES.length * 2; // 2 seconds per item
 
   return (
-    <div className="relative h-[220px] overflow-hidden">
+    <div className="relative h-[180px] overflow-hidden flex-shrink-0">
       <style>
         {`
           @keyframes tickerScroll {
@@ -160,7 +160,7 @@ const OnboardingWelcome = ({ onGetStarted }: OnboardingWelcomeProps) => {
   };
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center px-8 py-12">
+    <div className="flex-1 flex flex-col items-center justify-center px-8 py-6 max-h-[calc(100vh-60px)] overflow-hidden">
       <style>
         {`
           @keyframes fadeInUp {
@@ -178,7 +178,7 @@ const OnboardingWelcome = ({ onGetStarted }: OnboardingWelcomeProps) => {
 
       {/* Logo with shader */}
       <div
-        className="mb-10"
+        className="mb-6 flex-shrink-0"
         style={{ animation: 'fadeInUp 0.6s ease-out both' }}
       >
         <ShaderLogo />
@@ -186,20 +186,20 @@ const OnboardingWelcome = ({ onGetStarted }: OnboardingWelcomeProps) => {
 
       {/* Main headline */}
       <div
-        className="text-center mb-8 max-w-lg"
+        className="text-center mb-4 max-w-lg flex-shrink"
         style={{ animation: 'fadeInUp 0.6s ease-out 100ms both' }}
       >
-        <h1 className="text-3xl font-semibold text-foreground tracking-tight mb-4">
+        <h1 className="text-3xl font-semibold text-foreground tracking-tight mb-2">
           Meet Rose
         </h1>
-        <p className="text-xl text-muted-foreground leading-relaxed">
+        <p className="text-lg text-muted-foreground leading-relaxed whitespace-nowrap">
           A personal superintelligence that can process nearly any request
         </p>
       </div>
 
       {/* Carousel label */}
       <div
-        className="text-center mb-4"
+        className="text-center mb-2 flex-shrink-0"
         style={{ animation: 'fadeInUp 0.6s ease-out 200ms both' }}
       >
         <span className="text-sm text-muted-foreground">Rose Agents Can</span>
@@ -207,7 +207,7 @@ const OnboardingWelcome = ({ onGetStarted }: OnboardingWelcomeProps) => {
 
       {/* Vertical carousel */}
       <div
-        className="mb-12"
+        className="mb-6 flex-shrink"
         style={{ animation: 'fadeInUp 0.6s ease-out 300ms both' }}
       >
         <VerticalCarousel />
@@ -215,6 +215,7 @@ const OnboardingWelcome = ({ onGetStarted }: OnboardingWelcomeProps) => {
 
       {/* Get Started Button */}
       <div
+        className="flex-shrink-0"
         style={{ animation: 'fadeInUp 0.6s ease-out 400ms both' }}
       >
         <button

@@ -26,6 +26,7 @@ import x402Router from './routes/x402';
 import claudeCodeRouter from './routes/claudeCode';
 import billingRouter from './routes/billing';
 import apiKeysRouter from './routes/apiKeys';
+import smsWebhookRouter from './routes/smsWebhook';
 import { prisma } from './lib/prisma';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
@@ -72,6 +73,10 @@ const PORT = process.env.PORT || 3001;
 // Webhooks must be mounted BEFORE express.json() middleware
 // (Stripe requires raw body for signature verification)
 app.use('/webhooks', webhooksRouter);
+
+// SMS Webhook from Twilio (needs urlencoded body parser)
+// Must be before express.json() to use its own body parser
+app.use('/api/sms', express.urlencoded({ extended: true }), smsWebhookRouter);
 
 // Middleware
 app.use(express.json({ limit: '100mb' })); // Increased to handle large encrypted payloads

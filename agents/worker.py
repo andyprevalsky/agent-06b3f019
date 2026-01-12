@@ -70,6 +70,12 @@ from helpers.llm import call_planner_llm_activity, set_response_schema_activity
 from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
 from helpers.update_tokens import update_agent_tokens_activity
+from helpers.sms_activities import (
+    get_agent_source,
+    enqueue_sms_question_activity,
+    send_direct_sms_activity,
+    handle_agent_unblocked_activity,
+)
 from health_server import run_health_server, set_worker_status
 
 # Configure structured logging
@@ -211,6 +217,11 @@ async def main():
             get_user_context,
             update_agent_tokens_activity,
             update_agent_tree_state,
+            # SMS activities
+            get_agent_source,
+            enqueue_sms_question_activity,
+            send_direct_sms_activity,
+            handle_agent_unblocked_activity,
         ],
         max_concurrent_activities=config.temporal.max_concurrent_activities,
         max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,

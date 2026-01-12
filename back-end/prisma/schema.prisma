@@ -182,6 +182,10 @@ model User {
   phone                       String?
   // Anonymous user field - tracks if user was created via Supabase signInAnonymously
   isAnonymous                 Boolean       @default(false)
+  // Mac-app onboarding completion timestamp (null = not completed)
+  onboardingCompletedAt       DateTime?
+  // SMS notifications opt-in (must explicitly opt-in)
+  smsOptIn                    Boolean   @default(false)
   credits                     Credit[]
   subscriptions               Subscription?
 
@@ -465,6 +469,32 @@ model GoalHistory {
   @@index([originalAgentId])
 }
 
+model SmsQueue {
+  id           String   @id @default(uuid())
+  userId       String   @unique // One active SMS per user
+  agentId      String // Agent waiting for reply
+  workflowId   String // To signal when reply arrives
+  questionText String // The question sent
+  messageSid   String? // Twilio message SID
+  sentAt       DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@index([agentId])
+}
+
+model SmsQueuePending {
+  id           String   @id @default(uuid())
+  userId       String
+  agentId      String
+  workflowId   String
+  questionText String
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([agentId])
+}
+
 enum AgentStatus {
   STARTING_UP
   ACTIVE
@@ -477,6 +507,7 @@ enum AgentStatus {
 enum AgentSource {
   WEB
   MAC_APP
+  SMS
 }
 
 enum VerifierType {

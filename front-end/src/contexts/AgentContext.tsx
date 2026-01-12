@@ -154,7 +154,11 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
   const canSubscribe = isAuthenticated ?? !!user;
   // Agent state
   const [agent, setAgent] = useState<AgentDetail | null>(null);
-  const [selectedAgentId, setSelectedAgentIdState] = useState<string | null>(null);
+  const [selectedAgentId, setSelectedAgentIdState] = useState<string | null>(() => {
+    // Initialize from URL query param if present
+    const params = new URLSearchParams(window.location.search);
+    return params.get('agent-id');
+  });
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoadingAgent, setIsLoadingAgent] = useState(false);
   
@@ -221,7 +225,7 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
   // ═══════════════════════════════════════════════════════════════════════════
   // Load Agent
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const loadAgentDetail = useCallback(async (agentId: string) => {
     try {
       setIsLoadingAgent(true);
@@ -238,6 +242,21 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
       setIsLoadingAgent(false);
     }
   }, []);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Load agent from URL query param on mount
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  useEffect(() => {
+    // If selectedAgentId was initialized from URL and user is authenticated, load the agent
+    if (selectedAgentId && canSubscribe && !agent) {
+      loadAgentDetail(selectedAgentId);
+      // Clear the query param from URL after reading it
+      const url = new URL(window.location.href);
+      url.searchParams.delete('agent-id');
+      window.history.replaceState({}, '', url.toString());
+    }
+  }, [canSubscribe, selectedAgentId, agent, loadAgentDetail]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Set Selected Agent (with load)

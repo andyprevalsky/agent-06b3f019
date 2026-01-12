@@ -29,6 +29,7 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
+  const [smsAuthorized, setSmsAuthorized] = useState(false);
 
   // Format phone number as user types: +1 (XXX)-XXX-XXXX
   const formatPhoneNumber = (value: string) => {
@@ -104,12 +105,14 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
 
   const handleOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!smsAuthorized) return;
+
     setLoading(true);
     setError(null);
 
     try {
       const strippedPhone = stripPhoneNumber(phone);
-      await verifyOTP(strippedPhone, otp, undefined, { firstName, lastName });
+      await verifyOTP(strippedPhone, otp, undefined, { firstName, lastName, smsOptIn: smsAuthorized });
       onComplete();
     } catch (err: any) {
       setError(err.message || 'Invalid verification code');
@@ -212,29 +215,56 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
         )}
 
         {/* OTP input form */}
-        <form onSubmit={handleOtpSubmit}>
-          <div className="relative">
+        <form onSubmit={handleOtpSubmit} className="space-y-3">
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            placeholder="000000"
+            value={otp}
+            onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+            required
+            autoFocus
+            className="w-full px-3 py-3 bg-muted/30 border border-border rounded-xl text-foreground text-center text-sm font-mono tracking-widest placeholder-muted-foreground/30 focus:outline-none focus:border-foreground/20 transition-all"
+            disabled={loading}
+          />
+
+          {/* SMS Authorization checkbox */}
+          <label className="flex items-start gap-3 p-3 bg-muted/30 border border-border rounded-xl cursor-pointer">
             <input
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]{6}"
-              maxLength={6}
-              placeholder="000000"
-              value={otp}
-              onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-              required
-              autoFocus
-              className="w-full px-3 py-3 pr-10 bg-muted/30 border border-border rounded-xl text-foreground text-center text-sm font-mono tracking-widest placeholder-muted-foreground/30 focus:outline-none focus:border-foreground/20 transition-all"
-              disabled={loading}
+              type="checkbox"
+              checked={smsAuthorized}
+              onChange={(e) => setSmsAuthorized(e.target.checked)}
+              className="mt-0.5 w-4 h-4 rounded border-border text-foreground focus:ring-0 focus:ring-offset-0"
             />
-            <button
-              type="submit"
-              disabled={loading || otp.length !== 6}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >
-              <ArrowRight className="w-4 h-4" />
-            </button>
-          </div>
+            <div className="flex-1">
+              <span className="text-sm font-medium text-foreground">
+                I authorize SMS communication
+              </span>
+              <p className="text-xs text-muted-foreground mt-1">
+                By checking this box, you agree to receive automated messages from Rose Labs. Message/data rates may apply. Reply STOP to cancel. See our{' '}
+                <a
+                  href="https://roselabs.ai/privacy"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline hover:text-foreground"
+                >
+                  Privacy Policy
+                </a>
+                .
+              </p>
+            </div>
+          </label>
+
+          <button
+            type="submit"
+            disabled={loading || otp.length !== 6 || !smsAuthorized}
+            className="w-full py-3 px-4 rounded-xl bg-foreground text-background font-medium text-sm hover:bg-foreground/90 transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {loading ? 'Verifying...' : 'Continue'}
+            {!loading && <ArrowRight className="w-3.5 h-3.5" />}
+          </button>
         </form>
 
         <button

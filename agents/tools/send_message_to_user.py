@@ -4,15 +4,32 @@ Tool for proactively messaging the user from the PLAN phase.
 Cases:
 1. Clarifications / approvals → block until the user replies (is_question=True)
 2. Heads-up / plan visibility → send message and keep working (is_question=False)
+
+SMS Fallback:
+- SMS-initiated goals: send SMS immediately for questions
+- Web/Mac-initiated: wait 15 min, then send SMS if no response
 """
 
 from typing import Dict, Any, Optional, AsyncGenerator
+from datetime import timedelta
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 import structlog
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 
+# Import SMS activities (will be executed via workflow.execute_activity)
+with workflow.unsafe.imports_passed_through():
+    from helpers.sms_activities import (
+        get_agent_source,
+        enqueue_sms_question_activity,
+        handle_agent_unblocked_activity,
+    )
+
 logger = structlog.get_logger()
+
+# Timeout before sending SMS for non-SMS-initiated goals
+SMS_FALLBACK_TIMEOUT_MINUTES = 15
 
 
 class SendMessageToUserManager(ToolManager):
@@ -110,31 +127,107 @@ class SendMessageToUserManager(ToolManager):
             )
             return
 
-        # 3. Wait for user message signal (flag set by receive_user_response signal)
-        try:
-            await workflow.wait_condition(
-                lambda: workflow_instance._has_new_messages
-            )
-            # Reset flag so subsequent waits work correctly
-            workflow_instance._has_new_messages = False
+        # 3. Get agent source to determine SMS behavior
+        agent_source = await workflow.execute_activity(
+            get_agent_source,
+            args=[workflow_instance.agent_id],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
 
+        sms_sent = False
+
+        # 4. Handle SMS fallback based on source
+        if agent_source == "SMS":
+            # SMS-initiated: send SMS immediately
             logger.info(
-                "User responded to send_message_to_user request",
-                agent_id=workflow_instance.agent_id
+                "SMS-initiated goal, sending SMS question immediately",
+                agent_id=workflow_instance.agent_id,
+            )
+            await workflow.execute_activity(
+                enqueue_sms_question_activity,
+                args=[
+                    workflow_instance.user_id,
+                    workflow_instance.agent_id,
+                    workflow.info().workflow_id,
+                    message,
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            sms_sent = True
+        else:
+            # Web/Mac-initiated: wait 15 min, then send SMS if no response
+            logger.info(
+                "Non-SMS goal, waiting for response with SMS fallback timeout",
+                agent_id=workflow_instance.agent_id,
+                timeout_minutes=SMS_FALLBACK_TIMEOUT_MINUTES,
+            )
+            try:
+                await workflow.wait_condition(
+                    lambda: workflow_instance._has_new_messages,
+                    timeout=timedelta(minutes=SMS_FALLBACK_TIMEOUT_MINUTES),
+                )
+                # User responded within timeout - no need for SMS
+                logger.info(
+                    "User responded within timeout, no SMS needed",
+                    agent_id=workflow_instance.agent_id,
+                )
+            except TimeoutError:
+                # No response within timeout - send SMS
+                logger.info(
+                    "No response within timeout, sending SMS",
+                    agent_id=workflow_instance.agent_id,
+                )
+                await workflow.execute_activity(
+                    enqueue_sms_question_activity,
+                    args=[
+                        workflow_instance.user_id,
+                        workflow_instance.agent_id,
+                        workflow.info().workflow_id,
+                        message,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                sms_sent = True
+
+        # 5. If we haven't received a response yet (SMS path or after timeout), wait indefinitely
+        if not workflow_instance._has_new_messages:
+            try:
+                await workflow.wait_condition(
+                    lambda: workflow_instance._has_new_messages
+                )
+            except Exception as e:
+                logger.error(f"Error waiting for user response: {e}")
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Error waiting for response",
+                    message=str(e),
+                    status=MessageStatus.ERROR,
+                    metadata=_metadata(is_waiting=True),
+                )
+                return
+
+        # Reset flag so subsequent waits work correctly
+        workflow_instance._has_new_messages = False
+
+        logger.info(
+            "User responded to send_message_to_user request",
+            agent_id=workflow_instance.agent_id,
+            sms_was_sent=sms_sent,
+        )
+
+        # 6. Clean up SMS queue state (remove from active/pending)
+        if sms_sent:
+            await workflow.execute_activity(
+                handle_agent_unblocked_activity,
+                args=[workflow_instance.user_id, workflow_instance.agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-        except Exception as e:
-            logger.error(f"Error waiting for user response: {e}")
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Error waiting for response",
-                message=str(e),
-                status=MessageStatus.ERROR,
-                metadata=_metadata(is_waiting=True),
-            )
-            return
-
-        # 3. Success status - mark as finished (frontend will swallow this)
+        # 7. Success status - mark as finished (frontend will swallow this)
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="User response received",

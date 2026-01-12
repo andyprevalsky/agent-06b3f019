@@ -8,6 +8,9 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { createSignupBonusCredit } from '../lib/credits';
+import { authenticate, AuthRequest } from '../middleware/auth';
+import { sendSms } from '../lib/smsQueue';
+import { SMS_TEMPLATES } from '../lib/smsTemplates';
 
 // Supabase API response types
 interface SendOtpResponse {
@@ -203,6 +206,9 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
         await createSignupBonusCredit(userId);
         console.log(`✅ Created signup bonus credit for user ${userId}`);
 
+        // Note: Welcome SMS is sent when onboarding completes (mac-app flow),
+        // not here on login, to avoid sending SMS to web-only users
+
         // Merge agents from anonymous user if provided
         if (anonymousUserId && anonymousUserId !== userId) {
           await mergeAnonymousUserAgents(anonymousUserId, userId);
@@ -267,6 +273,68 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Verify OTP error:', error);
     res.status(500).json({ error: 'Failed to verify OTP' });
+  }
+});
+
+/**
+ * POST /api/auth/complete-onboarding
+ * Mark onboarding as complete and send welcome SMS (mac-app flow)
+ *
+ * This endpoint is called when the user completes the mac-app onboarding flow.
+ * It sets onboardingCompletedAt and sends a welcome SMS.
+ */
+router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Get user to check if already onboarded and get their info
+    const user = await prisma.user.findUnique({
+      where: { userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if already onboarded
+    if (user.onboardingCompletedAt) {
+      console.log(`User ${userId} already completed onboarding at ${user.onboardingCompletedAt}`);
+      return res.json({
+        success: true,
+        alreadyCompleted: true,
+        onboardingCompletedAt: user.onboardingCompletedAt,
+      });
+    }
+
+    // Mark onboarding as complete
+    const updatedUser = await prisma.user.update({
+      where: { userId },
+      data: { onboardingCompletedAt: new Date() },
+    });
+
+    console.log(`✅ Marked onboarding complete for user ${userId}`);
+
+    // Send welcome SMS if user has a phone number
+    if (user.phone) {
+      const firstName = user.name?.split(' ')[0] || 'there';
+      sendSms(user.phone, SMS_TEMPLATES.welcome(firstName)).catch((error) => {
+        console.error(`⚠️ Failed to send welcome SMS to user ${userId}:`, error);
+      });
+      console.log(`✅ Sending welcome SMS to user ${userId}`);
+    }
+
+    res.json({
+      success: true,
+      alreadyCompleted: false,
+      onboardingCompletedAt: updatedUser.onboardingCompletedAt,
+    });
+  } catch (error) {
+    console.error('Complete onboarding error:', error);
+    res.status(500).json({ error: 'Failed to complete onboarding' });
   }
 });
 
