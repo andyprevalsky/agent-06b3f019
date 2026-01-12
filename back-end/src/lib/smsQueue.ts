@@ -73,6 +73,62 @@ export async function sendSms(
 }
 
 /**
+ * Send MMS with media attachment via Twilio (for vCard, images, etc.)
+ */
+export async function sendMms(
+  phoneNumber: string,
+  message: string,
+  mediaUrl: string
+): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+
+  if (!accountSid || !authToken) {
+    console.error('[MMS] Twilio credentials not configured');
+    return { success: false, error: 'Twilio not configured' };
+  }
+
+  const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+
+  try {
+    const response = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          From: ROSE_SMS_NUMBER,
+          To: phoneNumber,
+          Body: message,
+          MediaUrl: mediaUrl,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[MMS] Twilio API error:', response.status, errorText);
+      return { success: false, error: `Twilio API error: ${response.status}` };
+    }
+
+    const result = (await response.json()) as TwilioResponse;
+    console.log('[MMS] Sent via Twilio', {
+      messageSid: result.sid,
+      phone: phoneNumber.substring(0, 7) + '****',
+      status: result.status,
+    });
+
+    return { success: true, messageSid: result.sid };
+  } catch (error) {
+    console.error('[MMS] Error sending:', error);
+    return { success: false, error: String(error) };
+  }
+}
+
+/**
  * Enqueue or send an SMS question for an agent.
  * - If no active SMS for user, sends immediately and marks as active
  * - If active SMS exists, adds to pending queue

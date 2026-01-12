@@ -9,8 +9,8 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { createSignupBonusCredit } from '../lib/credits';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { sendSms } from '../lib/smsQueue';
-import { SMS_TEMPLATES } from '../lib/smsTemplates';
+import { sendMms } from '../lib/smsQueue';
+import { SMS_TEMPLATES, ROSE_VCARD_URL } from '../lib/smsTemplates';
 
 // Supabase API response types
 interface SendOtpResponse {
@@ -318,13 +318,13 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
 
     console.log(`✅ Marked onboarding complete for user ${userId}`);
 
-    // Send welcome SMS if user has a phone number
+    // Send welcome MMS with vCard if user has a phone number
     if (user.phone) {
       const firstName = user.name?.split(' ')[0] || 'there';
-      sendSms(user.phone, SMS_TEMPLATES.welcome(firstName)).catch((error) => {
-        console.error(`⚠️ Failed to send welcome SMS to user ${userId}:`, error);
+      sendMms(user.phone, SMS_TEMPLATES.welcome(firstName), ROSE_VCARD_URL).catch((error) => {
+        console.error(`⚠️ Failed to send welcome MMS to user ${userId}:`, error);
       });
-      console.log(`✅ Sending welcome SMS to user ${userId}`);
+      console.log(`✅ Sending welcome MMS with vCard to user ${userId}`);
     }
 
     res.json({

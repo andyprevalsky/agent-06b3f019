@@ -27,6 +27,7 @@ import claudeCodeRouter from './routes/claudeCode';
 import billingRouter from './routes/billing';
 import apiKeysRouter from './routes/apiKeys';
 import smsWebhookRouter from './routes/smsWebhook';
+import vcardRouter from './routes/vcard';
 import { prisma } from './lib/prisma';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
@@ -148,6 +149,7 @@ app.use('/api/auth', authRouter);  // OTP send/verify (creates user + $5 credit)
 app.use('/api/waitlist', waitlistRouter);
 app.use('/api/models', modelsRouter);  // Models list is public
 app.use('/api/tools', toolsRouter);  // Tools list is public read
+app.use('/api/vcard', vcardRouter);  // vCard for contact card (public for Twilio MMS)
 
 // x402 Payment Routes Setup
 const x402ReceivingWallet = process.env.X402_RECEIVING_WALLET;

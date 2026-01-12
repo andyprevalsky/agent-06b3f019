@@ -184,8 +184,6 @@ model User {
   isAnonymous                 Boolean       @default(false)
   // Mac-app onboarding completion timestamp (null = not completed)
   onboardingCompletedAt       DateTime?
-  // SMS notifications opt-in (must explicitly opt-in)
-  smsOptIn                    Boolean   @default(false)
   credits                     Credit[]
   subscriptions               Subscription?
 
