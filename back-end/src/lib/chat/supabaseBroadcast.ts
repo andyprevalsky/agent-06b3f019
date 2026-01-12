@@ -5,7 +5,10 @@
 
 import { v4 as uuidv4 } from 'uuid';
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
+// Use local Supabase in development, production URL otherwise
+const SUPABASE_URL = process.env.NODE_ENV === 'production'
+  ? 'https://kzlurqihzaolhzsbkctf.supabase.co'
+  : 'http://localhost:54321';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 /**

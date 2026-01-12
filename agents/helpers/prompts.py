@@ -355,64 +355,55 @@ def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dic
     ).strip()
     prompt += "\n\n\n" + context_section
 
-    rules_section = dedent(
-        """
-RULES / CONTROL LOGIC
-------------------------
-Phase-aware minimum scores:
-- PREPARE_RESEARCH → 0.02
-- RESEARCH → 0.05
-- ATOMIZE → 0.10
-- PLAN → 0.15
-- SPAWN → 0.20
-- EXECUTE → 0.20–1.0 based on real completion
-
-Execute-phase guidance:
-- 0.20 = just entered execute phase
-- 0.30–0.50 = some execution progress
-- 0.50–0.80 = significant progress
-- 0.80–0.99 = nearly complete
-- 1.0 = verifiable completion
-
-Intent is not completion. Research alone caps at 0.10; acquisition goals without confirmation cap at 0.20.
-“Proceeding to checkout” or “order confirmed” ≠ finished outcome.
-        """
-    ).strip()
-    prompt += "\n\n\n" + rules_section
-
     # Build output section based on whether we have a response schema
     if response_schema and response_schema.get("fields"):
         fields_desc = "\n".join([
             f"  - {f['name']} ({f['type']}): {f['description']}"
             for f in response_schema["fields"]
         ])
+        num_fields = len(response_schema["fields"])
         output_section = dedent(
             f"""
+SCORING RULES (OUTPUT-SCHEMA BASED)
+-----------------------------------
+Your score MUST be based on whether the required output fields can be populated from the conversation.
+
+Required output fields ({num_fields} total):
+{fields_desc}
+
+SCORING CRITERIA:
+- Score = (number of fields you can populate with meaningful data) / {num_fields}
+- If ALL {num_fields} fields can be populated with real, extracted data → score = 1.0
+- If some fields are missing data → score = (populated fields) / {num_fields}
+- Empty strings, null values, or placeholder text do NOT count as populated
+
+IMPORTANT: The data does NOT need to be in a specific format. If the conversation contains the information needed to answer each field, even if scattered across tool results or messages, the field CAN be populated.
+
+Look through ALL tool results and messages for the required data. Web search results, API responses, and agent reasoning all count as valid sources.
+
 OUTPUT CONTRACT
 ---------------
-Evaluation criteria:
-{verifier_prompt}
-
-Only award 1.0 when the user would agree the goal is fully done with concrete proof.
+Additional context: {verifier_prompt}
 
 STRUCTURED OUTPUT EXTRACTION:
-When the goal is complete (score = 1.0), you must also extract the following output fields from the conversation:
+Extract the following fields from the conversation:
 {fields_desc}
 
 Return JSON:
 {{
-  "reasoning": "<internal thinking about what was actually accomplished>",
-  "score": <number between 0.0 and 1.0>,
+  "reasoning": "<explain which fields you could/couldn't populate and why>",
+  "score": <number between 0.0 and 1.0 based on field population>,
   "output": {{
     "<field_name>": <extracted value>,
     ...
   }}
 }}
 
-IMPORTANT: Always include the "output" field with your best extraction of the values, even if the goal is not complete. The output will only be used when score >= 1.0.
+IMPORTANT: Always include the "output" field with your best extraction of the values. Extract whatever data is available even for partial completion.
             """
         ).strip()
     else:
+        # No schema - use generic verifier without structured output extraction
         output_section = dedent(
             f"""
 OUTPUT CONTRACT

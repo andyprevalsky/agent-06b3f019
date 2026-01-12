@@ -30,16 +30,12 @@
  *     v
  * [ENABLED]
  *
- * FEEDBACK BANNER:
- * [HIDDEN] <-- hideFeedback: true or agent not completed
- *     |
- *     v (agent completed)
- * [VISIBLE] <-- hideFeedback: false, agentDetail.status === 'COMPLETED'
+ * NOTE: FeedbackBanner is now rendered within MessageBubble when isFinalSummary message arrives,
+ * not based on agent status. See MessageBubble isCompletionSummary handling.
  *
  * States:
  * - typingMessageId: string | null
  * - userScrolled: boolean
- * - hideFeedback: boolean
  */
 
 import { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } from 'react';
@@ -51,7 +47,7 @@ import MessageBubble from './MessageBubble';
 import { PlanChip } from './PlanChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { Button } from '@/components/ui/button';
-import { FeedbackBanner, FeedbackData } from './FeedbackBanner';
+import { FeedbackData } from './FeedbackBanner';
 import { Copy, ArrowDown } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
@@ -513,6 +509,7 @@ export function MessageList({
           agentId={selectedAgentId || undefined}
           onSendMessage={selectedAgentId ? handleSendMessage : undefined}
           compact={compact}
+          onSubmitFeedback={onSubmitFeedback}
         />
       ))}
 
@@ -635,16 +632,7 @@ export function MessageList({
             </div>
           )}
           
-          {/* Completed - with Feedback Banner */}
-          {agent?.status === 'COMPLETED' && onSubmitFeedback && (
-            <FeedbackBanner onSubmit={onSubmitFeedback} />
-          )}
-          {agent?.status === 'COMPLETED' && !onSubmitFeedback && (
-            <div className="flex gap-3">
-              <div className="flex-shrink-0 w-8 hidden md:block" />
-              <p className="text-sm text-muted-foreground">your goal is complete</p>
-            </div>
-          )}
+          {/* Completed - FeedbackBanner is now rendered below CompletionSummaryCard in MessageBubble */}
         </>
       )}
       

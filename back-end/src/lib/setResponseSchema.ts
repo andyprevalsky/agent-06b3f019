@@ -6,6 +6,11 @@
 import { z } from 'zod';
 import { prisma } from './prisma';
 
+// Use local Supabase functions in development, production URL otherwise
+const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
+  ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
+  : 'http://localhost:54321/functions/v1';
+
 // Schema field types supported
 const FieldTypeSchema = z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]']);
 
@@ -81,7 +86,7 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
  */
 export async function generateResponseSchema(goal: string): Promise<GenerateResult> {
   const startTime = Date.now();
-  const roseApiUrl = `${process.env.SUPABASE_URL}/functions/v1/completions`;
+  const roseApiUrl = `${SUPABASE_FUNCTIONS_URL}/completions`;
 
   const systemPrompt = `You are an expert at analyzing agent goals and determining what structured output they should produce.
 

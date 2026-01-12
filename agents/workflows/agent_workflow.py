@@ -42,7 +42,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.send_message_to_user import send_message_to_user
     from tools.enable_write_permissions import enable_write_permissions
     from tools.request_user_approval import request_user_approval_direct
-    from tools.knowledge_base import save_blueprint
+    from tools.knowledge_base import save_blueprint_activity
     from tools.web_search import web_search
     from tools.spawn_sub_agents import spawn_sub_agents
     from tools.send_sms_as_user import send_sms_as_user
@@ -135,22 +135,21 @@ class AgentWorkflow:
         # Context - kept in sync with run_agent for tools that check it
         self.context: List[Dict] = []
 
-        # Response schema for structured output (fetched from agent config)
-        self.response_schema: Optional[Dict[str, Any]] = None
-
         # Sub-agent tracking
         self.parent_workflow_id: Optional[str] = None
         self.parent_agent_id: Optional[str] = None  # Parent agent ID for tree structure
         self.pending_children: Set[str] = set()
         self.child_tool_ids: Dict[str, str] = {}
         self.child_last_tokens: Dict[str, Dict[str, int]] = {}
+        self.child_tool_counts: Dict[str, int] = {}  # Aggregated tool counts from sub-agents
         self.depth: int = 0
 
         # Tree state tracking (for sub-agent tree UI)
         self.bus_id: Optional[str] = None  # Shared bus channel ID for tree updates
         self.tools_in_use: Set[str] = set()  # Currently executing tools (display strings)
         self.message_count: int = 0  # Total message count for this agent
-        self.output_schema: Optional[Dict] = None  # Cached response schema for tree display
+        self.output_schema: Optional[Dict] = None  # Structured output schema (for prompts, verifier, tree, completion)
+        self.start_time: Optional[datetime] = None  # Workflow start time for duration tracking
     
     # =========================================================================
     # SIGNALS
@@ -214,6 +213,11 @@ class AgentWorkflow:
         result = data.get("result", {})
 
         workflow.logger.info(f"✅ Child {child_agent_id[:8]} completed")
+
+        # Aggregate tool counts from child
+        child_counts = result.get("tool_counts", {})
+        for tool_name, count in child_counts.items():
+            self.child_tool_counts[tool_name] = self.child_tool_counts.get(tool_name, 0) + count
 
         child_tool_id = self.child_tool_ids.get(child_agent_id)
         if child_tool_id:
@@ -279,6 +283,7 @@ class AgentWorkflow:
         self.parent_agent_id = parent_agent_id
         self.depth = depth
         self.bus_id = bus_id
+        self.start_time = workflow.now()  # Track start time for duration calculation
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
         
@@ -305,21 +310,6 @@ class AgentWorkflow:
         except Exception:
             pass
 
-        # Fetch and cache output schema for tree display (available immediately after spawn)
-        if self.bus_id:
-            try:
-                self.output_schema = await workflow.execute_activity(
-                    fetch_agent_response_schema,
-                    args=[agent_id],
-                    start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=2)
-                )
-            except Exception as e:
-                workflow.logger.debug(f"Failed to fetch output schema (non-fatal): {e}")
-
-            # Broadcast initial tree state with schema
-            await self._update_tree_state(progress=0.0, status="ACTIVE")
-
         # Fetch user context once (for both phases)
         user_context_section = ""
         try:
@@ -332,7 +322,7 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
 
-        # Fetch response schema from agent config (for system prompts and verifier)
+        # Fetch response schema from agent config (for system prompts, verifier, and completion summary)
         response_schema = None
         try:
             agent_config = await workflow.execute_activity(
@@ -342,10 +332,14 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
             response_schema = agent_config.get("response_schema")
-            self.response_schema = response_schema  # Store on instance for tools like set_plan
-            workflow.logger.info(f"Fetched response_schema: {response_schema is not None}")
+            self.output_schema = response_schema  # Single source of truth for output schema
+            workflow.logger.info(f"Fetched output_schema: {response_schema is not None}")
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
+
+        # Broadcast initial tree state with schema (only for sub-agents with bus_id)
+        if self.bus_id:
+            await self._update_tree_state(progress=0.0, status="ACTIVE")
         
         # =====================================================================
         # Tool lists from centralized source of truth
@@ -366,7 +360,7 @@ class AgentWorkflow:
                 agent_id=agent_id,
                 user_id=user_id,
                 system_prompt=build_system_prompt("PLAN", plan_tools, disabled_tools=execute_tools, user_context_section=user_context_section, response_schema=response_schema),
-                verifier_prompt=build_verifier_prompt("PLAN", self.verifier.get("llmJudgePrompt", ""), response_schema=response_schema),
+                verifier_prompt_generator=self._make_verifier_prompt_generator("PLAN", self.verifier.get("llmJudgePrompt", "")),
                 model=model,
                 tools=plan_tools,
                 is_inside_temporal_activity=False,
@@ -382,6 +376,7 @@ class AgentWorkflow:
                 reasoning_max_tokens=reasoning_max_tokens,
                 is_plan_loop=True,  # PLAN phase: requires set_plan, posts "sit back" message
                 response_schema=response_schema,
+                get_response_schema=self._make_response_schema_getter(),
             )
 
             self._track_tokens(plan_result)
@@ -402,7 +397,7 @@ class AgentWorkflow:
             agent_id=agent_id,
             user_id=user_id,
             system_prompt=build_system_prompt("EXECUTE", execute_tools, user_context_section=user_context_section, response_schema=response_schema),
-            verifier_prompt=build_verifier_prompt("EXECUTE", self.verifier.get("llmJudgePrompt", ""), response_schema=response_schema),
+            verifier_prompt_generator=self._make_verifier_prompt_generator("EXECUTE", self.verifier.get("llmJudgePrompt", "")),
             model=model,
             tools=execute_tools,
             is_inside_temporal_activity=False,
@@ -418,6 +413,7 @@ class AgentWorkflow:
             reasoning_max_tokens=reasoning_max_tokens,
             skip_blueprint_query=not skip_plan,  # Only skip if we ran PLAN phase
             response_schema=response_schema,
+            get_response_schema=self._make_response_schema_getter(),
         )
         
         self._track_tokens(execute_result)
@@ -434,7 +430,49 @@ class AgentWorkflow:
     # =========================================================================
     # CALLBACKS FOR run_agent
     # =========================================================================
-    
+
+    def _make_verifier_prompt_generator(self, phase: str, llm_judge_prompt: str):
+        """Create a generator function that builds the verifier prompt at verification time.
+
+        This allows schema to be polled/fetched when actually needed, avoiding race conditions
+        where the schema isn't ready at phase start.
+        """
+        async def generate() -> str:
+            # Poll for schema if not available (handles async schema generation race condition)
+            if self.output_schema is None:
+                max_attempts = 5
+                for attempt in range(max_attempts):
+                    try:
+                        agent_config = await workflow.execute_activity(
+                            fetch_agent_config,
+                            args=[self.agent_id],
+                            start_to_close_timeout=timedelta(seconds=30),
+                            retry_policy=RetryPolicy(maximum_attempts=2)
+                        )
+                        self.output_schema = agent_config.get("response_schema")
+                        if self.output_schema:
+                            workflow.logger.info(f"Fetched output_schema on attempt {attempt + 1}")
+                            break
+                        elif attempt < max_attempts - 1:
+                            await asyncio.sleep(1)  # Wait before retry
+                    except Exception as e:
+                        workflow.logger.warning(f"Failed to fetch schema (attempt {attempt + 1}): {e}")
+
+            return build_verifier_prompt(phase, llm_judge_prompt, response_schema=self.output_schema)
+
+        return generate
+
+    def _make_response_schema_getter(self):
+        """Create a getter that returns the current output_schema.
+
+        Called at verification time, after verifier_prompt_generator has polled for schema.
+        This ensures check_progress receives the dynamically-fetched schema for structured output extraction.
+        """
+        async def get_schema() -> Optional[Dict]:
+            return self.output_schema
+
+        return get_schema
+
     async def _wait_for_messages(self) -> bool:
         """Wait for new messages."""
         try:
@@ -687,41 +725,116 @@ class AgentWorkflow:
 
             return result
             
+    def _format_outputs(self, structured_response: Optional[Dict]) -> List[Dict]:
+        """Convert structured_response → CompletionSummaryCard outputs format."""
+        if not structured_response or not self.output_schema:
+            return []
+
+        fields = self.output_schema.get("fields", [])
+        outputs = []
+
+        for field in fields:
+            field_name = field.get("name")
+            if field_name and field_name in structured_response:
+                outputs.append({
+                    "key": field_name,
+                    "label": field.get("description", field_name.replace("_", " ").title()),
+                    "value": structured_response[field_name]
+                })
+
+        return outputs
+
     async def _mark_complete(self, context: List[Dict], structured_response: Optional[Dict] = None) -> None:
-        """Mark task complete, save blueprint, signal parent."""
+        """Mark task complete and signal parent.
+
+        Order:
+        1. Post IN_PROGRESS message → FE shows loading state
+        2. Generate completion summary (LLM call)
+        3. Post FINISHED message with isFinalSummary → FE renders CompletionSummaryCard
+        4. Update tree state (broadcast COMPLETED)
+        5. Mark finished in DB
+        6. Signal parent (if sub-agent)
+        7. Save blueprint (fire-and-forget, no UI)
+        """
         workflow.logger.info("✓ Marking task complete")
 
+        # Poll for output_schema if missing (handles race condition with async schema generation)
+        max_schema_attempts = 5
+        schema_attempt = 0
+        while self.output_schema is None and schema_attempt < max_schema_attempts:
+            schema_attempt += 1
+            try:
+                agent_config = await workflow.execute_activity(
+                    fetch_agent_config,
+                    args=[self.agent_id],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2)
+                )
+                self.output_schema = agent_config.get("response_schema")
+                workflow.logger.info(f"Fetched output_schema attempt {schema_attempt}/{max_schema_attempts}: {self.output_schema is not None}")
+
+                if self.output_schema is None and schema_attempt < max_schema_attempts:
+                    workflow.logger.info("Schema not ready, waiting 1s...")
+                    await asyncio.sleep(1)
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch output_schema (attempt {schema_attempt}): {e}")
+                if schema_attempt < max_schema_attempts:
+                    await asyncio.sleep(1)
+
+        tool_counts = {}
+        summary = ""
+        tool_call_id = str(workflow.uuid4())
+
         try:
-            # Generate summary - pass structured_response and output_schema so summarizer includes them
+            # Post IN_PROGRESS message for FE loading state
+            await self._post_message("", "TOOL", {
+                "toolCallId": tool_call_id,
+                "toolName": "completion_summary",
+                "toolStatus": "IN_PROGRESS",
+                "title": "Generating summary",
+            })
+
+            # Generate summary - pass structured_response, output_schema, and child_tool_counts
             summary_result = await workflow.execute_activity(
                 generate_completion_summary,
-                args=[context, self.goal, self.model, structured_response, self.output_schema],
+                args=[context, self.goal, self.model, structured_response, self.output_schema, self.child_tool_counts],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
             summary = summary_result.get("summary", "")
+            tool_counts = summary_result.get("tool_counts", {})
             self._track_tokens({"tokens_in": summary_result.get("usage", {}).get("prompt_tokens", 0),
                                "tokens_out": summary_result.get("usage", {}).get("completion_tokens", 0),
                                "token_count": summary_result.get("usage", {}).get("total_tokens", 0)})
 
-            if summary:
-                # Post as user attention message (like send_message_to_user) instead of ASSISTANT
-                await self._post_message(summary, "TOOL", {
-                    "isFinalSummary": True,
-                    "isUserAttentionMessage": True,
-                    "attentionMessage": summary,
-                    "sendMessageToUser": {
-                        "isQuestion": False,
-                        "attentionKind": "info",
-                        "isWaitingForUser": False,
-                    },
-                    "toolName": "completion_summary",
-                    "toolStatus": "FINISHED",
-                    "title": "✅ Task Complete",
-                })
+            # Build tool usage array for frontend
+            tool_usage = [{"name": k, "count": v} for k, v in tool_counts.items()] if tool_counts else []
+            total_tool_calls = sum(tool_counts.values()) if tool_counts else 0
 
-            # Save blueprint
-            await save_blueprint(self, self.user_id, context)
+            # Calculate duration
+            duration_seconds = 0
+            if self.start_time:
+                duration_seconds = int((workflow.now() - self.start_time).total_seconds())
+
+            # Calculate cost from token usage (approximate: $0.001/1k input, $0.003/1k output)
+            cost_dollars = (self.tokens_in / 1000 * 0.001) + (self.tokens_out / 1000 * 0.003)
+
+            # Post FINISHED message with completion summary (same toolCallId)
+            await self._post_message("", "TOOL", {
+                "toolCallId": tool_call_id,
+                "isFinalSummary": True,
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "title": "✅ Task Complete",
+                "completionSummary": {
+                    "summary": summary,
+                    "outputs": self._format_outputs(structured_response),
+                    "toolUsage": tool_usage,
+                    "totalToolCalls": total_tool_calls,
+                    "durationSeconds": duration_seconds,
+                    "costDollars": round(cost_dollars, 4),
+                }
+            })
 
             # Broadcast COMPLETED status with structured output to tree
             # (output_schema is already cached from startup and included in all broadcasts)
@@ -765,7 +878,7 @@ class AgentWorkflow:
             workflow.logger.error(f"Failed to mark complete: {e}")
             raise
 
-        # Signal parent
+        # Signal parent with tool_counts for aggregation
         if self.parent_workflow_id:
             try:
                 parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
@@ -775,11 +888,25 @@ class AgentWorkflow:
                         "status": "completed",
                         "goal": self.goal,
                         "summary": summary,
-                        "structured_response": structured_response
+                        "structured_response": structured_response,
+                        "tool_counts": tool_counts
                     }
                 })
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")
+
+        # Save blueprint (fire-and-forget, no tool messages - just logs)
+        # This is the last step so it doesn't block completion UX
+        try:
+            await workflow.execute_activity(
+                save_blueprint_activity,
+                args=[self.user_id, context],
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+            workflow.logger.info("Blueprint saved successfully")
+        except Exception as e:
+            workflow.logger.warning(f"Blueprint save failed (non-fatal): {e}")
     
     @workflow.query
     def get_status(self) -> Dict:

@@ -54,7 +54,7 @@ const TEST_PROMPTS: TestPrompt[] = [
   {
     title: 'Test Parallel Tool Calls',
     description: 'Tests parallel execution of multiple tools in one turn',
-    prompt: 'Do 10 parallel web_searches to get data for the best of each of these items\n1. tomatoe\n2. potatoe\n3. computer\n4. ram\n5. Coding agent\n6. Cities to live in in your 20s\n7. place to vacation\n8. places in austin\n9. Content creators in NYC\n10. Presidents of the world\n\nno questions ask\nstart in agent mode\nno sub agents',
+    prompt: 'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in execute mode\nno sub agents',
   },
   {
     title: 'Test Claude Code Agent',

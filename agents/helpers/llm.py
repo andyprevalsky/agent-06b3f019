@@ -1309,9 +1309,9 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 @activity.defn
 async def check_progress(
     context: List[Dict[str, Any]],
-    verifier_prompt: str,
+    verifier_system_prompt: str,
     model: str = "anthropic/claude-sonnet-4.5",
-    phase: str = "EXECUTE",
+    phase: str = "EXECUTE",  # Kept for backward compat but no longer used
     response_schema: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
@@ -1319,20 +1319,15 @@ async def check_progress(
 
     Args:
         context: Message history (first USER message is the goal)
-        verifier_prompt: Custom LLM judge prompt
+        verifier_system_prompt: Pre-built verifier system prompt (from build_verifier_prompt)
         model: LLM model to use
-        phase: Current workflow phase (PREPARE_RESEARCH, RESEARCH, ATOMIZE, PLAN, SPAWN, EXECUTE)
-        response_schema: Required structured response schema for output extraction
+        phase: Deprecated - no longer used (prompt is pre-built by caller)
+        response_schema: Response schema for structured output extraction
 
     Returns:
         Dict with 'score' (float 0.0-1.0), 'reasoning' (str), and optionally 'structured_response'
-
-    Raises:
-        ValueError: If response_schema is not provided for EXECUTE phase
     """
-    # If no schema provided, use empty schema
-    # For EXECUTE phase, this means we skip structured output extraction
-    # (schema may not be ready yet due to async generation race condition)
+    # If no schema provided, use empty schema for output extraction
     if not response_schema:
         response_schema = {"fields": []}
 
@@ -1350,11 +1345,12 @@ async def check_progress(
                     logger.error(f"❌ context[{i}] is None!")
                 elif not isinstance(m, dict):
                     logger.error(f"❌ context[{i}] is {type(m).__name__}, not dict: {str(m)[:200]}")
-        
+
         _safe_heartbeat("Checking progress with LLM judge")
 
         config = load_config()
-        system_prompt = build_verifier_prompt(phase, verifier_prompt, response_schema)
+        # Use the pre-built verifier prompt directly (no double-building)
+        system_prompt = verifier_system_prompt
         
         # Convert full context to OpenAI message format (no truncation)
         # NOTE: SYSTEM and ASSISTANT messages are excluded from verifier (default)

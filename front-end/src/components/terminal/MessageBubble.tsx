@@ -1,6 +1,17 @@
 /**
  * STATE MACHINE: MessageBubble
  *
+ * MESSAGE TYPE ROUTING (checked in order):
+ * - isSubAgentTool → SubAgentTree/SubAgentToolBubble
+ * - isSignupRequest → SignupPromptBubble
+ * - isSetPlanTool → PlanChip
+ * - isClaudeCodeTool → ClaudeCodeChip
+ * - isCompletionSummary → CompletionSummaryCard + FeedbackBanner
+ * - isUserAttentionMessage → AttentionMessage
+ * - toolData → ToolMessage
+ * - isUser → User bubble
+ * - default → System/Assistant bubble
+ *
  * TOOL EXPANSION (for tool messages):
  * [COLLAPSED] <-- toolExpanded: false
  *     |
@@ -41,6 +52,8 @@ import SubAgentTree from './SubAgentTree';
 import ClaudeCodeChip from './ClaudeCodeChip';
 import { MarkdownText } from './MarkdownText';
 import { PlanChip } from './PlanChip';
+import { CompletionSummaryCard, CompletionSummaryData } from './CompletionSummaryCard';
+import { FeedbackBanner, FeedbackData } from './FeedbackBanner';
 import { getToolIcon, isX402Tool, x402IconSrc, isClaudeCodeTool, claudeCodeIconSrc } from '@/lib/toolIcons';
 import { useToast } from '@/hooks/use-toast';
 import ThinkingAnimation from '../ThinkingAnimation';
@@ -60,6 +73,8 @@ interface MessageBubbleProps {
   compact?: boolean;
   /** Callback to open the auth modal (for signup prompts) */
   onOpenAuthModal?: () => void;
+  /** Callback to submit feedback (for completion summary) */
+  onSubmitFeedback?: (feedback: FeedbackData) => Promise<void>;
 }
 
 interface ToolMessageData {
@@ -541,7 +556,7 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -563,6 +578,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   // Check if this is a spawn_claude_code_agent tool message (render as ClaudeCodeChip)
   const isClaudeCodeTool = isTool && message.metadata?.toolName === 'spawn_claude_code_agent';
+
+  // Check if this is a completion summary message (render as CompletionSummaryCard + FeedbackBanner)
+  const isCompletionSummary = isTool && message.metadata?.isFinalSummary === true;
 
   // Memoize tool data to prevent flickers on re-renders
   const toolData = useMemo(() => {
@@ -776,6 +794,28 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
         <div className="flex-shrink-0 w-8 hidden md:block" />
         <div className="flex-1">
           <ClaudeCodeChip taskId={taskId} wsUrl={wsUrl} />
+        </div>
+      </div>
+    );
+  }
+
+  // Completion summary: render as CompletionSummaryCard + FeedbackBanner
+  if (isCompletionSummary && message.metadata?.completionSummary) {
+    // Call onTypingComplete immediately since card doesn't animate text
+    if (shouldType && onTypingComplete) {
+      requestAnimationFrame(() => {
+        onTypingComplete();
+      });
+    }
+
+    const completionData = message.metadata.completionSummary as CompletionSummaryData;
+
+    return (
+      <div className={cn("flex", !compact && "gap-3", "animate-in fade-in duration-300")}>
+        {!compact && <div className="flex-shrink-0 w-8 hidden md:block" />}
+        <div className="flex-1 space-y-3">
+          <CompletionSummaryCard data={completionData} />
+          {onSubmitFeedback && <FeedbackBanner onSubmit={onSubmitFeedback} />}
         </div>
       </div>
     );

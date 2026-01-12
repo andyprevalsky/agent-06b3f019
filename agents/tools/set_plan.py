@@ -206,7 +206,7 @@ class SetPlanManager(ToolManager):
         # 4. Build context for planner activity
         tools_description = _get_execute_phase_tools_description()
         user_context = getattr(workflow_instance, 'user_context_section', '')
-        response_schema = getattr(workflow_instance, 'response_schema', None)
+        response_schema = getattr(workflow_instance, 'output_schema', None)
         context_elapsed = (workflow.now() - context_start).total_seconds()
         workflow.logger.info(f"[TIMING] Context building: {context_elapsed*1000:.1f}ms (messages: {len(base_messages)}, has_schema: {response_schema is not None})")
 
@@ -253,9 +253,8 @@ class SetPlanManager(ToolManager):
 
                     # Update workflow instance with generated schema
                     if generated_schema:
-                        workflow_instance.response_schema = generated_schema
                         workflow_instance.output_schema = generated_schema
-                        workflow.logger.info(f"✅ Generated response schema with {len(generated_schema.get('fields', []))} fields")
+                        workflow.logger.info(f"✅ Generated output_schema with {len(generated_schema.get('fields', []))} fields")
                 else:
                     # Retry or schema already exists - just call planner
                     workflow.logger.info(f"[TIMING] Starting planner LLM only (attempt {attempt + 1}, schema_exists={response_schema is not None})")

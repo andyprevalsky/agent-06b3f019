@@ -373,7 +373,14 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     }
     // Fall back to DEV default if no prefill
     return import.meta.env.DEV
-      ? `Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 4, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10 and you are complete.`
+      ? `Do 3 parallel web_searches to get data for the best of each of these items
+1. Cities to live in in your 20s
+2. place to vacation
+3. cheapest cost of living in NA
+
+no questions ask
+start in execute mode
+no sub agents`
       : '';
   });
   const [isSendingMessage, setIsSendingMessage] = useState(false);

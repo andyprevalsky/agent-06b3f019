@@ -27,7 +27,7 @@ from helpers.tool_schemas import create_agent_action_model
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import compress_context
 from tools.base import ToolEvent, EventType, UsageType, UsageItem, MessageStatus
-from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity, query_blueprints
+from tools.knowledge_base import query_blueprints_activity, query_blueprints
 from loop.activity_helper import call_temporal_activity_from_activity
 
 logger = structlog.get_logger()
@@ -43,7 +43,7 @@ async def run_agent(
     
     # Configuration
     system_prompt: str,
-    verifier_prompt: str,
+    verifier_prompt_generator: Callable[[], Awaitable[str]],  # Called at verification time to build prompt (allows schema polling)
     model: str,
     tools: List[str],  # Tool names (schemas from Pydantic models)
     
@@ -94,8 +94,12 @@ async def run_agent(
     # PLAN phase mode - requires set_plan before completion, posts "sit back" message
     is_plan_loop: bool = False,
 
-    # Response schema for structured output extraction (passed from agent config)
+    # Response schema for structured output extraction
+    # Static schema (use get_response_schema for dynamic fetching)
     response_schema: Optional[Dict[str, Any]] = None,
+
+    # Dynamic schema getter - called at verification time (handles race condition with async schema generation)
+    get_response_schema: Optional[Callable[[], Awaitable[Optional[Dict[str, Any]]]]] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -714,12 +718,13 @@ async def run_agent(
                 verifier_result = await _run_verifier(
                     execute_activity=execute_activity,
                     context=context,
-                    verifier_prompt=verifier_prompt,
+                    verifier_prompt_generator=verifier_prompt_generator,
                     model=model,
                     agent_id=agent_id,
                     task_id=task_id,
                     post_message=post_message,
                     response_schema=response_schema,
+                    get_response_schema=get_response_schema,
                 )
 
                 # Track verifier tokens
@@ -732,17 +737,8 @@ async def run_agent(
                 v_reasoning = verifier_result.get("reasoning", "")
                 structured_response = verifier_result.get("structured_response")
 
-                # If complete, save blueprint and exit
+                # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
-                    try:
-                        await _save_blueprint(
-                            execute_activity=execute_activity,
-                            user_id=user_id,
-                            context=context,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Blueprint save failed (non-fatal): {e}")
-
                     return {
                         "status": "completed",
                         "context": context,
@@ -803,21 +799,6 @@ def _build_llm_messages(context: List[Dict], system_prompt: str) -> List[Dict]:
     return messages
 
 
-async def _save_blueprint(
-    execute_activity,
-    user_id: str,
-    context: List[Dict],
-) -> None:
-    """Save blueprint from completed context."""
-    await execute_activity(
-        save_blueprint_activity,
-        args=[user_id, context],
-        start_to_close_timeout=timedelta(seconds=60),
-        retry_policy=RetryPolicy(maximum_attempts=3),
-    )
-    logger.info("Blueprint saved")
-
-
 async def _compress_context(
     execute_activity,
     context: List[Dict],
@@ -841,12 +822,13 @@ async def _compress_context(
 async def _run_verifier(
     execute_activity,
     context: List[Dict],
-    verifier_prompt: str,
+    verifier_prompt_generator: Callable[[], Awaitable[str]],
     model: str,
     agent_id: str,
     task_id: Optional[str],
     post_message: Optional[Callable],
     response_schema: Optional[Dict] = None,
+    get_response_schema: Optional[Callable[[], Awaitable[Optional[Dict]]]] = None,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = str(uuid.uuid4())
@@ -866,9 +848,17 @@ async def _run_verifier(
             }
         )
 
+    # Generate verifier prompt at verification time (allows schema polling)
+    verifier_prompt = await verifier_prompt_generator()
+
+    # Get response schema dynamically if getter provided (handles race condition with async schema generation)
+    current_response_schema = response_schema
+    if get_response_schema:
+        current_response_schema = await get_response_schema()
+
     result = await execute_activity(
         check_progress,
-        args=[context, verifier_prompt, model, "EXECUTE", response_schema],
+        args=[context, verifier_prompt, model, "EXECUTE", current_response_schema],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )

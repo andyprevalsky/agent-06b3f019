@@ -6,6 +6,104 @@ import structlog
 
 logger = structlog.get_logger()
 
+# Tool name → Human-readable label mapping for summary display
+TOOL_DISPLAY_NAMES = {
+    "web_search": "Web Searches",
+    "spawn_sub_agents": "Sub Agents Spawned",
+    "spawn_browser_agent": "Browser Agents Spawned",
+    "spawn_claude_code_agent": "Code Agents Spawned",
+    "send_sms_as_user": "SMS's Sent",
+    "deep_research": "Deep Research Runs",
+    "find_all": "Find All Queries",
+    "enrich": "Enrichments",
+    "monitor": "Monitors Created",
+    "check_monitor_events": "Monitor Checks",
+    "message_person": "Messages Sent",
+    "read_message_history_with_person": "Message Histories Read",
+    "search_user_network_for_people": "Network Searches",
+    "send_message_to_user": "User Messages",
+    "wait_seconds": "Wait Operations",
+    "set_plan": "Plans Set",
+    "search_x402_bazaar": "Bazaar Searches",
+    "pay_for_x402_bazaar_service": "Bazaar Payments",
+}
+
+# Tools to exclude from the summary (internal/meta tools)
+EXCLUDED_TOOLS = {
+    "check_progress",
+    "completion_summary",
+    "plan_complete",
+    "attempt_completion",
+    "enable_write_permissions",
+    "request_user_approval",
+    "request_user_signup",
+}
+
+
+def _count_tool_usage(context: List[Dict[str, Any]]) -> Dict[str, int]:
+    """
+    Count tool usage from context messages.
+
+    Only counts FINISHED tool messages to avoid double-counting
+    IN_PROGRESS and FINISHED for the same tool call.
+
+    Args:
+        context: Full message history
+
+    Returns:
+        Dict mapping tool_name -> count
+    """
+    tool_counts: Dict[str, int] = {}
+    for msg in context:
+        if msg.get("role") == "TOOL":
+            metadata = msg.get("metadata", {})
+            tool_name = metadata.get("toolName")
+            tool_status = metadata.get("toolStatus")
+            if tool_name and tool_name not in EXCLUDED_TOOLS and tool_status == "FINISHED":
+                tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+    return tool_counts
+
+
+def _merge_tool_counts(own_counts: Dict[str, int], sub_agent_counts: Dict[str, int]) -> Dict[str, int]:
+    """
+    Merge tool counts from this agent and sub-agents.
+
+    Args:
+        own_counts: Tool counts from this agent's context
+        sub_agent_counts: Aggregated tool counts from sub-agents
+
+    Returns:
+        Merged dict with total counts per tool
+    """
+    merged = own_counts.copy()
+    for tool_name, count in sub_agent_counts.items():
+        merged[tool_name] = merged.get(tool_name, 0) + count
+    return merged
+
+
+def _format_tool_stats_footer(tool_counts: Dict[str, int]) -> str:
+    """
+    Format tool usage statistics as a markdown footer.
+
+    Args:
+        tool_counts: Dict mapping tool_name -> count
+
+    Returns:
+        Formatted markdown string
+    """
+    if not tool_counts:
+        return ""
+
+    total_calls = sum(tool_counts.values())
+    footer = f"\n\n---\n### Tool Usage Statistics\n**Total:** {total_calls}\n\n"
+
+    # Sort by count descending
+    for tool_name, count in sorted(tool_counts.items(), key=lambda x: -x[1]):
+        display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name.replace("_", " ").title())
+        footer += f"**{display_name}:** {count}\n"
+
+    return footer
+
 
 @activity.defn
 async def compress_context(
@@ -98,6 +196,7 @@ async def generate_completion_summary(
     model: str = "anthropic/claude-sonnet-4.5",
     structured_response: Dict[str, Any] = None,
     output_schema: Dict[str, Any] = None,
+    sub_agent_tool_counts: Dict[str, int] = None,
 ) -> Dict[str, Any]:
     """
     Generate a summary of what the agent accomplished.
@@ -111,11 +210,13 @@ async def generate_completion_summary(
         model: LLM model to use
         structured_response: Extracted structured output values from verifier
         output_schema: Schema definition with field descriptions
+        sub_agent_tool_counts: Aggregated tool counts from sub-agents
 
     Returns:
         Dict with:
-            - summary: Text summary of work completed (up to 1000 tokens)
+            - summary: Text summary of work completed (up to 1000 tokens) + tool stats footer
             - usage: Token usage stats
+            - tool_counts: Merged tool counts (for parent aggregation)
     """
     try:
         activity.heartbeat("Generating completion summary")
@@ -123,37 +224,27 @@ async def generate_completion_summary(
         # Import here to avoid circular dependency
         from helpers.llm import convert_context_to_messages, call_llm
 
-        # Build structured output section if available
-        structured_output_section = ""
+        # Build context about structured output (for LLM awareness, not for formatting)
+        structured_output_context = ""
         if structured_response and isinstance(structured_response, dict) and len(structured_response) > 0:
-            structured_output_section = "\n\n## EXTRACTED STRUCTURED OUTPUT (MUST BE INCLUDED IN SUMMARY):\n"
+            structured_output_context = "\n\nSTRUCTURED OUTPUT DELIVERED:\n"
             for key, value in structured_response.items():
-                # Convert snake_case to Title Case for display
                 formatted_key = key.replace("_", " ").title()
-                # Format value (handle arrays)
                 if isinstance(value, list):
                     formatted_value = ", ".join(str(v) for v in value)
                 else:
                     formatted_value = str(value) if value is not None else ""
-                structured_output_section += f"- **{formatted_key}:** {formatted_value}\n"
-
-            structured_output_section += "\nIMPORTANT: You MUST include ALL of the above structured output values in your summary. These are the key deliverables the user is expecting."
+                structured_output_context += f"- {formatted_key}: {formatted_value}\n"
 
         system_prompt = f"""You are summarizing the work completed by an AI agent.
 
 ORIGINAL GOAL: {goal}
-{structured_output_section}
+{structured_output_context}
 
-Review the conversation history and provide a clear, comprehensive summary of:
-1. What the agent accomplished
-2. Key findings, results, or outputs
-3. Any important decisions or actions taken
-4. Final status/outcome
-
-{"CRITICAL: Your summary MUST prominently feature the EXTRACTED STRUCTURED OUTPUT values listed above. These are the primary deliverables." if structured_output_section else ""}
-
-Be thorough but concise. Focus on actionable information and concrete results.
-Maximum length: ~1000 tokens."""
+Write a BRIEF 1-2 sentence summary of what was accomplished. Focus on the outcome and key result.
+Do NOT use markdown formatting, bullet points, or section headers.
+Do NOT list the structured output values - they are displayed separately in the UI.
+Just write plain text describing what was done."""
 
         # Convert context to messages (exclude system messages like blueprints)
         # Summarization needs assistant messages to see what the agent accomplished
@@ -161,9 +252,7 @@ Maximum length: ~1000 tokens."""
         messages.extend(convert_context_to_messages(context, include_system=False, include_assistant=True))
         messages.append({
             "role": "user",
-            "content": "Provide a comprehensive summary of what was accomplished." + (
-                " Make sure to prominently include the structured output values." if structured_output_section else ""
-            )
+            "content": "Provide a brief 1-2 sentence summary of what was accomplished. Plain text only, no markdown."
         })
 
         # Use call_llm which handles Rose model routing automatically
@@ -171,11 +260,16 @@ Maximum length: ~1000 tokens."""
             messages=messages,
             model=model,
             temperature=0.3,
-            max_tokens=1500,
+            max_tokens=200,  # Brief summary only needs ~50-100 tokens
         )
 
         summary = result.get("content", "")
         usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+
+        # Count this agent's tool usage and merge with sub-agent counts
+        # (returned as structured data, not appended as text)
+        own_tool_counts = _count_tool_usage(context)
+        total_tool_counts = _merge_tool_counts(own_tool_counts, sub_agent_tool_counts or {})
 
         logger.info(
             "Summary generated",
@@ -183,11 +277,13 @@ Maximum length: ~1000 tokens."""
             summary_length=len(summary),
             tokens=usage.get("total_tokens", 0),
             has_structured_output=bool(structured_response),
+            tool_count=sum(total_tool_counts.values()) if total_tool_counts else 0,
         )
 
         return {
             "summary": summary,
-            "usage": usage
+            "usage": usage,
+            "tool_counts": total_tool_counts,
         }
 
     except Exception as e:
@@ -195,5 +291,6 @@ Maximum length: ~1000 tokens."""
         # Return empty summary with zero usage on error
         return {
             "summary": f"Agent completed goal: {goal}",
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "tool_counts": {},
         }

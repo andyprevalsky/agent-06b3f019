@@ -10,6 +10,11 @@ const router = Router();
 // Cerebras API base URL (OpenAI-compatible)
 const CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions';
 
+// Use local Supabase functions in development, production URL otherwise
+const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
+  ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
+  : 'http://localhost:54321/functions/v1';
+
 // Randomly select a model from the pool
 function selectModel(requestedModel: string): { model: string; isCerebras: boolean } {
   const normalized = normalizeRoseAlias(requestedModel) ?? requestedModel.toLowerCase();
@@ -393,7 +398,7 @@ router.post('/bench', async (req: AuthRequest, res: Response) => {
                 
                 // Call edge function /completions
                 const response = await fetch(
-                  `${process.env.SUPABASE_URL}/functions/v1/completions`,
+                  `${SUPABASE_FUNCTIONS_URL}/completions`,
                   {
                     method: 'POST',
                     headers: {
