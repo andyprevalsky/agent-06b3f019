@@ -348,9 +348,13 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
 
-        <p className="text-xs text-muted-foreground text-center mt-4">
-          You can connect more services later in Settings
-        </p>
+        {/* Skip button */}
+        <button
+          onClick={onComplete}
+          className="w-full py-2 mt-3 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          Skip for now
+        </button>
       </div>
     </div>
   );

@@ -178,6 +178,20 @@ export function registerHandlers() {
     return { success: true };
   });
 
+  // Shell handlers
+  ipcMain.handle('shell:openExternal', async (_, url: string) => {
+    logIpc('IN', 'shell:openExternal', { url });
+    try {
+      await shell.openExternal(url);
+      logIpc('OUT', 'shell:openExternal', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('Shell', 'Failed to open external URL', error);
+      logIpc('OUT', 'shell:openExternal', { success: false, message: error?.message });
+      return { success: false, message: error?.message || 'Failed to open URL' };
+    }
+  });
+
   // Shortcut handlers
   ipcMain.handle('shortcut:get', () => {
     logIpc('IN', 'shortcut:get');

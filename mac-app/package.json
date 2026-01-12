@@ -59,6 +59,10 @@
     "appId": "com.rose.desktop",
     "productName": "Rose",
     "artifactName": "${productName}-mac.${ext}",
+    "protocols": {
+      "name": "Rose",
+      "schemes": ["roselabs"]
+    },
     "publish": {
       "provider": "github",
       "owner": "andyprevalsky",

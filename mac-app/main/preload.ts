@@ -78,6 +78,17 @@ const api: IPC = {
   checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<{ success: boolean }>,
   downloadUpdate: () => ipcRenderer.invoke('updates:download') as Promise<{ success: boolean }>,
   restartToUpdate: () => ipcRenderer.invoke('updates:install') as Promise<{ success: boolean }>,
+
+  // Shell
+  openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url) as Promise<{ success: boolean }>,
+
+  // Payment
+  onPaymentComplete: (callback: (data: { success: boolean }) => void) => {
+    ipcRenderer.on('payment-complete', (_, data) => callback(data as { success: boolean }));
+  },
+  removePaymentCompleteListener: () => {
+    ipcRenderer.removeAllListeners('payment-complete');
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);

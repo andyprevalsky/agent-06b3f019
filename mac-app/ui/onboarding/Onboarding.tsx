@@ -5,8 +5,9 @@ import OnboardingAuth from './OnboardingAuth';
 import OnboardingData from './OnboardingData';
 import OnboardingShortcut from './OnboardingShortcut';
 import OnboardingWelcome from './OnboardingWelcome';
+import OnboardingPayment from './OnboardingPayment';
 
-export type OnboardingStep = 'auth' | 'data' | 'shortcut' | 'welcome';
+export type OnboardingStep = 'auth' | 'data' | 'shortcut' | 'welcome' | 'payment';
 
 interface OnboardingProps {
   onComplete: () => void;
@@ -44,11 +45,11 @@ const StepDots = ({
 
 const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: OnboardingProps) => {
   // Always use full steps array for navigation - we handle skipAuth separately
-  const fullSteps: OnboardingStep[] = ['auth', 'data', 'shortcut', 'welcome'];
+  const fullSteps: OnboardingStep[] = ['auth', 'data', 'shortcut', 'welcome', 'payment'];
 
   // Steps for display (dots) - exclude auth if skipping
   const displaySteps: OnboardingStep[] = skipAuth
-    ? ['data', 'shortcut', 'welcome']
+    ? ['data', 'shortcut', 'welcome', 'payment']
     : fullSteps;
 
   const [currentStep, setCurrentStep] = useState<OnboardingStep>(skipAuth ? 'data' : 'auth');
@@ -80,10 +81,11 @@ const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: Onboar
   };
 
   // Show back button when not on auth step (data can go back to auth via sign out)
-  const canGoBack = currentStep !== 'auth';
+  // Also hide back button on payment step (can't go back from payment)
+  const canGoBack = currentStep !== 'auth' && currentStep !== 'payment';
 
   const handleGetStarted = () => {
-    onComplete();
+    goToNext(); // Go to payment step
   };
 
   // Don't show dots on auth page
@@ -91,8 +93,8 @@ const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: Onboar
   // For dots, show all steps except auth
   const dotSteps = displaySteps.filter(s => s !== 'auth');
 
-  // Show footer on all steps except welcome
-  const showFooter = currentStep !== 'welcome';
+  // Show footer on all steps except welcome and payment
+  const showFooter = currentStep !== 'welcome' && currentStep !== 'payment';
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -120,6 +122,9 @@ const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: Onboar
         )}
         {currentStep === 'welcome' && (
           <OnboardingWelcome onGetStarted={handleGetStarted} />
+        )}
+        {currentStep === 'payment' && (
+          <OnboardingPayment onComplete={onComplete} />
         )}
       </div>
 

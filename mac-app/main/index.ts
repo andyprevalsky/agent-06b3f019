@@ -15,6 +15,53 @@ import {
 
 app.name = 'Rose';
 
+// Register custom URL scheme for deep links (e.g., roselabs://payment-success)
+// Use roselabs-dev in dev to avoid conflicts with production app
+// Must be called before app.ready on macOS
+const PROTOCOL = config.isDev ? 'roselabs-dev' : 'roselabs';
+
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient(PROTOCOL);
+}
+
+console.log(`[App] Registered protocol: ${PROTOCOL}://`)
+
+// Handle deep link URLs (roselabs://...)
+function handleDeepLink(url: string) {
+  console.log('[App] Received deep link:', url);
+  try {
+    const parsed = new URL(url);
+    if (parsed.host === 'payment-success') {
+      console.log('[App] Payment success deep link received');
+      // Send to renderer to complete onboarding
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+        mainWindow.focus();
+        mainWindow.webContents.send('payment-complete', { success: true });
+      }
+    } else if (parsed.host === 'payment-cancel') {
+      console.log('[App] Payment cancel deep link received');
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+        mainWindow.focus();
+        mainWindow.webContents.send('payment-complete', { success: false });
+      }
+    }
+  } catch (err) {
+    console.error('[App] Failed to parse deep link URL:', err);
+  }
+}
+
+// Handle deep link on macOS (when app is already running)
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleDeepLink(url);
+});
+
 // Log environment mode at startup
 console.log(`🚀 [Mac App] Mode: ${config.isDev ? 'DEVELOPMENT' : 'PRODUCTION'}`);
 
@@ -480,6 +527,14 @@ app.whenReady().then(() => {
   createQuickQueryWindow();
   registerQuickQueryIpc();
   registerUpdateIpc();
+
+  // Handle deep link if app was launched via URL (app was closed)
+  // On macOS, the URL is passed via process.argv when launched from closed state
+  const deepLinkArg = process.argv.find(arg => arg.startsWith(`${PROTOCOL}://`));
+  if (deepLinkArg) {
+    // Small delay to ensure renderer is ready
+    setTimeout(() => handleDeepLink(deepLinkArg), 500);
+  }
 
   // Only register global shortcuts if onboarding is complete
   // During onboarding, shortcuts are disabled so user can configure them

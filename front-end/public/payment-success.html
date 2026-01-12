@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Redirecting to Rose...</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      background: #0a0a0a;
+      color: #fafafa;
+    }
+    .container {
+      text-align: center;
+      padding: 2rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+    }
+    p {
+      color: #a1a1aa;
+      margin-bottom: 1.5rem;
+    }
+    a {
+      color: #fafafa;
+      text-decoration: underline;
+    }
+    a:hover {
+      opacity: 0.8;
+    }
+  </style>
+  <script>
+    // In prod: use roselabs:// deep link (auto-redirect)
+    // In dev: show instructions (deep links don't work in dev)
+    const isDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+    if (!isDev) {
+      // Production: redirect via deep link
+      window.location.href = 'roselabs://payment-success';
+    }
+    // Dev mode: don't redirect, show instructions instead
+  </script>
+</head>
+<body>
+  <div class="container" id="content">
+    <h1>Payment Successful!</h1>
+    <p id="message">Redirecting to Rose...</p>
+    <a id="fallback-link" href="roselabs://payment-success">Click here if not redirected</a>
+  </div>
+  <script>
+    const isDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+    if (isDev) {
+      // Dev mode: show instructions
+      document.getElementById('message').innerHTML =
+        'Deep links do not work in dev environments.<br><br>' +
+        'To replicate prod functionality, close this page and return to your dev app, then click "I\'ve completed payment".';
+      document.getElementById('fallback-link').style.display = 'none';
+    }
+  </script>
+</body>
+</html>

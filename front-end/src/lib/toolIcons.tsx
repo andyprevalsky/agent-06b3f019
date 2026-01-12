@@ -38,7 +38,7 @@ import {
   Plus,
   Terminal,
   Brain,
-  FilePen,
+  FileEdit,
   type LucideIcon
 } from 'lucide-react';
 
@@ -165,7 +165,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'agent_decision': Brain,
   'agent_intervention': Brain,
   'code_read_file': FileText,
-  'code_write_file': FilePen,
+  'code_write_file': FileEdit,
   'code_bash': Terminal,
   'code_thinking': Brain,
 };

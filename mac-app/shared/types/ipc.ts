@@ -56,6 +56,13 @@ export interface IPC {
   checkForUpdates: () => Promise<{ success: boolean }>;
   downloadUpdate: () => Promise<{ success: boolean }>;
   restartToUpdate: () => Promise<{ success: boolean }>;
+
+  // Shell
+  openExternal: (url: string) => Promise<{ success: boolean }>;
+
+  // Payment events
+  onPaymentComplete: (callback: (data: { success: boolean }) => void) => void;
+  removePaymentCompleteListener: () => void;
 }
 
 // Data types
