@@ -1,0 +1,71 @@
+---
+title: Authentication
+description: "How to authenticate with the Rose API"
+---
+
+## API Key Authentication
+
+All requests to the Rose API require an API key passed in the `x-api-key` header.
+
+```bash
+x-api-key: YOUR_API_KEY
+```
+
+## Getting Your API Key
+
+1. Sign up at [roselabs.ai](https://roselabs.ai)
+2. Subscribe to any plan
+3. Go to **Settings > API Keys**
+4. Your first key is auto-generated when you subscribe
+5. Click **Generate New Key** to create additional keys
+
+## Managing API Keys
+
+From the Settings page, you can:
+
+- **View keys**: Keys are masked for security (only last 4 characters shown)
+- **Generate new keys**: Create additional keys with optional names
+- **Delete keys**: Remove keys you no longer need
+
+<Warning>
+API keys are shown only once when created. Copy and store them securely - you won't be able to see the full key again.
+</Warning>
+
+## Subscription Requirements
+
+API access requires an active Rose Labs subscription. Without a subscription:
+
+- Requests will return a `401 Unauthorized` error
+- You'll need to subscribe at [roselabs.ai](https://roselabs.ai)
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Never expose keys in client-side code">
+    API keys should only be used in server-side code. Never include them in frontend JavaScript, mobile apps, or public repositories.
+  </Accordion>
+  <Accordion title="Use environment variables">
+    Store API keys in environment variables, not in source code:
+    ```bash
+    export ROSE_API_KEY=your_key_here
+    ```
+  </Accordion>
+  <Accordion title="Rotate keys periodically">
+    Generate new keys and delete old ones regularly. If you suspect a key is compromised, delete it immediately.
+  </Accordion>
+  <Accordion title="Use separate keys per environment">
+    Create different keys for development, staging, and production. This limits blast radius if one is compromised.
+  </Accordion>
+</AccordionGroup>
+
+## Example Request
+
+```bash
+curl -X POST "https://navi-j9a9.onrender.com/api/agents" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -d '{
+    "goal": "Research the latest news on AI",
+    "model": "rose-1-lite"
+  }'
+```

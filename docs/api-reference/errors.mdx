@@ -1,0 +1,177 @@
+---
+title: Errors
+description: "Error codes and how to handle them"
+---
+
+## Error Response Format
+
+All errors return a JSON object with an `error` field:
+
+```json
+{
+  "error": "Error message here",
+  "message": "Optional detailed message"
+}
+```
+
+## HTTP Status Codes
+
+| Code | Meaning | Common Causes |
+|------|---------|---------------|
+| 400 | Bad Request | Invalid JSON, missing required fields |
+| 401 | Unauthorized | Missing or invalid API key |
+| 403 | Forbidden | No active subscription |
+| 404 | Not Found | Agent not found or invalid endpoint |
+| 429 | Too Many Requests | Rate limit exceeded |
+| 500 | Internal Server Error | Server-side issue |
+
+## Common Errors
+
+### Missing API Key
+
+```json
+{
+  "error": "Missing or invalid API key"
+}
+```
+
+**Solution**: Include your API key in the `x-api-key` header:
+```bash
+-H "x-api-key: YOUR_API_KEY"
+```
+
+### Invalid API Key
+
+```json
+{
+  "error": "Unauthorized"
+}
+```
+
+**Solution**: Check that your API key is correct and hasn't been deleted.
+
+### No Active Subscription
+
+```json
+{
+  "error": "Active subscription required"
+}
+```
+
+**Solution**: Subscribe at [roselabs.ai](https://roselabs.ai).
+
+### Agent Not Found
+
+```json
+{
+  "error": "Agent not found"
+}
+```
+
+**Solution**: Verify the agent ID is correct. Agents may be deleted after completion.
+
+### Missing Goal
+
+```json
+{
+  "error": "goal is required"
+}
+```
+
+**Solution**: Include the `goal` field in your request body when creating an agent.
+
+### Invalid Model
+
+```json
+{
+  "error": "Invalid model specified"
+}
+```
+
+**Solution**: Use a valid model: `rose-1-lite` or `rose-1-ultra`.
+
+### Rate Limit Exceeded
+
+```json
+{
+  "error": "Rate limit exceeded"
+}
+```
+
+**Solution**: Implement exponential backoff and retry logic.
+
+## Error Handling Best Practices
+
+### Retry with Exponential Backoff
+
+```python
+import time
+import requests
+
+def create_agent_with_retry(goal, max_retries=3):
+    url = "https://navi-j9a9.onrender.com/api/agents"
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": "YOUR_API_KEY"
+    }
+
+    for attempt in range(max_retries):
+        response = requests.post(url, headers=headers, json={"goal": goal})
+
+        if response.status_code == 429:
+            wait_time = (2 ** attempt) + random.random()
+            time.sleep(wait_time)
+            continue
+
+        if response.status_code >= 500:
+            wait_time = (2 ** attempt) + random.random()
+            time.sleep(wait_time)
+            continue
+
+        return response
+
+    raise Exception("Max retries exceeded")
+```
+
+### Handle Specific Error Types
+
+```typescript
+try {
+  const response = await fetch("https://navi-j9a9.onrender.com/api/agents", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": "YOUR_API_KEY"
+    },
+    body: JSON.stringify({ goal: "Research AI trends" })
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+
+    switch (response.status) {
+      case 401:
+        throw new Error("Invalid API key. Check your credentials.");
+      case 403:
+        throw new Error("Subscription required. Visit roselabs.ai to subscribe.");
+      case 429:
+        throw new Error("Rate limited. Please slow down.");
+      default:
+        throw new Error(error.message || "Unknown error");
+    }
+  }
+
+  return await response.json();
+} catch (error) {
+  console.error("API Error:", error);
+  throw error;
+}
+```
+
+## Getting Help
+
+If you encounter persistent errors:
+
+1. Check the [status page](https://status.roselabs.ai) for outages
+2. Review your API key in Settings
+3. Contact support at support@roselabs.ai

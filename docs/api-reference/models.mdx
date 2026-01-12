@@ -1,0 +1,79 @@
+---
+title: Models
+description: "Available models and pricing"
+---
+
+## Available Models
+
+Rose offers two model tiers for agents:
+
+### rose-1-lite
+
+**Best for**: Fast tasks, simple research, web searches, basic automation
+
+| Metric | Value |
+|--------|-------|
+| Input tokens | $0.50 / 1M tokens |
+| Output tokens | $1.50 / 1M tokens |
+
+**Use cases**:
+- Quick web searches
+- Simple data lookups
+- Basic summarization
+- Fast task completion
+
+### rose-1-ultra
+
+**Best for**: Complex reasoning, detailed analysis, multi-step research
+
+| Metric | Value |
+|--------|-------|
+| Input tokens | $3.00 / 1M tokens |
+| Output tokens | $15.00 / 1M tokens |
+
+**Use cases**:
+- Deep research and analysis
+- Complex multi-step tasks
+- Code generation and review
+- Detailed report writing
+
+## Specifying a Model
+
+Pass the `model` parameter when creating an agent:
+
+```bash
+curl -X POST "https://navi-j9a9.onrender.com/api/agents" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -d '{
+    "goal": "Research quantum computing startups",
+    "model": "rose-1-lite"
+  }'
+```
+
+If no model is specified, `rose-1-lite` is used by default.
+
+## Choosing the Right Model
+
+| If you need... | Use |
+|----------------|-----|
+| Fast, cheap results | `rose-1-lite` |
+| High quality output | `rose-1-ultra` |
+| Simple lookups | `rose-1-lite` |
+| Complex analysis | `rose-1-ultra` |
+
+## Token Usage
+
+Token usage is tracked per agent and visible in the status response:
+
+```json
+{
+  "agent": {
+    "agent_id": "...",
+    "token_count": 15420,
+    "status": "COMPLETED"
+  }
+}
+```
+
+Monitor your usage in the [Dashboard](https://roselabs.ai) to manage costs.

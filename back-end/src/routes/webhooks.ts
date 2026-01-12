@@ -7,6 +7,8 @@
 
 import express from 'express';
 import Stripe from 'stripe';
+import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 import { prisma } from '../lib/prisma';
 import { getUserUsage } from '../lib/credits';
 
@@ -142,6 +144,9 @@ async function handlePaymentSuccess(invoice: Stripe.Invoice) {
 
   // Unpause user's agents if they now have credits
   await unpauseUserAgents(userId);
+
+  // Auto-generate Rose API key for new subscribers
+  await autoGenerateApiKeyIfNeeded(userId);
 }
 
 /**
@@ -180,6 +185,62 @@ async function unpauseUserAgents(userId: string) {
   }
 
   console.log(`✅ Unpaused ${pausedAgents.length} agents for user ${userId}`);
+}
+
+/**
+ * Auto-generate a Rose API key for the user if they don't have one
+ * Called when user subscribes - gives them immediate API access
+ */
+async function autoGenerateApiKeyIfNeeded(userId: string) {
+  try {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl || !supabaseServiceKey) {
+      console.error('❌ Missing Supabase credentials for API key generation');
+      return;
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // Check if user already has any API keys
+    const { data: existingKeys, error: fetchError } = await supabase
+      .from('RoseApiKey')
+      .select('id')
+      .eq('userId', userId)
+      .limit(1);
+
+    if (fetchError) {
+      console.error('❌ Error checking existing API keys:', fetchError);
+      return;
+    }
+
+    if (existingKeys && existingKeys.length > 0) {
+      console.log(`🔑 User ${userId} already has API keys, skipping auto-generation`);
+      return;
+    }
+
+    // Generate 32-character API key (UUID without dashes)
+    const apiKey = crypto.randomUUID().replace(/-/g, '');
+
+    const { error: insertError } = await supabase
+      .from('RoseApiKey')
+      .insert({
+        userId,
+        apiKey,
+        name: 'Default (auto-generated)',
+      });
+
+    if (insertError) {
+      console.error('❌ Error creating API key:', insertError);
+      return;
+    }
+
+    console.log(`✅ Auto-generated Rose API key for user ${userId}`);
+  } catch (error) {
+    console.error('❌ Error in autoGenerateApiKeyIfNeeded:', error);
+    // Don't throw - this shouldn't block subscription processing
+  }
 }
 
 export default router;

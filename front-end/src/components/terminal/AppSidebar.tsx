@@ -33,7 +33,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { Plus, LogOut, Settings as SettingsIcon, BarChart3, Plug, Network, ChevronLeft, ChevronRight, Loader2, CreditCard } from 'lucide-react';
+import { Plus, LogOut, Settings as SettingsIcon, Plug, Network, ChevronLeft, ChevronRight, Loader2, CreditCard } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
@@ -399,16 +399,6 @@ export default function AppSidebar({
         onSelectAgent(null);
       },
       isActive: currentView === 'settings',
-    },
-    {
-      id: 'usage',
-      label: 'Usage',
-      icon: <BarChart3 className="h-4 w-4" />,
-      onClick: () => {
-        onViewChange('usage');
-        onSelectAgent(null);
-      },
-      isActive: currentView === 'usage',
     },
   ];
 

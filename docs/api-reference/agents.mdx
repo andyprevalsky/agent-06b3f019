@@ -1,0 +1,194 @@
+---
+title: Agents
+description: "Create and manage autonomous AI agents"
+---
+
+## Overview
+
+Rose Agents are autonomous AI systems that can execute complex, multi-step tasks. Each agent has access to powerful tools including web search, browser automation, code execution, and the ability to spawn sub-agents.
+
+## Create an Agent
+
+<ParamField header="x-api-key" type="string" required>
+  Your Rose API key
+</ParamField>
+
+### Body Parameters
+
+<ParamField body="goal" type="string" required>
+  The task for the agent to accomplish. Be specific and detailed.
+</ParamField>
+
+<ParamField body="model" type="string" default="rose-1-lite">
+  The model to use:
+  - `rose-1-lite` - Fast, cost-effective
+  - `rose-1-ultra` - High quality reasoning
+</ParamField>
+
+### Request
+
+```bash
+curl -X POST "https://navi-j9a9.onrender.com/api/agents" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -d '{
+    "goal": "Research the top 5 AI startups founded in 2024 and summarize their products",
+    "model": "rose-1-lite"
+  }'
+```
+
+### Response
+
+```json
+{
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "goal": "Research the top 5 AI startups founded in 2024...",
+  "model": "rose-1-lite",
+  "status": "ACTIVE",
+  "progress": 0,
+  "created_at": "2024-01-15T10:30:00Z"
+}
+```
+
+## Get Agent Status
+
+Poll this endpoint to check agent progress and retrieve messages.
+
+<ParamField path="id" type="string" required>
+  The agent ID returned from creation
+</ParamField>
+
+### Request
+
+```bash
+curl "https://navi-j9a9.onrender.com/api/agents/550e8400-e29b-41d4-a716-446655440000" \
+  -H "x-api-key: YOUR_API_KEY"
+```
+
+### Response
+
+```json
+{
+  "agent": {
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "goal": "Research the top 5 AI startups...",
+    "model": "rose-1-lite",
+    "status": "ACTIVE",
+    "status_message": "Searching for AI startups...",
+    "progress": 0.35,
+    "token_count": 15420,
+    "message_count": 12,
+    "created_at": "2024-01-15T10:30:00Z",
+    "updated_at": "2024-01-15T10:32:15Z"
+  },
+  "messages": [
+    {
+      "message_id": "msg-001",
+      "timestamp": "2024-01-15T10:30:00Z",
+      "text": "Research the top 5 AI startups...",
+      "role": "USER"
+    },
+    {
+      "message_id": "msg-002",
+      "timestamp": "2024-01-15T10:30:05Z",
+      "text": "I'll search for recently founded AI startups...",
+      "role": "ASSISTANT"
+    }
+  ]
+}
+```
+
+## Agent Statuses
+
+| Status | Description |
+|--------|-------------|
+| `STARTING_UP` | Agent is initializing |
+| `ACTIVE` | Agent is working on the task |
+| `PAUSED` | Agent is paused (can be resumed) |
+| `COMPLETED` | Task completed successfully |
+| `FAILED` | Task failed (check status_message) |
+| `OUT_OF_CREDITS` | Ran out of credits |
+
+## Pause an Agent
+
+```bash
+curl -X POST "https://navi-j9a9.onrender.com/api/agents/550e8400.../pause" \
+  -H "x-api-key: YOUR_API_KEY"
+```
+
+## Resume an Agent
+
+```bash
+curl -X POST "https://navi-j9a9.onrender.com/api/agents/550e8400.../resume" \
+  -H "x-api-key: YOUR_API_KEY"
+```
+
+## Delete an Agent
+
+```bash
+curl -X DELETE "https://navi-j9a9.onrender.com/api/agents/550e8400..." \
+  -H "x-api-key: YOUR_API_KEY"
+```
+
+## Agent Tools
+
+Every Rose agent has access to these tools:
+
+| Tool | Description |
+|------|-------------|
+| `web_search` | Search the web using Perplexity AI |
+| `deep_research` | Comprehensive research on any topic |
+| `spawn_sub_agents` | Spawn up to 10,000 parallel sub-agents |
+| `spawn_browser_agent` | Control a browser for web tasks |
+| `spawn_claude_code_agent` | Execute code in a sandbox |
+| `find_all` | Discover entities matching criteria |
+| `enrich` | Enrich entity data from the web |
+| `monitor` | Monitor web pages for changes |
+| `message_person` | Send messages via SMS/email |
+
+## Example: Polling for Completion
+
+```python
+import requests
+import time
+
+API_KEY = "YOUR_API_KEY"
+BASE_URL = "https://navi-j9a9.onrender.com/api"
+
+# Create agent
+response = requests.post(
+    f"{BASE_URL}/agents",
+    headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
+    json={"goal": "Find the current Bitcoin price"}
+)
+agent_id = response.json()["agent_id"]
+
+# Poll until complete
+while True:
+    status = requests.get(
+        f"{BASE_URL}/agents/{agent_id}",
+        headers={"x-api-key": API_KEY}
+    ).json()
+
+    print(f"Status: {status['agent']['status']}, Progress: {status['agent']['progress']:.0%}")
+
+    if status["agent"]["status"] in ["COMPLETED", "FAILED"]:
+        break
+
+    time.sleep(2)
+
+# Print final messages
+for msg in status["messages"]:
+    print(f"[{msg['role']}] {msg['text'][:200]}...")
+```
+
+## Pricing
+
+Agents consume credits as they work:
+- Token usage is billed per-model at standard rates
+- Tool usage (web search, browser, etc.) has additional costs
+- Monitor your usage in the Dashboard
+
+<Note>
+Agents can spawn sub-agents, which inherit the parent's credit balance. Set appropriate limits for complex tasks.
+</Note>

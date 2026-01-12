@@ -1,0 +1,55 @@
+{
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "Rose Labs API",
+  "logo": {
+    "dark": "/logo/dark.svg",
+    "light": "/logo/light.svg"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#7A6BEC",
+    "light": "#F8F8FB",
+    "dark": "#121318",
+    "anchors": {
+      "from": "#FE7503",
+      "to": "#7A6BEC"
+    }
+  },
+  "topbarLinks": [
+    {
+      "name": "Dashboard",
+      "url": "https://roselabs.ai"
+    }
+  ],
+  "topbarCtaButton": {
+    "name": "Get API Key",
+    "url": "https://roselabs.ai/settings"
+  },
+  "tabs": [
+    {
+      "name": "API Reference",
+      "url": "api-reference"
+    }
+  ],
+  "navigation": [
+    {
+      "group": "Get Started",
+      "pages": ["introduction", "quickstart", "authentication"]
+    },
+    {
+      "group": "API Reference",
+      "pages": [
+        "api-reference/agents",
+        "api-reference/models",
+        "api-reference/errors"
+      ]
+    }
+  ],
+  "footerSocials": {
+    "twitter": "https://twitter.com/roselabsai",
+    "github": "https://github.com/rose-labs"
+  },
+  "api": {
+    "baseUrl": "https://navi-j9a9.onrender.com/api"
+  }
+}

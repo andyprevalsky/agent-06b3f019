@@ -24,6 +24,8 @@ import integrationsRouter from './routes/integrations';
 import authRouter from './routes/auth';
 import x402Router from './routes/x402';
 import claudeCodeRouter from './routes/claudeCode';
+import billingRouter from './routes/billing';
+import apiKeysRouter from './routes/apiKeys';
 import { prisma } from './lib/prisma';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
@@ -228,6 +230,8 @@ app.use('/api/browser-session', browserSessionRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/people', peopleRouter);
 app.use('/api/integrations', integrationsRouter);
+app.use('/api/billing', billingRouter);
+app.use('/api/api-keys', apiKeysRouter);
 
 // Catch-all authenticated route (must be AFTER x402 routes)
 app.use('/api', authenticate, formatRouter);

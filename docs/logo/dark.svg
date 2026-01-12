@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 56" width="240" height="56">
+  <defs>
+    <linearGradient id="g" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FE7503"/>
+      <stop offset="30%" stop-color="#FC585C"/>
+      <stop offset="50%" stop-color="#FD5776"/>
+      <stop offset="70%" stop-color="#E062CC"/>
+      <stop offset="100%" stop-color="#7A6BEC"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="48" height="48" rx="14" fill="url(#g)"/>
+  <text x="62" y="40" font-family="system-ui, -apple-system, sans-serif" font-size="36" font-weight="600" fill="#FFFFFF">Rose Labs</text>
+</svg>

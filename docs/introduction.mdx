@@ -1,0 +1,49 @@
+---
+title: Introduction
+description: "Welcome to the Rose API documentation"
+---
+
+# Rose API
+
+Rose provides an API for spawning autonomous AI agents that execute complex tasks.
+
+## What Are Rose Agents?
+
+Rose Agents are autonomous AI systems that can:
+
+- Search the web and conduct deep research
+- Control browsers for web automation
+- Execute code in sandboxed environments
+- Spawn thousands of sub-agents for parallel work
+- Monitor web pages for changes
+- Send messages via SMS/email
+
+## Quick Example
+
+```bash
+# Create an agent
+curl -X POST "https://navi-j9a9.onrender.com/api/agents" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "Research the top AI startups of 2024"}'
+
+# Poll for results
+curl "https://navi-j9a9.onrender.com/api/agents/AGENT_ID" \
+  -H "x-api-key: YOUR_API_KEY"
+```
+
+## Authentication
+
+All API requests require an API key passed in the `x-api-key` header:
+
+```
+x-api-key: YOUR_API_KEY
+```
+
+Get your API key from [Settings > API Keys](https://roselabs.ai/settings) after subscribing.
+
+## Getting Started
+
+1. [Subscribe to Rose Labs](https://roselabs.ai) to get your API key
+2. Follow the [Quickstart guide](/quickstart) to spawn your first agent
+3. Check the [Agents API Reference](/api-reference/agents) for full details

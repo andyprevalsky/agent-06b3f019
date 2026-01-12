@@ -3,6 +3,7 @@
 AI agent platform with model racing infrastructure.
 - Production: https://roselabs.ai
 - Backend API: https://navi-j9a9.onrender.com
+- API Docs: https://docs.roselabs.ai
 
 ## Architecture
 
@@ -12,6 +13,7 @@ back-end/      → Express/TypeScript/Prisma (Render)
 agents/        → Python Temporal workers (Fly.io)
 research/      → Model development (rose-1-lite, rose-1-ultra)
 mac-app/       → Electron desktop app (macOS only)
+docs/          → API documentation (Mintlify)
 ```
 
 **Key entry points:**
@@ -22,6 +24,7 @@ mac-app/       → Electron desktop app (macOS only)
 - `back-end/prisma/schema.prisma` - Database schema (source of truth)
 - `research/supabase/functions/completions/index.ts` - Rose model racing endpoint
 - `mac-app/main/index.ts` - Electron main process
+- `docs/mint.json` - Mintlify docs config
 
 ## Development
 
@@ -42,6 +45,7 @@ Check these when errors occur:
 - **Mac App (console):** `mac-app/mac-app-console-logs.log`
 - **Mac App (IPC):** `mac-app/mac-app-ipc-logs.log`
 - **Research (edge functions):** `research/research-logs.log`
+- **Docs:** `docs/docs-logs.log`
 
 ## Critical Rules
 
@@ -113,6 +117,14 @@ All realtime and tool message types are defined in `front-end/src/lib/realtime-t
 
 ## Rose API
 
+Public API for agents and completions. Docs: https://docs.roselabs.ai (localhost:3002 in dev)
+
+- `docs/` - Mintlify API documentation
+- `research/supabase/functions/completions/index.ts` - Completions endpoint (model racing)
+- `back-end/src/routes/agents.ts` - Agents API (create, poll, pause/resume)
+- `back-end/src/middleware/hybridAuth.ts` - API key authentication
+
+**Test files:**
 - `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite
 - `research/supabase/functions/completions/test-browser-use-usage.mjs` - rose-1-browser-use test
 

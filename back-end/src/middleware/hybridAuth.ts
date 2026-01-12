@@ -43,6 +43,7 @@ export interface HybridAuthRequest extends Request {
   isInternal?: boolean;
   isX402?: boolean;
   isAnonymous?: boolean;
+  isRoseApiKey?: boolean;
   user?: {
     id: string;
     email?: string;
@@ -118,6 +119,7 @@ export async function hybridAuth(
     if (apiKey && expectedKey && apiKey === expectedKey) {
       req.isInternal = true;
       req.isX402 = false;
+      req.isRoseApiKey = false;
       // For internal calls, userId may come from body or X-User-Id header
       const bodyUserId = (req.body as any)?.user_id;
       const headerUserId = req.headers['x-user-id'] as string;
@@ -125,7 +127,40 @@ export async function hybridAuth(
       return next();
     }
 
-    // 2. Try JWT (for both regular and anonymous users)
+    // 2. Try Rose API key (for external API access)
+    if (apiKey) {
+      const roseApiKey = await prisma.roseApiKey.findUnique({
+        where: { apiKey },
+      });
+
+      if (roseApiKey) {
+        // Verify user has active subscription
+        const subscription = await prisma.subscription.findUnique({
+          where: { userId: roseApiKey.userId },
+        });
+
+        if (!subscription) {
+          res.status(403).json({
+            error: 'Active subscription required',
+            message: 'API access requires an active subscription. Visit roselabs.ai to subscribe.',
+          });
+          return;
+        }
+
+        req.userId = roseApiKey.userId;
+        req.isInternal = false;
+        req.isX402 = false;
+        req.isRoseApiKey = true;
+        req.isAnonymous = false;
+        return next();
+      }
+
+      // Invalid API key - don't fall through to JWT, return error
+      res.status(401).json({ error: 'Invalid API key' });
+      return;
+    }
+
+    // 3. Try JWT (for web/mobile app users)
     // Anonymous users created via Supabase signInAnonymously() have real JWTs
     // with is_anonymous=true in the payload
     const authHeader = req.headers.authorization;
@@ -168,6 +203,7 @@ export async function hybridAuth(
             };
             req.isInternal = false;
             req.isX402 = false;
+            req.isRoseApiKey = false;
             req.isAnonymous = isAnonymous;
 
             // Ensure user record exists in our database
@@ -201,7 +237,7 @@ export async function hybridAuth(
       });
     }
 
-    // 3. Try x402 payment (for crypto payments)
+    // 4. Try x402 payment (for crypto payments)
     const payment = (req as any).payment;
     if (payment) {
       const paymentAmount = parseFloat(payment.amount || '0');
@@ -226,12 +262,13 @@ export async function hybridAuth(
       req.userId = user.userId;
       req.isInternal = false;
       req.isX402 = true;
+      req.isRoseApiKey = false;
       req.isAnonymous = false;
 
       return next();
     }
 
-    // 4. No valid auth method found
+    // 5. No valid auth method found
     res.status(401).json({
       error: 'Authentication required. Provide JWT token, API key, or x402 payment.',
     });
