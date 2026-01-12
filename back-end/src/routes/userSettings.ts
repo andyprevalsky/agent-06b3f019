@@ -15,7 +15,6 @@ const updateUserSchema = z.object({
   postalCode: z.string().optional(),
   country: z.string().optional(),
   encryptedPaymentInformation: z.string().optional().nullable(),
-  smsOptIn: z.boolean().optional(),
 });
 
 // GET /api/user-settings - Get user data
@@ -48,7 +47,6 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         country: 'United States',
         encryptedPaymentInformation: null,
         onboardingCompletedAt: null,
-        smsOptIn: false,
       });
     }
 
@@ -63,7 +61,6 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
       country: user.country,
       encryptedPaymentInformation: user.encryptedPaymentInformation,
       onboardingCompletedAt: user.onboardingCompletedAt,
-      smsOptIn: user.smsOptIn,
     });
   } catch (error) {
     console.error('Failed to fetch user data:', error);
@@ -88,7 +85,6 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
         postalCode: body.postalCode,
         country: body.country,
         encryptedPaymentInformation: body.encryptedPaymentInformation,
-        smsOptIn: body.smsOptIn,
       },
       create: {
         userId,
@@ -100,7 +96,6 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
         postalCode: body.postalCode,
         country: body.country,
         encryptedPaymentInformation: body.encryptedPaymentInformation,
-        smsOptIn: body.smsOptIn,
       },
     });
 
@@ -113,7 +108,6 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
       postalCode: user.postalCode,
       country: user.country,
       encryptedPaymentInformation: user.encryptedPaymentInformation,
-      smsOptIn: user.smsOptIn,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -148,7 +142,6 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
           postalCode: body.postalCode,
           country: body.country,
           encryptedPaymentInformation: body.encryptedPaymentInformation,
-          smsOptIn: body.smsOptIn,
         },
       });
 
@@ -161,7 +154,6 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
         postalCode: user.postalCode,
         country: user.country,
         encryptedPaymentInformation: user.encryptedPaymentInformation,
-        smsOptIn: user.smsOptIn,
       });
     }
 
@@ -175,7 +167,6 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
     if (body.postalCode !== undefined) updateData.postalCode = body.postalCode;
     if (body.country !== undefined) updateData.country = body.country;
     if (body.encryptedPaymentInformation !== undefined) updateData.encryptedPaymentInformation = body.encryptedPaymentInformation;
-    if (body.smsOptIn !== undefined) updateData.smsOptIn = body.smsOptIn;
 
     const user = await prisma.user.update({
       where: { userId },
@@ -191,7 +182,6 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
       postalCode: user.postalCode,
       country: user.country,
       encryptedPaymentInformation: user.encryptedPaymentInformation,
-      smsOptIn: user.smsOptIn,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
