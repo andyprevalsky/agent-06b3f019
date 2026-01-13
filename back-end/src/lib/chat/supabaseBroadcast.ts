@@ -5,10 +5,8 @@
 
 import { v4 as uuidv4 } from 'uuid';
 
-// Use local Supabase in development, production URL otherwise
-const SUPABASE_URL = process.env.NODE_ENV === 'production'
-  ? 'https://kzlurqihzaolhzsbkctf.supabase.co'
-  : 'http://localhost:54321';
+// Use SUPABASE_URL env var, fallback to production URL (matches agent worker behavior)
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://kzlurqihzaolhzsbkctf.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 /**
@@ -169,8 +167,8 @@ async function broadcast(params: {
           {
             topic: params.topic,
             event: params.event,
-            payload: { record: params.payload },  // Nested in 'record' like Python
-            private: true,  // Required for private channels
+            payload: { record: params.payload },
+            private: true,
           },
         ],
       }),

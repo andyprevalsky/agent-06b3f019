@@ -54,6 +54,7 @@ export interface CompletionChunk {
     delta: {
       role?: string;
       content?: string;
+      reasoning?: string; // From thinking models (GPT-5.2, Gemini, DeepSeek, Claude)
     };
     finish_reason: string | null;
   }>;

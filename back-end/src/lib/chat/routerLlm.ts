@@ -182,21 +182,71 @@ async function buildMultimodalContentFromFile(
 }
 
 // ============================================
-// Extract reasoning from partial JSON stream
+// Extract partial string content from JSON stream
+// Unlike the old regex approach, this can extract content BEFORE the closing quote
 // ============================================
-function extractReasoningFromPartialJson(json: string): string | null {
-  // Try to extract the reasoning field from partial JSON
-  // Match: "reasoning": "..." or "reasoning":"..."
-  const match = json.match(/"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (match) {
-    try {
-      // Unescape JSON string
-      return JSON.parse(`"${match[1]}"`);
-    } catch {
-      return match[1];
+function extractPartialStringField(json: string, fieldName: string): string | null {
+  // Find the field pattern: "fieldName": "
+  const fieldPattern = `"${fieldName}"\\s*:\\s*"`;
+  const fieldRegex = new RegExp(fieldPattern);
+  const match = json.match(fieldRegex);
+
+  if (!match || match.index === undefined) {
+    return null;
+  }
+
+  // Start position is right after the opening quote
+  const startPos = match.index + match[0].length;
+
+  // Extract everything after the opening quote, handling escape sequences
+  let result = '';
+  let i = startPos;
+
+  while (i < json.length) {
+    const char = json[i];
+
+    if (char === '\\' && i + 1 < json.length) {
+      // Handle escape sequences
+      const nextChar = json[i + 1];
+      switch (nextChar) {
+        case '"': result += '"'; break;
+        case '\\': result += '\\'; break;
+        case 'n': result += '\n'; break;
+        case 'r': result += '\r'; break;
+        case 't': result += '\t'; break;
+        case 'b': result += '\b'; break;
+        case 'f': result += '\f'; break;
+        default: result += nextChar; break;
+      }
+      i += 2;
+    } else if (char === '"') {
+      // End of string - we got the complete field
+      break;
+    } else {
+      result += char;
+      i++;
     }
   }
-  return null;
+
+  return result || null;
+}
+
+// ============================================
+// Extract streamable text from partial JSON (like agent worker)
+// For router, we only stream reasoning
+// ============================================
+function extractStreamableReasoning(
+  accumulatedReasoning: string,
+  accumulatedJson: string
+): string | null {
+  // Prefer reasoning from delta.reasoning (thinking models)
+  if (accumulatedReasoning.trim()) {
+    return accumulatedReasoning.trim();
+  }
+
+  // Fall back to reasoning field from JSON
+  const jsonReasoning = extractPartialStringField(accumulatedJson, 'reasoning');
+  return jsonReasoning?.trim() || null;
 }
 
 // ============================================
@@ -274,56 +324,81 @@ export async function callRouterLlm(params: {
     },
   });
 
-  let fullJson = '';
+  // Track reasoning and JSON content separately (like agent worker)
+  let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
+  let accumulatedJson = ''; // From delta.content (JSON structure)
   let sequence = 0;
-  let lastStreamedReasoning = '';
+  let lastStreamedText = ''; // What we've sent to FE so far
+  let chunkCount = 0;
   let webSearchToolCallId: string | undefined;
   let webSearchDetected = false;
 
-  // Process stream chunks
+  // Process stream chunks - stream every delta immediately
   for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta?.content || '';
-    if (delta) {
-      fullJson += delta;
+    chunkCount++;
 
-      // Extract reasoning and stream it
-      const reasoning = extractReasoningFromPartialJson(fullJson);
-      if (reasoning && reasoning.length > lastStreamedReasoning.length) {
-        // Stream only the new part of reasoning
-        const newReasoning = reasoning.slice(lastStreamedReasoning.length);
-        if (newReasoning) {
-          await broadcastAssistantStream(
-            params.agentId,
-            streamId,
-            newReasoning,
-            false,
-            sequence++
-          );
-          lastStreamedReasoning = reasoning;
-        }
-      }
+    // Get delta from chunk
+    const delta = chunk.choices[0]?.delta;
 
-      // Detect web_search action early and emit TOOL_STREAM IN_PROGRESS
-      if (!webSearchDetected) {
-        const action = detectActionFromPartialJson(fullJson);
-        if (action === 'web_search') {
-          webSearchDetected = true;
-          webSearchToolCallId = uuidv4();
-          console.log('[RouterLLM] Detected web_search early, emitting IN_PROGRESS', {
-            toolCallId: webSearchToolCallId,
-          });
-          await broadcastToolEvent(
-            params.agentId,
-            streamId,
-            webSearchToolCallId,
-            'web_search',
-            'IN_PROGRESS',
-            '🔍 Searching the web'
-          );
-        }
+    // Handle reasoning from thinking models (delta.reasoning)
+    const reasoningDelta = delta?.reasoning || '';
+    if (reasoningDelta) {
+      accumulatedReasoning += reasoningDelta;
+    }
+
+    // Handle JSON content (delta.content)
+    const contentDelta = delta?.content || '';
+    if (contentDelta) {
+      accumulatedJson += contentDelta;
+    }
+
+    // Extract streamable reasoning text
+    const streamableText = extractStreamableReasoning(accumulatedReasoning, accumulatedJson);
+
+    if (streamableText && streamableText !== lastStreamedText) {
+      const newText = streamableText.slice(lastStreamedText.length);
+      lastStreamedText = streamableText;
+
+      // Stream every delta immediately
+      if (newText) {
+        await broadcastAssistantStream(
+          params.agentId,
+          streamId,
+          newText,
+          false,
+          sequence++
+        );
       }
     }
+
+    // Detect web_search action early and emit TOOL_STREAM IN_PROGRESS
+    if (!webSearchDetected) {
+      const action = detectActionFromPartialJson(accumulatedJson);
+      if (action === 'web_search') {
+        webSearchDetected = true;
+        webSearchToolCallId = uuidv4();
+        console.log('[RouterLLM] Detected web_search early, emitting IN_PROGRESS', {
+          toolCallId: webSearchToolCallId,
+        });
+        await broadcastToolEvent(
+          params.agentId,
+          streamId,
+          webSearchToolCallId,
+          'web_search',
+          'IN_PROGRESS',
+          '🔍 Searching the web'
+        );
+      }
+    }
+
+    // Log progress every 50 chunks
+    if (chunkCount % 50 === 0) {
+      console.log(`[RouterLLM] Progress: chunk=${chunkCount}, reasoning=${accumulatedReasoning.length}, json=${accumulatedJson.length}, streamed=${sequence}`);
+    }
   }
+
+  // Combine for parsing - use accumulatedJson for JSON parsing
+  const fullJson = accumulatedJson;
 
   // Broadcast final "done" signal for reasoning stream
   await broadcastAssistantStream(
@@ -339,8 +414,9 @@ export async function callRouterLlm(params: {
     agentId: params.agentId,
     streamId,
     durationMs: streamDuration,
+    chunksReceived: chunkCount,
     chunksStreamed: sequence,
-    reasoningLength: lastStreamedReasoning.length,
+    reasoningLength: accumulatedReasoning.length,
     jsonLength: fullJson.length,
   });
 
