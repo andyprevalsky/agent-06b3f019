@@ -11,13 +11,17 @@
  * [IDLE]
  *
  * THINKING DISPLAY:
- * [HIDDEN] <-- no streaming bubbles
- *     |
- *     v (streaming starts)
- * [STREAMING] <-- filteredStreamingBubbles.size > 0
- *     |         Shows: ThinkingAnimation + "Thinking" + char counter (animated)
- *     v (streaming ends)
- * [HIDDEN]
+ * Show when ALL conditions met (with 500ms debounce):
+ * ├─ agent.status is active (not PAUSED/COMPLETED/FAILED/OUT_OF_CREDITS)
+ * ├─ filteredStreamingBubbles.size > 0 (LLM streaming) OR no IN_PROGRESS tools
+ * └─ NOT (last message is send_message_to_user with isQuestion == true)
+ *     OR in chat mode: NOT (last message is send_message_to_user at all)
+ *
+ * Debounce: 800ms delay before showing (cancelled if conditions become false)
+ *
+ * Persistence rule (once shown, only dismiss when):
+ * ├─ selectedAgent changes
+ * └─ OR ASSISTANT message INSERT arrives
  *
  * AUTO-SCROLL:
  * [ENABLED] <-- userScrolled: false
@@ -36,6 +40,7 @@
  * States:
  * - typingMessageId: string | null
  * - userScrolled: boolean
+ * - thinkingVisible: boolean (with persistence)
  */
 
 import { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } from 'react';
@@ -312,6 +317,9 @@ export function MessageList({
     
     // ASSISTANT messages animate unless already streamed
     if (nextMessage.role === 'ASSISTANT') {
+      // Flag assistant INSERT for thinking dismissal
+      assistantInsertedRef.current = true;
+
       const textKey = (nextMessage.text || '').trim();
       if (streamedTextsRef.current.has(textKey)) {
         console.log(`⏭️ [MessageList] Skipping animation for streamed text`);
@@ -406,52 +414,95 @@ export function MessageList({
   const animatedCharCount = useAnimatedCounter(streamingCharCount, 0.3);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // THINKING LOADER state
+  // THINKING VISIBILITY state (with persistence)
   // ═══════════════════════════════════════════════════════════════════════════
-  
-  const [showThinkingLoader, setShowThinkingLoader] = useState(false);
-  
-  useEffect(() => {
-    if (!showThinkingIndicator) {
-      setShowThinkingLoader(false);
-      return;
-    }
-    
-    if (!agent || 
-        agent.status === 'COMPLETED' || 
-        agent.status === 'FAILED' || 
-        agent.status === 'PAUSED' ||
-        agent.status === 'OUT_OF_CREDITS' ||
-        messageBuffer.length > 0 ||
-        isAnimating) {
-      setShowThinkingLoader(false);
-      return;
-    }
 
+  const [thinkingVisible, setThinkingVisible] = useState(false);
+  const prevAgentIdRef = useRef<string | null | undefined>(selectedAgentId);
+  const assistantInsertedRef = useRef(false);
+  const showDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Compute whether thinking should show based on conditions
+  const shouldShowThinking = useMemo(() => {
+    if (!showThinkingIndicator) return false;
+
+    // Condition 1: agent status is active
+    const isAgentActive = agent &&
+      agent.status !== 'PAUSED' &&
+      agent.status !== 'COMPLETED' &&
+      agent.status !== 'FAILED' &&
+      agent.status !== 'OUT_OF_CREDITS';
+
+    if (!isAgentActive) return false;
+
+    // Always show if LLM is actively streaming (real-time thinking feedback)
+    if (filteredStreamingBubbles.size > 0) return true;
+
+    // Condition 2: no tools with status IN_PROGRESS (excluding isUserAttentionMessage)
+    const hasInProgressTool = filteredMessages.some(m =>
+      m.role === 'TOOL' &&
+      m.metadata?.toolStatus === 'IN_PROGRESS' &&
+      !m.metadata?.isUserAttentionMessage
+    );
+
+    if (hasInProgressTool) return false;
+
+    // Condition 3: check last message for send_message_to_user
     const lastMessage = filteredMessages[filteredMessages.length - 1];
-    if (!lastMessage) {
-      setShowThinkingLoader(false);
+
+    if (lastMessage?.metadata?.isUserAttentionMessage) {
+      // In chat mode: NOT (last message is send_message_to_user at all)
+      if (isChatMode) return false;
+
+      // In agent mode: NOT (isQuestion == true)
+      const isQuestion = lastMessage.metadata?.sendMessageToUser?.isQuestion;
+      if (isQuestion === true) return false;
+    }
+
+    return true;
+  }, [showThinkingIndicator, agent, filteredMessages, isChatMode, filteredStreamingBubbles.size]);
+
+  // Effect to manage visibility with persistence rule + 500ms debounce for showing
+  useEffect(() => {
+    // Clear any pending debounce on cleanup or condition change
+    if (showDebounceRef.current) {
+      clearTimeout(showDebounceRef.current);
+      showDebounceRef.current = null;
+    }
+
+    // Check for agent change - always sync to shouldShowThinking on agent change
+    if (prevAgentIdRef.current !== selectedAgentId) {
+      prevAgentIdRef.current = selectedAgentId;
+      setThinkingVisible(shouldShowThinking);
+      assistantInsertedRef.current = false;
       return;
     }
 
-    if (lastMessage.role === 'TOOL') {
-      const status = lastMessage.metadata?.toolStatus;
-      if (status === 'IN_PROGRESS') {
-        setShowThinkingLoader(false);
-        return;
-      }
+    // Always hide on ASSISTANT INSERT (dismissal trigger)
+    if (assistantInsertedRef.current) {
+      setThinkingVisible(false);
+      assistantInsertedRef.current = false;
+      return;
     }
 
-    let lastSeenTime = Date.now();
-    const checkThreshold = () => {
-      const timeSince = Date.now() - lastSeenTime;
-      setShowThinkingLoader(timeSince > 500);
-    };
+    if (shouldShowThinking) {
+      if (!thinkingVisible) {
+        // Debounce showing by 800ms - only show if conditions still met after delay
+        showDebounceRef.current = setTimeout(() => {
+          setThinkingVisible(true);
+        }, 800);
+      }
+      // If already visible, keep it visible (no change needed)
+    }
+    // Otherwise keep current state (persistence - don't hide until dismissal trigger)
 
-    checkThreshold();
-    const interval = setInterval(checkThreshold, 100);
-    return () => clearInterval(interval);
-  }, [filteredMessages.length, agent?.status, isAnimating, messageBuffer.length, showThinkingIndicator]);
+    return () => {
+      if (showDebounceRef.current) {
+        clearTimeout(showDebounceRef.current);
+        showDebounceRef.current = null;
+      }
+    };
+  }, [shouldShowThinking, selectedAgentId, thinkingVisible]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SEND MESSAGE handler for attention messages
@@ -636,18 +687,7 @@ export function MessageList({
       )}
       
       {/* Thinking indicator with token counter */}
-      {showThinkingIndicator && (
-        // Show if:
-        // 1. We have active streaming bubbles, OR
-        // 2. showThinkingLoader is true AND the last message is NOT an ASSISTANT (we're waiting for response)
-        // This prevents the flash when INSERT arrives before showThinkingLoader is updated
-        // In chat mode, don't show thinking indicator when last message is a finished tool (chat is waiting for user)
-        (filteredStreamingBubbles.size > 0 ||
-         (showThinkingLoader && filteredMessages[filteredMessages.length - 1]?.role !== 'ASSISTANT')) &&
-        agent?.status !== 'PAUSED' &&
-        // Hide thinking in chat mode when last message is finished tool (waiting for user input)
-        !(isChatMode && filteredMessages[filteredMessages.length - 1]?.role === 'TOOL' &&
-          filteredMessages[filteredMessages.length - 1]?.metadata?.toolStatus === 'FINISHED') && (
+      {thinkingVisible && (
           <div className={cn("flex", !compact && "gap-3")}>
             <div className="flex flex-col gap-2">
               {/* Thinking header with token counter */}
@@ -689,7 +729,6 @@ export function MessageList({
               )}
             </div>
           </div>
-        )
       )}
 
       {/* Streaming tools - early detection indicators (below thinking bubble) */}
