@@ -16,9 +16,16 @@ const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
 const ROSE_API_KEY = process.env.ROSE_API_KEY || '';
 
+// Content block for multimodal messages
+export interface ContentBlock {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+}
+
 export interface CompletionMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | ContentBlock[];  // String for text-only, array for multimodal
 }
 
 export interface CompletionOptions {
@@ -73,15 +80,13 @@ export async function createStreamingCompletion(
     throw new Error('Missing ROSE_API_KEY environment variable');
   }
 
-  console.log('[SupabaseCompletions] Starting streaming request', {
-    url,
-    model: options.model,
-    messageCount: options.messages.length,
-    temperature: options.temperature,
-    hasResponseFormat: !!options.response_format,
-    hasAnonKey: !!SUPABASE_ANON_KEY,
-    hasRoseKey: !!ROSE_API_KEY,
-  });
+  const requestBody = {
+    ...options,
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+
+  console.log('[SupabaseCompletions] Request to Rose:', JSON.stringify(requestBody, null, 2));
 
   const response = await fetch(url, {
     method: 'POST',
@@ -90,11 +95,7 @@ export async function createStreamingCompletion(
       'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
       'x-api-key': ROSE_API_KEY,
     },
-    body: JSON.stringify({
-      ...options,
-      stream: true,
-      stream_options: { include_usage: true },
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {

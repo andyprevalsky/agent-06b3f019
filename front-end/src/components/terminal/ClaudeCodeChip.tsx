@@ -424,13 +424,14 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
     };
 
     ws.onclose = () => {
-      // Retry with fixed delays
+      // Retry with fixed delays (only if not complete)
+      // Don't set failed state here - let DB messages drive state via realtime
+      // WS close is expected when task completes (backend closes connection)
       if (attempt < MAX_RETRIES - 1 && !isComplete) {
         const delay = RETRY_DELAYS[attempt] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
         setTimeout(() => connectWebSocket(attempt + 1), delay);
-      } else if (!isComplete) {
-        setChipState('failed');
       }
+      // State will be updated via useEffect when isComplete changes from DB
     };
   }, [wsUrl, isComplete]);
 
@@ -577,8 +578,8 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
           </div>
         </div>
 
-        {/* Structured response (extracted output) */}
-        {structuredResponse && Object.keys(structuredResponse).length > 0 && (
+        {/* Structured response (extracted output) - only show when expanded and completed successfully */}
+        {isExpanded && chipState === 'completed' && structuredResponse && Object.keys(structuredResponse).length > 0 && (
           <StructuredResponseDisplay structuredResponse={structuredResponse} outputSchema={outputSchema} />
         )}
 

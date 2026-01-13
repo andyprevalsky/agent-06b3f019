@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
+import multer from 'multer';
 import { prisma } from '../lib/prisma';
+import { AuthRequest, authenticate } from '../middleware/auth';
 import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
 import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
@@ -9,8 +11,34 @@ import { getX402Endpoints } from '../lib/x402Endpoints';
 import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSchema';
 import { handleChatMessage, broadcastAgentModeStarted } from '../lib/chat';
 import { createMessage } from '../lib/messages';
+import {
+  processUploadedFile,
+  validateTotalSize,
+  getSignedUrl,
+  MAX_FILE_SIZE,
+  MAX_TOTAL_SIZE,
+  FilePointer,
+} from '../lib/storage';
 
 const router = Router();
+
+// Configure multer for attachment uploads (memory storage for processing)
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_FILE_SIZE,
+  },
+});
+
+// FilePointer schema for validation - all files stored in Supabase Storage
+const filePointerSchema = z.object({
+  id: z.string().uuid(),
+  storage_path: z.string(), // Required - all files stored in storage
+  original_filename: z.string(),
+  mime_type: z.string(),
+  size_bytes: z.number(),
+  created_at: z.string(),
+});
 
 /**
  * Auto-generate verifier prompt from goal
@@ -59,12 +87,16 @@ const createAgentSchema = z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
     llm_judge_prompt: z.string().min(1),
   }).optional(),
+  // File attachments for the initial goal message
+  attachments: z.array(filePointerSchema).optional(),
 });
 
 const postMessageSchema = z.object({
   message: z.string().min(0), // Actual message content (tool result, assistant response, etc)
   role: z.enum(['USER', 'ASSISTANT', 'TOOL', 'SYSTEM']).optional(),
   metadata: z.record(z.any()).optional(), // JSON metadata about the tool call (toolCallId, toolName, status, etc)
+  attachments: z.array(filePointerSchema).optional(), // File attachments (array, creates separate messages)
+  file_pointer: filePointerSchema.optional(), // Single file pointer for this message (OAI-style)
 });
 
 const updateStatusSchema = z.object({
@@ -261,7 +293,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         },
       });
 
-      // Insert goal as the first USER message in the chat
+      // Insert goal as the first USER message
       const goalMessage = await tx.message.create({
         data: {
           agentId: newAgent.id,
@@ -270,6 +302,21 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           timestamp: new Date(),
         },
       });
+
+      // Create separate messages for each file attachment (OAI-style)
+      if (body.attachments && body.attachments.length > 0) {
+        for (const attachment of body.attachments) {
+          await tx.message.create({
+            data: {
+              agentId: newAgent.id,
+              text: '', // Empty text for file-only messages
+              role: 'USER',
+              timestamp: new Date(),
+              filePointer: attachment as Prisma.JsonObject,
+            },
+          });
+        }
+      }
 
       return { agent: newAgent, goalMessage };
     });
@@ -527,6 +574,7 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
         text: msg.text,
         role: msg.role,
         metadata: msg.metadata,
+        file_pointer: msg.filePointer,
       })),
       pagination: {
         has_more: false,
@@ -620,13 +668,36 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
       }
     }
 
-    // Create message using shared helper
+    // Validate attachments if provided
+    if (body.attachments && body.attachments.length > 0) {
+      try {
+        validateTotalSize(body.attachments as FilePointer[]);
+      } catch (error) {
+        res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid attachments' });
+        return;
+      }
+    }
+
+    // Create the text message (optionally with file_pointer for single-file messages)
     const message = await createMessage({
       agentId,
       text: body.message,
       role,
       metadata: body.metadata,
+      filePointer: body.file_pointer as Record<string, unknown> | undefined,
     });
+
+    // Create separate messages for each file attachment (OAI-style)
+    if (body.attachments && body.attachments.length > 0) {
+      for (const attachment of body.attachments) {
+        await createMessage({
+          agentId,
+          text: '', // Empty text for file-only messages
+          role,
+          filePointer: attachment as Record<string, unknown>,
+        });
+      }
+    }
 
     // If this is a USER message, either signal workflow or run chat handler
     if (role === 'USER') {
@@ -675,6 +746,73 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
     }
     console.error('Post message error:', error);
     res.status(500).json({ error: 'Failed to post message' });
+  }
+});
+
+// POST /api/agents/:id/attachments - DEPRECATED: Use POST /api/upload instead
+// Kept for backwards compatibility - redirects to new endpoint behavior
+router.post('/:id/attachments', authenticate, attachmentUpload.single('file') as any, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.id;
+
+    if (!req.file) {
+      res.status(400).json({ error: 'No file uploaded' });
+      return;
+    }
+
+    // Process the uploaded file (stored under userId, not agent-scoped)
+    const filePointer = await processUploadedFile(
+      userId,
+      req.file.buffer,
+      req.file.originalname,
+      req.file.mimetype
+    );
+
+    console.log(`[Attachments] Uploaded file for user ${userId}: ${filePointer.original_filename} (${filePointer.size_bytes} bytes)`);
+
+    res.status(201).json({
+      file_pointer: filePointer,
+    });
+  } catch (error) {
+    console.error('Upload attachment error:', error);
+    res.status(500).json({
+      error: 'Failed to upload attachment',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+// GET /api/agents/:id/attachments/:fileId/url - Get a signed URL for a file attachment
+// Verifies the storage path starts with the user's ID for security
+router.get('/:id/attachments/:fileId/url', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.id;
+    const storagePath = req.query.storage_path as string;
+
+    if (!storagePath) {
+      res.status(400).json({ error: 'storage_path query parameter is required' });
+      return;
+    }
+
+    // Verify the storage path belongs to this user (files are stored under userId/)
+    if (!storagePath.startsWith(`${userId}/`)) {
+      res.status(403).json({ error: 'Access denied to this file' });
+      return;
+    }
+
+    // Generate signed URL (1 hour expiry)
+    const signedUrl = await getSignedUrl(storagePath, 3600);
+
+    res.json({
+      signed_url: signedUrl,
+      expires_in: 3600,
+    });
+  } catch (error) {
+    console.error('Get signed URL error:', error);
+    res.status(500).json({
+      error: 'Failed to generate signed URL',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
   }
 });
 

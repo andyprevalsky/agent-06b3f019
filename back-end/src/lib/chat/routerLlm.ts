@@ -79,12 +79,106 @@ const ROUTER_JSON_SCHEMA = {
   additionalProperties: false,
 };
 
+import { downloadFromStorage } from '../storage';
+
+// FilePointer interface for type safety when processing
+interface FilePointer {
+  id: string;
+  storage_path: string;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  created_at: string;
+}
+
 // ============================================
 // Message format for LLM calls
 // ============================================
 interface ChatMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   text: string;
+  filePointer?: any; // FilePointer from DB JSON - validated at runtime
+  metadata?: Record<string, any>;
+}
+
+// File size threshold for inline content (20MB)
+const LLM_INLINE_THRESHOLD = 20 * 1024 * 1024;
+
+// File type helpers
+const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
+const TEXT_MIME_TYPES = new Set(['text/plain', 'text/csv', 'text/markdown', 'text/html', 'application/json', 'application/xml']);
+
+// ============================================
+// Build multimodal content from a file pointer
+// Downloads from storage and converts to base64 for LLM
+// ============================================
+async function buildMultimodalContentFromFile(
+  text: string,
+  filePointer: FilePointer
+): Promise<Array<{ type: string; text?: string; image_url?: { url: string } }>> {
+  const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+
+  // File too large for inline content
+  if (filePointer.size_bytes >= LLM_INLINE_THRESHOLD) {
+    const sizeStr = (filePointer.size_bytes / 1024 / 1024).toFixed(1);
+    content.push({
+      type: 'text',
+      text: text ? `${text}\n\n[Attached: ${filePointer.original_filename} (${sizeStr}MB) - too large for inline viewing]` : `[Attached: ${filePointer.original_filename} (${sizeStr}MB) - too large for inline viewing]`
+    });
+    return content;
+  }
+
+  try {
+    // Download file from storage
+    const fileBuffer = await downloadFromStorage(filePointer.storage_path);
+    const base64 = fileBuffer.toString('base64');
+
+    if (IMAGE_MIME_TYPES.has(filePointer.mime_type)) {
+      // Image: add as image_url content block
+      if (text) {
+        content.push({ type: 'text', text });
+      }
+      content.push({
+        type: 'image_url',
+        image_url: {
+          url: `data:${filePointer.mime_type};base64,${base64}`
+        }
+      });
+    } else if (TEXT_MIME_TYPES.has(filePointer.mime_type) || filePointer.mime_type.startsWith('text/')) {
+      // Text file: decode and add as text
+      const decoded = fileBuffer.toString('utf-8');
+      content.push({
+        type: 'text',
+        text: text ? `${text}\n\n[File: ${filePointer.original_filename}]\n\`\`\`\n${decoded}\n\`\`\`` : `[File: ${filePointer.original_filename}]\n\`\`\`\n${decoded}\n\`\`\``
+      });
+    } else if (filePointer.mime_type === 'application/pdf') {
+      // PDF: add as file block (for capable models)
+      if (text) {
+        content.push({ type: 'text', text });
+      }
+      content.push({
+        type: 'file',
+        file: {
+          filename: filePointer.original_filename,
+          file_data: `data:${filePointer.mime_type};base64,${base64}`
+        }
+      } as any);
+    } else {
+      // Other file types: just metadata
+      content.push({
+        type: 'text',
+        text: text ? `${text}\n\n[Attached: ${filePointer.original_filename} (${filePointer.mime_type})]` : `[Attached: ${filePointer.original_filename} (${filePointer.mime_type})]`
+      });
+    }
+  } catch (error) {
+    console.error('[RouterLLM] Failed to download file from storage:', error);
+    content.push({
+      type: 'text',
+      text: text ? `${text}\n\n[Attached: ${filePointer.original_filename} - failed to load]` : `[Attached: ${filePointer.original_filename} - failed to load]`
+    });
+  }
+
+  return content;
 }
 
 // ============================================
@@ -123,8 +217,8 @@ export async function callRouterLlm(params: {
 }): Promise<RouterResponse> {
   const streamId = generateStreamId();
 
-  // Convert messages to OpenAI format
-  const openaiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+  // Convert messages to OpenAI format (with multimodal support)
+  const openaiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [
     { role: 'system', content: ROUTER_SYSTEM_PROMPT },
   ];
 
@@ -140,7 +234,18 @@ export async function callRouterLlm(params: {
         content: `[Tool Result]\n${msg.text}`,
       });
     } else if (msg.role === 'USER') {
-      openaiMessages.push({ role: 'user', content: msg.text });
+      // Check for file attachment
+      if (msg.filePointer) {
+        // Build multimodal content from file (downloads from storage)
+        const content = await buildMultimodalContentFromFile(msg.text, msg.filePointer);
+        openaiMessages.push({
+          role: 'user',
+          content,
+        });
+      } else if (msg.text) {
+        openaiMessages.push({ role: 'user', content: msg.text });
+      }
+      // Skip empty user messages (shouldn't happen but be safe)
     } else if (msg.role === 'ASSISTANT') {
       openaiMessages.push({ role: 'assistant', content: msg.text });
     }

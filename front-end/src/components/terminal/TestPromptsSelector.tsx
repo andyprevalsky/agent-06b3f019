@@ -28,6 +28,7 @@ interface TestPrompt {
   title: string;
   description: string;
   prompt: string;
+  attachmentUrl?: string; // Optional URL to a file in public folder to attach
 }
 
 const TEST_PROMPTS: TestPrompt[] = [
@@ -66,18 +67,45 @@ const TEST_PROMPTS: TestPrompt[] = [
     description: 'Tests DAG executor with plan mode (no web searches during planning)',
     prompt: 'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno sub agents',
   },
+  {
+    title: 'Test Image Handling',
+    description: 'Tests image attachment processing with rs.jpeg',
+    prompt: 'make this red',
+    attachmentUrl: '/test-assets/rs.jpeg',
+  },
 ];
 
 interface TestPromptsSelectorProps {
-  onSelectPrompt: (prompt: string) => void;
+  onSelectPrompt: (prompt: string, files?: File[]) => void;
 }
 
 export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const handleSelectPrompt = (prompt: string) => {
-    onSelectPrompt(prompt);
-    setIsOpen(false);
+  const handleSelectPrompt = async (testPrompt: TestPrompt) => {
+    setIsLoading(true);
+    try {
+      let files: File[] | undefined;
+
+      if (testPrompt.attachmentUrl) {
+        // Fetch the file from public folder and convert to File object
+        const response = await fetch(testPrompt.attachmentUrl);
+        const blob = await response.blob();
+        const filename = testPrompt.attachmentUrl.split('/').pop() || 'attachment';
+        const file = new File([blob], filename, { type: blob.type });
+        files = [file];
+      }
+
+      onSelectPrompt(testPrompt.prompt, files);
+    } catch (error) {
+      console.error('Failed to load test prompt attachment:', error);
+      // Fall back to just the prompt without attachment
+      onSelectPrompt(testPrompt.prompt);
+    } finally {
+      setIsLoading(false);
+      setIsOpen(false);
+    }
   };
 
   return (
@@ -108,11 +136,15 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
             {TEST_PROMPTS.map((testPrompt) => (
               <button
                 key={testPrompt.title}
-                className="w-full text-left flex flex-col gap-1 p-2 rounded-md hover:bg-muted/50 transition-colors cursor-pointer"
-                onClick={() => handleSelectPrompt(testPrompt.prompt)}
+                className="w-full text-left flex flex-col gap-1 p-2 rounded-md hover:bg-muted/50 transition-colors cursor-pointer disabled:opacity-50"
+                onClick={() => handleSelectPrompt(testPrompt)}
+                disabled={isLoading}
               >
                 <span className="font-medium text-sm text-foreground">
                   {testPrompt.title}
+                  {testPrompt.attachmentUrl && (
+                    <span className="ml-2 text-xs text-muted-foreground">📎</span>
+                  )}
                 </span>
                 <span className="text-xs text-muted-foreground leading-snug">
                   {testPrompt.description}

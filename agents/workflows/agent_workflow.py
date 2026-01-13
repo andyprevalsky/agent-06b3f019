@@ -35,7 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.prompts import build_system_prompt, build_verifier_prompt
     from helpers.handle_tool_event import handle_tool_event
     from helpers.tool_schemas import PLAN_PHASE_TOOLS, EXECUTE_PHASE_TOOLS
-    from tools.base import ToolEvent, EventType, MessageStatus
+    from tools.base import ToolEvent, AssistantEvent, EventType, MessageStatus
     # Tool executors (map tool name → workflow helper)
     from tools.deep_research import deep_research
     from tools.wait_seconds import wait_seconds

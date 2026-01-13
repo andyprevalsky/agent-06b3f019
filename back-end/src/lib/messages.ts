@@ -10,6 +10,7 @@ export interface CreateMessageParams {
   text: string;
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   metadata?: Record<string, any> | null;
+  filePointer?: object | null; // FilePointer for file attachment messages (JSON)
 }
 
 /**
@@ -27,6 +28,7 @@ export async function createMessage(params: CreateMessageParams) {
       text: params.text,
       role: params.role,
       metadata: params.metadata || undefined,
+      filePointer: params.filePointer || undefined,
       timestamp: new Date(),
     },
   });

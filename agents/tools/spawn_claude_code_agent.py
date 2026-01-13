@@ -8,6 +8,7 @@ follow-up prompts through stdin for a true agentic loop.
 
 from typing import Dict, Any, Optional, AsyncGenerator, List, Callable, Awaitable
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
 from datetime import timedelta
 import structlog
@@ -17,10 +18,11 @@ import time
 import uuid as uuid_module
 from pydantic import BaseModel, Field
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
+from tools.base import ToolManager, ToolEvent, AssistantEvent, EventType, MessageStatus, UsageType, UsageItem
 from config import load_config
 from helpers.terminal_filter import TerminalFilter
 from helpers.claude_code_ws_client import ClaudeCodeWsClient
+from helpers.attachments import FilePointer, extract_attachments_from_context, get_file_from_pointer
 
 logger = structlog.get_logger()
 
@@ -201,6 +203,19 @@ async def call_parent_llm(
     """
     from helpers.llm import call_llm_structured_streaming
 
+    # Build file info for system prompt
+    file_info = ""
+    if conversation_history and any("attachments" in str(h) for h in conversation_history):
+        file_info = """
+
+## Available Files
+User attachments are available in /home/user/attachments/
+Claude Code can read and process these files as needed.
+
+## Output Files
+When Claude Code creates files the user needs, it should copy them to /home/user/output/
+Files in this directory will be automatically uploaded and returned to the user."""
+
     system_prompt = f"""You are interacting with Claude Code, a terminal-based coding agent working on a task.
 
 ORIGINAL GOAL: {goal}
@@ -228,7 +243,7 @@ Set attempt_completion=false when:
 - Be concise - Claude Code is a terminal agent
 - If Claude asks numbered options (like 1, 2, 3), respond with just the number
 - If unsure about a question, let Claude Code decide (respond with "your choice" or similar)
-- Don't repeat the goal - Claude Code already knows it"""
+- Don't repeat the goal - Claude Code already knows it{file_info}"""
 
     # Build messages for LLM
     messages = [{"role": "system", "content": system_prompt}]
@@ -282,19 +297,23 @@ async def spawn_claude_code_activity(
     goal: str,
     tool_call_id: str,
     output_schema: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    model: str = "rose-labs/rose-1-lite",
 ) -> Dict[str, Any]:
     """
     Claude Code agent activity using E2B Desktop Sandbox.
 
     Flow:
-    1. Call back-end API to create E2B session
+    1. Call back-end API to create E2B session (with file attachments)
     2. Post init message with stream_url
     3. Monitor Claude Code output via polling
     4. Run verifier to confirm completion
-    5. On completion, close session
+    5. On completion, close session and extract output files
 
     Args:
         output_schema: Response schema from parent agent's tool call (required for structured responses)
+        attachments: File attachments from context to upload to sandbox
+        model: Model to use for verifier (inherited from parent agent)
     """
     from helpers.llm import check_progress
     from helpers.prompts import build_verifier_prompt
@@ -326,12 +345,21 @@ async def spawn_claude_code_activity(
     try:
         activity.heartbeat("Creating E2B sandbox with Claude Code")
 
-        # 1. Create E2B session via back-end API
+        # 1. Create E2B session via back-end API (with attachments)
         logger.info(
             "[ClaudeCode] Creating E2B session",
             agent_id=agent_id,
-            goal=goal[:200]
+            goal=goal[:200],
+            num_attachments=len(attachments) if attachments else 0
         )
+
+        # Build request payload
+        create_payload = {
+            "agent_id": agent_id,
+            "goal": goal,
+        }
+        if attachments:
+            create_payload["attachments"] = attachments
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
@@ -340,10 +368,7 @@ async def spawn_claude_code_activity(
                     "x-api-key": config.backend.api_key or "",
                     "Content-Type": "application/json"
                 },
-                json={
-                    "agent_id": agent_id,
-                    "goal": goal,
-                }
+                json=create_payload
             )
 
             if response.status_code not in [200, 201]:
@@ -359,15 +384,19 @@ async def spawn_claude_code_activity(
             task_id = session_data["task_id"]
             sandbox_id = session_data["sandbox_id"]
             ws_url = session_data["ws_url"]
+            uploaded_files = session_data.get("uploaded_files", [])
 
         logger.info(
             "[ClaudeCode] Session created",
             agent_id=agent_id,
             task_id=task_id,
             sandbox_id=sandbox_id,
-            ws_url=ws_url[:100] if ws_url else None
+            ws_url=ws_url[:100] if ws_url else None,
+            uploaded_files=len(uploaded_files)
         )
         action_summary.append(f"Created E2B sandbox: {sandbox_id}")
+        if uploaded_files:
+            action_summary.append(f"Uploaded {len(uploaded_files)} files to /home/user/attachments/")
 
         # 2. Post init message with ws_url (for WebSocket terminal streaming)
         await save_claude_code_message(
@@ -406,6 +435,7 @@ async def spawn_claude_code_activity(
         pending_output = False  # Track if we have new output since last LLM call
         conversation_history: List[Dict[str, str]] = []  # Track back-and-forth
         attempt_completion = False
+        ws_connected = True  # Track WebSocket connection state
 
         async def on_output(data: str, is_buffer: bool):
             """Handle output from Claude Code WebSocket."""
@@ -428,11 +458,31 @@ async def spawn_claude_code_activity(
                 exit_code=code
             )
 
+        async def on_connection_change(connected: bool):
+            """Handle WebSocket connection state changes."""
+            nonlocal ws_connected, last_output_time
+            ws_connected = connected
+            if connected:
+                # Reset silence timer on reconnect to avoid false triggers
+                last_output_time = _safe_time()
+                logger.info(
+                    "[ClaudeCode] WebSocket reconnected, silence timer reset",
+                    agent_id=agent_id,
+                    task_id=task_id
+                )
+            else:
+                logger.info(
+                    "[ClaudeCode] WebSocket disconnected, pausing silence detection",
+                    agent_id=agent_id,
+                    task_id=task_id
+                )
+
         # Connect to WebSocket
         ws_client = ClaudeCodeWsClient(
             ws_url=ws_url,
             on_output=on_output,
             on_exit=on_exit,
+            on_connection_change=on_connection_change,
             heartbeat_fn=lambda msg: activity.heartbeat(msg),
         )
 
@@ -468,10 +518,21 @@ async def spawn_claude_code_activity(
                     action_summary.append(f"Max runtime exceeded ({int(elapsed)}s)")
                     break
 
+                # Check if WebSocket reconnects exhausted - fail the activity
+                if ws_client.reconnects_exhausted:
+                    logger.error(
+                        "[ClaudeCode] WebSocket connection lost after all reconnect attempts",
+                        agent_id=agent_id,
+                        task_id=task_id
+                    )
+                    action_summary.append("WebSocket connection lost - all reconnect attempts failed")
+                    raise Exception("WebSocket connection to Claude Code sandbox lost after all reconnect attempts")
+
                 # Check for silence timeout with pending output
+                # Only check if WebSocket is connected - pause silence detection during reconnects
                 silence_duration = _safe_time() - last_output_time
 
-                if silence_duration >= SILENCE_TIMEOUT_S and pending_output:
+                if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
                     # Claude Code stopped talking - get filtered output
                     filtered_output = terminal.get_display()
 
@@ -555,13 +616,13 @@ async def spawn_claude_code_activity(
                 await asyncio.sleep(0.1)  # Fast poll for responsive interaction
 
         finally:
-            # Cleanup WebSocket
+            # Cancel listen task but DON'T disconnect yet - keep WS open for FE
+            # We'll disconnect after verifier completes
             listen_task.cancel()
             try:
                 await listen_task
             except asyncio.CancelledError:
                 pass
-            await ws_client.disconnect()
 
         logger.info(
             "[ClaudeCode] Agentic loop finished",
@@ -588,32 +649,33 @@ async def spawn_claude_code_activity(
 
             # Build verifier context with filtered terminal output
             final_output = terminal.get_display()
+
+            # Build output files info for verifier (list files in /home/user/output/ via action_summary)
+            output_files_info = ""
+            if "output" in final_output.lower() or "/home/user/output" in final_output:
+                output_files_info = "\n\nNote: Check if any files were created in /home/user/output/ based on terminal output."
+
             verifier_context = [
                 {"role": "USER", "text": f"Goal: {goal}"},
                 {"role": "TOOL", "text": f"Claude Code Terminal Output:\n\n{final_output[-5000:]}", "metadata": {"toolName": "claude_code_terminal", "toolStatus": "FINISHED"}},
-                {"role": "TOOL", "text": f"Execution Summary:\n\n" + "\n".join(action_summary[-20:]), "metadata": {"toolName": "claude_code_history", "toolStatus": "FINISHED"}}
+                {"role": "TOOL", "text": f"Execution Summary:\n\n" + "\n".join(action_summary[-20:]) + output_files_info, "metadata": {"toolName": "claude_code_history", "toolStatus": "FINISHED"}}
             ]
 
             verifier_prompt = build_verifier_prompt("EXECUTE", f"Goal: {goal}\n\nVerify Claude Code task completion based on the terminal output.")
 
-            # Try ultra first with 7s timeout, fallback to lite on timeout
-            try:
-                progress_result = await call_temporal_activity_from_activity(
-                    check_progress,
-                    args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE", output_schema],
-                    start_to_close_timeout=timedelta(seconds=7),
-                )
-            except TimeoutError:
-                logger.warning(
-                    "[ClaudeCode] Verifier ultra timeout, falling back to lite",
-                    agent_id=agent_id,
-                    task_id=task_id
-                )
-                progress_result = await call_temporal_activity_from_activity(
-                    check_progress,
-                    args=[verifier_context, verifier_prompt, "rose-labs/rose-1-lite", "EXECUTE", output_schema],
-                    start_to_close_timeout=timedelta(seconds=15),
-                )
+            # Use inherited model with 30s timeout and 1 retry for transient failures
+            logger.info(
+                "[ClaudeCode] Running verifier",
+                agent_id=agent_id,
+                task_id=task_id,
+                model=model,
+            )
+            progress_result = await call_temporal_activity_from_activity(
+                check_progress,
+                args=[verifier_context, verifier_prompt, model, "EXECUTE", output_schema],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
 
             v_usage = progress_result.get("usage", {})
             total_input_tokens += v_usage.get("prompt_tokens", 0)
@@ -662,6 +724,9 @@ async def spawn_claude_code_activity(
             v_reasoning = "Verification failed - assuming partial completion"
             structured_response = None
 
+        # Now disconnect WebSocket - verifier is done, FE can show final state
+        await ws_client.disconnect()
+
         # 5. Persist terminal output to DB (use filtered output - same as LLM context)
         try:
             filtered_output = terminal.get_display()
@@ -686,20 +751,31 @@ async def spawn_claude_code_activity(
                 error=str(e)
             )
 
-        # 6. Close the session
+        # 6. Close the session and extract output files
+        output_files = []
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 close_response = await client.post(
                     f"{config.backend.api_url}/api/claude-code-session/close",
                     headers={"x-api-key": config.backend.api_key or ""},
-                    json={"task_id": task_id}
+                    json={
+                        "task_id": task_id,
+                        "user_id": user_id,
+                        "agent_id": agent_id,
+                    }
                 )
+                if close_response.status_code == 200:
+                    close_data = close_response.json()
+                    output_files = close_data.get("output_files", [])
                 logger.info(
                     "[ClaudeCode] Session closed",
                     agent_id=agent_id,
                     task_id=task_id,
-                    response_status=close_response.status_code
+                    response_status=close_response.status_code,
+                    output_files=len(output_files)
                 )
+                if output_files:
+                    action_summary.append(f"Extracted {len(output_files)} output files")
         except Exception as e:
             logger.warning(
                 "[ClaudeCode] Failed to close session",
@@ -749,6 +825,7 @@ async def spawn_claude_code_activity(
             "execution_time_ms": execution_time_ms,
             "usage_items": usage_items,
             "structured_response": structured_response,
+            "output_files": output_files,
         }
 
     except asyncio.CancelledError:
@@ -855,11 +932,29 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
+        # Extract attachments from workflow context to pass to E2B
+        attachments = []
+        if hasattr(workflow_instance, 'context'):
+            context_attachments = extract_attachments_from_context(workflow_instance.context)
+            # Convert FilePointer objects to dicts for serialization
+            attachments = [
+                {
+                    "id": fp.id,
+                    "storage_path": fp.storage_path,
+                    "original_filename": fp.original_filename,
+                    "mime_type": fp.mime_type,
+                    "size_bytes": fp.size_bytes,
+                    "created_at": fp.created_at,
+                }
+                for fp in context_attachments
+            ]
+
         logger.info(
             "[ClaudeCode] Tool starting",
             agent_id=agent_id,
             goal=goal[:200],
-            has_output_schema=output_schema is not None
+            has_output_schema=output_schema is not None,
+            num_attachments=len(attachments)
         )
 
         yield ToolEvent(
@@ -870,10 +965,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         )
 
         try:
+            # Get model from workflow instance (inherit parent's model)
+            model = getattr(workflow_instance, 'model', 'rose-labs/rose-1-lite')
+
             # Start activity
             activity_handle = workflow.start_activity(
                 spawn_claude_code_activity,
-                args=[user_id, agent_id, goal, tool_call_id, output_schema],
+                args=[user_id, agent_id, goal, tool_call_id, output_schema, attachments if attachments else None, model],
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=60),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
@@ -936,6 +1034,20 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     tool_name="spawn_claude_code_agent",
                     usage_items=usage_items
                 )
+
+            # Post output files as separate ASSISTANT messages (OAI-style)
+            output_files = result.get("output_files", [])
+            if output_files:
+                logger.info(
+                    "[ClaudeCode] Posting output files as ASSISTANT messages",
+                    agent_id=agent_id,
+                    file_count=len(output_files),
+                )
+                for fp in output_files:
+                    yield AssistantEvent(
+                        message="",  # Empty text for file-only messages
+                        file_pointer=fp,
+                    )
 
             # Yield final result with task_id and structured_response for FE ClaudeCodeChip
             yield ToolEvent(

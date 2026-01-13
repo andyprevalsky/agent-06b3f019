@@ -501,36 +501,42 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
 
 @activity.defn
 async def post_agent_message(
-    agent_id: str, 
-    text: str, 
+    agent_id: str,
+    text: str,
     role: str = "ASSISTANT",
-    metadata: Dict[str, Any] | None = None
+    metadata: Dict[str, Any] | None = None,
+    file_pointer: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
     Post a message from the agent back to the database.
-    
+
     Args:
         agent_id: The agent ID
         text: Message text
         role: Message role (ASSISTANT, TOOL, SYSTEM)
         metadata: Optional JSON metadata (tool type, sub-agent ID, etc)
-        
+        file_pointer: Optional FilePointer dict for file attachment messages
+
     Returns:
         Created message data
     """
     try:
         activity.heartbeat(f"Posting message for agent {agent_id}")
-        
+
         config = load_config()
-        
+
         payload = {
             "message": text,
             "role": role
         }
-        
+
         # Add metadata if provided
         if metadata:
             payload["metadata"] = metadata
+
+        # Add file_pointer for file attachment messages (OAI-style)
+        if file_pointer:
+            payload["file_pointer"] = file_pointer
         
         async with httpx.AsyncClient() as client:
             response = await client.post(

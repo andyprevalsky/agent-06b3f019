@@ -18,6 +18,7 @@ __all__ = [
     "UsageType",
     "UsageItem",
     "ToolEvent",
+    "AssistantEvent",
     "ToolManager",
     "ToolSchema",
     "format_tool_message",
@@ -152,7 +153,10 @@ class ToolEvent:
     
     # For structured data (e.g., plan artifacts)
     data: Optional[Dict[str, Any]] = None
-    
+
+    # For POST_MESSAGE events with file attachments (OAI-style)
+    file_pointer: Optional[Dict[str, Any]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for serialization."""
         result = {
@@ -166,6 +170,7 @@ class ToolEvent:
             "metadata": self.metadata,
             "signal_key": self.signal_key,
             "data": self.data,
+            "file_pointer": self.file_pointer,
         }
         
         # Convert usage_items to dicts
@@ -175,6 +180,19 @@ class ToolEvent:
             result["usage_items"] = None
         
         return result
+
+
+@dataclass
+class AssistantEvent:
+    """
+    Event for posting ASSISTANT role messages (output files, responses).
+
+    Separate from ToolEvent to maintain clean separation:
+    - ToolEvent → TOOL messages (progress, status)
+    - AssistantEvent → ASSISTANT messages (output files, agent responses)
+    """
+    message: str = ""
+    file_pointer: Optional[Dict[str, Any]] = None
 
 
 # ========================================

@@ -382,6 +382,7 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
               text: data.text,
               role: data.role,
               metadata: data.metadata ?? undefined,
+              file_pointer: data.file_pointer ?? undefined,
             };
             
             console.log(`📥 AgentContext INSERT:`, {

@@ -37,8 +37,8 @@
  * Supports stopping agent via onStop prop.
  */
 
-import { useState, useEffect, useRef } from 'react';
-import { ChevronDown, ArrowUp, Square, Loader2 } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { ChevronDown, ArrowUp, Square, Loader2, Paperclip, X, FileIcon, ImageIcon, FileText } from 'lucide-react';
 import * as amplitude from '@amplitude/analytics-browser';
 import { cn } from '@/lib/utils';
 import {
@@ -56,8 +56,15 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useToast } from '@/hooks/use-toast';
 import { Model } from '@/hooks/useAppData';
-import { AgentDetail } from '@/lib/api';
+import {
+  AgentDetail,
+  FilePointer,
+  uploadAttachment,
+  MAX_FILE_SIZE,
+  MAX_TOTAL_ATTACHMENTS_SIZE,
+} from '@/lib/api';
 import RoseToolSetChip from './RoseToolSetChip';
 import TestPromptsSelector from './TestPromptsSelector';
 import AgentSettingsDialog from './AgentSettingsDialog';
@@ -65,6 +72,17 @@ import AgentSettingsDialog from './AgentSettingsDialog';
 import LiquidBlackButton from '@/components/ui/liquid-black-button';
 import RoseWhiteButton from '@/components/ui/rose-white-button';
 import LiquidWhiteButton from '@/components/ui/liquid-white-button';
+
+// Attachment with upload state
+interface PendingAttachment {
+  id: string;
+  file: File;
+  status: 'pending' | 'uploading' | 'done' | 'error';
+  progress: number;
+  filePointer?: FilePointer;
+  error?: string;
+  thumbnailUrl?: string; // Blob URL for image thumbnails (must be revoked on cleanup)
+}
 
 interface DripStyles {
   blur: number;
@@ -83,7 +101,7 @@ interface DripStyles {
 interface QueryInputProps {
   value: string;
   onChange: (value: string) => void;
-  onSubmit: () => void;
+  onSubmit: (attachments?: FilePointer[]) => void;
   disabled?: boolean;
   placeholder?: string;
   selectedModel?: string;
@@ -104,6 +122,8 @@ interface QueryInputProps {
   canSubmit?: boolean; // true when no agent selected OR has active attention request
   onPause?: () => void; // callback to pause the agent
   isPausing?: boolean; // loading state for pause action
+  // Agent ID for file uploads (required for large file uploads)
+  agentId?: string;
 }
 
 export default function QueryInput({
@@ -140,6 +160,7 @@ export default function QueryInput({
   canSubmit = true,
   onPause,
   isPausing = false,
+  agentId,
 }: QueryInputProps) {
   // Tool picker removed - LLM automatically selects tools based on goal
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -148,6 +169,227 @@ export default function QueryInput({
   const [hasTrackedFocus, setHasTrackedFocus] = useState(false);
   const [hasTrackedTyping, setHasTrackedTyping] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { toast } = useToast();
+
+  // Attachment state
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  // Check if any attachments are still uploading
+  const hasUploadingAttachments = attachments.some(a => a.status === 'uploading');
+  const hasFailedAttachments = attachments.some(a => a.status === 'error');
+
+  // Check if agent is completed or failed (disable input)
+  const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
+
+  // Process files for attachment - upload to storage via backend
+  // Upload happens immediately on attach (not agent-scoped)
+  const processFiles = useCallback(async (files: FileList | File[]) => {
+    const fileArray = Array.from(files);
+
+    // Calculate current total size
+    const currentTotalSize = attachments.reduce((sum, a) => sum + a.file.size, 0);
+    let addedSize = 0;
+
+    for (const file of fileArray) {
+      // Check individual file size
+      if (file.size > MAX_FILE_SIZE) {
+        toast({
+          title: 'File too large',
+          description: `${file.name} exceeds the 20MB limit`,
+          variant: 'destructive',
+        });
+        continue;
+      }
+
+      // Check total size
+      if (currentTotalSize + addedSize + file.size > MAX_TOTAL_ATTACHMENTS_SIZE) {
+        toast({
+          title: 'Total size limit exceeded',
+          description: 'Total attachments cannot exceed 100MB',
+          variant: 'destructive',
+        });
+        break;
+      }
+
+      addedSize += file.size;
+
+      // Create thumbnail URL for images (will be revoked on removal)
+      const thumbnailUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
+
+      const pendingAttachment: PendingAttachment = {
+        id: crypto.randomUUID(),
+        file,
+        status: 'uploading',
+        progress: 0,
+        thumbnailUrl,
+      };
+
+      setAttachments(prev => [...prev, pendingAttachment]);
+
+      // Upload to Supabase Storage (not agent-scoped)
+      try {
+        const filePointer = await uploadAttachment(file, (progress) => {
+          setAttachments(prev =>
+            prev.map(a =>
+              a.id === pendingAttachment.id ? { ...a, progress } : a
+            )
+          );
+        });
+
+        setAttachments(prev =>
+          prev.map(a =>
+            a.id === pendingAttachment.id
+              ? { ...a, status: 'done', progress: 100, filePointer }
+              : a
+          )
+        );
+      } catch (error) {
+        setAttachments(prev =>
+          prev.map(a =>
+            a.id === pendingAttachment.id
+              ? { ...a, status: 'error', error: error instanceof Error ? error.message : 'Upload failed' }
+              : a
+          )
+        );
+      }
+    }
+  }, [attachments, toast]);
+
+  // Remove attachment (revokes blob URL to prevent memory leak)
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments(prev => {
+      const toRemove = prev.find(a => a.id === id);
+      if (toRemove?.thumbnailUrl) {
+        URL.revokeObjectURL(toRemove.thumbnailUrl);
+      }
+      return prev.filter(a => a.id !== id);
+    });
+  }, []);
+
+  // Handle file input change
+  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processFiles(e.target.files);
+      e.target.value = ''; // Reset input
+    }
+  }, [processFiles]);
+
+  // Handle paste (for screenshots)
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      if (!textareaRef.current?.contains(document.activeElement) &&
+          document.activeElement !== textareaRef.current) {
+        return;
+      }
+
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      const files: File[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === 'file') {
+          const file = item.getAsFile();
+          if (file) {
+            // Generate a better filename for pasted images
+            const ext = file.type.split('/')[1] || 'png';
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const namedFile = new File([file], `screenshot-${timestamp}.${ext}`, { type: file.type });
+            files.push(namedFile);
+          }
+        }
+      }
+
+      if (files.length > 0) {
+        e.preventDefault();
+        processFiles(files);
+      }
+    };
+
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [processFiles]);
+
+  // Handle drag and drop
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processFiles(e.dataTransfer.files);
+    }
+  }, [processFiles]);
+
+  // Handle submit with attachments
+  const handleSubmitWithAttachments = useCallback(() => {
+    if (hasUploadingAttachments) {
+      toast({
+        title: 'Please wait',
+        description: 'Files are still uploading...',
+      });
+      return;
+    }
+
+    if (hasFailedAttachments) {
+      toast({
+        title: 'Upload failed',
+        description: 'Some files failed to upload. Remove them and try again.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    // Collect all successful file pointers
+    const filePointers = attachments
+      .filter(a => a.status === 'done' && a.filePointer)
+      .map(a => a.filePointer!);
+
+    // Revoke all thumbnail URLs before clearing
+    attachments.forEach(a => {
+      if (a.thumbnailUrl) {
+        URL.revokeObjectURL(a.thumbnailUrl);
+      }
+    });
+
+    // Clear attachments after collecting
+    setAttachments([]);
+
+    // Call onSubmit with file pointers
+    onSubmit(filePointers.length > 0 ? filePointers : undefined);
+  }, [attachments, hasUploadingAttachments, hasFailedAttachments, onSubmit, toast]);
+
+  // Get icon for file type
+  const getFileIcon = (file: File) => {
+    if (file.type.startsWith('image/')) {
+      return <ImageIcon className="w-4 h-4" />;
+    }
+    if (file.type === 'application/pdf' || file.type.startsWith('text/')) {
+      return <FileText className="w-4 h-4" />;
+    }
+    return <FileIcon className="w-4 h-4" />;
+  };
+
+  // Format file size
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
 
   // Close tooltip when clicking outside on mobile
   useEffect(() => {
@@ -168,7 +410,7 @@ export default function QueryInput({
     // CMD/Ctrl + Enter to submit
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      onSubmit();
+      handleSubmitWithAttachments();
     }
 
     // Update cursor position
@@ -211,18 +453,33 @@ export default function QueryInput({
   return (
     <div className="w-full md:px-0">
       <div className="max-w-4xl mx-auto">
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={handleFileInputChange}
+        />
+
         {/* Query Wrap - Glossy modal background */}
-        <div 
-          className="relative rounded-xl p-3 shadow-lg border border-border overflow-hidden"
+        <div
+          className={cn(
+            "relative rounded-xl p-3 shadow-lg border overflow-hidden transition-colors",
+            isDragOver ? "border-primary border-2 bg-primary/5" : "border-border"
+          )}
           style={{
             backdropFilter: drippiness > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
             WebkitBackdropFilter: drippiness > 0 ? `blur(${dripStyles.blur}px) saturate(${dripStyles.saturation}) brightness(${dripStyles.brightness})` : undefined,
             backgroundColor: dripStyles.backgroundColorsScalar > 0 ? `rgba(255, 255, 255, ${dripStyles.bgOpacity})` : 'transparent',
-            borderColor: dripStyles.borderColorScalar > 0 ? dripStyles.borderRgb : undefined,
-            boxShadow: dripStyles.shadowIntensity > 0 
+            borderColor: !isDragOver && dripStyles.borderColorScalar > 0 ? dripStyles.borderRgb : undefined,
+            boxShadow: dripStyles.shadowIntensity > 0
               ? `0 8px 32px rgba(0, 0, 0, ${dripStyles.shadowIntensity}), 0 0 ${dripStyles.glow}px rgba(126, 87, 194, ${dripStyles.glowOpacity}), inset 0 1px 1px rgba(255,255,255,${dripStyles.bgOpacity * 0.5})`
               : undefined,
           }}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
         >
           {/* Marble gradient background - soft white with pastel hints */}
           {dripStyles.backgroundColorsScalar > 0 && (
@@ -246,7 +503,16 @@ export default function QueryInput({
               {/* Rose-ToolSet Chip */}
               <RoseToolSetChip />
               {/* Test Prompts Selector - Dev only */}
-              {import.meta.env.DEV && <TestPromptsSelector onSelectPrompt={onChange} />}
+              {import.meta.env.DEV && (
+                <TestPromptsSelector
+                  onSelectPrompt={(prompt, files) => {
+                    onChange(prompt);
+                    if (files && files.length > 0) {
+                      processFiles(files);
+                    }
+                  }}
+                />
+              )}
             </div>
 
             {/* Context Meter and Settings */}
@@ -297,6 +563,85 @@ export default function QueryInput({
             </div>
           </div>
 
+          {/* Attachment Chips */}
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-3 pb-2">
+              {attachments.map((attachment) => (
+                <div
+                  key={attachment.id}
+                  className={cn(
+                    "flex items-center gap-2 px-2 py-1 rounded-lg text-xs border",
+                    attachment.status === 'error'
+                      ? "bg-red-50 border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-800 dark:text-red-400"
+                      : attachment.status === 'done'
+                      ? "bg-green-50 border-green-200 text-green-700 dark:bg-green-900/20 dark:border-green-800 dark:text-green-400"
+                      : "bg-gray-100 border-gray-200 text-gray-700 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-300"
+                  )}
+                >
+                  {/* File icon or thumbnail */}
+                  {attachment.thumbnailUrl && attachment.status === 'done' ? (
+                    <img
+                      src={attachment.thumbnailUrl}
+                      alt={attachment.file.name}
+                      className="w-6 h-6 object-cover rounded"
+                    />
+                  ) : (
+                    getFileIcon(attachment.file)
+                  )}
+
+                  {/* Filename and size */}
+                  <div className="flex flex-col">
+                    <span className="truncate max-w-[120px]" title={attachment.file.name}>
+                      {attachment.file.name}
+                    </span>
+                    <span className="text-[10px] opacity-70">
+                      {formatFileSize(attachment.file.size)}
+                    </span>
+                  </div>
+
+                  {/* Progress or status indicator */}
+                  {attachment.status === 'uploading' && (
+                    <div className="flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>{attachment.progress}%</span>
+                    </div>
+                  )}
+                  {attachment.status === 'pending' && (
+                    <Loader2 className="w-3 h-3 animate-spin opacity-50" />
+                  )}
+                  {attachment.status === 'done' && (
+                    <span className="text-green-600 dark:text-green-400">✓</span>
+                  )}
+                  {attachment.status === 'error' && (
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <span className="text-red-600 dark:text-red-400">✗</span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="text-xs">{attachment.error || 'Upload failed'}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
+
+                  {/* Remove button */}
+                  <button
+                    onClick={() => removeAttachment(attachment.id)}
+                    className="ml-1 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Drag overlay */}
+          {isDragOver && (
+            <div className="absolute inset-0 bg-primary/10 flex items-center justify-center z-20 pointer-events-none rounded-xl">
+              <div className="text-primary font-medium">Drop files here</div>
+            </div>
+          )}
+
           {/* Textarea Input */}
           <div className="relative px-3">
             <textarea
@@ -319,6 +664,29 @@ export default function QueryInput({
           {/* Bottom Bar */}
           <div className="flex items-center justify-between gap-3 px-3 pt-2 w-full">
             <div className="flex items-center gap-1.5">
+                {/* Paperclip button for file attachments */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={disabled || agentCompleted}
+                      className={cn(
+                        "flex items-center justify-center w-8 h-8 rounded-lg transition-colors",
+                        "border border-gray-300 bg-gray-100 text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300",
+                        disabled || agentCompleted
+                          ? "opacity-50 cursor-not-allowed"
+                          : "hover:bg-gray-200 dark:hover:bg-gray-700 cursor-pointer"
+                      )}
+                    >
+                      <Paperclip className="w-4 h-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p className="text-xs">Attach files (drag & drop or paste)</p>
+                  </TooltipContent>
+                </Tooltip>
+
                 <Popover open={showModelPicker && showModelSelector} onOpenChange={(open) => showModelSelector && setShowModelPicker(open)}>
                   <PopoverTrigger asChild>
                     <button 
@@ -475,19 +843,29 @@ export default function QueryInput({
               <Tooltip delayDuration={200}>
                 <TooltipTrigger asChild>
                   <LiquidWhiteButton
-                    onClick={onSubmit}
-                    disabled={disabled}
+                    onClick={handleSubmitWithAttachments}
+                    disabled={disabled || hasUploadingAttachments}
                     size="md"
                   >
-                    <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
+                    {hasUploadingAttachments ? (
+                      <Loader2 className="w-5 h-5 animate-spin" strokeWidth={2.5} />
+                    ) : (
+                      <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
+                    )}
                   </LiquidWhiteButton>
                 </TooltipTrigger>
                 <TooltipContent side="top" sideOffset={8}>
                   <p className="text-xs flex items-center gap-1">
-                    <span>Send</span>
-                    <span>(</span>
-                    <span className="font-mono text-base" style={{ transform: 'translateY(1px)' }}>⌘</span>
-                    <span>+ Enter )</span>
+                    {hasUploadingAttachments ? (
+                      <span>Uploading files...</span>
+                    ) : (
+                      <>
+                        <span>Send</span>
+                        <span>(</span>
+                        <span className="font-mono text-base" style={{ transform: 'translateY(1px)' }}>⌘</span>
+                        <span>+ Enter )</span>
+                      </>
+                    )}
                   </p>
                 </TooltipContent>
               </Tooltip>

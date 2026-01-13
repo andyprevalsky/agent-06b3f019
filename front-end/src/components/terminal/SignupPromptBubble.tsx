@@ -98,7 +98,6 @@ const SignupPromptBubble = memo(function SignupPromptBubble({
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-      <div className="flex-shrink-0 w-8" />
 
       <div className="flex-1 space-y-3">
         {/* Render reason message as markdown text */}

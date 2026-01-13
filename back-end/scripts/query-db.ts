@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Reset onboarding flag for a user
+ * Query messages to compare file_pointer between USER and ASSISTANT messages
  */
 
 import { PrismaClient } from '@prisma/client';
@@ -8,27 +8,54 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-  // Find users with onboarding completed
-  const users = await prisma.user.findMany({
-    where: { onboardingCompletedAt: { not: null } },
-    select: { id: true, userId: true, name: true, phone: true, onboardingCompletedAt: true },
+  // Find recent USER messages with file_pointer
+  const userMessages = await prisma.message.findMany({
+    where: {
+      role: 'USER',
+      filePointer: { not: null },
+    },
+    orderBy: { timestamp: 'desc' },
+    take: 3,
+    select: {
+      id: true,
+      role: true,
+      text: true,
+      timestamp: true,
+      filePointer: true,
+    },
   });
 
-  console.log('Users with onboarding completed:');
-  console.log(JSON.stringify(users, null, 2));
+  console.log('=== USER messages with file_pointer ===');
+  for (const msg of userMessages) {
+    console.log(`\n--- Message ${msg.id} ---`);
+    console.log(`Role: ${msg.role}`);
+    console.log(`Text: ${msg.text?.substring(0, 50) || '(empty)'}`);
+    console.log(`FilePointer: ${JSON.stringify(msg.filePointer, null, 2)}`);
+  }
 
-  if (users.length > 0) {
-    // Reset the first user's onboarding (or specify which one)
-    const targetUser = users[0];
-    console.log(`\nResetting onboarding for user: ${targetUser.name || targetUser.userId}`);
+  // Find recent ASSISTANT messages with file_pointer
+  const assistantMessages = await prisma.message.findMany({
+    where: {
+      role: 'ASSISTANT',
+      filePointer: { not: null },
+    },
+    orderBy: { timestamp: 'desc' },
+    take: 3,
+    select: {
+      id: true,
+      role: true,
+      text: true,
+      timestamp: true,
+      filePointer: true,
+    },
+  });
 
-    const updated = await prisma.user.update({
-      where: { id: targetUser.id },
-      data: { onboardingCompletedAt: null },
-    });
-
-    console.log('Updated user:');
-    console.log(JSON.stringify(updated, null, 2));
+  console.log('\n\n=== ASSISTANT messages with file_pointer ===');
+  for (const msg of assistantMessages) {
+    console.log(`\n--- Message ${msg.id} ---`);
+    console.log(`Role: ${msg.role}`);
+    console.log(`Text: ${msg.text?.substring(0, 50) || '(empty)'}`);
+    console.log(`FilePointer: ${JSON.stringify(msg.filePointer, null, 2)}`);
   }
 }
 

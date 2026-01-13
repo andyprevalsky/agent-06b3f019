@@ -81,14 +81,15 @@ model Verifier {
 }
 
 model Message {
-  id        String      @id @default(uuid())
-  agentId   String
-  timestamp DateTime    @default(now())
-  text      String
-  role      MessageRole
-  createdAt DateTime    @default(now())
-  metadata  Json?
-  agent     Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  id          String      @id @default(uuid())
+  agentId     String
+  timestamp   DateTime    @default(now())
+  text        String
+  role        MessageRole
+  createdAt   DateTime    @default(now())
+  metadata    Json?
+  filePointer Json?       // FilePointer for file attachment messages (stored in Supabase Storage)
+  agent       Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([agentId, timestamp])
   @@index([createdAt])

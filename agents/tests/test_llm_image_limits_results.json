@@ -1,0 +1,1598 @@
+[
+  {
+    "pool": "rose-lite",
+    "model_seed": 0,
+    "model_name": "moonshotai/kimi-k2-0905",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:37:27",
+    "status_code": 404,
+    "request_time_s": 0.69,
+    "success": false,
+    "error": {
+      "error": "OpenRouter API error",
+      "status": 404,
+      "details": "{\n  \"error\": {\n    \"message\": \"No endpoints found that support image input\",\n    \"code\": 404\n  }\n}"
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 1,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:37:28",
+    "status_code": 200,
+    "request_time_s": 4.7,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 456,
+        "completion_tokens": 43,
+        "total_tokens": 499,
+        "cost": 0.0014,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.000798,
+          "upstream_inference_completions_cost": 0.000602
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 25,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random multicolored static noise pattern, like TV snow."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 1,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 2,
+    "actual_size_mb": 2.66,
+    "timestamp": "2026-01-09 16:37:32",
+    "status_code": 200,
+    "request_time_s": 5.81,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 897,
+        "completion_tokens": 38,
+        "total_tokens": 935,
+        "cost": 0.00210175,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.00156975,
+          "upstream_inference_completions_cost": 0.000532
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 22,
+          "image_tokens": 0
+        }
+      },
+      "content": "Multicolored pixel noise, like TV static."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 1,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 3,
+    "actual_size_mb": 3.99,
+    "timestamp": "2026-01-09 16:37:38",
+    "status_code": 200,
+    "request_time_s": 6.4,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1251,
+        "completion_tokens": 38,
+        "total_tokens": 1289,
+        "cost": 0.00272125,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.00218925,
+          "upstream_inference_completions_cost": 0.000532
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 21,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colorful TV static-like noise filling the entire image."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 1,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 4,
+    "actual_size_mb": 5.33,
+    "timestamp": "2026-01-09 16:37:45",
+    "status_code": 200,
+    "request_time_s": 8.03,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1665,
+        "completion_tokens": 37,
+        "total_tokens": 1702,
+        "cost": 0.00343175,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.00291375,
+          "upstream_inference_completions_cost": 0.000518
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 21,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colorful static noise pattern, like television snow."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 1,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 5,
+    "actual_size_mb": 6.66,
+    "timestamp": "2026-01-09 16:37:53",
+    "status_code": 200,
+    "request_time_s": 9.32,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1848,
+        "completion_tokens": 34,
+        "total_tokens": 1882,
+        "cost": 0.0014924,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 1408,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0010164,
+          "upstream_inference_completions_cost": 0.000476
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 16,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colorful random static noise pattern; no discernible objects."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 1,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 10,
+    "actual_size_mb": 13.33,
+    "timestamp": "2026-01-09 16:38:02",
+    "status_code": 200,
+    "request_time_s": 13.1,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1848,
+        "completion_tokens": 39,
+        "total_tokens": 1887,
+        "cost": 0.0015624,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 1408,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0010164,
+          "upstream_inference_completions_cost": 0.000546
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 21,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random multicolored static noise; no distinct objects visible."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 1,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 15,
+    "actual_size_mb": 20.0,
+    "timestamp": "2026-01-09 16:38:15",
+    "status_code": 200,
+    "request_time_s": 16.35,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1848,
+        "completion_tokens": 32,
+        "total_tokens": 1880,
+        "cost": 0.003682,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.003234,
+          "upstream_inference_completions_cost": 0.000448
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 16,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colorful static noise pattern, like TV snow."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 1,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 20,
+    "actual_size_mb": 26.66,
+    "timestamp": "2026-01-09 16:38:32",
+    "success": false,
+    "error": "Request timed out after 20s"
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 2,
+    "model_name": "google/gemini-2.5-flash",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:38:55",
+    "status_code": 200,
+    "request_time_s": 2.13,
+    "success": true,
+    "response": {
+      "model": "google/gemini-2.5-flash",
+      "usage": {
+        "prompt_tokens": 1307,
+        "completion_tokens": 13,
+        "total_tokens": 1320,
+        "cost": 0.0004246,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0003921,
+          "upstream_inference_completions_cost": 3.25e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "This image appears to be random multicolored noise, like television static."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 2,
+    "model_name": "google/gemini-2.5-flash",
+    "file_size_mb": 2,
+    "actual_size_mb": 2.66,
+    "timestamp": "2026-01-09 16:38:57",
+    "status_code": 200,
+    "request_time_s": 2.42,
+    "success": true,
+    "response": {
+      "model": "google/gemini-2.5-flash",
+      "usage": {
+        "prompt_tokens": 1307,
+        "completion_tokens": 9,
+        "total_tokens": 1316,
+        "cost": 0.0004146,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0003921,
+          "upstream_inference_completions_cost": 2.25e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "A field of colorful static, or noise."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 2,
+    "model_name": "google/gemini-2.5-flash",
+    "file_size_mb": 3,
+    "actual_size_mb": 3.99,
+    "timestamp": "2026-01-09 16:38:59",
+    "status_code": 200,
+    "request_time_s": 3.11,
+    "success": true,
+    "response": {
+      "model": "google/gemini-2.5-flash",
+      "usage": {
+        "prompt_tokens": 1307,
+        "completion_tokens": 7,
+        "total_tokens": 1314,
+        "cost": 0.0004096,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0003921,
+          "upstream_inference_completions_cost": 1.75e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "This image displays colorful static noise."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 2,
+    "model_name": "google/gemini-2.5-flash",
+    "file_size_mb": 4,
+    "actual_size_mb": 5.33,
+    "timestamp": "2026-01-09 16:39:02",
+    "status_code": 200,
+    "request_time_s": 3.18,
+    "success": true,
+    "response": {
+      "model": "google/gemini-2.5-flash",
+      "usage": {
+        "prompt_tokens": 1307,
+        "completion_tokens": 9,
+        "total_tokens": 1316,
+        "cost": 0.0004146,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0003921,
+          "upstream_inference_completions_cost": 2.25e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random colored noise, similar to television static."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 2,
+    "model_name": "google/gemini-2.5-flash",
+    "file_size_mb": 5,
+    "actual_size_mb": 6.66,
+    "timestamp": "2026-01-09 16:39:06",
+    "status_code": 200,
+    "request_time_s": 3.24,
+    "success": true,
+    "response": {
+      "model": "google/gemini-2.5-flash",
+      "usage": {
+        "prompt_tokens": 1307,
+        "completion_tokens": 7,
+        "total_tokens": 1314,
+        "cost": 0.0004096,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0003921,
+          "upstream_inference_completions_cost": 1.75e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "Static or TV noise, multicolored."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 2,
+    "model_name": "google/gemini-2.5-flash",
+    "file_size_mb": 10,
+    "actual_size_mb": 13.33,
+    "timestamp": "2026-01-09 16:39:09",
+    "status_code": 200,
+    "request_time_s": 5.37,
+    "success": true,
+    "response": {
+      "model": "google/gemini-2.5-flash",
+      "usage": {
+        "prompt_tokens": 2597,
+        "completion_tokens": 12,
+        "total_tokens": 2609,
+        "cost": 0.0008091,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0007791,
+          "upstream_inference_completions_cost": 3e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "This image shows colorful static or noise, resembling TV snow."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 2,
+    "model_name": "google/gemini-2.5-flash",
+    "file_size_mb": 15,
+    "actual_size_mb": 20.0,
+    "timestamp": "2026-01-09 16:39:15",
+    "status_code": 200,
+    "request_time_s": 7.62,
+    "success": true,
+    "response": {
+      "model": "google/gemini-2.5-flash",
+      "usage": {
+        "prompt_tokens": 2597,
+        "completion_tokens": 11,
+        "total_tokens": 2608,
+        "cost": 0.0008066,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0007791,
+          "upstream_inference_completions_cost": 2.75e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "This image shows a pattern of static or white noise."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 2,
+    "model_name": "google/gemini-2.5-flash",
+    "file_size_mb": 20,
+    "actual_size_mb": 26.66,
+    "timestamp": "2026-01-09 16:39:22",
+    "success": false,
+    "error": "Request timed out after 20s"
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 3,
+    "model_name": "anthropic/claude-haiku-4.5",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:39:45",
+    "status_code": 200,
+    "request_time_s": 4.57,
+    "success": true,
+    "response": {
+      "model": "anthropic/claude-haiku-4.5",
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 16,
+        "total_tokens": 528,
+        "cost": 0.000592,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.000512,
+          "upstream_inference_completions_cost": 8e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random colored noise or static pattern with no discernible image."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 3,
+    "model_name": "anthropic/claude-haiku-4.5",
+    "file_size_mb": 2,
+    "actual_size_mb": 2.66,
+    "timestamp": "2026-01-09 16:39:49",
+    "status_code": 200,
+    "request_time_s": 3.86,
+    "success": true,
+    "response": {
+      "model": "anthropic/claude-haiku-4.5",
+      "usage": {
+        "prompt_tokens": 928,
+        "completion_tokens": 16,
+        "total_tokens": 944,
+        "cost": 0.001008,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.000928,
+          "upstream_inference_completions_cost": 8e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random colored noise or static pattern, no discernible image."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 3,
+    "model_name": "anthropic/claude-haiku-4.5",
+    "file_size_mb": 3,
+    "actual_size_mb": 3.99,
+    "timestamp": "2026-01-09 16:39:53",
+    "status_code": 200,
+    "request_time_s": 6.71,
+    "success": true,
+    "response": {
+      "model": "anthropic/claude-haiku-4.5",
+      "usage": {
+        "prompt_tokens": 1397,
+        "completion_tokens": 16,
+        "total_tokens": 1413,
+        "cost": 0.001477,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.001397,
+          "upstream_inference_completions_cost": 8e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random colored noise or static pattern; no discernible content."
+    }
+  },
+  {
+    "pool": "rose-lite",
+    "model_seed": 3,
+    "model_name": "anthropic/claude-haiku-4.5",
+    "file_size_mb": 4,
+    "actual_size_mb": 5.33,
+    "timestamp": "2026-01-09 16:40:00",
+    "status_code": 400,
+    "request_time_s": 8.96,
+    "success": false,
+    "error": {
+      "error": "OpenRouter API error",
+      "status": 400,
+      "details": "{\n  \"error\": {\n    \"message\": \"Provider returned error\",\n    \"code\": 400,\n    \"metadata\": {\n      \"raw\": \"{\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"messages.0.content.0.image.source.base64: image exceeds 5 MB maximum: 5591960 bytes > 5242880 bytes\\\"},\\\"request_id\\\":\\\"req_011CWxcFErkc4nx8io7mxamv\\\"}\",\n      \"provider_name\": \"Anthropic\"\n    }\n  },\n  \"user_id\": \"user_33q0i1JO5W5cgHsD7ha7KrWvoPx\"\n}"
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 0,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:40:09",
+    "status_code": 200,
+    "request_time_s": 3.15,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 456,
+        "completion_tokens": 39,
+        "total_tokens": 495,
+        "cost": 0.001344,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.000798,
+          "upstream_inference_completions_cost": 0.000546
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 20,
+          "image_tokens": 0
+        }
+      },
+      "content": "A field of multicolored static noise, like TV snow."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 0,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 2,
+    "actual_size_mb": 2.66,
+    "timestamp": "2026-01-09 16:40:12",
+    "status_code": 200,
+    "request_time_s": 5.87,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 897,
+        "completion_tokens": 31,
+        "total_tokens": 928,
+        "cost": 0.00200375,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.00156975,
+          "upstream_inference_completions_cost": 0.000434
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 15,
+          "image_tokens": 0
+        }
+      },
+      "content": "Multicolored static noise; no recognizable objects."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 0,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 3,
+    "actual_size_mb": 3.99,
+    "timestamp": "2026-01-09 16:40:18",
+    "status_code": 200,
+    "request_time_s": 4.73,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1251,
+        "completion_tokens": 35,
+        "total_tokens": 1286,
+        "cost": 0.00267925,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.00218925,
+          "upstream_inference_completions_cost": 0.00049
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 20,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colorful static noise, like TV snow."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 0,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 4,
+    "actual_size_mb": 5.33,
+    "timestamp": "2026-01-09 16:40:23",
+    "status_code": 200,
+    "request_time_s": 10.07,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1665,
+        "completion_tokens": 39,
+        "total_tokens": 1704,
+        "cost": 0.00345975,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.00291375,
+          "upstream_inference_completions_cost": 0.000546
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 20,
+          "image_tokens": 0
+        }
+      },
+      "content": "A field of multicolored static noise with no clear objects."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 0,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 5,
+    "actual_size_mb": 6.66,
+    "timestamp": "2026-01-09 16:40:33",
+    "status_code": 200,
+    "request_time_s": 8.88,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1848,
+        "completion_tokens": 43,
+        "total_tokens": 1891,
+        "cost": 0.0016184,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 1408,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0010164,
+          "upstream_inference_completions_cost": 0.000602
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 26,
+          "image_tokens": 0
+        }
+      },
+      "content": "Multicolored static noise pattern, like television snow."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 0,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 10,
+    "actual_size_mb": 13.33,
+    "timestamp": "2026-01-09 16:40:42",
+    "status_code": 200,
+    "request_time_s": 14.02,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1848,
+        "completion_tokens": 33,
+        "total_tokens": 1881,
+        "cost": 0.0014784,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 1408,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0010164,
+          "upstream_inference_completions_cost": 0.000462
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 16,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colorful TV static noise with no discernible objects."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 0,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 15,
+    "actual_size_mb": 20.0,
+    "timestamp": "2026-01-09 16:40:56",
+    "status_code": 200,
+    "request_time_s": 17.43,
+    "success": true,
+    "response": {
+      "model": "openai/gpt-5.2",
+      "usage": {
+        "prompt_tokens": 1848,
+        "completion_tokens": 35,
+        "total_tokens": 1883,
+        "cost": 0.0015064,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 1408,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.0010164,
+          "upstream_inference_completions_cost": 0.00049
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 19,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colored static noise, like a TV without signal."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 0,
+    "model_name": "openai/gpt-5.2",
+    "file_size_mb": 20,
+    "actual_size_mb": 26.66,
+    "timestamp": "2026-01-09 16:41:14",
+    "success": false,
+    "error": "Request timed out after 20s"
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 1,
+    "model_name": "anthropic/claude-sonnet-4.5",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:41:36",
+    "status_code": 200,
+    "request_time_s": 3.59,
+    "success": true,
+    "response": {
+      "model": "anthropic/claude-sonnet-4.5",
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 16,
+        "total_tokens": 528,
+        "cost": 0.001776,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.001536,
+          "upstream_inference_completions_cost": 0.00024
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random colorful noise or static with no discernible pattern."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 1,
+    "model_name": "anthropic/claude-sonnet-4.5",
+    "file_size_mb": 2,
+    "actual_size_mb": 2.66,
+    "timestamp": "2026-01-09 16:41:40",
+    "status_code": 200,
+    "request_time_s": 3.95,
+    "success": true,
+    "response": {
+      "model": "anthropic/claude-sonnet-4.5",
+      "usage": {
+        "prompt_tokens": 928,
+        "completion_tokens": 17,
+        "total_tokens": 945,
+        "cost": 0.003039,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.002784,
+          "upstream_inference_completions_cost": 0.000255
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random colored noise or static with no discernible pattern or object."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 1,
+    "model_name": "anthropic/claude-sonnet-4.5",
+    "file_size_mb": 3,
+    "actual_size_mb": 3.99,
+    "timestamp": "2026-01-09 16:41:44",
+    "status_code": 200,
+    "request_time_s": 4.41,
+    "success": true,
+    "response": {
+      "model": "anthropic/claude-sonnet-4.5",
+      "usage": {
+        "prompt_tokens": 1397,
+        "completion_tokens": 16,
+        "total_tokens": 1413,
+        "cost": 0.004431,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.004191,
+          "upstream_inference_completions_cost": 0.00024
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0
+        }
+      },
+      "content": "Random colorful noise or static with no discernible pattern."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 1,
+    "model_name": "anthropic/claude-sonnet-4.5",
+    "file_size_mb": 4,
+    "actual_size_mb": 5.33,
+    "timestamp": "2026-01-09 16:41:49",
+    "status_code": 400,
+    "request_time_s": 6.7,
+    "success": false,
+    "error": {
+      "error": "OpenRouter API error",
+      "status": 400,
+      "details": "{\n  \"error\": {\n    \"message\": \"Provider returned error\",\n    \"code\": 400,\n    \"metadata\": {\n      \"raw\": \"{\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"messages.0.content.0.image.source.base64: image exceeds 5 MB maximum: 5591960 bytes > 5242880 bytes\\\"},\\\"request_id\\\":\\\"req_011CWxcP5fpf9qqr3564dygu\\\"}\",\n      \"provider_name\": \"Anthropic\"\n    }\n  },\n  \"user_id\": \"user_33q0i1JO5W5cgHsD7ha7KrWvoPx\"\n}"
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 2,
+    "model_name": "moonshotai/kimi-k2-thinking",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:41:55",
+    "status_code": 404,
+    "request_time_s": 0.67,
+    "success": false,
+    "error": {
+      "error": "OpenRouter API error",
+      "status": 404,
+      "details": "{\n  \"error\": {\n    \"message\": \"No endpoints found that support image input\",\n    \"code\": 404\n  }\n}"
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 3,
+    "model_name": "google/gemini-3-pro-preview",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:41:56",
+    "status_code": 200,
+    "request_time_s": 4.59,
+    "success": true,
+    "response": {
+      "model": "google/gemini-3-pro-preview",
+      "usage": {
+        "prompt_tokens": 1106,
+        "completion_tokens": 47,
+        "total_tokens": 1153,
+        "cost": 0.002776,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.002212,
+          "upstream_inference_completions_cost": 0.000564
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 47,
+          "image_tokens": 0
+        }
+      },
+      "content": ""
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 3,
+    "model_name": "google/gemini-3-pro-preview",
+    "file_size_mb": 2,
+    "actual_size_mb": 2.66,
+    "timestamp": "2026-01-09 16:42:01",
+    "status_code": 200,
+    "request_time_s": 5.16,
+    "success": true,
+    "response": {
+      "model": "google/gemini-3-pro-preview",
+      "usage": {
+        "prompt_tokens": 1106,
+        "completion_tokens": 47,
+        "total_tokens": 1153,
+        "cost": 0.002776,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.002212,
+          "upstream_inference_completions_cost": 0.000564
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 47,
+          "image_tokens": 0
+        }
+      },
+      "content": ""
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 3,
+    "model_name": "google/gemini-3-pro-preview",
+    "file_size_mb": 3,
+    "actual_size_mb": 3.99,
+    "timestamp": "2026-01-09 16:42:06",
+    "status_code": 200,
+    "request_time_s": 4.87,
+    "success": true,
+    "response": {
+      "model": "google/gemini-3-pro-preview",
+      "usage": {
+        "prompt_tokens": 1106,
+        "completion_tokens": 47,
+        "total_tokens": 1153,
+        "cost": 0.002776,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.002212,
+          "upstream_inference_completions_cost": 0.000564
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 47,
+          "image_tokens": 0
+        }
+      },
+      "content": ""
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 3,
+    "model_name": "google/gemini-3-pro-preview",
+    "file_size_mb": 4,
+    "actual_size_mb": 5.33,
+    "timestamp": "2026-01-09 16:42:11",
+    "status_code": 200,
+    "request_time_s": 5.77,
+    "success": true,
+    "response": {
+      "model": "google/gemini-3-pro-preview",
+      "usage": {
+        "prompt_tokens": 1106,
+        "completion_tokens": 47,
+        "total_tokens": 1153,
+        "cost": 0.002776,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.002212,
+          "upstream_inference_completions_cost": 0.000564
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 47,
+          "image_tokens": 0
+        }
+      },
+      "content": ""
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 3,
+    "model_name": "google/gemini-3-pro-preview",
+    "file_size_mb": 5,
+    "actual_size_mb": 6.66,
+    "timestamp": "2026-01-09 16:42:16",
+    "status_code": 200,
+    "request_time_s": 5.5,
+    "success": true,
+    "response": {
+      "model": "google/gemini-3-pro-preview",
+      "usage": {
+        "prompt_tokens": 1106,
+        "completion_tokens": 47,
+        "total_tokens": 1153,
+        "cost": 0.002776,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.002212,
+          "upstream_inference_completions_cost": 0.000564
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 47,
+          "image_tokens": 0
+        }
+      },
+      "content": ""
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 3,
+    "model_name": "google/gemini-3-pro-preview",
+    "file_size_mb": 10,
+    "actual_size_mb": 13.33,
+    "timestamp": "2026-01-09 16:42:22",
+    "status_code": 200,
+    "request_time_s": 7.39,
+    "success": true,
+    "response": {
+      "model": "google/gemini-3-pro-preview",
+      "usage": {
+        "prompt_tokens": 1106,
+        "completion_tokens": 47,
+        "total_tokens": 1153,
+        "cost": 0.002776,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.002212,
+          "upstream_inference_completions_cost": 0.000564
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 47,
+          "image_tokens": 0
+        }
+      },
+      "content": ""
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 3,
+    "model_name": "google/gemini-3-pro-preview",
+    "file_size_mb": 15,
+    "actual_size_mb": 20.0,
+    "timestamp": "2026-01-09 16:42:30",
+    "status_code": 200,
+    "request_time_s": 9.65,
+    "success": true,
+    "response": {
+      "model": "google/gemini-3-pro-preview",
+      "usage": {
+        "prompt_tokens": 1106,
+        "completion_tokens": 47,
+        "total_tokens": 1153,
+        "cost": 0.002776,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 0.002212,
+          "upstream_inference_completions_cost": 0.000564
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 47,
+          "image_tokens": 0
+        }
+      },
+      "content": ""
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 3,
+    "model_name": "google/gemini-3-pro-preview",
+    "file_size_mb": 20,
+    "actual_size_mb": 26.66,
+    "timestamp": "2026-01-09 16:42:39",
+    "success": false,
+    "error": "Request timed out after 20s"
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 4,
+    "model_name": "x-ai/grok-4.1-fast",
+    "file_size_mb": 1,
+    "actual_size_mb": 1.33,
+    "timestamp": "2026-01-09 16:43:02",
+    "status_code": 200,
+    "request_time_s": 4.72,
+    "success": true,
+    "response": {
+      "model": "x-ai/grok-4.1-fast",
+      "usage": {
+        "prompt_tokens": 429,
+        "completion_tokens": 428,
+        "total_tokens": 857,
+        "cost": 0.00027715,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 151,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 6.315e-05,
+          "upstream_inference_completions_cost": 0.000214
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 422,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colorful pixel static noise."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 4,
+    "model_name": "x-ai/grok-4.1-fast",
+    "file_size_mb": 2,
+    "actual_size_mb": 2.66,
+    "timestamp": "2026-01-09 16:43:07",
+    "status_code": 200,
+    "request_time_s": 4.08,
+    "success": true,
+    "response": {
+      "model": "x-ai/grok-4.1-fast",
+      "usage": {
+        "prompt_tokens": 429,
+        "completion_tokens": 188,
+        "total_tokens": 617,
+        "cost": 0.000157,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 152,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 6.3e-05,
+          "upstream_inference_completions_cost": 9.4e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 182,
+          "image_tokens": 0
+        }
+      },
+      "content": "Colorful pixel static noise."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 4,
+    "model_name": "x-ai/grok-4.1-fast",
+    "file_size_mb": 3,
+    "actual_size_mb": 3.99,
+    "timestamp": "2026-01-09 16:43:11",
+    "status_code": 200,
+    "request_time_s": 3.74,
+    "success": true,
+    "response": {
+      "model": "x-ai/grok-4.1-fast",
+      "usage": {
+        "prompt_tokens": 429,
+        "completion_tokens": 242,
+        "total_tokens": 671,
+        "cost": 0.000184,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 152,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 6.3e-05,
+          "upstream_inference_completions_cost": 0.000121
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 238,
+          "image_tokens": 0
+        }
+      },
+      "content": "Gray pixel noise."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 4,
+    "model_name": "x-ai/grok-4.1-fast",
+    "file_size_mb": 4,
+    "actual_size_mb": 5.33,
+    "timestamp": "2026-01-09 16:43:15",
+    "status_code": 200,
+    "request_time_s": 3.81,
+    "success": true,
+    "response": {
+      "model": "x-ai/grok-4.1-fast",
+      "usage": {
+        "prompt_tokens": 429,
+        "completion_tokens": 194,
+        "total_tokens": 623,
+        "cost": 0.00016015,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 151,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 6.315e-05,
+          "upstream_inference_completions_cost": 9.7e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 190,
+          "image_tokens": 0
+        }
+      },
+      "content": "Gray static noise."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 4,
+    "model_name": "x-ai/grok-4.1-fast",
+    "file_size_mb": 5,
+    "actual_size_mb": 6.66,
+    "timestamp": "2026-01-09 16:43:19",
+    "status_code": 200,
+    "request_time_s": 4.95,
+    "success": true,
+    "response": {
+      "model": "x-ai/grok-4.1-fast",
+      "usage": {
+        "prompt_tokens": 429,
+        "completion_tokens": 223,
+        "total_tokens": 652,
+        "cost": 0.00017465,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 151,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 6.315e-05,
+          "upstream_inference_completions_cost": 0.0001115
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 217,
+          "image_tokens": 0
+        }
+      },
+      "content": "Grayscale pixel noise/static."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 4,
+    "model_name": "x-ai/grok-4.1-fast",
+    "file_size_mb": 10,
+    "actual_size_mb": 13.33,
+    "timestamp": "2026-01-09 16:43:24",
+    "status_code": 200,
+    "request_time_s": 5.02,
+    "success": true,
+    "response": {
+      "model": "x-ai/grok-4.1-fast",
+      "usage": {
+        "prompt_tokens": 429,
+        "completion_tokens": 136,
+        "total_tokens": 565,
+        "cost": 0.00013115,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 151,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 6.315e-05,
+          "upstream_inference_completions_cost": 6.8e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 132,
+          "image_tokens": 0
+        }
+      },
+      "content": "Gray static noise."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 4,
+    "model_name": "x-ai/grok-4.1-fast",
+    "file_size_mb": 15,
+    "actual_size_mb": 20.0,
+    "timestamp": "2026-01-09 16:43:29",
+    "status_code": 200,
+    "request_time_s": 5.58,
+    "success": true,
+    "response": {
+      "model": "x-ai/grok-4.1-fast",
+      "usage": {
+        "prompt_tokens": 429,
+        "completion_tokens": 126,
+        "total_tokens": 555,
+        "cost": 0.000126,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 152,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": null,
+          "upstream_inference_prompt_cost": 6.3e-05,
+          "upstream_inference_completions_cost": 6.3e-05
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 122,
+          "image_tokens": 0
+        }
+      },
+      "content": "Gray static noise."
+    }
+  },
+  {
+    "pool": "rose-ultra",
+    "model_seed": 4,
+    "model_name": "x-ai/grok-4.1-fast",
+    "file_size_mb": 20,
+    "actual_size_mb": 26.66,
+    "timestamp": "2026-01-09 16:43:35",
+    "success": false,
+    "error": "Request timed out after 20s"
+  }
+]

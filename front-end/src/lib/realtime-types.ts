@@ -22,7 +22,7 @@
  * The helpers in realtime.ts extract `payload.record` before calling handlers.
  */
 
-import { Agent, OutputSchema } from './api';
+import { Agent, OutputSchema, FilePointer } from './api';
 
 // =============================================================================
 // Raw Supabase Realtime Wrapper
@@ -402,6 +402,7 @@ export interface InsertMessagePayload {
   text: string;
   role: MessageRole;
   metadata?: MessageMetadata | null;
+  file_pointer?: FilePointer | null;  // File attachment (OAI-style: one file per message)
 }
 
 /**
@@ -473,6 +474,16 @@ export function isRequestUserSignupMessage(
   msg: InsertMessagePayload
 ): msg is ToolMessagePayload<RequestUserSignupMetadata> {
   return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'request_user_signup';
+}
+
+/**
+ * Type guard for ASSISTANT messages with file attachments.
+ * These are output files from tools like Claude Code.
+ */
+export function isAssistantFileMessage(
+  msg: InsertMessagePayload
+): msg is InsertMessagePayload & { file_pointer: FilePointer } {
+  return msg.role === 'ASSISTANT' && msg.file_pointer != null;
 }
 
 // -----------------------------------------------------------------------------
@@ -944,9 +955,19 @@ function extractAndValidate<T>(
 
 /**
  * Extract and validate INSERT message payload.
+ * Transforms DB column names to API format (filePointer -> file_pointer).
  */
 export function extractInsertPayload(wrapper: unknown): InsertMessagePayload | null {
-  return extractAndValidate<InsertMessagePayload>(wrapper, 'INSERT', validateInsertMessagePayload);
+  const record = extractAndValidate<InsertMessagePayload>(wrapper, 'INSERT', validateInsertMessagePayload);
+  if (!record) return null;
+
+  // Transform DB column name (camelCase) to API format (snake_case)
+  const dbRecord = record as unknown as Record<string, unknown>;
+  if (dbRecord.filePointer !== undefined) {
+    record.file_pointer = dbRecord.filePointer as FilePointer | null;
+  }
+
+  return record;
 }
 
 /**

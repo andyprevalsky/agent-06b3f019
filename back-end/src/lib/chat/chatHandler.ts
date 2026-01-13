@@ -32,9 +32,13 @@ export interface ChatResult {
   decision: RouterDecision;
 }
 
+// ChatMessage type - compatible with routerLlm and generatorLlm
+// Uses 'any' for filePointer since it comes from DB as JSON
 interface ChatMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   text: string;
+  filePointer?: any; // FilePointer for file attachment messages (from DB JSON)
+  metadata?: Record<string, any>;
 }
 
 // ============================================
@@ -59,6 +63,8 @@ export async function handleChatMessage(config: {
   const messages: ChatMessage[] = dbMessages.map((m) => ({
     role: m.role as 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM',
     text: m.text,
+    filePointer: m.filePointer as Record<string, any> | undefined,
+    metadata: m.metadata as Record<string, any> | undefined,
   }));
 
   // ============================================
@@ -192,6 +198,7 @@ export async function handleChatMessage(config: {
   const updatedMessages: ChatMessage[] = updatedDbMessages.map((m) => ({
     role: m.role as 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM',
     text: m.text,
+    filePointer: m.filePointer as Record<string, any> | undefined,
   }));
 
   const generatorResponse = await callGeneratorLlm({

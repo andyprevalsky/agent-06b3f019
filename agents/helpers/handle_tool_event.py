@@ -13,7 +13,7 @@ import structlog
 
 # All imports at module level - no inline imports to avoid workflow sandbox issues
 from temporalio.common import RetryPolicy
-from tools.base import EventType, UsageType
+from tools.base import EventType, UsageType, AssistantEvent
 from helpers.messages import post_agent_message, stream_assistant_chunk
 from helpers.update_tokens import update_agent_tokens_activity
 from helpers.save_tool_usage import save_tool_usage
@@ -34,10 +34,10 @@ async def handle_tool_event(
     sub_agent_id: Optional[str] = None,  # For routing browser agent events
 ):
     """
-    Handle a ToolEvent - routes to appropriate FE/DB updates.
-    
+    Handle a ToolEvent or AssistantEvent - routes to appropriate FE/DB updates.
+
     Args:
-        event: ToolEvent instance
+        event: ToolEvent or AssistantEvent instance
         agent_id: Agent ID for DB updates
         tool_call_id: Unique ID for this tool call
         tool_name: Name of the tool
@@ -45,6 +45,17 @@ async def handle_tool_event(
         user_id: User ID (required for ToolUsage inserts)
         sub_agent_id: Optional sub-agent ID for routing (browser agent)
     """
+    # Handle AssistantEvent separately - posts as ASSISTANT role
+    if isinstance(event, AssistantEvent):
+        await execute_activity(
+            post_agent_message,
+            args=[agent_id, event.message or "", "ASSISTANT", None, event.file_pointer],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        return
+
+    # Handle ToolEvent types
     if event.type == EventType.POST_MESSAGE:
         # Build metadata - merge event metadata with standard tool fields
         metadata = {
@@ -65,10 +76,13 @@ async def handle_tool_event(
         # Include structured data (e.g., plan tasks) in metadata for FE
         if event.data:
             metadata["data"] = event.data
-        
+
+        # Get file_pointer if present (for file attachment messages)
+        file_pointer = getattr(event, 'file_pointer', None)
+
         await execute_activity(
             post_agent_message,
-            args=[agent_id, event.message or "", "TOOL", metadata],
+            args=[agent_id, event.message or "", "TOOL", metadata, file_pointer],
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )

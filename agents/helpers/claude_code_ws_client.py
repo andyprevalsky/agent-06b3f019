@@ -32,6 +32,7 @@ class ClaudeCodeWsClient:
         ws_url: str,
         on_output: Callable[[str, bool], Awaitable[None]],  # (data, is_buffer) -> None
         on_exit: Callable[[int], Awaitable[None]],  # (exit_code) -> None
+        on_connection_change: Optional[Callable[[bool], Awaitable[None]]] = None,  # (is_connected) -> None
         heartbeat_fn: Optional[Callable[[str], None]] = None,
         max_reconnects: int = 5,
         reconnect_delay: float = 1.0,
@@ -44,6 +45,7 @@ class ClaudeCodeWsClient:
             on_output: Callback for output data. Called with (data, is_buffer).
                        is_buffer=True means this is the full buffer from reconnect.
             on_exit: Callback when process exits. Called with exit code.
+            on_connection_change: Callback when connection state changes. Called with True on connect, False on disconnect.
             heartbeat_fn: Optional Temporal activity heartbeat function.
             max_reconnects: Maximum reconnection attempts.
             reconnect_delay: Base delay for exponential backoff (seconds).
@@ -51,6 +53,7 @@ class ClaudeCodeWsClient:
         self.ws_url = ws_url
         self.on_output = on_output
         self.on_exit = on_exit
+        self.on_connection_change = on_connection_change
         self.heartbeat_fn = heartbeat_fn
         self.max_reconnects = max_reconnects
         self.reconnect_delay = reconnect_delay
@@ -60,6 +63,7 @@ class ClaudeCodeWsClient:
         self._running = False
         self._reconnect_count = 0
         self._exited = False  # Process has exited, don't reconnect
+        self._reconnects_exhausted = False  # All reconnect attempts failed
 
     async def connect(self) -> bool:
         """
@@ -80,6 +84,11 @@ class ClaudeCodeWsClient:
             self._running = True
             self._reconnect_count = 0  # Reset on successful connect
             logger.info("[ClaudeCodeWs] Connected", url=self.ws_url[:60])
+
+            # Notify connection state change
+            if self.on_connection_change:
+                await self.on_connection_change(True)
+
             return True
 
         except Exception as e:
@@ -140,9 +149,14 @@ class ClaudeCodeWsClient:
             if self._exited or not self._running:
                 break
 
+            # Notify disconnection before attempting reconnect
+            if self.on_connection_change:
+                await self.on_connection_change(False)
+
             # Attempt reconnection
             if not await self._reconnect():
                 logger.error("[ClaudeCodeWs] Max reconnects exceeded")
+                self._reconnects_exhausted = True
                 break
 
     async def _listen_loop(self) -> None:
@@ -238,3 +252,8 @@ class ClaudeCodeWsClient:
     def has_exited(self) -> bool:
         """Check if the Claude Code process has exited."""
         return self._exited
+
+    @property
+    def reconnects_exhausted(self) -> bool:
+        """Check if all reconnection attempts have been exhausted."""
+        return self._reconnects_exhausted

@@ -36,6 +36,72 @@ const MODEL_POOLS: Record<string, string[]> = {
   ]
 };
 
+// ============================================
+// FILE SIZE CAPABILITY FILTERING
+// ============================================
+// Models that don't support vision/images at all
+const NO_VISION_MODELS = new Set([
+  'moonshotai/kimi-k2-0905',
+  'moonshotai/kimi-k2-thinking',
+]);
+
+// Models with 5MB image size limit (Anthropic)
+const MAX_5MB_MODELS = new Set([
+  'anthropic/claude-haiku-4.5',
+  'anthropic/claude-sonnet-4.5',
+]);
+
+const FIVE_MB = 5 * 1024 * 1024;
+
+/**
+ * Detect the maximum base64 file size in request messages.
+ * Returns 0 if no base64 files are found.
+ */
+function getMaxBase64FileSizeBytes(messages: any[]): number {
+  let maxSize = 0;
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'image_url' && block.image_url?.url?.startsWith('data:')) {
+          // Extract base64 portion after "data:mime;base64,"
+          const base64 = block.image_url.url.split(',')[1];
+          if (base64) {
+            // base64 to bytes: each 4 base64 chars = 3 bytes
+            const sizeBytes = Math.ceil(base64.length * 0.75);
+            maxSize = Math.max(maxSize, sizeBytes);
+          }
+        }
+      }
+    }
+  }
+  return maxSize;
+}
+
+/**
+ * Filter models based on file size capability.
+ * - No files: route to all models
+ * - Files <= 5MB: exclude Kimi (no vision)
+ * - Files > 5MB: exclude Kimi AND Anthropic
+ */
+function filterPoolByFileSize(pool: string[], maxFileSizeBytes: number): string[] {
+  if (maxFileSizeBytes === 0) return pool; // No files, all models eligible
+
+  // Any file -> exclude models without vision
+  let filtered = pool.filter(m => !NO_VISION_MODELS.has(m));
+
+  if (maxFileSizeBytes > FIVE_MB) {
+    // Large files -> also exclude Anthropic (5MB limit)
+    filtered = filtered.filter(m => !MAX_5MB_MODELS.has(m));
+  }
+
+  const excluded = pool.filter(m => !filtered.includes(m));
+  if (excluded.length > 0) {
+    console.log(`📁 File size ${(maxFileSizeBytes / 1024 / 1024).toFixed(2)}MB, excluded models: ${excluded.join(', ')}`);
+  }
+
+  return filtered;
+}
+
 // Browser-use API configuration
 const BROWSER_USE_API_URL = 'https://llm.api.browser-use.com/v1/chat/completions';
 
@@ -2093,6 +2159,7 @@ async function raceModels(
         }
         
         console.log(`🔮 Calling Anthropic directly for ${anthropicModel}`);
+        console.log(`[Anthropic Race] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
         response = await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
@@ -2116,14 +2183,16 @@ async function raceModels(
           tool_choice: toolChoice,
           stream: true
         };
-        
+
         if (responseFormat) {
           body.response_format = responseFormat;
         }
         if (reasoning) {
           body.reasoning = reasoning;
         }
-        
+
+        console.log(`[OpenRouter Race] Request to ${model}:`, JSON.stringify(truncateForLogging(body), null, 2));
+
         response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -2370,26 +2439,90 @@ function countToolTypes(responseFormat: any): number {
   return 0;
 }
 
+// Transform OpenAI content block to Anthropic format
+// - image_url with data URI -> image with base64 source
+// - file blocks (PDF) -> document with base64 source
+// - text blocks pass through
+function transformContentBlockForAnthropic(block: any): any {
+  if (block.type === 'image_url' && block.image_url?.url) {
+    const url = block.image_url.url;
+    // Check if it's a data URI (base64)
+    if (url.startsWith('data:')) {
+      // Parse data URI: data:image/jpeg;base64,/9j/...
+      const match = url.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        const [, mediaType, data] = match;
+        return {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mediaType,
+            data: data
+          }
+        };
+      }
+    }
+    // For URL-based images, keep as-is (Anthropic supports URL images too)
+    return {
+      type: 'image',
+      source: {
+        type: 'url',
+        url: url
+      }
+    };
+  }
+
+  if (block.type === 'file' && block.file?.file_data) {
+    // Transform file block (PDF) to Anthropic document format
+    const fileData = block.file.file_data;
+    if (fileData.startsWith('data:')) {
+      const match = fileData.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        const [, mediaType, data] = match;
+        return {
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: mediaType,
+            data: data
+          }
+        };
+      }
+    }
+  }
+
+  // Pass through text and other blocks unchanged
+  return block;
+}
+
 // Transform OpenAI messages format to Anthropic format
 // - System messages go to top-level 'system' param
 // - Remove trailing assistant messages (prefill not allowed with output_format)
+// - Convert image_url blocks to Anthropic image format
+// - Convert file blocks (PDF) to Anthropic document format
 function transformMessagesForAnthropic(messages: any[]): { system: string; messages: any[] } {
   const systemParts: string[] = [];
   const anthropicMessages: any[] = [];
-  
+
   for (const msg of messages) {
     if (msg.role === 'system') {
-      systemParts.push(msg.content);
+      systemParts.push(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
     } else {
-      anthropicMessages.push(msg);
+      // Transform content blocks if content is an array
+      if (Array.isArray(msg.content)) {
+        const transformedContent = msg.content.map(transformContentBlockForAnthropic);
+        anthropicMessages.push({ ...msg, content: transformedContent });
+      } else {
+        anthropicMessages.push(msg);
+      }
     }
   }
-  
+
   // Remove trailing assistant messages (not allowed with output_format)
   while (anthropicMessages.length > 0 && anthropicMessages[anthropicMessages.length - 1].role === 'assistant') {
     anthropicMessages.pop();
   }
-  
+
   return {
     system: systemParts.join('\n\n'),
     messages: anthropicMessages
@@ -2653,7 +2786,9 @@ async function handleStreaming(
               schema: transformedSchema
             };
           }
-          
+
+          console.log(`[Anthropic Stream] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
+
           response = await fetch(ANTHROPIC_API_URL, {
             method: 'POST',
             headers: {
@@ -2687,7 +2822,9 @@ async function handleStreaming(
             openRouterBody.reasoning = reasoning;
             console.log(`🧠 Streaming with reasoning config:`, reasoning);
           }
-          
+
+          console.log(`[OpenRouter Stream] Request to ${actualModel}:`, JSON.stringify(truncateForLogging(openRouterBody), null, 2));
+
           response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: {
@@ -3141,7 +3278,10 @@ serve(async (req) => {
     const cotSteps = cot_steps || 1;
     const maxTokens = max_tokens;
     let messages = originalMessages;
-    
+
+    // Log incoming messages for debugging
+    console.log(`[Rose Completions] Received ${messages?.length || 0} messages:`, JSON.stringify(truncateForLogging(messages), null, 2));
+
     // Default reasoning tokens to 256 if reasoning is enabled but no max_tokens specified
     const DEFAULT_REASONING_TOKENS = 256;
     let cappedReasoning = reasoning;
@@ -3377,7 +3517,13 @@ serve(async (req) => {
           }
         }
       }
-      
+
+      // Filter out models that can't handle file attachments based on size
+      const maxFileSize = getMaxBase64FileSizeBytes(messages);
+      if (maxFileSize > 0) {
+        effectivePool = filterPoolByFileSize(effectivePool, maxFileSize);
+      }
+
       // Select racing trio with delays (using current cached values, even if stale)
       const trioSelectStart = Date.now();
       const racingTrio = selectRacingTrio(effectivePool, cachedLatencies);

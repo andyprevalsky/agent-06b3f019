@@ -7,17 +7,32 @@ import {
   closeClaudeCodeSession,
   getClaudeCodeSession,
 } from '../lib/e2b';
+import { FilePointer } from '../lib/storage';
 
 const router = Router();
 
 // Validation schemas
+const filePointerSchema = z.object({
+  id: z.string(),
+  storage_path: z.string().optional(),
+  base64_data: z.string().optional(),
+  original_filename: z.string(),
+  mime_type: z.string(),
+  size_bytes: z.number(),
+  created_at: z.string(),
+  created_by_agent_id: z.string().optional(),
+});
+
 const createSessionSchema = z.object({
   agent_id: z.string().uuid(),
   goal: z.string(),
+  attachments: z.array(filePointerSchema).optional(),
 });
 
 const closeSessionSchema = z.object({
   task_id: z.string().uuid(),
+  user_id: z.string().uuid().optional(),
+  agent_id: z.string().uuid().optional(),
 });
 
 /**
@@ -28,17 +43,18 @@ const closeSessionSchema = z.object({
  */
 router.post('/create', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { agent_id, goal } = createSessionSchema.parse(req.body);
+    const { agent_id, goal, attachments } = createSessionSchema.parse(req.body);
 
-    console.log(`[ClaudeCode] Creating session for agent ${agent_id}`);
+    console.log(`[ClaudeCode] Creating session for agent ${agent_id}${attachments?.length ? ` with ${attachments.length} attachments` : ''}`);
 
-    const session = await createClaudeCodeSession(agent_id, goal);
+    const session = await createClaudeCodeSession(agent_id, goal, attachments as FilePointer[] | undefined);
 
     res.json({
       success: true,
       task_id: session.taskId,
       sandbox_id: session.sandboxId,
       ws_url: session.wsUrl,
+      uploaded_files: session.uploadedFiles,
     });
 
   } catch (error) {
@@ -55,15 +71,16 @@ router.post('/create', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/close', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { task_id } = closeSessionSchema.parse(req.body);
+    const { task_id, user_id, agent_id } = closeSessionSchema.parse(req.body);
 
     console.log(`🖥️ Closing Claude Code session ${task_id}`);
 
-    await closeClaudeCodeSession(task_id);
+    const result = await closeClaudeCodeSession(task_id, user_id, agent_id);
 
     res.json({
       success: true,
       status: 'CLOSED',
+      output_files: result.outputFiles,
     });
 
   } catch (error) {

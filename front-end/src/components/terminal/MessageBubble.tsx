@@ -40,10 +40,11 @@
  * Renders different content based on message.role and message.type.
  */
 
-import { Message, respondToAttentionRequest } from '@/lib/api';
+import { Message, respondToAttentionRequest, FilePointer, getAttachmentUrl } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Info, ChevronRight } from 'lucide-react';
-import { useState, useEffect, useMemo, memo, useRef } from 'react';
+import { Bot, User, Wrench, Info, ChevronRight, X, Download, FileIcon, FileText, ImageIcon } from 'lucide-react';
+import { useState, useEffect, useMemo, memo, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import SubAgentToolBubble from './SubAgentToolBubble';
@@ -436,6 +437,263 @@ const ToolMessage = memo(function ToolMessage({
   );
 });
 
+// Image Lightbox component - portaled to document.body for proper z-index stacking
+const ImageLightbox = memo(function ImageLightbox({
+  src,
+  alt,
+  onClose,
+  onDownload,
+}: {
+  src: string;
+  alt: string;
+  onClose: () => void;
+  onDownload: () => void;
+}) {
+  // Close on escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div className="relative max-w-[90vw] max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+        <img
+          src={src}
+          alt={alt}
+          className="max-w-full max-h-[90vh] object-contain rounded-lg"
+        />
+        {/* Close button */}
+        <button
+          onClick={onClose}
+          className="absolute top-2 right-2 p-2 rounded-full bg-black/50 hover:bg-black/70 text-white transition-colors"
+        >
+          <X className="w-5 h-5" />
+        </button>
+        {/* Download button */}
+        <button
+          onClick={onDownload}
+          className="absolute bottom-2 right-2 p-2 rounded-full bg-black/50 hover:bg-black/70 text-white transition-colors"
+        >
+          <Download className="w-5 h-5" />
+        </button>
+      </div>
+    </div>,
+    document.body
+  );
+});
+
+// Attachment display component
+const AttachmentDisplay = memo(function AttachmentDisplay({
+  attachments,
+  agentId,
+}: {
+  attachments: FilePointer[];
+  agentId?: string;
+}) {
+  const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
+  const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+  const { toast } = useToast();
+
+  // Fetch signed URLs for images on mount
+  useEffect(() => {
+    if (!agentId) return;
+
+    const imageAttachments = attachments.filter(fp =>
+      fp.mime_type.startsWith('image/') && fp.storage_path
+    );
+
+    if (imageAttachments.length === 0) return;
+
+    // Fetch all image URLs in parallel
+    Promise.all(
+      imageAttachments.map(async (fp) => {
+        try {
+          const url = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
+          return { id: fp.id, url };
+        } catch {
+          return { id: fp.id, url: '' };
+        }
+      })
+    ).then((results) => {
+      const urlMap: Record<string, string> = {};
+      results.forEach(({ id, url }) => {
+        if (url) urlMap[id] = url;
+      });
+      setImageUrls(urlMap);
+    });
+  }, [attachments, agentId]);
+
+  // Download file - fetch as blob to force download (not open in tab)
+  const handleDownload = useCallback(async (fp: FilePointer) => {
+    try {
+      let url: string;
+
+      if (imageUrls[fp.id]) {
+        url = imageUrls[fp.id];
+      } else if (fp.storage_path && agentId) {
+        // For storage files, get signed URL
+        url = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
+      } else {
+        throw new Error('Cannot download file');
+      }
+
+      // Fetch the file as blob to force download (cross-origin URLs ignore download attribute)
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
+      // Create download link with blob URL
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = fp.original_filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      // Clean up blob URL
+      URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      toast({
+        title: 'Download failed',
+        description: error instanceof Error ? error.message : 'Failed to download file',
+        variant: 'destructive',
+      });
+    }
+  }, [agentId, imageUrls, toast]);
+
+  // Open image in lightbox
+  const openLightbox = useCallback(async (fp: FilePointer) => {
+    let src = imageUrls[fp.id] || '';
+
+    if (!src && fp.storage_path && agentId) {
+      try {
+        src = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
+        // Cache it
+        setImageUrls(prev => ({ ...prev, [fp.id]: src }));
+      } catch {
+        toast({
+          title: 'Failed to load image',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
+    setLightboxImage({ src, alt: fp.original_filename });
+  }, [agentId, imageUrls, toast]);
+
+  // Get icon for file type
+  const getFileIcon = (fp: FilePointer) => {
+    if (fp.mime_type.startsWith('image/')) {
+      return <ImageIcon className="w-4 h-4" />;
+    }
+    if (fp.mime_type === 'application/pdf' || fp.mime_type.startsWith('text/')) {
+      return <FileText className="w-4 h-4" />;
+    }
+    return <FileIcon className="w-4 h-4" />;
+  };
+
+  // Format file size
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  if (!attachments || attachments.length === 0) return null;
+
+  return (
+    <>
+      <div className="flex flex-wrap gap-2 mt-2">
+        {attachments.map((fp) => {
+          const isImage = fp.mime_type.startsWith('image/');
+          const imageSrc = imageUrls[fp.id] || '';
+
+          if (isImage && imageSrc) {
+            // Image thumbnail with loaded URL (fixed 240px size)
+            return (
+              <div
+                key={fp.id}
+                className="relative group cursor-pointer"
+                onClick={() => openLightbox(fp)}
+              >
+                <img
+                  src={imageSrc}
+                  alt={fp.original_filename}
+                  className="w-60 h-60 object-cover rounded-lg border border-border hover:border-primary transition-colors"
+                />
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 rounded-lg transition-colors flex items-center justify-center">
+                  <span className="opacity-0 group-hover:opacity-100 text-white text-sm font-medium transition-opacity">
+                    View
+                  </span>
+                </div>
+              </div>
+            );
+          } else if (isImage && !imageSrc && fp.storage_path) {
+            // Image loading placeholder (fixed 240px size)
+            return (
+              <div
+                key={fp.id}
+                className="relative group cursor-pointer w-60 h-60 bg-muted rounded-lg border border-border hover:border-primary transition-colors flex flex-col items-center justify-center gap-2"
+                onClick={() => openLightbox(fp)}
+              >
+                <div className="animate-pulse">
+                  <ImageIcon className="w-12 h-12 text-muted-foreground" />
+                </div>
+                <span className="text-xs text-muted-foreground truncate max-w-[200px]">
+                  {fp.original_filename}
+                </span>
+              </div>
+            );
+          } else {
+            // Non-image file
+            return (
+              <button
+                key={fp.id}
+                onClick={() => handleDownload(fp)}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-muted/50 hover:bg-muted transition-colors"
+              >
+                {getFileIcon(fp)}
+                <div className="flex flex-col items-start">
+                  <span className="text-xs font-medium truncate max-w-[120px]">
+                    {fp.original_filename}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {formatFileSize(fp.size_bytes)}
+                  </span>
+                </div>
+                <Download className="w-3 h-3 text-muted-foreground" />
+              </button>
+            );
+          }
+        })}
+      </div>
+
+      {/* Lightbox */}
+      {lightboxImage && (
+        <ImageLightbox
+          src={lightboxImage.src}
+          alt={lightboxImage.alt}
+          onClose={() => setLightboxImage(null)}
+          onDownload={() => {
+            const fp = attachments.find(a => a.original_filename === lightboxImage.alt);
+            if (fp) handleDownload(fp);
+          }}
+        />
+      )}
+    </>
+  );
+});
+
 // StreamingText - renders text with fade-in animation for each chunk (for streaming attention)
 function StreamingText({ text }: { text: string }) {
   const prevTextRef = useRef('');
@@ -495,7 +753,6 @@ const AttentionMessage = memo(function AttentionMessage({
   
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-      <div className="flex-shrink-0 w-8 hidden md:block" />
 
       <div className="flex-1 space-y-3">
         {/* Render message as raw markdown text */}
@@ -590,7 +847,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       return null;
     }
     
-    if (isAssistant) {
+    // ASSISTANT messages with file_pointer are rendered separately (not as Thought cards)
+    if (isAssistant && !message.file_pointer) {
       const assistantStatus: ToolMessageData['status'] = shouldType ? 'IN_PROGRESS' : 'FINISHED';
       return {
         toolCallId: message.message_id,
@@ -649,7 +907,6 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       title = title.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\s*/u, '');
       return (
         <div className="flex gap-3 animate-in fade-in duration-300">
-          <div className="flex-shrink-0 w-8" />
           <SubAgentTree
             busId={busId}
             subAgentIds={subAgentIds}
@@ -670,7 +927,6 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       // Render simple text line matching tree node style with └─ prefix
       return (
         <div className="flex gap-3 animate-in fade-in duration-300">
-          <div className="flex-shrink-0 w-8" />
           <div className="flex items-center gap-1 font-mono text-sm">
             <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">└─</span>
             <span className="w-4 text-center select-none animate-pulse">○</span>
@@ -686,8 +942,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         {/* Empty space where icon would be to align with agent messages */}
-        <div className="flex-shrink-0 w-8 hidden md:block" />
-
+  
         <div className="flex-1">
           <SubAgentToolBubble
             toolCallId={message.metadata.toolCallId || ''}
@@ -752,8 +1007,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
-        <div className="flex-shrink-0 w-8 hidden md:block" />
-        <div className="flex-1">
+          <div className="flex-1">
           <PlanChip
             plan={{
               title: title,
@@ -791,8 +1045,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
-        <div className="flex-shrink-0 w-8 hidden md:block" />
-        <div className="flex-1">
+          <div className="flex-1">
           <ClaudeCodeChip taskId={taskId} wsUrl={wsUrl} />
         </div>
       </div>
@@ -812,7 +1065,6 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
     return (
       <div className={cn("flex", !compact && "gap-3", "animate-in fade-in duration-300")}>
-        {!compact && <div className="flex-shrink-0 w-8 hidden md:block" />}
         <div className="flex-1 space-y-3">
           <CompletionSummaryCard data={completionData} />
           {onSubmitFeedback && <FeedbackBanner onSubmit={onSubmitFeedback} />}
@@ -849,7 +1101,6 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   if (toolData) {
     return (
       <div className={cn("flex", !compact && "gap-3")}>
-        {!compact && <div className="flex-shrink-0 w-8 hidden md:block" />}
 
         <div className="flex-1">
           <ToolMessage
@@ -863,62 +1114,73 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   }
 
   // User messages: right-aligned, with bubble, no icon, no label
+  // Attachments displayed below the bubble (not inside)
   if (isUser) {
+    // file_pointer is a single FilePointer per message (OAI-style)
+    const filePointer = message.file_pointer;
+    const attachments = filePointer ? [filePointer] : [];
+    const hasAttachments = attachments.length > 0;
+
     return (
-      <div className="flex justify-end animate-in fade-in duration-300">
-        <div 
-          className={cn(
-            'inline-block max-w-[80%] px-4 py-2 rounded-lg border backdrop-blur-md',
-            config.bg,
-            config.border
-          )}
-        >
-          <p className="text-sm whitespace-pre-wrap break-words">{message.text}</p>
-        </div>
+      <div className="flex flex-col items-end gap-2 animate-in fade-in duration-300">
+        {/* User message bubble */}
+        {message.text && (
+          <div
+            className={cn(
+              'inline-block max-w-[80%] px-4 py-2 rounded-lg border backdrop-blur-md',
+              config.bg,
+              config.border
+            )}
+          >
+            <p className="text-sm whitespace-pre-wrap break-words">{message.text}</p>
+          </div>
+        )}
+        {/* Attachments displayed inline below the bubble */}
+        {hasAttachments && (
+          <div className="max-w-[80%]">
+            <AttachmentDisplay attachments={attachments} agentId={agentId} />
+          </div>
+        )}
       </div>
     );
   }
 
-  // System/Assistant messages: keep original style with icon and label
+  // ASSISTANT messages with file attachments (output files from Claude Code, etc.)
+  // Display just the attachment without avatar/label/timestamp
+  if (isAssistant && message.file_pointer) {
+    const attachments = [message.file_pointer];
+    return (
+      <div className="flex flex-col items-start gap-2 animate-in fade-in duration-300">
+        {/* Render text if present */}
+        {message.text && (
+          <div className={cn(
+            'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
+            config.bg,
+            config.border
+          )}>
+            <p className="text-sm whitespace-pre-wrap break-words">
+              {message.text}
+            </p>
+          </div>
+        )}
+        {/* Render file attachment */}
+        <AttachmentDisplay attachments={attachments} agentId={agentId} />
+      </div>
+    );
+  }
+
+  // System/Assistant messages: simplified without avatar/label
   return (
-    <div className="flex gap-3 animate-in fade-in duration-300">
+    <div className="flex flex-col items-start gap-2 animate-in fade-in duration-300">
       <div className={cn(
-        'flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center border',
+        'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
         config.bg,
         config.border,
-        // Add pulse animation for streaming messages
-        isStreaming && 'animate-pulse'
+        isStreaming && 'border-purple-500/50'
       )}>
-        <Icon className="h-4 w-4" />
-      </div>
-      
-      <div className="flex-1 space-y-1">
-        <div className="flex items-center gap-2">
-          <span className={cn('text-xs font-medium', config.text)}>
-            {config.label}
-          </span>
-          {!isStreaming && (
-            <span className="text-xs text-muted-foreground">
-              {new Date(message.timestamp).toLocaleTimeString()}
-            </span>
-          )}
-          {isStreaming && (
-            <span className="text-xs text-muted-foreground animate-pulse">
-              streaming...
-            </span>
-          )}
-        </div>
-        
-        <div className={cn(
-          'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
-          config.bg,
-          config.border,
-          isStreaming && 'border-purple-500/50'
-        )}>
-          <p className="text-sm whitespace-pre-wrap break-words">
-            {message.text}
-          </p>
-        </div>
+        <p className="text-sm whitespace-pre-wrap break-words">
+          {message.text}
+        </p>
       </div>
     </div>
   );
