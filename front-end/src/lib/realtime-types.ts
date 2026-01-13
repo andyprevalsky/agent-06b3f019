@@ -159,6 +159,7 @@ export type ToolName =
   | 'deep_research'
   | 'enable_write_permissions'
   | 'enrich'
+  | 'people_search'
   | 'find_all'
   | 'query_blueprints'
   | 'save_blueprint'

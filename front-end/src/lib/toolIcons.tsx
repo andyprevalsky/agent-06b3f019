@@ -81,6 +81,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'web_search': Search,
   'wait_seconds': Clock,
   'deep_research': FileSearch,
+  'people_search': Users,
   'spawn_sub_agents': Users,
   'search_user_network_for_people': Users,
   'find_all': FileSearch,
@@ -176,6 +177,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
  */
 const DISPLAY_PREFIX_ICONS: [string, LucideIcon][] = [
   ['Searching the web', Search],
+  ['Searching for people', Users],
   ['Browsing the web', Globe],
   ['Delegating', Users],
   ['Researching', FileSearch],

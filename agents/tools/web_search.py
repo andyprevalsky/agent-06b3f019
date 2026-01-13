@@ -7,7 +7,7 @@ from datetime import timedelta
 import structlog
 import httpx
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
 from helpers.handle_tool_event import handle_tool_event
 
 # Config import is safe - no side effects at import time (load_dotenv is lazy)
@@ -96,13 +96,8 @@ class WebSearchManager(ToolManager):
             
             # 3. Calculate elapsed time and cost
             elapsed_time = _safe_time() - start_time
-            # Parallel AI Search pricing: $5/1000 requests = 0.5 cents base
-            # + $1/1000 additional results beyond 10 = 0.1 cents each
-            results_count = len(result.get("sources", []))
-            base_cost_cents = 0.5  # $0.005 per request
-            additional_results = max(0, results_count - 10)
-            additional_cost_cents = additional_results * 0.1  # $0.001 per extra result
-            total_cost_cents = base_cost_cents + additional_cost_cents
+            # Parallel AI Search pricing: $0.005 for 10 results = 0.5 cents flat
+            total_cost_cents = 0.5
             
             # Format success message using standardized format
             message = format_tool_message(
@@ -126,7 +121,27 @@ class WebSearchManager(ToolManager):
                 execute_activity=execute_activity,
                 user_id=user_id,
             )
-            
+
+            # Track usage for billing
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.USAGE,
+                    tool_name="web_search",
+                    usage_items=[
+                        UsageItem(
+                            type=UsageType.SERVICE,
+                            cost_cents=total_cost_cents,
+                            provider="Parallel AI Search"
+                        )
+                    ]
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="web_search",
+                execute_activity=execute_activity,
+                user_id=user_id,
+            )
+
             return result
             
         except Exception as e:

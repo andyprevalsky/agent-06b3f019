@@ -173,6 +173,13 @@ class AnthropicConfig:
 
 
 @dataclass
+class ExaConfig:
+    """Exa API configuration for people search."""
+
+    api_key: str = ""
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
     
@@ -192,6 +199,7 @@ class AppConfig:
     vercel: VercelConfig
     e2b: E2BConfig
     anthropic: AnthropicConfig
+    exa: ExaConfig
 
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -313,6 +321,10 @@ def load_config() -> AppConfig:
         api_key=os.getenv("ANTHROPIC_API_KEY", ""),  # For Claude Code in E2B
     )
 
+    exa = ExaConfig(
+        api_key=os.getenv("EXA_API_KEY", ""),
+    )
+
     return AppConfig(
         temporal=temporal,
         backend=backend,
@@ -330,6 +342,7 @@ def load_config() -> AppConfig:
         vercel=vercel,
         e2b=e2b,
         anthropic=anthropic,
+        exa=exa,
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

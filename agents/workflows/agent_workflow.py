@@ -60,6 +60,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
     from helpers.sms_activities import get_agent_source, send_direct_sms_activity
     from tools.request_user_signup import request_user_signup
+    from tools.people_search import people_search
     from loop.run_agent import run_agent
     from loop.dag_executor import extract_plan_from_context, TaskDAG, execute_dag
     from helpers.format_tool_display import format_tool_display
@@ -94,6 +95,7 @@ TOOL_EXECUTORS = {
     "search_x402_bazaar": search_x402_bazaar,
     "pay_for_x402_bazaar_service": pay_for_x402_bazaar_service,
     "request_user_signup": request_user_signup,
+    "people_search": people_search,
 }
 
 # Tools requiring user approval before execution
@@ -633,6 +635,7 @@ class AgentWorkflow:
                 "monitor", "check_monitor_events",
                 "deep_research", "attempt_completion",
                 "search_x402_bazaar", "pay_for_x402_bazaar_service",
+                "people_search",
             }
 
             if tool_name in NEW_SIGNATURE_TOOLS:

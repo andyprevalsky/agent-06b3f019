@@ -53,6 +53,11 @@ const TEST_PROMPTS: TestPrompt[] = [
     prompt: 'Get me the latest news.',
   },
   {
+    title: 'Test People Search',
+    description: 'Tests Exa people search tool',
+    prompt: 'Use people_search to get me info about Andy Prevalsky',
+  },
+  {
     title: 'Test Parallel Tool Calls',
     description: 'Tests parallel execution of multiple tools in one turn',
     prompt: 'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in execute mode\nno sub agents',

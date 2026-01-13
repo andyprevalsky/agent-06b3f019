@@ -30,6 +30,7 @@ EXECUTE_PHASE_TOOLS = [
     "spawn_sub_agents",
     "wait_seconds",
     "web_search",
+    "people_search",
     "send_message_to_user_execute_phase",
     "attempt_completion",
 ]
@@ -43,6 +44,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "sub_agent",  # Delegate complex task to a sub-agent (maps to spawn_sub_agents with 1 agent)
     "wait_seconds",
     "web_search",
+    "people_search",
     "send_message_to_user_execute_phase",
     "reasoning",  # Pure thinking/analysis step (no tool call)
 ]
@@ -134,6 +136,14 @@ class WebSearchTool(BaseModel):
 
     tool: Literal["web_search"]
     query: str = Field(description="Search query or question about current/recent information")
+
+
+class PeopleSearchTool(BaseModel):
+    """Tool call for searching for people using Exa's people index."""
+
+    tool: Literal["people_search"]
+    query: str = Field(description="Natural language query describing the person to find (name, role, company, skills)")
+    max_results: Optional[int] = Field(default=10, ge=1, le=100, description="Maximum number of results to return")
 
 
 class DeepResearchTool(BaseModel):
@@ -681,6 +691,7 @@ class PayForX402BazaarServiceTool(BaseModel):
 TOOL_MODELS = {
     "wait_seconds": WaitSecondsTool,
     "web_search": WebSearchTool,
+    "people_search": PeopleSearchTool,
     "deep_research": DeepResearchTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
