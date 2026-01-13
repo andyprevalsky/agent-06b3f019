@@ -507,6 +507,7 @@ export interface UpdateAgentPayload {
   contextSize?: number;
   messageCount?: number;
   updatedAt?: string;
+  temporalWorkflowId?: string | null;
 }
 
 // -----------------------------------------------------------------------------

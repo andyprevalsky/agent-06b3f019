@@ -458,8 +458,16 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
                 context_size: updated.contextSize ?? prev.context_size,
                 message_count: updated.messageCount ?? prev.message_count,
                 updated_at: updated.updatedAt ?? prev.updated_at,
+                temporal_workflow_id: updated.temporalWorkflowId !== undefined
+                  ? updated.temporalWorkflowId
+                  : prev.temporal_workflow_id,
               };
             });
+
+            // Update chat mode if temporalWorkflowId changed
+            if (updated.temporalWorkflowId !== undefined) {
+              setIsChatMode(!updated.temporalWorkflowId);
+            }
 
             onLoadAgents?.();
           },
@@ -563,6 +571,8 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
             const data = await getAgent(selectedAgentId);
             setMessages(data.messages);
             setAgent(data.agent);
+            // Update chat mode in case agent escalated while disconnected
+            setIsChatMode(!data.agent.temporal_workflow_id);
           } catch (error) {
             console.error('Failed to refetch after reconnection:', error);
           }

@@ -513,15 +513,17 @@ export function MessageList({
         />
       ))}
 
-      {/* Chat Mode Actions - show copy + Start Agent when in chat mode after tool response */}
+      {/* Chat Mode Actions - show copy + Start Agent when in chat mode after generator response */}
       {showStatusBanners && subAgentId === undefined && isChatMode && (() => {
         const lastMessage = filteredMessages[filteredMessages.length - 1];
-        const isToolFinished = lastMessage?.role === 'TOOL' &&
-          lastMessage.metadata?.toolStatus === 'FINISHED';
+        // Only show after send_message_to_user (generator's final response), not intermediate tools like web_search
+        const isChatComplete = lastMessage?.role === 'TOOL' &&
+          lastMessage.metadata?.toolStatus === 'FINISHED' &&
+          lastMessage.metadata?.toolName === 'send_message_to_user';
         const notStreaming = filteredStreamingBubbles.size === 0 && filteredStreamingTools.size === 0;
         const notAnimating = !isAnimating && messageBuffer.length === 0;
 
-        if (isToolFinished && notStreaming && notAnimating && agent?.status === 'ACTIVE') {
+        if (isChatComplete && notStreaming && notAnimating && agent?.status === 'ACTIVE') {
           const handleCopy = async () => {
             // Copy the last assistant/tool response to clipboard
             const lastAssistant = [...filteredMessages].reverse().find(m =>
