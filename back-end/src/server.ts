@@ -35,7 +35,7 @@ import { prisma } from './lib/prisma';
 const SYSTEM_TOOLS = [
   { name: "web_search", description: "Search the web for information using Perplexity AI" },
   { name: "deep_research", description: "Conduct deep, comprehensive research on a topic" },
-  { name: "spawn_sub_agents", description: "Spawn up to 10,000 parallel sub-agents for complex tasks" },
+  { name: "spawn_sub_agent", description: "Spawn a sub-agent for delegating complex subtasks" },
   { name: "spawn_browser_agent", description: "Spawn autonomous browser agent for web tasks" },
   { name: "spawn_claude_code_agent", description: "Spawn Claude Code agent in E2B sandbox for coding tasks" },
   { name: "find_all", description: "Discover entities matching criteria using natural language" },

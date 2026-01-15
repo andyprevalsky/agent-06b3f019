@@ -9,7 +9,7 @@ logger = structlog.get_logger()
 # Tool name → Human-readable label mapping for summary display
 TOOL_DISPLAY_NAMES = {
     "web_search": "Web Searches",
-    "spawn_sub_agents": "Sub Agents Spawned",
+    "spawn_sub_agent": "Sub Agent Spawned",
     "spawn_browser_agent": "Browser Agents Spawned",
     "spawn_claude_code_agent": "Code Agents Spawned",
     "send_sms_as_user": "SMS's Sent",

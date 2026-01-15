@@ -67,7 +67,7 @@ export interface Agent {
 
 export interface ResponseSchemaField {
   name: string;
-  type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]';
+  type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]' | 'file_pointer' | 'list[file_pointer]';
   required: boolean;
   description: string;
 }
@@ -664,7 +664,7 @@ export async function startAgent(agentId: string): Promise<void> {
 // Sub-agent Tree Types
 export interface OutputSchemaField {
   name: string;
-  type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]';
+  type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]' | 'file_pointer' | 'list[file_pointer]';
   required: boolean;
   description: string;
 }

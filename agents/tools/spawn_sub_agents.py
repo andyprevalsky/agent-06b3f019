@@ -1,26 +1,96 @@
-"""Event-driven spawn_sub_agents tool implementation."""
+"""Event-driven spawn_sub_agent tool implementation."""
 
 import asyncio
+from dataclasses import asdict
 from typing import List, Dict, Any, AsyncGenerator
 from datetime import timedelta
 from temporalio import activity, workflow
 import httpx
 import structlog
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
+from tools.base import ToolManager, ToolEvent, AssistantEvent, EventType, MessageStatus
 from config import load_config
-
-# No dangerous imports needed
+from helpers.attachments import FilePointer, extract_attachments_from_context
 
 logger = structlog.get_logger()
 
 
-class SpawnSubAgentsManager(ToolManager):
-    """Manager for spawn_sub_agents tool using event-driven architecture."""
-    
+def extract_error_message(e: Exception) -> str:
+    """
+    Extract the actual error message from an exception, unwrapping Temporal wrappers.
+
+    Temporal wraps activity failures in ActivityError/ApplicationError which have
+    generic messages like "Activity task failed". The real error is in .cause.
+    """
+    current = e
+    messages = []
+
+    while current is not None:
+        msg = str(current)
+        if msg and msg not in ("Activity task failed", ""):
+            messages.append(msg)
+
+        if hasattr(current, "cause") and current.cause is not None:
+            current = current.cause
+        elif hasattr(current, "__cause__") and current.__cause__ is not None:
+            current = current.__cause__
+        else:
+            break
+
+    if messages:
+        return messages[-1] if len(messages) > 1 else messages[0]
+    return str(e) or "Unknown error"
+
+
+def extract_file_pointers_from_structured_response(
+    structured_response: Dict[str, Any],
+    output_schema: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Extract FilePointer dicts from structured_response based on output_schema field types.
+
+    Args:
+        structured_response: The response dict from sub-agent verifier
+        output_schema: The output schema with field definitions
+
+    Returns:
+        List of FilePointer dicts found in the structured response
+    """
+    if not structured_response or not output_schema:
+        return []
+
+    file_pointers = []
+    fields = output_schema.get("fields", [])
+
+    for field in fields:
+        field_name = field.get("name")
+        field_type = field.get("type")
+
+        if not field_name or field_name not in structured_response:
+            continue
+
+        value = structured_response[field_name]
+
+        if field_type == "file_pointer":
+            # Single file pointer
+            if value and isinstance(value, dict) and value.get("id") and value.get("storage_path"):
+                file_pointers.append(value)
+        elif field_type == "list[file_pointer]":
+            # List of file pointers
+            if isinstance(value, list):
+                for item in value:
+                    if item and isinstance(item, dict) and item.get("id") and item.get("storage_path"):
+                        file_pointers.append(item)
+
+    return file_pointers
+
+
+class SpawnSubAgentManager(ToolManager):
+    """Manager for spawn_sub_agent tool using event-driven architecture."""
+
     @property
     def tool_name(self) -> str:
-        return "spawn_sub_agents"
+        return "spawn_sub_agent"
     
     async def execute_tool(
         self,
@@ -29,39 +99,35 @@ class SpawnSubAgentsManager(ToolManager):
         tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """
-        Execute spawn_sub_agents tool with event-driven architecture.
-        
+        Execute spawn_sub_agent tool with event-driven architecture.
+
         Args:
             workflow_instance: The workflow instance
-            tool_call: Dict with "sub_agents" field
+            tool_call: Dict with "sub_agent" field (single sub-agent config)
             tool_call_id: Unique ID for this tool call
-            
+
         Yields:
             - Pre-execution status
             - Post-execution status with result
         """
-        sub_agents = tool_call.get("sub_agents", [])
-        
-        if not sub_agents:
+        sub_agent = tool_call.get("sub_agent")
+
+        if not sub_agent:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="🚀 Spawning sub-agents",
-                message="No sub-agents specified",
+                title="🚀 Spawning sub-agent",
+                message="No sub-agent specified",
                 status=MessageStatus.ERROR
             )
             return
-        
-        # Build list of subtasks for display
-        subtasks = []
-        for i, agent in enumerate(sub_agents, 1):
-            goal = agent.get("goal", "Unknown goal")
-            subtasks.append(f"{i}. {goal}")
-        
+
+        goal = sub_agent.get("goal", "Unknown goal")
+
         # 1. Pre-execution status
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title=f"🚀 Spawning {len(sub_agents)} sub-agent{'s' if len(sub_agents) != 1 else ''}",
-            message="Delegating subtasks (watch progress below):\n" + "\n".join(subtasks),
+            title="🚀 Spawning sub-agent",
+            message=f"Delegating task: {goal}",
             status=MessageStatus.IN_PROGRESS
         )
         
@@ -69,23 +135,22 @@ class SpawnSubAgentsManager(ToolManager):
             # Get workflow info
             info = workflow.info()
             user_id = workflow_instance.user_id
-            # user_phone removed - fetched from user context in workflow
             parent_agent_id = workflow_instance.agent_id
             parent_workflow_id = info.workflow_id
             depth = getattr(workflow_instance, 'depth', 0) + 1
             parent_is_paused = getattr(workflow_instance, 'is_paused', False)
-            
+
             # Check depth limit
             MAX_DEPTH = 4  # Allow up to 4 levels of nesting
             if workflow_instance.depth >= MAX_DEPTH:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="❌ Sub-agents failed",
-                    message=f"Cannot spawn sub-agents: maximum nesting depth ({MAX_DEPTH}) reached. Sub-agents cannot create their own sub-agents.",
+                    title="❌ Sub-agent failed",
+                    message=f"Cannot spawn sub-agent: maximum nesting depth ({MAX_DEPTH}) reached.",
                     status=MessageStatus.ERROR
                 )
                 return
-            
+
             # Determine busId for children:
             # - If parent has a busId, children inherit it
             # - If parent is root (no busId), children use parent's agentId as busId
@@ -101,82 +166,128 @@ class SpawnSubAgentsManager(ToolManager):
                 # Inherit parent's busId
                 bus_id = parent_bus_id
 
-            # 2. Execute spawn activity (inherit model from parent)
+            # 2. Execute spawn activity (wrap single sub_agent in list for activity)
             parent_model = getattr(workflow_instance, 'model', 'rose-labs/rose-1-lite')
             result = await workflow.execute_activity(
-                spawn_sub_agents_activity,
-                args=[user_id, sub_agents, parent_agent_id, parent_workflow_id, depth, parent_is_paused, parent_model, bus_id],
+                spawn_sub_agent_activity,
+                args=[user_id, [sub_agent], parent_agent_id, parent_workflow_id, depth, parent_is_paused, parent_model, bus_id],
                 start_to_close_timeout=timedelta(seconds=60),
             )
-            
-            # 3. Set up child tracking and post initial messages
+
+            # 3. Set up child tracking and post initial message
             agents_list = result.get("agents", [])
-            
-            logger.info(f"✅ Spawned {len(agents_list)} sub-agents, setting up tracking...")
-            
-            for child_info in agents_list:
-                if "error" not in child_info:
-                    # Generate unique tool call ID for this sub-agent
-                    child_tool_id = workflow.uuid4()
-                    child_agent_id = child_info["agent_id"]
-                    
-                    # Store mapping: agent_id -> tool_call_id
-                    # Signal handlers will use this to update the right message
-                    workflow_instance.child_tool_ids[child_agent_id] = child_tool_id
-                    workflow_instance.pending_children.add(child_agent_id)
-                    
-                    # Post initial IN_PROGRESS message with subAgentId
-                    # This creates the message that signals will update
-                    await workflow_instance._post_message(
-                        child_info['goal'],
-                        "TOOL",
-                        metadata={
-                            "toolCallId": child_tool_id,
-                            "toolName": "spawn_sub_agents",
-                            "toolStatus": "IN_PROGRESS",
-                            "title": "Sub-agent starting",
-                            "subAgentId": child_agent_id,
-                            "progress": 0.0
-                        }
-                    )
-            
-            # 4. Post summary message (agents spawned successfully)
-            # Include subAgentIds and busId for frontend tree rendering
-            spawned_count = len(agents_list)
-            sub_agent_ids = [a["agent_id"] for a in agents_list if "agent_id" in a]
+
+            if not agents_list:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Sub-agent failed",
+                    message="Failed to spawn sub-agent",
+                    status=MessageStatus.ERROR
+                )
+                return
+
+            child_info = agents_list[0]
+            if "error" in child_info:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Sub-agent failed",
+                    message=f"Error: {child_info.get('error', 'Unknown error')}",
+                    status=MessageStatus.ERROR
+                )
+                return
+
+            logger.info("✅ Spawned sub-agent, setting up tracking...")
+
+            # Generate unique tool call ID for this sub-agent
+            child_tool_id = workflow.uuid4()
+            child_agent_id = child_info["agent_id"]
+
+            # Store mapping: agent_id -> tool_call_id
+            # Signal handlers will use this to update the right message
+            workflow_instance.child_tool_ids[child_agent_id] = child_tool_id
+            workflow_instance.pending_children.add(child_agent_id)
+
+            # Post initial IN_PROGRESS message with subAgentId
+            # This creates the message that signals will update
+            await workflow_instance._post_message(
+                child_info['goal'],
+                "TOOL",
+                metadata={
+                    "toolCallId": child_tool_id,
+                    "toolName": "spawn_sub_agent",
+                    "toolStatus": "IN_PROGRESS",
+                    "title": "Sub-agent starting",
+                    "subAgentId": child_agent_id,
+                    "progress": 0.0
+                }
+            )
+
+            # 4. Post summary message (agent spawned, waiting for completion)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Spawning agent cluster",
+                title="Spawning sub-agent",
                 message="",
-                status=MessageStatus.FINISHED,
+                status=MessageStatus.IN_PROGRESS,
                 metadata={
-                    "subAgentIds": sub_agent_ids,
+                    "subAgentIds": [child_agent_id],
                     "busId": bus_id,
                 }
             )
-            
-            # 5. Wait for all children to complete (via signals)
-            # The workflow's signal handlers (child_progress, child_completed) will:
-            # - Update messages with progress
-            # - Remove children from pending_children when done
-            logger.info(f"⏳ Waiting for {len(workflow_instance.pending_children)} sub-agents to complete...")
-            
+
+            # 5. Wait for child to complete (via signals)
+            logger.info(f"⏳ Waiting for sub-agent {child_agent_id} to complete...")
+
             await workflow.wait_condition(
-                lambda: len(workflow_instance.pending_children) == 0
-                # No timeout - can wait indefinitely
+                lambda cid=child_agent_id: cid in workflow_instance.child_results
             )
-            
-            logger.info(f"🎉 All {spawned_count} sub-agents completed!")
-            
-            # Note: Individual completion messages already posted by child_completed signal
-            # No need for final summary event - child results are in context
-                
-        except Exception as e:
-            logger.error("Failed to spawn sub-agents", error=str(e))
+
+            logger.info(f"🎉 Sub-agent {child_agent_id} completed!")
+
+            # 6. Extract file pointers from child result and yield as ASSISTANT messages
+            child_result = workflow_instance.child_results.get(child_agent_id, {})
+            structured_response = child_result.get("structured_response", {})
+            output_schema = sub_agent.get("output_schema", {})
+
+            file_pointers = extract_file_pointers_from_structured_response(
+                structured_response, output_schema
+            )
+
+            if file_pointers:
+                logger.info(
+                    "Posting sub-agent output files as ASSISTANT messages",
+                    child_agent_id=child_agent_id,
+                    file_count=len(file_pointers),
+                )
+                for fp in file_pointers:
+                    yield AssistantEvent(
+                        message="",
+                        file_pointer=fp,
+                    )
+
+            # Clean up stored result
+            workflow_instance.child_results.pop(child_agent_id, None)
+
+            # 7. Post final FINISHED message (replaces IN_PROGRESS via toolCallId dedup)
+            # Include structured_response so parent verifier can extract full FilePointers
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="❌ Sub-agents failed",
-                message=f"Error spawning sub-agents: {str(e)}",
+                title="Spawning sub-agent",
+                message="",
+                status=MessageStatus.FINISHED,
+                metadata={
+                    "subAgentIds": [child_agent_id],
+                    "busId": bus_id,
+                    "structured_response": structured_response,
+                }
+            )
+
+        except Exception as e:
+            error_msg = extract_error_message(e)
+            logger.error("Failed to spawn sub-agent", error=error_msg)
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="❌ Sub-agent failed",
+                message=f"Error spawning sub-agent: {error_msg}",
                 status=MessageStatus.ERROR
             )
 
@@ -185,11 +296,11 @@ class SpawnSubAgentsManager(ToolManager):
 _manager_instance = None
 
 
-def get_manager() -> SpawnSubAgentsManager:
+def get_manager() -> SpawnSubAgentManager:
     """Get or create manager singleton."""
     global _manager_instance
     if _manager_instance is None:
-        _manager_instance = SpawnSubAgentsManager()
+        _manager_instance = SpawnSubAgentManager()
     return _manager_instance
 
 
@@ -197,8 +308,9 @@ def get_manager() -> SpawnSubAgentsManager:
 # TEMPORAL ACTIVITY
 # ============================================================================
 
+
 @activity.defn
-async def spawn_sub_agents_activity(
+async def spawn_sub_agent_activity(
     user_id: str,
     sub_agents: List[Dict[str, Any]],
     parent_agent_id: str,
@@ -216,6 +328,7 @@ async def spawn_sub_agents_activity(
         sub_agents: List of agent configs, each with:
             - goal (str): The subtask goal
             - verifier (dict): {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "..."}
+            - attachments (list[str], optional): Filenames to pass to this sub-agent
         parent_agent_id: Parent agent ID (for hierarchy)
         parent_workflow_id: Parent workflow ID (for signaling)
         depth: Nesting depth for children
@@ -228,19 +341,67 @@ async def spawn_sub_agents_activity(
     """
     try:
         activity.heartbeat(f"Spawning {len(sub_agents)} sub-agents")
-        
+
         # Get config
         config = load_config()
         backend_url = config.backend.api_url.rstrip('/')
         api_key = config.backend.api_key
-        
+
         if not api_key:
             raise ValueError("BACKEND_API_KEY not configured - required for spawning sub-agents")
-        
+
+        # Check if any sub-agent needs attachments - if so, fetch parent's messages
+        needs_attachments = any(agent.get("attachments") for agent in sub_agents)
+        filename_to_pointer: Dict[str, Dict[str, Any]] = {}
+
+        if needs_attachments:
+            activity.heartbeat("Fetching parent agent's attachments...")
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(
+                        f"{backend_url}/api/agents/{parent_agent_id}",
+                        headers={
+                            "X-API-Key": api_key,
+                            "Content-Type": "application/json"
+                        },
+                    )
+                    response.raise_for_status()
+                    parent_data = response.json()
+                    parent_messages = parent_data.get("messages", [])
+
+                    # Extract FilePointers from parent's context
+                    file_pointers = extract_attachments_from_context(parent_messages)
+
+                    # Build filename -> FilePointer dict lookup
+                    for fp in file_pointers:
+                        filename_to_pointer[fp.original_filename] = asdict(fp)
+
+                    logger.info(
+                        "Extracted parent attachments",
+                        parent_agent_id=parent_agent_id,
+                        attachment_count=len(file_pointers),
+                        filenames=list(filename_to_pointer.keys())
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to fetch parent attachments: {e}")
+                # Continue without attachments - don't fail the spawn
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Spawn all agents concurrently using internal API key
             tasks = []
             for agent in sub_agents:
+                # Resolve attachments for this sub-agent
+                resolved_attachments = []
+                if agent.get("attachments"):
+                    for filename in agent["attachments"]:
+                        if filename in filename_to_pointer:
+                            resolved_attachments.append(filename_to_pointer[filename])
+                        else:
+                            logger.warning(
+                                f"Attachment not found in parent context: {filename}",
+                                available_files=list(filename_to_pointer.keys())
+                            )
+
                 # Build payload - tool_ids intentionally omitted, backend selects tools automatically
                 # user_phone removed - fetched from user context in workflow
                 payload = {
@@ -256,10 +417,14 @@ async def spawn_sub_agents_activity(
                     "bus_id": bus_id,  # Shared bus channel for tree updates
                 }
 
+                # Add resolved attachments if any
+                if resolved_attachments:
+                    payload["attachments"] = resolved_attachments
+
                 # Always inherit model from parent
                 payload["model"] = parent_model
                 # Note: reasoning_max_tokens not passed - sub-agents use backend default (256)
-                
+
                 logger.info("Spawning sub-agent", payload=payload)
                 tasks.append(
                     client.post(
@@ -342,14 +507,15 @@ async def spawn_sub_agents_activity(
 # WORKFLOW HELPER
 # ============================================================================
 
-async def spawn_sub_agents(workflow_instance, tool_call: Dict, tool_call_id: str):
+
+async def spawn_sub_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
     """
-    Workflow helper for spawn_sub_agents tool.
-    
+    Workflow helper for spawn_sub_agent tool.
+
     This function is called from the workflow's _execute_tool method for
     event-driven tools.
     """
     manager = get_manager()
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_sub_agents")
+        await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_sub_agent")
 

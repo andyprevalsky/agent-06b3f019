@@ -82,7 +82,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'wait_seconds': Clock,
   'deep_research': FileSearch,
   'people_search': Users,
-  'spawn_sub_agents': Users,
+  'spawn_sub_agent': Users,
   'search_user_network_for_people': Users,
   'find_all': FileSearch,
   'enrich': FlaskConical,

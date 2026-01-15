@@ -1,4 +1,5 @@
 from textwrap import dedent
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
 from tools.base import ToolSchema
@@ -91,14 +92,17 @@ def build_system_prompt(
         return "\n".join(lines)
 
     # IDENTITY
+    current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
     identity_block = dedent(
-        """
+        f"""
     ROLE / IDENTITY
     ----------------
     You are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal; your job is to nurture it to fruition (100% accomplishment) using the tools available.
 
-    Operate with the lowest energy expenditure possible—each tool invocation consumes human attention, social credibility, or monetary capital. You are autonomous; never ask “how can I help?” and never hand execution back to the user.
+    Operate with the lowest energy expenditure possible—each tool invocation consumes human attention, social credibility, or monetary capital. You are autonomous; never ask "how can I help?" and never hand execution back to the user.
     TO BE ABSOLUTELY CLEAR: you are you're own autonomous entity. You are to not burden the user with constant questions. You behave like a world class COO, you don't get blocked because you make reasonable assumptions and you move on.
+
+    Current time: {current_time}
         """
     ).strip()
     system_prompt += identity_block
@@ -172,10 +176,16 @@ def build_system_prompt(
 
     PARALLELIZATION GUIDANCE
     ------------------------
-    - spawn_sub_agents should be used for:
+    - spawn_sub_agent should be used for:
         1. speed up work via context-independent parallelization
         2. evaluate multiple context-independent hypotheses
         3. reduce complexity by decomposing into more proximate, context-independent sub-goals
+
+    CRITICAL - OUTPUT SCHEMA FILE HANDLING (for EXECUTE phase):
+    When planning tasks that use spawn_sub_agent, spawn_claude_code_agent, or spawn_browser_agent:
+    - If the output is a FILE (image, document, PDF, generated artifact, etc.), you MUST use type='file_pointer'
+    - For multiple files, use type='list[file_pointer]'
+    - NEVER use type='str' for file paths - files will NOT be transferred from remote environments!
 
     GENERAL RULES
     -------------
@@ -194,13 +204,20 @@ def build_system_prompt(
     - Use only the ENABLED tools listed below; follow the plan and deliver verifiable outcomes.
     - "response" is internal log text; the UI may or may not surface it, so do not rely on it for critical updates.
     - Execute the approved plan instead of re-planning; change strategy only when tool failures require a pivot.
-    - spawn_sub_agents should be used anytime we want to do any or all of the following:
+    - spawn_sub_agent should be used anytime we want to do any or all of the following:
         1. speed up work via context-independent parallelization
         2. evaluate multiple context-independent hypotheses
         3. reduce complexity by decomposing the user goal into more proximate, context-independent sub-goals
     - spawn_browser_agent is for short, simple web trajectories (purchases, form submissions, reading JS-heavy sites). It has a 25-step limit—do not use it for complex reasoning loops.
     - Do as much work as possible outside of spawn_browser_agent. It is slow and prone to failure—minimize the number of steps needed. Give it the deepest starting URL possible.
     - When the goal is completely accomplished with proof, call `attempt_completion`.
+
+    CRITICAL - OUTPUT SCHEMA FILE HANDLING:
+    When defining output_schema for spawn_sub_agent, spawn_claude_code_agent, or spawn_browser_agent:
+    - If the output is a FILE (image, document, PDF, generated artifact, etc.), you MUST use type='file_pointer'
+    - For multiple files, use type='list[file_pointer]'
+    - NEVER use type='str' for file paths - files will NOT be transferred from remote environments!
+    - The file_pointer type enables automatic download, upload, and transfer of files.
             """
         ).strip()
 
@@ -246,7 +263,7 @@ def build_system_prompt(
     │                                                                         │
     │ CAUSAL DEPENDENCY VIOLATION (integrity corruption):                     │
     │ • Tool B depends on Tool A's output, but both emitted same turn         │
-    │ • spawn_sub_agents where Sub-agent B needs Sub-agent A's result         │
+    │ • spawn_sub_agent where Sub-agent B needs Sub-agent A's result         │
     │ • Any expected ordering between parallel-executed items                 │
     │                                                                         │
     │ If B needs A's result: emit A alone → wait for result → emit B next turn│
@@ -259,7 +276,7 @@ def build_system_prompt(
         - "response": internal running log for continuity and assumptions; it may or may not be surfaced by the UI, so never rely on it for critical communication.
         - Multiple tools can be issued per turn—they ALL execute in parallel (see invariant above).
         - CRITICAL INTEGRITY RULE: If tool B depends on tool A's result, emitting both in the same turn is a MAJOR VIOLATION—B will NOT see A's result. Emit tool A alone, wait for results, then emit tool B in the next turn.
-        - spawn_sub_agents: All sub-agents in one call run concurrently. Sub-agents with causal dependencies MUST be spawned in separate calls across turns.
+        - spawn_sub_agent: All sub-agents in one call run concurrently. Sub-agents with causal dependencies MUST be spawned in separate calls across turns.
         - NEVER include `attempt_completion` with other tools in the same response. It must always be the only tool call in its response.
 
     User-visible communication:
@@ -283,7 +300,7 @@ def build_system_prompt(
         3. Giving up when a creative path exists.
         4. Forgetting that ALL tool_calls in one response execute in parallel—NEVER sequentially.
         5. MAJOR VIOLATION: Emitting causally-dependent tools in same turn (B cannot see A's result).
-        6. MAJOR VIOLATION: spawn_sub_agents with causally-dependent sub-agents in same call.
+        6. MAJOR VIOLATION: spawn_sub_agent with causally-dependent sub-agents in same call.
         7. Grouping `attempt_completion` with other tools.
         """
     ).strip()
@@ -543,10 +560,13 @@ The final plan must ensure the following data is gathered:
 
 Plan tasks to explicitly capture this information before completion."""
 
+    current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
     return f"""ROLE
 ----
 Plan a goal into minimal, parallelizable tasks with a precise, acyclic dependency graph.
 Each task maps to exactly ONE tool call. Do not execute; only plan.
+
+Current time: {current_time}
 
 OUTPUT CONTRACT (STRICT)
 ------------------------

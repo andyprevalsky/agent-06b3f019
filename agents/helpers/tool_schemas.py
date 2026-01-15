@@ -27,7 +27,7 @@ PLAN_PHASE_TOOLS = [
 EXECUTE_PHASE_TOOLS = [
     "spawn_browser_agent",
     "spawn_claude_code_agent",
-    "spawn_sub_agents",
+    "spawn_sub_agent",
     "wait_seconds",
     "web_search",
     "people_search",
@@ -36,12 +36,10 @@ EXECUTE_PHASE_TOOLS = [
 ]
 
 # Tools the planner can assign to tasks (what shows up in task.tool_name)
-# NOTE: "sub_agent" is a planning concept - DAG executor maps it to spawn_sub_agents(1 agent)
-# NOTE: "spawn_sub_agents" is excluded to avoid confusion - planner uses "sub_agent" instead
 PLANNER_ASSIGNABLE_TOOLS = [
     "spawn_browser_agent",
     "spawn_claude_code_agent",
-    "sub_agent",  # Delegate complex task to a sub-agent (maps to spawn_sub_agents with 1 agent)
+    "spawn_sub_agent",
     "wait_seconds",
     "web_search",
     "people_search",
@@ -94,8 +92,11 @@ class ResponseSchemaFieldConfig(BaseModel):
     """Configuration for a single field in the output schema."""
 
     name: str = Field(description="Field name in snake_case")
-    type: Literal["str", "int", "float", "bool", "list[str]", "list[int]"] = Field(
-        description="Field type: str, int, float, bool, list[str], or list[int]"
+    type: Literal["str", "int", "float", "bool", "list[str]", "list[int]", "file_pointer", "list[file_pointer]"] = Field(
+        description="Field type: str, int, float, bool, list[str], list[int], file_pointer, or list[file_pointer]. "
+        "IMPORTANT: If the output is a FILE (image, document, generated artifact, etc.), you MUST use 'file_pointer' or 'list[file_pointer]'. "
+        "Using 'str' for file paths will NOT work - files will not be downloaded or transferred. "
+        "The file_pointer type enables automatic file transfer from remote environments to persistent storage."
     )
     required: bool = Field(description="Whether this field is required in the output")
     description: str = Field(description="Brief description of what this field contains")
@@ -120,7 +121,13 @@ class SubAgentConfig(BaseModel):
     )
     verifier: VerifierConfig = Field(description="Verifier config with type='FLOAT_LLM_JUDGE' and llm_judge_prompt")
     output_schema: ResponseSchemaConfig = Field(
-        description="Structured output schema defining what data this sub-agent must return when complete"
+        description="Structured output schema defining what data this sub-agent must return when complete. "
+        "IMPORTANT: If the sub-agent needs to return any FILES, you MUST use 'file_pointer' or 'list[file_pointer]' as the field type. "
+        "Using 'str' for file paths will NOT work - files will not be transferred."
+    )
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description="List of filenames to pass to this sub-agent (must match files attached to parent agent's context)"
     )
 
 
@@ -253,14 +260,17 @@ class MessagePersonTool(BaseModel):
 
 
 class SpawnBrowserAgentTool(BaseModel):
-    """Spawn an autonomous browser agent to complete short, simple web tasks. Best for: purchases, checkouts, form submissions, and reading content from JS-heavy sites. The browser agent should be used for short simple trajectories, not complex reasoning loops—it has a 25-step limit. Provide a complete, high-level goal - the browser agent will autonomously execute all necessary steps. Login state and saved payment methods persist across sessions. Minimize the work done by this tool and keep the trajectory as short as possible. Give it the deepest starting URL you reasonably can. Do not call this tool multiple times in parallel."""
+    """Spawn an autonomous browser agent to complete short, simple web tasks. Best for: purchases, checkouts, form submissions, downloading files, and reading content from JS-heavy sites. The browser agent should be used for short simple trajectories, not complex reasoning loops—it has a 25-step limit. Provide a complete, high-level goal - the browser agent will autonomously execute all necessary steps. Login state and saved payment methods persist across sessions. Minimize the work done by this tool and keep the trajectory as short as possible. Give it the deepest starting URL you reasonably can. Do not call this tool multiple times in parallel."""
 
     tool: Literal["spawn_browser_agent"]
     goal: str = Field(
         description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy a black beanie under $35 from Amazon', 'Order a Chipotle bowl from Uber Eats with white rice, steak, fajita peppers, corn, pico de gallo, and hot sauce', 'Purchase the cheapest MacBook Pro M3 from Amazon, Best Buy, or Apple Store', 'Find the top 3 trending Python repos on GitHub and summarize their READMEs'"
     )
     output_schema: ResponseSchemaConfig = Field(
-        description="Structured output schema defining what data the browser agent must return when complete"
+        description="Structured output schema defining what data the browser agent must return when complete. "
+        "IMPORTANT: If the agent needs to return any FILES (screenshots, downloads, PDFs, images, etc.), "
+        "you MUST use 'file_pointer' or 'list[file_pointer]' as the field type. Using 'str' for file paths will NOT work - "
+        "files will not be transferred from the remote browser environment."
     )
 
 
@@ -274,7 +284,8 @@ class SpawnClaudeCodeAgentTool(BaseModel):
     - Package managers (npm, pip, etc.)
 
     Provide a complete, high-level coding goal. Note: Sandboxes are ephemeral -
-    files don't persist after the session ends. Use git to push changes to preserve work.
+    files don't persist after the session ends. Use git to push changes to preserve work,
+    or use file_pointer in output_schema to return generated files.
     """
 
     tool: Literal["spawn_claude_code_agent"]
@@ -282,7 +293,10 @@ class SpawnClaudeCodeAgentTool(BaseModel):
         description="Complete coding goal for Claude Code to accomplish. Examples: 'Clone the repo at https://github.com/user/project, add TypeScript support, and push changes to a new branch', 'Create a Python script that analyzes CSV data and generates a report', 'Set up a new React project with Tailwind CSS and create a landing page component'"
     )
     output_schema: ResponseSchemaConfig = Field(
-        description="Structured output schema defining what data the Claude Code agent must return when complete"
+        description="Structured output schema defining what data the Claude Code agent must return when complete. "
+        "IMPORTANT: If the agent needs to return any FILES (generated images, reports, processed data, etc.), "
+        "you MUST use 'file_pointer' or 'list[file_pointer]' as the field type. Using 'str' for file paths will NOT work - "
+        "files will not be transferred from the ephemeral E2B sandbox."
     )
 
 
@@ -604,11 +618,15 @@ class AttemptCompletionTool(BaseModel):
     tool: Literal["attempt_completion"]
 
 
-class SpawnSubAgentsTool(BaseModel):
-    """Tool call for spawning multiple sub-agents to work on parallel subtasks."""
+class SpawnSubAgentTool(BaseModel):
+    """Tool call for spawning a sub-agent to work on a subtask.
 
-    tool: Literal["spawn_sub_agents"]
-    sub_agents: List[SubAgentConfig] = Field(description="List of sub-agent configurations to spawn")
+    IMPORTANT: When defining the output_schema, if the sub-agent needs to return any FILES
+    (images, documents, generated artifacts, etc.), you MUST use 'file_pointer' or 'list[file_pointer]'
+    as the field type. Using 'str' for file paths will NOT work - files will not be transferred."""
+
+    tool: Literal["spawn_sub_agent"]
+    sub_agent: SubAgentConfig = Field(description="Sub-agent configuration to spawn")
 
 
 # ============================================================================
@@ -699,7 +717,7 @@ TOOL_MODELS = {
     "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
     "spawn_claude_code_agent": SpawnClaudeCodeAgentTool,
-    "spawn_sub_agents": SpawnSubAgentsTool,
+    "spawn_sub_agent": SpawnSubAgentTool,
     "search_user_network_for_people": SearchUserNetworkTool,
     "find_all": FindAllTool,
     "enrich": EnrichTool,

@@ -12,7 +12,7 @@ const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
   : 'http://localhost:54321/functions/v1';
 
 // Schema field types supported
-const FieldTypeSchema = z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]']);
+const FieldTypeSchema = z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]', 'file_pointer', 'list[file_pointer]']);
 
 // Individual field definition (no 'required' - we hardcode it to true)
 const SchemaFieldSchema = z.object({
@@ -30,7 +30,7 @@ const ResponseSchemaSchema = z.object({
 export type ResponseSchema = {
   fields: Array<{
     name: string;
-    type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]';
+    type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]' | 'file_pointer' | 'list[file_pointer]';
     required: boolean;
     description: string;
   }>;
@@ -63,7 +63,7 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
           },
           type: {
             type: 'string',
-            enum: ['str', 'int', 'float', 'bool', 'list[str]', 'list[int]'],
+            enum: ['str', 'int', 'float', 'bool', 'list[str]', 'list[int]', 'file_pointer', 'list[file_pointer]'],
             description: 'Field type',
           },
           description: {
@@ -105,7 +105,9 @@ SUPPORTED TYPES:
 - float: Decimal number
 - bool: True/false
 - list[str]: List of strings
-- list[int]: List of integers`;
+- list[int]: List of integers
+- file_pointer: Reference to a file created by the agent. Use for tasks that produce files (images, documents, etc.). The verifier will extract file metadata including: path (local path), id (UUID), storage_path (cloud storage), original_filename, mime_type, size_bytes, created_at.
+- list[file_pointer]: List of file references. Use when multiple files are produced.`;
 
   const response = await fetch(roseApiUrl, {
     method: 'POST',

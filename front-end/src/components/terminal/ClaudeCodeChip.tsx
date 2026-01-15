@@ -29,14 +29,14 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Maximize2, X, FileJson } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Maximize2, X, FileJson, FileIcon, Download } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { Terminal as XTermTerminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { cn } from '@/lib/utils';
 import { useAgentContext } from '@/contexts/AgentContext';
-import { ResponseSchemaField } from '@/lib/api';
+import { ResponseSchemaField, FilePointer } from '@/lib/api';
 import ClaudeIcon from '@/assets/claude-color.svg';
 import { supabase } from '@/lib/supabase';
 
@@ -51,8 +51,70 @@ function formatFieldType(type: ResponseSchemaField['type']): string {
     case 'bool': return 'boolean';
     case 'list[str]': return 'string[]';
     case 'list[int]': return 'integer[]';
+    case 'file_pointer': return 'file';
+    case 'list[file_pointer]': return 'file[]';
     default: return type;
   }
+}
+
+// Check if a value looks like a FilePointer
+export function isFilePointer(value: unknown): value is FilePointer {
+  if (!value || typeof value !== 'object') return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    typeof obj.id === 'string' &&
+    typeof obj.storage_path === 'string' &&
+    typeof obj.original_filename === 'string'
+  );
+}
+
+// Format file size for display
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Render a single FilePointer as a clickable file chip
+export function FilePointerDisplay({ file }: { file: FilePointer }) {
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Get signed URL for download
+    async function getUrl() {
+      try {
+        const { data } = await supabase.storage
+          .from('attachments')
+          .createSignedUrl(file.storage_path, 3600); // 1 hour
+        if (data?.signedUrl) {
+          setDownloadUrl(data.signedUrl);
+        }
+      } catch {
+        // Silently fail - user can still see filename
+      }
+    }
+    getUrl();
+  }, [file.storage_path]);
+
+  return (
+    <a
+      href={downloadUrl || '#'}
+      download={file.original_filename}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        "inline-flex items-center gap-1.5 px-2 py-1 rounded-md",
+        "bg-muted hover:bg-muted/80 transition-colors",
+        "text-sm text-foreground",
+        !downloadUrl && "pointer-events-none opacity-60"
+      )}
+    >
+      <FileIcon className="h-3.5 w-3.5 text-muted-foreground" />
+      <span className="truncate max-w-[200px]">{file.original_filename}</span>
+      <span className="text-[10px] text-muted-foreground">({formatFileSize(file.size_bytes)})</span>
+      {downloadUrl && <Download className="h-3 w-3 text-muted-foreground" />}
+    </a>
+  );
 }
 
 // Schema chip component with portaled tooltip (hover to see output schema)
@@ -155,6 +217,47 @@ function StructuredResponseDisplay({
     return null;
   }
 
+  // Render a value based on its type
+  const renderValue = (value: unknown, fieldType?: ResponseSchemaField['type']) => {
+    // Handle FilePointer type
+    if (fieldType === 'file_pointer' && isFilePointer(value)) {
+      return <FilePointerDisplay file={value} />;
+    }
+
+    // Handle list[file_pointer] type
+    if (fieldType === 'list[file_pointer]' && Array.isArray(value)) {
+      const filePointers = value.filter(isFilePointer);
+      if (filePointers.length > 0) {
+        return (
+          <div className="flex flex-wrap gap-1.5">
+            {filePointers.map((fp) => (
+              <FilePointerDisplay key={fp.id} file={fp} />
+            ))}
+          </div>
+        );
+      }
+    }
+
+    // Auto-detect FilePointer even if field type isn't specified
+    if (isFilePointer(value)) {
+      return <FilePointerDisplay file={value} />;
+    }
+
+    // Format other values
+    let formattedValue: string;
+    if (Array.isArray(value)) {
+      formattedValue = value.join(', ');
+    } else if (typeof value === 'object' && value !== null) {
+      formattedValue = JSON.stringify(value, null, 2);
+    } else if (value === null || value === undefined) {
+      formattedValue = '—';
+    } else {
+      formattedValue = String(value);
+    }
+
+    return <p className="text-muted-foreground break-words whitespace-pre-wrap">{formattedValue}</p>;
+  };
+
   return (
     <div className="mt-3 rounded-lg border border-border bg-muted/30 p-3">
       <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Extracted Output</div>
@@ -164,18 +267,6 @@ function StructuredResponseDisplay({
           const fieldDef = outputSchema?.fields?.find(f => f.name === key);
           const formattedKey = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
-          // Format value (handle arrays and objects)
-          let formattedValue: string;
-          if (Array.isArray(value)) {
-            formattedValue = value.join(', ');
-          } else if (typeof value === 'object' && value !== null) {
-            formattedValue = JSON.stringify(value, null, 2);
-          } else if (value === null || value === undefined) {
-            formattedValue = '—';
-          } else {
-            formattedValue = String(value);
-          }
-
           return (
             <div key={key} className="text-sm">
               <div className="flex items-center gap-1.5 mb-0.5">
@@ -184,7 +275,7 @@ function StructuredResponseDisplay({
                   <span className="text-[10px] text-muted-foreground">({formatFieldType(fieldDef.type)})</span>
                 )}
               </div>
-              <p className="text-muted-foreground break-words whitespace-pre-wrap">{formattedValue}</p>
+              {renderValue(value, fieldDef?.type)}
             </div>
           );
         })}

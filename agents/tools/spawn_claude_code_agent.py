@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional, AsyncGenerator, List, Callable, Awaitabl
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
-from datetime import timedelta
+from datetime import timedelta, datetime
 import structlog
 import httpx
 import asyncio
@@ -23,6 +23,7 @@ from config import load_config
 from helpers.terminal_filter import TerminalFilter
 from helpers.claude_code_ws_client import ClaudeCodeWsClient
 from helpers.attachments import FilePointer, extract_attachments_from_context, get_file_from_pointer
+from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 
 logger = structlog.get_logger()
 
@@ -216,7 +217,10 @@ Claude Code can read and process these files as needed.
 When Claude Code creates files the user needs, it should copy them to /home/user/output/
 Files in this directory will be automatically uploaded and returned to the user."""
 
+    current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
     system_prompt = f"""You are interacting with Claude Code, a terminal-based coding agent working on a task.
+
+Current time: {current_time}
 
 ORIGINAL GOAL: {goal}
 
@@ -670,9 +674,12 @@ async def spawn_claude_code_activity(
                 task_id=task_id,
                 model=model,
             )
+            # Transform output_schema for remote session: file_pointer -> session_file_pointer
+            # This ensures the verifier only extracts the file path, not full FilePointer metadata
+            remote_session_schema = transform_schema_for_remote_session(output_schema)
             progress_result = await call_temporal_activity_from_activity(
                 check_progress,
-                args=[verifier_context, verifier_prompt, model, "EXECUTE", output_schema],
+                args=[verifier_context, verifier_prompt, model, "EXECUTE", remote_session_schema],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
@@ -752,6 +759,34 @@ async def spawn_claude_code_activity(
             )
 
         # 6. Close the session and extract output files
+        # Extract file paths from verifier's structured_response to download specific files
+        additional_paths = []
+        if structured_response and output_schema:
+            for field in output_schema.get("fields", []):
+                field_name = field.get("name")
+                field_type = field.get("type")
+                if not field_name or field_name not in structured_response:
+                    continue
+                value = structured_response[field_name]
+                if field_type == "file_pointer" and isinstance(value, dict):
+                    path = value.get("path")
+                    if path and path.startswith("/"):
+                        additional_paths.append(path)
+                elif field_type == "list[file_pointer]" and isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            path = item.get("path")
+                            if path and path.startswith("/"):
+                                additional_paths.append(path)
+
+        if additional_paths:
+            logger.info(
+                "[ClaudeCode] Extracted file paths from verifier response",
+                agent_id=agent_id,
+                task_id=task_id,
+                paths=additional_paths
+            )
+
         output_files = []
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -762,6 +797,7 @@ async def spawn_claude_code_activity(
                         "task_id": task_id,
                         "user_id": user_id,
                         "agent_id": agent_id,
+                        "additional_paths": additional_paths if additional_paths else None,
                     }
                 )
                 if close_response.status_code == 200:
@@ -782,6 +818,19 @@ async def spawn_claude_code_activity(
                 agent_id=agent_id,
                 task_id=task_id,
                 error=str(e)
+            )
+
+        # 7. Resolve file pointers in structured_response using extracted files
+        if structured_response and output_files:
+            structured_response = resolve_file_pointers_from_extracted(
+                structured_response=structured_response,
+                output_schema=output_schema,
+                extracted_files=output_files,
+            )
+            logger.info(
+                "[ClaudeCode] Resolved file pointers in structured response",
+                agent_id=agent_id,
+                task_id=task_id,
             )
 
         # Build context summary

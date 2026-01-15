@@ -79,6 +79,8 @@ function formatFieldType(type: ResponseSchemaField['type']): string {
     case 'bool': return 'boolean';
     case 'list[str]': return 'string[]';
     case 'list[int]': return 'integer[]';
+    case 'file_pointer': return 'file';
+    case 'list[file_pointer]': return 'file[]';
     default: return type;
   }
 }

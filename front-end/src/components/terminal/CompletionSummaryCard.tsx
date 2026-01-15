@@ -21,11 +21,13 @@ import { memo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { Check, ChevronDown, Copy } from 'lucide-react';
+import { FilePointer } from '@/lib/api';
+import { isFilePointer, FilePointerDisplay } from './ClaudeCodeChip';
 
 // Tool name → Human-readable label mapping (mirrors backend TOOL_DISPLAY_NAMES)
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
   web_search: 'Web Searches',
-  spawn_sub_agents: 'Sub Agents Spawned',
+  spawn_sub_agent: 'Sub Agents Spawned',
   spawn_browser_agent: 'Browser Agents Spawned',
   spawn_claude_code_agent: 'Code Agents Spawned',
   send_sms_as_user: "SMS's Sent",
@@ -48,7 +50,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
 interface OutputField {
   key: string;
   label: string;
-  value: string | number | string[];
+  value: string | number | string[] | FilePointer | FilePointer[] | Record<string, unknown>;
 }
 
 interface ToolUsage {
@@ -94,11 +96,31 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const formatValue = (value: string | number | string[]): string => {
+  const formatValue = (value: OutputField['value']): string => {
+    // FilePointers are rendered as components, not text
+    if (isFilePointer(value)) {
+      return value.original_filename;
+    }
+    // Array of FilePointers
+    if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
+      return value.map(fp => (fp as FilePointer).original_filename).join(', ');
+    }
+    // Regular array
     if (Array.isArray(value)) {
       return value.join(', ');
     }
+    // Object (but not FilePointer) - JSON stringify
+    if (typeof value === 'object' && value !== null) {
+      return JSON.stringify(value);
+    }
     return String(value);
+  };
+
+  // Check if value is a FilePointer or array of FilePointers
+  const isFilePointerValue = (value: OutputField['value']): boolean => {
+    if (isFilePointer(value)) return true;
+    if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) return true;
+    return false;
   };
 
   const getToolDisplayName = (toolName: string): string => {
@@ -160,20 +182,34 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
                         {output.label}
                       </div>
                       <div className="text-sm text-foreground font-medium break-words">
-                        {formatValue(output.value)}
+                        {/* Render FilePointers with download chip */}
+                        {isFilePointer(output.value) ? (
+                          <FilePointerDisplay file={output.value} />
+                        ) : Array.isArray(output.value) && output.value.length > 0 && isFilePointer(output.value[0]) ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {output.value.map((fp, idx) => (
+                              <FilePointerDisplay key={idx} file={fp as FilePointer} />
+                            ))}
+                          </div>
+                        ) : (
+                          formatValue(output.value)
+                        )}
                       </div>
                     </div>
-                    <button
-                      onClick={() => handleCopy(formatValue(output.value), output.key)}
-                      className="flex-shrink-0 p-1 text-muted-foreground/50 hover:text-muted-foreground opacity-0 group-hover:opacity-100 transition-all"
-                      title="Copy to clipboard"
-                    >
-                      {copiedField === output.key ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                    {/* Only show copy button for non-FilePointer values */}
+                    {!isFilePointerValue(output.value) && (
+                      <button
+                        onClick={() => handleCopy(formatValue(output.value), output.key)}
+                        className="flex-shrink-0 p-1 text-muted-foreground/50 hover:text-muted-foreground opacity-0 group-hover:opacity-100 transition-all"
+                        title="Copy to clipboard"
+                      >
+                        {copiedField === output.key ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                       ) : (
                         <Copy className="w-3.5 h-3.5" />
                       )}
                     </button>
+                    )}
                   </div>
                 </div>
               ))}

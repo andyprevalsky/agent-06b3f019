@@ -177,7 +177,7 @@ export type ToolName =
   | 'set_plan'
   | 'spawn_browser_agent'
   | 'spawn_claude_code_agent'
-  | 'spawn_sub_agents'
+  | 'spawn_sub_agent'
   | 'web_search'
   | 'search_x402_bazaar'
   | 'pay_for_x402_bazaar_service'
@@ -236,10 +236,10 @@ export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
 }
 
 /**
- * Metadata for spawn_sub_agents tool messages.
+ * Metadata for spawn_sub_agent tool messages.
  */
-export interface SpawnSubAgentsMetadata extends BaseToolMetadata {
-  toolName: 'spawn_sub_agents';
+export interface SpawnSubAgentMetadata extends BaseToolMetadata {
+  toolName: 'spawn_sub_agent';
   subAgentIds?: string[];
 }
 
@@ -379,7 +379,7 @@ export interface SimpleToolMetadata extends BaseToolMetadata {
 export type ToolMessageMetadata =
   | SpawnBrowserAgentMetadata
   | SpawnClaudeCodeAgentMetadata
-  | SpawnSubAgentsMetadata
+  | SpawnSubAgentMetadata
   | SetPlanMetadata
   | SendMessageToUserMetadata
   | RequestUserSignupMetadata

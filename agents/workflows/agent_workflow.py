@@ -44,7 +44,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.request_user_approval import request_user_approval_direct
     from tools.knowledge_base import save_blueprint_activity
     from tools.web_search import web_search
-    from tools.spawn_sub_agents import spawn_sub_agents
+    from tools.spawn_sub_agents import spawn_sub_agent
     from tools.send_sms_as_user import send_sms_as_user
     from tools.spawn_browser_agent_v3 import spawn_browser_agent  # V3: browser-use + Rose API
     from tools.spawn_claude_code_agent import spawn_claude_code_agent  # Claude Code in E2B sandbox
@@ -81,7 +81,7 @@ TOOL_EXECUTORS = {
     "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
     "enable_write_permissions": enable_write_permissions,
     "web_search": web_search,
-    "spawn_sub_agents": spawn_sub_agents,
+    "spawn_sub_agent": spawn_sub_agent,
     "send_sms_as_user": send_sms_as_user,
     "search_user_network_for_people": search_user_network_for_people,
     "find_all": find_all,
@@ -145,6 +145,7 @@ class AgentWorkflow:
         self.child_tool_ids: Dict[str, str] = {}
         self.child_last_tokens: Dict[str, Dict[str, int]] = {}
         self.child_tool_counts: Dict[str, int] = {}  # Aggregated tool counts from sub-agents
+        self.child_results: Dict[str, Dict] = {}  # Store child results for file extraction after wait_condition
         self.depth: int = 0
 
         # Tree state tracking (for sub-agent tree UI)
@@ -201,7 +202,7 @@ class AgentWorkflow:
                 "TOOL",
                 metadata={
                     "toolCallId": child_tool_id,
-                    "toolName": "spawn_sub_agents",
+                    "toolName": "spawn_sub_agent",
                     "toolStatus": "IN_PROGRESS",
                     "title": goal[:30] if goal else "Sub-agent",
                     "subAgentId": child_agent_id,
@@ -232,7 +233,7 @@ class AgentWorkflow:
                 "TOOL",
                 metadata={
                     "toolCallId": child_tool_id,
-                    "toolName": "spawn_sub_agents",
+                    "toolName": "spawn_sub_agent",
                     "toolStatus": "FINISHED",
                     "title": f"Sub-agent completed: {goal_text[:30]}",
                     "subAgentId": child_agent_id,
@@ -240,6 +241,9 @@ class AgentWorkflow:
                     "structuredResponse": structured_response
                 }
             )
+
+        # Store result for file extraction in spawn_sub_agents after wait_condition
+        self.child_results[child_agent_id] = result
 
         self.pending_children.discard(child_agent_id)
 

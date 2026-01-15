@@ -28,10 +28,46 @@ from tools.base import ToolEvent, EventType, MessageStatus
 logger = structlog.get_logger()
 
 # Planning-time aliases → Execution-time tool names
-# "sub_agent" is a planning abstraction that maps to spawn_sub_agents(1 agent)
-TOOL_ALIASES = {
-    "sub_agent": "spawn_sub_agents",
-}
+# No aliases needed - planner uses spawn_sub_agent directly
+TOOL_ALIASES = {}
+
+
+def extract_error_message(e: Exception) -> str:
+    """
+    Extract the actual error message from an exception, unwrapping Temporal wrappers.
+
+    Temporal wraps activity failures in ActivityError/ApplicationError which have
+    generic messages like "Activity task failed". The real error is in .cause.
+
+    Args:
+        e: The exception to extract the message from
+
+    Returns:
+        The actual error message string
+    """
+    # Try to get the deepest cause
+    current = e
+    messages = []
+
+    while current is not None:
+        msg = str(current)
+        # Skip generic Temporal wrapper messages
+        if msg and msg not in ("Activity task failed", ""):
+            messages.append(msg)
+
+        # Traverse the cause chain
+        if hasattr(current, "cause") and current.cause is not None:
+            current = current.cause
+        elif hasattr(current, "__cause__") and current.__cause__ is not None:
+            current = current.__cause__
+        else:
+            break
+
+    # Return the most specific message (last in chain), or fallback
+    if messages:
+        # Prefer the deepest error (most specific)
+        return messages[-1] if len(messages) > 1 else messages[0]
+    return str(e) or "Unknown error"
 
 
 class TaskState(str, Enum):
@@ -378,14 +414,16 @@ async def _execute_single_task(
             return True
 
     except Exception as e:
-        workflow.logger.error(f"[DAG] Task {task.index} error: {e}", exc_info=True)
+        # Extract actual error message (unwrap Temporal's ActivityError wrapper)
+        error_msg = extract_error_message(e)
+        workflow.logger.error(f"[DAG] Task {task.index} error: {error_msg}", exc_info=True)
 
         # Post error via handle_tool_event (adds to context)
         await handle_tool_event_fn(
             ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=task.tool_name,
-                message=f"Error: {str(e)}",
+                message=f"Error: {error_msg}",
                 status=MessageStatus.ERROR,
             ),
             tool_call_id,

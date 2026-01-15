@@ -57,7 +57,7 @@ Scoring Instructions:
 // Response schema field type
 const ResponseSchemaFieldSchema = z.object({
   name: z.string(),
-  type: z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]']),
+  type: z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]', 'file_pointer', 'list[file_pointer]']),
   required: z.boolean(),
   description: z.string(),
 });
@@ -393,7 +393,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       });
 
       // Response schema generation:
-      // - Sub-agents: get schema passed via spawn_sub_agents tool call (stored in responseSchema)
+      // - Sub-agents: get schema passed via spawn_sub_agent tool call (stored in responseSchema)
       // - Root agents: schema is generated during set_plan tool execution (not at creation)
       // This defers expensive LLM call until planning phase when goal context is richer
       if (body.parent_agent_id && body.response_schema) {

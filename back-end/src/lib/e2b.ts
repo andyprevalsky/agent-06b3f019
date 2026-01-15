@@ -154,7 +154,8 @@ export async function createClaudeCodeSession(
 export async function closeClaudeCodeSession(
   taskId: string,
   userId?: string,
-  agentId?: string
+  agentId?: string,
+  additionalPaths?: string[]
 ): Promise<{ outputFiles: FilePointer[] }> {
   console.log(`[E2B] Closing Claude Code session ${taskId}...`);
 
@@ -220,9 +221,58 @@ export async function closeClaudeCodeSession(
           }
         }
 
-        console.log(`[E2B] Extracted ${outputFiles.length} output files`);
+        console.log(`[E2B] Extracted ${outputFiles.length} output files from ${OUTPUT_DIR}`);
       } catch (extractErr) {
         console.error(`[E2B] Failed to extract output files:`, extractErr);
+      }
+
+      // Also extract any additional file paths specified (e.g., from verifier structured_response)
+      if (additionalPaths && additionalPaths.length > 0) {
+        console.log(`[E2B] Extracting ${additionalPaths.length} additional file paths...`);
+
+        for (const filePath of additionalPaths) {
+          // Skip if already extracted (might be in output dir)
+          const filename = filePath.split('/').pop() || '';
+          if (outputFiles.some(f => f.original_filename === filename)) {
+            console.log(`[E2B] Skipping ${filename} - already extracted from ${OUTPUT_DIR}`);
+            continue;
+          }
+
+          try {
+            // Verify file exists
+            const checkResult = await sandbox.commands.run(`test -f "${filePath}" && echo "EXISTS"`, { timeoutMs: 3000 });
+            if (!checkResult.stdout?.includes('EXISTS')) {
+              console.log(`[E2B] File not found: ${filePath}`);
+              continue;
+            }
+
+            // Read file content
+            const content = await sandbox.files.read(filePath, { format: 'bytes' });
+            const mimeType = mime.lookup(filename) || 'application/octet-stream';
+
+            // Upload to Supabase Storage
+            const fileId = crypto.randomUUID();
+            const { storage_path } = await uploadToStorage(
+              userId,
+              Buffer.from(content),
+              filename,
+              mimeType
+            );
+
+            outputFiles.push({
+              id: fileId,
+              storage_path,
+              original_filename: filename,
+              mime_type: mimeType,
+              size_bytes: content.length,
+              created_at: new Date().toISOString(),
+            });
+
+            console.log(`[E2B] Extracted additional file: ${filePath} (${content.length} bytes)`);
+          } catch (fileErr) {
+            console.error(`[E2B] Failed to extract additional file ${filePath}:`, fileErr);
+          }
+        }
       }
     }
 

@@ -86,7 +86,7 @@ export async function createSessionWithContext(
   // Steel provides debugUrl for unauthenticated live viewing (anyone with URL can view)
   // sessionViewerUrl requires Steel dashboard login - don't use that
   // Add ?interactive=true so users can interact with the browser
-  const debugUrl = `${session.debugUrl}?interactive=true`;
+  const debugUrl = `${session.debugUrl}?interactive=false`;
 
   // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
   // The session.websocketUrl does NOT include the apiKey, so we construct it manually
@@ -199,7 +199,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
   console.log(`  ✓ Created new Steel session: ${session.id}`);
 
   // Use debugUrl for unauthenticated live viewing (not sessionViewerUrl which requires login)
-  const debugUrl = `${session.debugUrl}?interactive=true`;
+  const debugUrl = `${session.debugUrl}?interactive=false`;
   // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
   const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
 

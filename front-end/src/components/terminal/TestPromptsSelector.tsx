@@ -78,6 +78,18 @@ const TEST_PROMPTS: TestPrompt[] = [
     prompt: 'make this red',
     attachmentUrl: '/test-assets/rs.jpeg',
   },
+  {
+    title: 'Test Files in Sub Agents',
+    description: 'Tests file_pointer output schema with sub-agents creating color variants',
+    prompt: 'turn this file into 4 different color variants, yellow, red, blue, green, use a spawn_sub_agent for each one, no claude code agents in main agent, instruct each sub agent to use claude code to do the color transformation',
+    attachmentUrl: '/test-assets/rs.jpeg',
+  },
+  {
+    title: 'Test Files in Browser Agent',
+    description: 'Tests browser agent file upload/download with Google Drive',
+    prompt: 'upload this image to my google drive, then download the newest file in 2025 inside my google drive for me and tell me what it is\n\nno sub agents\nmax 2 browser agent calls\nno questions asked',
+    attachmentUrl: '/test-assets/rs.jpeg',
+  },
 ];
 
 interface TestPromptsSelectorProps {

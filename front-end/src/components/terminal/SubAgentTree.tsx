@@ -32,8 +32,56 @@ import {
   getStatusText,
   TreeNode,
 } from '@/hooks/useAgentTree';
-import { OutputSchema } from '@/lib/api';
+import { OutputSchema, OutputSchemaField, FilePointer } from '@/lib/api';
 import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
+
+// Format field type for display
+function formatFieldType(type: OutputSchemaField['type']): string {
+  switch (type) {
+    case 'str': return 'string';
+    case 'int': return 'integer';
+    case 'float': return 'number';
+    case 'bool': return 'boolean';
+    case 'list[str]': return 'string[]';
+    case 'list[int]': return 'integer[]';
+    case 'file_pointer': return 'file';
+    case 'list[file_pointer]': return 'file[]';
+    default: return type;
+  }
+}
+
+// Check if a value looks like a FilePointer
+function isFilePointer(value: unknown): value is FilePointer {
+  if (!value || typeof value !== 'object') return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    typeof obj.id === 'string' &&
+    typeof obj.storage_path === 'string' &&
+    typeof obj.original_filename === 'string'
+  );
+}
+
+// Format a value for display, handling FilePointers specially
+function formatValue(value: unknown, fieldType?: OutputSchemaField['type']): string {
+  // Handle FilePointer - show just the filename
+  if (isFilePointer(value)) {
+    return `📄 ${value.original_filename}`;
+  }
+
+  // Handle list of FilePointers
+  if (fieldType === 'list[file_pointer]' && Array.isArray(value)) {
+    const filePointers = value.filter(isFilePointer);
+    if (filePointers.length > 0) {
+      return filePointers.map(fp => `📄 ${fp.original_filename}`).join(', ');
+    }
+  }
+
+  // Default formatting
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
 import {
   Tooltip,
   TooltipContent,
@@ -80,11 +128,11 @@ function OutputChip({ schema, output }: OutputChipProps) {
                   <div key={field.name} className="flex flex-col">
                     <div className="flex items-baseline gap-1">
                       <span className="font-medium">{field.name.replace(/_/g, ' ')}</span>
-                      <span className="text-muted-foreground text-[10px]">({field.type})</span>
+                      <span className="text-muted-foreground text-[10px]">({formatFieldType(field.type)})</span>
                     </div>
                     {hasValue ? (
                       <span className="text-foreground pl-2">
-                        {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                        {formatValue(value, field.type)}
                       </span>
                     ) : (
                       <span className="text-muted-foreground pl-2 italic">—</span>
@@ -98,7 +146,7 @@ function OutputChip({ schema, output }: OutputChipProps) {
                 <div key={key}>
                   <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
                   <span className="text-muted-foreground">
-                    {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                    {formatValue(value)}
                   </span>
                 </div>
               ))
@@ -170,7 +218,7 @@ function getTreeDepth(
 }
 
 /**
- * Tree-style display of sub-agents spawned by a spawn_sub_agents tool call.
+ * Tree-style display of sub-agents spawned by a spawn_sub_agent tool call.
  *
  * Renders a DAG visualization using tree drawing characters and circle progress states.
  * For trees of depth >= 2, collapses intermediary nodes and only shows leaf nodes,
@@ -344,7 +392,7 @@ const SubAgentTree = memo(function SubAgentTree({
   // Full tree view (depth < 2 or user clicked to show all)
   return (
     <div className="font-mono text-sm">
-      {/* Header: spawn_sub_agents call */}
+      {/* Header: spawn_sub_agent call */}
       {headerLine}
       {showAllIntermediaries && intermediaryNodes.length > 0 && (
         <div

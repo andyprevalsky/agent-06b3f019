@@ -36,8 +36,8 @@ interface RoseTool {
 
 const ROSE_SYSTEM_TOOLS: RoseTool[] = [
   {
-    name: 'spawn_sub_agents',
-    displayName: 'Spawn Sub-Agents',
+    name: 'spawn_sub_agent',
+    displayName: 'Spawn Sub-Agent',
     description: 'Recursively break down arbitrarily complex goals into proximate, context-independent & parallelizable sub goals. Rose can spawn up to 10,000 agents for any single goal.',
   },
   {

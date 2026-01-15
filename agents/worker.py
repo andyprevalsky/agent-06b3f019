@@ -23,7 +23,7 @@ if not os.getenv("BACKEND_API_KEY"):
 from config import load_config
 from workflows import AgentWorkflow
 # User-configurable tools
-from tools.spawn_sub_agents import spawn_sub_agents_activity
+from tools.spawn_sub_agents import spawn_sub_agent_activity
 from tools.request_user_approval import create_approval_request_activity
 from tools.send_sms import send_sms_activity
 from tools.send_email import send_email_activity
@@ -177,7 +177,7 @@ async def main():
             AgentWorkflow
         ],
         activities=[
-            spawn_sub_agents_activity,
+            spawn_sub_agent_activity,
             create_approval_request_activity,
             send_sms_activity,
             spawn_browser_agent_activity_v3,  # V3: browser-use + Rose API

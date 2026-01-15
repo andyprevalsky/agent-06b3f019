@@ -176,6 +176,27 @@ function formatDeps(deps: number[]): string {
 }
 
 /**
+ * Format tool name for display.
+ * Converts snake_case tool names to readable labels.
+ * e.g., "spawn_browser_agent_v3" → "Browser Agent"
+ */
+function formatToolName(toolName: string): string {
+  if (!toolName) return '';
+
+  return toolName
+    // Remove spawn_ prefix
+    .replace(/^spawn_/, '')
+    // Remove version suffixes like _v3, _v2
+    .replace(/_v\d+$/, '')
+    // Replace underscores with spaces
+    .replace(/_/g, ' ')
+    // Title case each word
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
+
+/**
  * PlanChip - Expandable chip for displaying agent plans inline in the conversation.
  *
  * Shows as a compact chip when collapsed, expands vertically to show full plan content.
@@ -311,15 +332,22 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
                     <span className="text-muted-foreground/60 flex-shrink-0 mt-0.5 text-sm tabular-nums min-w-[1.25rem]">
                       {isHypothesis ? '◇' : `${displayIndex + 1}.`}
                     </span>
-                    {/* Task text with inline deps */}
-                    <span className="text-sm text-foreground leading-snug">
-                      {task.text}
-                      {hasDeps && (
-                        <span className="text-muted-foreground ml-1.5">
-                          {formatDeps(task.deps)}
-                        </span>
+                    {/* Task text with inline deps and action subtext */}
+                    <div className="leading-snug">
+                      <span className="text-sm text-foreground">
+                        {task.text}
+                        {hasDeps && (
+                          <span className="text-muted-foreground ml-1.5">
+                            {formatDeps(task.deps)}
+                          </span>
+                        )}
+                      </span>
+                      {task.toolName && (
+                        <div className="text-xs text-muted-foreground/60 mt-0.5">
+                          {formatToolName(task.toolName)}
+                        </div>
                       )}
-                    </span>
+                    </div>
                   </li>
                 );
               })}

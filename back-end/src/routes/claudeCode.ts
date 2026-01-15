@@ -33,6 +33,7 @@ const closeSessionSchema = z.object({
   task_id: z.string().uuid(),
   user_id: z.string().uuid().optional(),
   agent_id: z.string().uuid().optional(),
+  additional_paths: z.array(z.string()).optional(), // Additional file paths to extract (e.g., from verifier)
 });
 
 /**
@@ -71,11 +72,11 @@ router.post('/create', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/close', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { task_id, user_id, agent_id } = closeSessionSchema.parse(req.body);
+    const { task_id, user_id, agent_id, additional_paths } = closeSessionSchema.parse(req.body);
 
-    console.log(`🖥️ Closing Claude Code session ${task_id}`);
+    console.log(`🖥️ Closing Claude Code session ${task_id}${additional_paths?.length ? ` with ${additional_paths.length} additional paths` : ''}`);
 
-    const result = await closeClaudeCodeSession(task_id, user_id, agent_id);
+    const result = await closeClaudeCodeSession(task_id, user_id, agent_id, additional_paths);
 
     res.json({
       success: true,

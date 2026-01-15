@@ -94,7 +94,7 @@ export const WithSubAgents: Story = {
         },
       ],
       toolUsage: [
-        { name: 'spawn_sub_agents', count: 4 },
+        { name: 'spawn_sub_agent', count: 4 },
         { name: 'web_search', count: 12 },
         { name: 'spawn_browser_agent', count: 6 },
         { name: 'deep_research', count: 3 },
@@ -163,7 +163,7 @@ export const LongRunningTask: Story = {
         },
       ],
       toolUsage: [
-        { name: 'spawn_sub_agents', count: 8 },
+        { name: 'spawn_sub_agent', count: 8 },
         { name: 'web_search', count: 45 },
         { name: 'spawn_browser_agent', count: 12 },
         { name: 'deep_research', count: 6 },

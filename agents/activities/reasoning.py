@@ -10,7 +10,7 @@ from temporalio import activity
 from pydantic import BaseModel, Field
 import structlog
 
-from helpers.llm import call_llm_structured_streaming, convert_context_to_messages
+from helpers.llm import call_llm_structured_streaming, build_llm_messages
 from helpers.messages import stream_assistant_chunk
 
 logger = structlog.get_logger()
@@ -67,20 +67,17 @@ INSTRUCTIONS:
 
 Provide your reasoning and conclusions directly."""
 
-    # Use existing context formatter (handles timestamps, IN_PROGRESS filtering, tool matching)
-    context_messages = convert_context_to_messages(context, include_system=True, include_assistant=True)
+    # Use build_llm_messages which handles file attachments (images, PDFs, etc.)
+    # This ensures the LLM can see attached files when reasoning
+    messages = await build_llm_messages(context, system_prompt)
 
-    # Keep last N messages to stay within context limits
+    # Keep last N messages to stay within context limits (preserve system prompt at index 0)
     max_context_messages = 30
-    if len(context_messages) > max_context_messages:
-        context_messages = context_messages[-max_context_messages:]
+    if len(messages) > max_context_messages + 1:  # +1 for system prompt
+        messages = [messages[0]] + messages[-(max_context_messages):]
 
-    # Build full message list
-    messages = [
-        {"role": "system", "content": system_prompt},
-        *context_messages,
-        {"role": "user", "content": f"Please complete this reasoning task: {goal}"},
-    ]
+    # Append final instruction
+    messages.append({"role": "user", "content": f"Please complete this reasoning task: {goal}"})
 
     _safe_heartbeat("Starting reasoning task")
 

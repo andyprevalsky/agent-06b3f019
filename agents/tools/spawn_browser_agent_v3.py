@@ -25,6 +25,7 @@ from browser_tools.schemas import BROWSER_TOOL_MODELS, AVAILABLE_ACTIONS
 from browser_tools.dom_service import DOMService, ActionHistory
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.prompts import build_verifier_prompt
+from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 from loop.activity_helper import call_temporal_activity_from_activity
 from config import load_config
 
@@ -866,7 +867,10 @@ async def execute_action(
 
 def get_browser_system_prompt(goal: str, current_url: str, custom_instructions: str = "") -> str:
     """Build browser agent system prompt."""
+    current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
     return f"""You are a browser automation agent. Your goal is to accomplish tasks by interacting with web pages.
+
+Current time: {current_time}
 
 CURRENT GOAL: {goal}
 CURRENT URL: {current_url}
@@ -1320,18 +1324,22 @@ BROWSER CONTEXT:
                     
                     verifier_prompt = build_verifier_prompt("EXECUTE", f"Goal: {goal}\n\nVerify browser task completion.")
 
+                    # Transform output_schema for remote session: file_pointer -> session_file_pointer
+                    # This ensures the verifier only extracts the file path, not full FilePointer metadata
+                    remote_session_schema = transform_schema_for_remote_session(response_schema)
+
                     # Try ultra first with 7s timeout, fallback to lite on timeout
                     try:
                         progress_result = await call_temporal_activity_from_activity(
                             check_progress,
-                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE", response_schema],
+                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE", remote_session_schema],
                             start_to_close_timeout=timedelta(seconds=7),
                         )
                     except TimeoutError:
                         logger.warning("Verifier ultra timeout, falling back to lite")
                         progress_result = await call_temporal_activity_from_activity(
                             check_progress,
-                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-lite", "EXECUTE", response_schema],
+                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-lite", "EXECUTE", remote_session_schema],
                             start_to_close_timeout=timedelta(seconds=15),
                         )
                     
@@ -1352,6 +1360,13 @@ BROWSER CONTEXT:
                         # Task complete
                         execution_time_ms = (_safe_time() - start_time) * 1000
                         structured_response = progress_result.get("structured_response")
+
+                        # TODO: Add file extraction for file_pointer support
+                        # When browser session close endpoint supports file extraction:
+                        # 1. Get output_files from close response
+                        # 2. Resolve file pointers: structured_response = resolve_file_pointers_from_extracted(
+                        #        structured_response, output_schema, output_files)
+                        # 3. Emit output files as assistant events
 
                         # Disconnect and close session
                         await dom_service.disconnect()

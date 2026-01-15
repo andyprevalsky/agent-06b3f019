@@ -4,89 +4,51 @@ Parameter Populator Activity - Populate tool parameters using LLM.
 Given a tool name and goal, calls LLM with full context to generate
 the appropriate parameters for the tool call.
 
-Uses structured outputs to guarantee the LLM output matches the tool schema.
+Uses the SAME call_llm_structured_streaming function as run_agent to ensure
+consistent behavior between DAG execution and the main agent loop.
 """
 
-import json
 from typing import Dict, List, Any
 from temporalio import activity
 import structlog
 
-from helpers.llm import call_llm, convert_context_to_messages, prepare_schema_for_openai
-from helpers.tool_schemas import TOOL_MODELS
+from helpers.llm import call_llm_structured_streaming, build_llm_messages
+from helpers.tool_schemas import TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
 
 
-def _get_tool_schema_description(tool_name: str) -> str:
+def _build_agent_system_prompt(tool_name: str, goal: str) -> str:
     """
-    Get a description of the tool's parameters for the LLM prompt.
+    Build a full agent-style system prompt for parameter population.
 
     Args:
-        tool_name: Name of the tool
-
-    Returns:
-        String description of the tool schema
-    """
-    if tool_name not in TOOL_MODELS:
-        return f"Unknown tool: {tool_name}"
-
-    model = TOOL_MODELS[tool_name]
-    schema = model.model_json_schema()
-
-    # Extract properties and their descriptions
-    properties = schema.get("properties", {})
-    required = schema.get("required", [])
-
-    lines = [f"Tool: {tool_name}"]
-    if model.__doc__:
-        lines.append(f"Description: {model.__doc__.strip().split(chr(10))[0]}")
-    lines.append("Parameters:")
-
-    for prop_name, prop_schema in properties.items():
-        if prop_name == "tool":
-            continue  # Skip the literal tool name field
-
-        prop_type = prop_schema.get("type", "any")
-        prop_desc = prop_schema.get("description", "No description")
-        is_required = prop_name in required
-        req_marker = "(required)" if is_required else "(optional)"
-
-        lines.append(f"  - {prop_name} ({prop_type}) {req_marker}: {prop_desc}")
-
-    return "\n".join(lines)
-
-
-def _build_populator_prompt(tool_name: str, goal: str) -> str:
-    """
-    Build the system prompt for parameter population.
-
-    Args:
-        tool_name: Name of the tool
+        tool_name: Name of the tool to call
         goal: The task goal
 
     Returns:
         System prompt string
     """
-    tool_desc = _get_tool_schema_description(tool_name)
+    return f"""You are an AI agent executing a specific task from a plan.
 
-    return f"""You are a parameter extraction assistant. Extract parameters for a tool call.
-
-TASK GOAL:
-{goal}
-
-TOOL SCHEMA:
-{tool_desc}
+CURRENT TASK:
+Goal: {goal}
+Required Tool: {tool_name}
 
 INSTRUCTIONS:
-1. The TASK GOAL contains what should be extracted as parameter values
-2. For web_search: the query should be derived directly from the goal (e.g., "Find X" → query="X")
-3. For required parameters, ALWAYS provide a non-empty value
-4. Your response must match the schema exactly
+1. Analyze the goal and the conversation context
+2. Call the {tool_name} tool with appropriate parameters to accomplish the goal
+3. Your response field should briefly explain your reasoning
+4. You MUST call exactly one tool: {tool_name}
 
-EXAMPLE:
-Goal: "Search for best hotels in Austin Texas"
-Output: {{"query": "best hotels in Austin Texas"}}"""
+CRITICAL - FILE OUTPUT SCHEMA RULES:
+When defining output_schema fields, if the output is a FILE (image, document, PDF, generated artifact, etc.):
+- You MUST use type='file_pointer' for single files
+- You MUST use type='list[file_pointer]' for multiple files
+- NEVER use type='str' for file paths - files will NOT be transferred!
+The file_pointer type enables automatic file transfer from remote environments.
+
+Execute the task now by calling {tool_name} with the correct parameters."""
 
 
 @activity.defn
@@ -99,8 +61,9 @@ async def populate_tool_params_activity(
     """
     Populate tool parameters using LLM based on context.
 
-    Uses structured outputs with the tool's Pydantic schema to guarantee
-    the LLM output matches the expected format exactly.
+    Uses the SAME call_llm_structured_streaming function as run_agent to ensure
+    consistent behavior. The LLM outputs a response + tool_calls array,
+    and we extract the single tool call for the specified tool.
 
     Args:
         tool_name: Name of the tool to populate params for
@@ -116,63 +79,68 @@ async def populate_tool_params_activity(
         logger.error(f"[ParamPopulator] Unknown tool: {tool_name}")
         raise ValueError(f"Unknown tool: {tool_name}")
 
-    tool_model = TOOL_MODELS[tool_name]
+    # Create AgentAction model with only the target tool available
+    # This constrains the LLM to only call the tool we need
+    AgentAction = create_agent_action_model([tool_name])
 
-    # Build JSON schema for structured output
-    schema = prepare_schema_for_openai(tool_model)
+    # Build system prompt (full agent style, not just extraction)
+    system_prompt = _build_agent_system_prompt(tool_name, goal)
 
-    # Build system prompt
-    system_prompt = _build_populator_prompt(tool_name, goal)
+    # Use build_llm_messages which handles file attachments (images, PDFs, etc.)
+    # This ensures the LLM can see attached files and their filenames
+    messages = await build_llm_messages(context, system_prompt)
 
-    # Use existing context formatter (handles timestamps, IN_PROGRESS filtering, tool matching)
-    context_messages = convert_context_to_messages(context, include_system=True, include_assistant=True)
-
-    # Keep last N messages to stay within context limits
-    max_context_messages = 20
-    if len(context_messages) > max_context_messages:
-        context_messages = context_messages[-max_context_messages:]
-
-    # Build full message list
-    messages = [
-        {"role": "system", "content": system_prompt},
-        *context_messages,
-        {"role": "user", "content": f"Extract parameters for {tool_name}. Goal: {goal}"},
-    ]
+    # Append final instruction to execute the task
+    messages.append({"role": "user", "content": f"Execute the task: {goal}"})
 
     activity.heartbeat("Calling LLM for parameter population")
 
     try:
-        # Use non-streaming call_llm with strict structured output
-        result = await call_llm(
+        # No-op callback since we don't need streaming for param population
+        async def noop_callback(text_so_far: str, token_count: int):
+            pass
+
+        # Use SAME function as run_agent - this is the key fix!
+        pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
             messages=messages,
             model=model,
-            temperature=0.1,  # Low temperature for deterministic extraction
-            max_tokens=500,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": tool_model.__name__,
-                    "schema": schema,
-                    "strict": True,
-                }
-            },
+            temperature=1.0,  # Same as run_agent
+            max_tokens=4096,  # Same as run_agent
+            response_model=AgentAction,
+            on_chunk=noop_callback,
+            reasoning_max_tokens=256,  # Same as run_agent default
         )
 
-        content = result.get("content", "")
-        if not content:
-            raise ValueError("Empty response from LLM")
+        # Extract tool calls from the Pydantic result
+        tool_calls = []
+        if pydantic_result.tool_calls:
+            for tc in pydantic_result.tool_calls:
+                if tc is not None:
+                    tool_calls.append(tc.model_dump())
 
-        # Parse JSON response (schema-validated by LLM)
-        try:
-            params = json.loads(content)
-        except json.JSONDecodeError as e:
-            logger.error(f"[ParamPopulator] Failed to parse JSON: {content[:200]}", error=str(e))
-            raise ValueError(f"Invalid JSON response: {e}")
+        if not tool_calls:
+            raise ValueError(f"LLM did not call any tools. Response: {pydantic_result.response[:200] if pydantic_result.response else 'empty'}")
 
-        # Remove 'tool' field (added during execution)
-        params.pop("tool", None)
+        # Find the tool call for our target tool
+        tool_call = None
+        for tc in tool_calls:
+            if tc.get("tool") == tool_name:
+                tool_call = tc
+                break
+
+        if not tool_call:
+            # Use first tool call if it exists (shouldn't happen with constrained schema)
+            tool_call = tool_calls[0]
+            logger.warning(
+                f"[ParamPopulator] Expected tool {tool_name}, got {tool_call.get('tool')}",
+                tool_calls=tool_calls,
+            )
+
+        # Remove 'tool' field from params (added during execution)
+        params = {k: v for k, v in tool_call.items() if k != "tool"}
 
         # Validate required fields are non-empty
+        tool_model = TOOL_MODELS[tool_name]
         model_schema = tool_model.model_json_schema()
         required = model_schema.get("required", [])
         for field in required:
@@ -185,7 +153,8 @@ async def populate_tool_params_activity(
         logger.info(
             f"[ParamPopulator] Populated params for {tool_name}",
             params=params,
-            tokens=result.get("usage", {}).get("total_tokens", 0),
+            response=pydantic_result.response[:100] if pydantic_result.response else "",
+            tokens=usage.get("total_tokens", 0),
         )
         return params
 

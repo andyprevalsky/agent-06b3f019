@@ -22,20 +22,13 @@ import uuid
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from pydantic import BaseModel
-from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity
+from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity, build_llm_messages
 from helpers.tool_schemas import create_agent_action_model
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import compress_context
 from tools.base import ToolEvent, EventType, UsageType, UsageItem, MessageStatus
 from tools.knowledge_base import query_blueprints_activity, query_blueprints
 from loop.activity_helper import call_temporal_activity_from_activity
-from helpers.attachments import (
-    FilePointer,
-    extract_attachments_from_context,
-    build_multimodal_user_message,
-    get_attachment_system_prompt_addition,
-    has_pdf_attachments,
-)
 
 logger = structlog.get_logger()
 
@@ -306,7 +299,7 @@ async def run_agent(
         if build_messages:
             messages = build_messages(context, system_prompt)
         else:
-            messages = await _build_llm_messages(context, system_prompt)
+            messages = await build_llm_messages(context, system_prompt)
         
         # 7. Call LLM with structured streaming
         try:
@@ -786,115 +779,6 @@ def _estimate_tokens(context: List[Dict]) -> int:
     """Rough token estimation: ~4 chars per token."""
     text = "\n".join([m.get("text", "") for m in context])
     return len(text) // 4
-
-
-async def _build_llm_messages(context: List[Dict], system_prompt: str) -> List[Dict]:
-    """Build messages list for LLM from context, with attachment support.
-
-    For attachments:
-    - Small files (<20MB) are downloaded from storage and resolved to multimodal content
-    - Large files (>=20MB) are shown as metadata only (LLM can't process large files anyway)
-    - Binary files are shown as metadata only
-
-    Downloads are cached within the module to avoid re-downloading the same file.
-    """
-    import base64
-    from helpers.attachments import (
-        FilePointer,
-        IMAGE_MIME_TYPES,
-        PDF_MIME_TYPES,
-        TEXT_MIME_TYPES,
-        INLINE_THRESHOLD,
-        build_attachment_metadata_text,
-        get_file_from_pointer,
-    )
-
-    messages = [{"role": "system", "content": system_prompt}]
-
-    for msg in context:
-        role = msg.get("role", "").upper()
-        text = msg.get("text", "")
-        metadata = msg.get("metadata", {}) or {}
-
-        # Check for file attachments in multiple places:
-        # 1. file_pointer / filePointer - top-level field from DB (OAI-style: each file is a separate message)
-        # 2. metadata.attachments - legacy format
-        file_pointer = msg.get("file_pointer") or msg.get("filePointer")
-        attachments_data = metadata.get("attachments", []) if isinstance(metadata, dict) else []
-
-        # If this message has a file_pointer, treat it as an attachment
-        if file_pointer and isinstance(file_pointer, dict):
-            attachments_data = [file_pointer] + list(attachments_data)
-
-        if role == "USER":
-            if attachments_data:
-                # Build multimodal message with attachments
-                content = []
-                metadata_texts = []
-
-                for att_data in attachments_data:
-                    fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
-                    if not fp:
-                        continue
-
-                    # Large files or binary files -> metadata only
-                    if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
-                        metadata_texts.append(build_attachment_metadata_text(fp))
-                        continue
-
-                    # Download file from storage (uses module-level cache)
-                    try:
-                        file_content, file_metadata = await get_file_from_pointer(fp)
-                        base64_data = base64.b64encode(file_content).decode("utf-8")
-
-                        if fp.is_image():
-                            # Image: inject as image_url content block
-                            content.append({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{fp.mime_type};base64,{base64_data}"
-                                }
-                            })
-                        elif fp.is_pdf():
-                            # PDF: inject as file content block (for capable models)
-                            content.append({
-                                "type": "file",
-                                "file": {
-                                    "filename": fp.original_filename,
-                                    "file_data": f"data:{fp.mime_type};base64,{base64_data}"
-                                }
-                            })
-                        elif fp.is_text():
-                            # Text: inject as text content
-                            try:
-                                text_content = file_content.decode("utf-8")
-                                metadata_texts.append(f"[File: {fp.original_filename}]\n```\n{text_content}\n```")
-                            except UnicodeDecodeError:
-                                metadata_texts.append(build_attachment_metadata_text(fp))
-                    except Exception as e:
-                        logger.warning(f"Failed to download/process attachment {fp.original_filename}: {e}")
-                        metadata_texts.append(build_attachment_metadata_text(fp))
-
-                # Build final content
-                full_text = text
-                if metadata_texts:
-                    full_text = text + "\n\n" + "\n\n".join(metadata_texts)
-
-                if content:
-                    # Has multimodal content - use content array format
-                    content.insert(0, {"type": "text", "text": full_text})
-                    messages.append({"role": "user", "content": content})
-                else:
-                    # No multimodal content - just text
-                    messages.append({"role": "user", "content": full_text})
-            else:
-                messages.append({"role": "user", "content": text})
-        elif role == "ASSISTANT":
-            messages.append({"role": "assistant", "content": text})
-        elif role in ("TOOL", "SYSTEM"):
-            messages.append({"role": "user", "content": f"[{role}]: {text}"})
-
-    return messages
 
 
 async def _compress_context(

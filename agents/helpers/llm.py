@@ -1,6 +1,7 @@
 """LLM tool for agent reasoning and decision making."""
 
 import asyncio
+import base64
 import re
 import uuid
 import time  # Import at module level for Temporal workflow sandbox compatibility
@@ -23,6 +24,11 @@ from helpers.tool_schemas import (
 )
 from helpers.messages import stream_assistant_chunk, stream_tool_event, stream_attention_event
 from tools.base import ToolSchema
+from helpers.attachments import (
+    FilePointer,
+    build_attachment_metadata_text,
+    get_file_from_pointer,
+)
 
 logger = structlog.get_logger()
 
@@ -255,6 +261,9 @@ def convert_context_to_messages(
                 tool_content = content
                 if metadata.get('title'):
                     tool_content = f"{metadata['title']}: {content}"
+                # Include structured_response for verifier extraction of full FilePointers
+                if metadata.get('structured_response'):
+                    tool_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
                 if metadata.get('toolName'):
@@ -267,8 +276,123 @@ def convert_context_to_messages(
                 system_content = content
                 if metadata.get('title'):
                     system_content = f"{metadata['title']}: {content}"
+                # Include structured_response for verifier extraction of full FilePointers
+                if metadata.get('structured_response'):
+                    system_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
                 messages.append({"role": "system", "content": system_content})
-    
+
+    return messages
+
+
+async def build_llm_messages(context: List[Dict], system_prompt: str) -> List[Dict]:
+    """Build messages list for LLM from context, with attachment support.
+
+    This is the primary function for building LLM messages across the codebase.
+    It handles:
+    - System prompt injection
+    - USER messages with file attachments (images, PDFs, text files)
+    - ASSISTANT messages
+    - TOOL/SYSTEM messages (converted to user role for context)
+
+    For attachments:
+    - Small files (<20MB) are downloaded from storage and resolved to multimodal content
+    - Large files (>=20MB) are shown as metadata only (LLM can't process large files anyway)
+    - Binary files are shown as metadata only
+
+    Downloads are cached within the module to avoid re-downloading the same file.
+
+    Args:
+        context: List of message dicts from agent context (role, text, metadata, file_pointer)
+        system_prompt: System prompt to prepend
+
+    Returns:
+        List of OpenAI-compatible messages ready for LLM
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+
+    for msg in context:
+        role = msg.get("role", "").upper()
+        text = msg.get("text", "")
+        metadata = msg.get("metadata", {}) or {}
+
+        # Check for file attachments in multiple places:
+        # 1. file_pointer / filePointer - top-level field from DB (OAI-style: each file is a separate message)
+        # 2. metadata.attachments - legacy format
+        file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+        attachments_data = metadata.get("attachments", []) if isinstance(metadata, dict) else []
+
+        # If this message has a file_pointer, treat it as an attachment
+        if file_pointer and isinstance(file_pointer, dict):
+            attachments_data = [file_pointer] + list(attachments_data)
+
+        if role == "USER":
+            if attachments_data:
+                # Build multimodal message with attachments
+                content = []
+                metadata_texts = []
+
+                for att_data in attachments_data:
+                    fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
+                    if not fp:
+                        continue
+
+                    # Large files or binary files -> metadata only
+                    if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
+                        metadata_texts.append(build_attachment_metadata_text(fp))
+                        continue
+
+                    # Download file from storage (uses module-level cache)
+                    try:
+                        file_content, file_metadata = await get_file_from_pointer(fp)
+                        base64_data = base64.b64encode(file_content).decode("utf-8")
+
+                        if fp.is_image():
+                            # Image: inject as image_url content block
+                            content.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{fp.mime_type};base64,{base64_data}"
+                                }
+                            })
+                        elif fp.is_pdf():
+                            # PDF: inject as file content block (for capable models)
+                            content.append({
+                                "type": "file",
+                                "file": {
+                                    "filename": fp.original_filename,
+                                    "file_data": f"data:{fp.mime_type};base64,{base64_data}"
+                                }
+                            })
+                        elif fp.is_text():
+                            # Text: inject as text content
+                            try:
+                                text_content = file_content.decode("utf-8")
+                                metadata_texts.append(f"[File: {fp.original_filename}]\n```\n{text_content}\n```")
+                            except UnicodeDecodeError:
+                                metadata_texts.append(build_attachment_metadata_text(fp))
+                    except Exception as e:
+                        logger.warning(f"Failed to download/process attachment {fp.original_filename}: {e}")
+                        metadata_texts.append(build_attachment_metadata_text(fp))
+
+                # Build final content
+                full_text = text
+                if metadata_texts:
+                    full_text = text + "\n\n" + "\n\n".join(metadata_texts)
+
+                if content:
+                    # Has multimodal content - use content array format
+                    content.insert(0, {"type": "text", "text": full_text})
+                    messages.append({"role": "user", "content": content})
+                else:
+                    # No multimodal content - just text
+                    messages.append({"role": "user", "content": full_text})
+            else:
+                messages.append({"role": "user", "content": text})
+        elif role == "ASSISTANT":
+            messages.append({"role": "assistant", "content": text})
+        elif role in ("TOOL", "SYSTEM"):
+            messages.append({"role": "user", "content": f"[{role}]: {text}"})
+
     return messages
 
 
@@ -1275,6 +1399,72 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
                 json_type = {"type": "array", "items": {"type": "string"}}
             elif field_type == "list[int]":
                 json_type = {"type": "array", "items": {"type": "integer"}}
+            elif field_type == "file_pointer":
+                # Full FilePointer schema - used by main agent and spawn_sub_agent verifiers
+                # Expects context to contain full FilePointer with all fields populated
+                file_pointer_schema = {
+                    "type": "object",
+                    "description": "Full file reference with all metadata. Copy ALL fields exactly from 'Structured Response' in context.",
+                    "properties": {
+                        "id": {"type": "string", "description": "File UUID. MUST copy exactly from Structured Response."},
+                        "storage_path": {"type": "string", "description": "Supabase storage path. MUST copy exactly from Structured Response."},
+                        "original_filename": {"type": "string", "description": "Original filename. MUST copy exactly from Structured Response."},
+                        "mime_type": {"type": "string", "description": "MIME type (e.g., image/jpeg). MUST copy exactly from Structured Response."},
+                        "size_bytes": {"type": "integer", "description": "File size in bytes. MUST copy exactly from Structured Response."},
+                        "created_at": {"type": "string", "description": "ISO timestamp. MUST copy exactly from Structured Response."}
+                    },
+                    "required": ["id", "storage_path", "original_filename", "mime_type", "size_bytes", "created_at"],
+                    "additionalProperties": False
+                }
+                json_type = file_pointer_schema
+            elif field_type == "list[file_pointer]":
+                # List of full FilePointers
+                file_pointer_schema = {
+                    "type": "object",
+                    "description": "Full file reference with all metadata. Copy ALL fields exactly from 'Structured Response' in context.",
+                    "properties": {
+                        "id": {"type": "string", "description": "File UUID. MUST copy exactly from Structured Response."},
+                        "storage_path": {"type": "string", "description": "Supabase storage path. MUST copy exactly from Structured Response."},
+                        "original_filename": {"type": "string", "description": "Original filename. MUST copy exactly from Structured Response."},
+                        "mime_type": {"type": "string", "description": "MIME type (e.g., image/jpeg). MUST copy exactly from Structured Response."},
+                        "size_bytes": {"type": "integer", "description": "File size in bytes. MUST copy exactly from Structured Response."},
+                        "created_at": {"type": "string", "description": "ISO timestamp. MUST copy exactly from Structured Response."}
+                    },
+                    "required": ["id", "storage_path", "original_filename", "mime_type", "size_bytes", "created_at"],
+                    "additionalProperties": False
+                }
+                json_type = {
+                    "type": "array",
+                    "items": file_pointer_schema
+                }
+            elif field_type == "session_file_pointer":
+                # Session file pointer - used by cloud agent verifiers (spawn_claude_code_agent, spawn_browser_agent)
+                # Only extracts the path from terminal output - activity handles download/upload
+                session_file_pointer_schema = {
+                    "type": "object",
+                    "description": "File reference from remote session. Extract the ABSOLUTE file path from terminal output.",
+                    "properties": {
+                        "path": {"type": "string", "description": "ABSOLUTE file path starting with /. Example: '/home/user/output/report.pdf'. Extract the full path exactly as shown in terminal output."}
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False
+                }
+                json_type = session_file_pointer_schema
+            elif field_type == "list[session_file_pointer]":
+                # List of session file pointers
+                session_file_pointer_schema = {
+                    "type": "object",
+                    "description": "File reference from remote session. Extract the ABSOLUTE file path from terminal output.",
+                    "properties": {
+                        "path": {"type": "string", "description": "ABSOLUTE file path starting with /. Example: '/home/user/output/report.pdf'. Extract the full path exactly as shown in terminal output."}
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False
+                }
+                json_type = {
+                    "type": "array",
+                    "items": session_file_pointer_schema
+                }
             else:
                 json_type = {"type": "string"}  # Default fallback
 

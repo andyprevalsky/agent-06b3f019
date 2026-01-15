@@ -827,8 +827,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // Check if this is a request_user_signup message (render as SignupPromptBubble)
   const isSignupRequest = isTool && message.metadata?.requestUserSignup;
 
-  // Check if this is a sub-agent tool message (actual spawn_sub_agents calls, not browser actions)
-  const isSubAgentTool = message.metadata?.toolName === 'spawn_sub_agents';
+  // Check if this is a sub-agent tool message (actual spawn_sub_agent calls, not browser actions)
+  const isSubAgentTool = message.metadata?.toolName === 'spawn_sub_agent';
 
   // Check if this is a set_plan tool message (render as PlanChip)
   const isSetPlanTool = isTool && message.metadata?.toolName === 'set_plan';
