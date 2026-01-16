@@ -29,7 +29,7 @@ def _build_agent_system_prompt(tool_name: str, goal: str) -> str:
     Returns:
         System prompt string
     """
-    return f"""You are an AI agent executing a specific task from a plan.
+    prompt = f"""You are an AI agent executing a specific task from a plan.
 
 CURRENT TASK:
 Goal: {goal}
@@ -57,6 +57,17 @@ When using spawn_sub_agent, spawn_claude_code_agent, or spawn_browser_agent:
 - Do NOT use the file's `id` field, storage_path, or any `file:` prefix format
 
 Execute the task now by calling {tool_name} with the correct parameters."""
+
+    # Add ephemeral session warning for spawn_* tools
+    if tool_name.startswith("spawn_"):
+        prompt += """
+
+EPHEMERAL SESSION WARNING:
+This tool creates a NEW session that does not persist. Any login state, cookies, or context
+from previous calls will NOT be available. Include ALL necessary steps in a single goal
+(e.g., "Login, add to cart, checkout" - not separate calls for each step)."""
+
+    return prompt
 
 
 @activity.defn
