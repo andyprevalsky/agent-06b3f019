@@ -894,7 +894,7 @@ async def execute_action(
             logger.info(f"📎 Uploaded file '{filename}' to element {index}")
             return {
                 "success": True,
-                "message": f"Successfully uploaded {filename}",
+                "message": "",
                 "uploaded": filename,
                 "to_index": index
             }
@@ -1273,6 +1273,16 @@ async def spawn_browser_agent_activity_v3(
                 enriched_task += f"\n\n{shipping_section.strip()}"
             if autopay_section:
                 enriched_task += f"\n\n{autopay_section.strip()}"
+            # Add available files section if files were uploaded to Steel
+            if available_file_paths:
+                files_list = ', '.join(available_file_paths.keys())
+                enriched_task += f"""
+
+AVAILABLE FILES FOR UPLOAD:
+The following files have been uploaded and are ready to use with the upload_file action.
+To upload a file to a file input element, use: upload_file(index=<file_input_index>, filename="<filename>")
+Files: {files_list}"""
+
             enriched_task += """
 
 BROWSER CONTEXT:

@@ -928,24 +928,30 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   const normalizedAction = yutoriActionMap[actionType] || actionType;
   
   // Validate action is one we support (Yutori has limited actions)
-  const validYutoriActions = ['click', 'scroll', 'input_text', 'press_key', 'navback', 'goto', 'wait', 'attempt_completion'];
+  const validYutoriActions = ['click', 'scroll', 'input_text', 'press_key', 'navback', 'goto', 'wait', 'attempt_completion', 'upload_file'];
   if (!validYutoriActions.includes(normalizedAction)) {
     throw new Error(`normalizeYutoriResponse: Unknown action "${normalizedAction}" (raw: "${actionType}") - add to yutoriActionMap or validYutoriActions`);
   }
-  
+
   // Normalize Yutori params to Python agent expected format
   const normalizedParams: Record<string, any> = {};
-  
+
   // Text input
   if (firstAction.typing_text) normalizedParams.text = firstAction.typing_text;
   if (firstAction.text) normalizedParams.text = firstAction.text;
-  
+
   // Navigation
   if (firstAction.url) normalizedParams.url = firstAction.url;
+
+  // File upload - filename is at top level in Yutori response
+  if (firstAction.filename) normalizedParams.filename = firstAction.filename;
+  if (firstAction.file_path) normalizedParams.file_path = firstAction.file_path;
   
-  // Key presses - map 'keys' to 'key'
+  // Key presses - map 'keys' and 'key_comb' to 'key'
+  // Yutori uses 'key_comb' for keyboard shortcuts (e.g., "Control+o")
   if (firstAction.key) normalizedParams.key = firstAction.key;
   if (firstAction.keys) normalizedParams.key = firstAction.keys;
+  if (firstAction.key_comb) normalizedParams.key = firstAction.key_comb;
   
   // Handle scroll direction from action_type
   // Yutori returns amount in pixels directly (e.g. 300, 600)
@@ -1454,12 +1460,18 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   
   // Normalize params to Python agent expected format
   const normalizedParams: Record<string, any> = {};
-  
+
   // Handle different param formats
   if (params.url) normalizedParams.url = params.url;
   if (params.text) normalizedParams.text = params.text;
   if (params.typing_text) normalizedParams.text = params.typing_text; // Yutori format
-  
+
+  // File upload - filename can be at top level (firstAction) or in params
+  if (firstAction.filename) normalizedParams.filename = firstAction.filename;
+  else if (params.filename) normalizedParams.filename = params.filename;
+  if (firstAction.file_path) normalizedParams.file_path = firstAction.file_path;
+  else if (params.file_path) normalizedParams.file_path = params.file_path;
+
   // press_key: map 'keys' to 'key'
   if (params.key) normalizedParams.key = params.key;
   if (params.keys) normalizedParams.key = params.keys;

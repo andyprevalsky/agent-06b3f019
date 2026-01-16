@@ -387,13 +387,12 @@ export async function uploadFileToSession(
   console.log(`📎 Uploading file '${filename}' to Steel session ${sessionId}...`);
 
   try {
-    // Create a readable stream from the buffer
-    const { Readable } = await import('stream');
-    const stream = Readable.from(fileBuffer);
+    // Steel SDK expects a File or Blob object, NOT a Node.js Readable stream
+    // Using File (available in Node.js 20+) which includes filename metadata
+    const file = new File([fileBuffer], filename, { type: mimeType });
 
-    // Steel SDK expects a ReadableStream or file object
     const uploadedFile = await steel.sessions.files.upload(sessionId, {
-      file: stream as any,  // Steel SDK accepts various file-like objects
+      file: file,
     });
 
     console.log(`  ✅ Uploaded ${filename} -> ${uploadedFile.path} (${uploadedFile.size} bytes)`);

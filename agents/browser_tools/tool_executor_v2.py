@@ -742,7 +742,7 @@ async def _execute_upload_file(
             "success": True,
             "uploaded": filename,
             "to_index": index,
-            "message": f"Successfully uploaded {filename}"
+            "message": ""
         }
     except Exception as e:
         await action_history.record_action(
