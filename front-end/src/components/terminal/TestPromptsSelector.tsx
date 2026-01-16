@@ -86,8 +86,8 @@ const TEST_PROMPTS: TestPrompt[] = [
   },
   {
     title: 'Test Files in Browser Agent',
-    description: 'Tests browser agent file upload/download with Google Drive',
-    prompt: 'upload this image to my google drive, then download the newest file in 2025 inside my google drive for me and tell me what it is\n\nno sub agents\nmax 2 browser agent calls\nno questions asked',
+    description: 'Tests browser agent file upload with TinyPNG',
+    prompt: 'upload this image to tinypng.com and compress it\n\nno sub agents\nno questions asked',
     attachmentUrl: '/test-assets/rs.jpeg',
   },
 ];

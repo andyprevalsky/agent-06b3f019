@@ -7,7 +7,7 @@ This is the v3 version that uses:
 - Index-based element selection
 """
 
-from typing import Dict, Any, Optional, AsyncGenerator
+from typing import Dict, Any, Optional, AsyncGenerator, List
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from datetime import timedelta, datetime, timezone
