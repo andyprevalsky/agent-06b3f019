@@ -238,7 +238,7 @@ router.get('/:sessionId', authenticate, async (req: AuthRequest, res) => {
  * Upload a file to a Steel browser session.
  * The file becomes available in the session's VM environment for use with file inputs.
  */
-router.post('/:sessionId/files', authenticate, upload.single('file'), async (req: AuthRequest, res) => {
+router.post('/:sessionId/files', authenticate, upload.single('file') as any, async (req: AuthRequest, res) => {
   try {
     const { sessionId } = req.params;
 

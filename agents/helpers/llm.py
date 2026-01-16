@@ -397,7 +397,7 @@ async def build_llm_messages(context: List[Dict], system_prompt: str) -> List[Di
 
 
 async def call_llm_structured_streaming(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     model: Optional[str],
     temperature: float,
     max_tokens: int,
@@ -1085,7 +1085,7 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
 
 @activity.defn
 async def call_llm(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     model: Optional[str] = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
@@ -1252,7 +1252,7 @@ async def call_llm(
 
 
 async def _call_llm_verifier(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     model: str,
     config: Any,
     response_schema: Optional[Dict[str, Any]] = None,
@@ -1605,7 +1605,7 @@ async def check_progress(
 
 @activity.defn
 async def call_llm_activity(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     model: str,
     tool_names: List[str],
     reasoning_max_tokens: int = 256,
@@ -1851,7 +1851,7 @@ async def set_response_schema_activity(
 
 @activity.defn
 async def call_planner_llm_activity(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     model: str,
     tools_description: str,
     user_context: str,
