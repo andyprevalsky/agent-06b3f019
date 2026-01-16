@@ -38,6 +38,8 @@ from .schemas import (
     SwitchTabTool,
     CloseTabTool,
     OpenNewTabTool,
+    # File upload
+    UploadFileTool,
     # Completion
     DoneTool,
     AttemptCompletionBrowserTool,
@@ -80,6 +82,8 @@ __all__ = [
     "SwitchTabTool",
     "CloseTabTool",
     "OpenNewTabTool",
+    # File upload
+    "UploadFileTool",
     # Completion
     "DoneTool",
     "AttemptCompletionBrowserTool",

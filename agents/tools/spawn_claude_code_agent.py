@@ -978,25 +978,36 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         """Spawn Claude Code agent in E2B sandbox."""
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")  # Response schema from parent's tool call
+        requested_attachments = tool_call.get("attachments")  # List of filenames from tool call
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
-        # Extract attachments from workflow context to pass to E2B
+        # Resolve requested attachments from workflow context
         attachments = []
-        if hasattr(workflow_instance, 'context'):
+        if requested_attachments and hasattr(workflow_instance, 'context'):
+            # Extract all file_pointers from context and build filename lookup
             context_attachments = extract_attachments_from_context(workflow_instance.context)
-            # Convert FilePointer objects to dicts for serialization
-            attachments = [
-                {
-                    "id": fp.id,
-                    "storage_path": fp.storage_path,
-                    "original_filename": fp.original_filename,
-                    "mime_type": fp.mime_type,
-                    "size_bytes": fp.size_bytes,
-                    "created_at": fp.created_at,
-                }
-                for fp in context_attachments
-            ]
+            filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
+
+            # Resolve requested filenames to FilePointer dicts
+            for filename in requested_attachments:
+                if filename in filename_to_pointer:
+                    fp = filename_to_pointer[filename]
+                    attachments.append({
+                        "id": fp.id,
+                        "storage_path": fp.storage_path,
+                        "original_filename": fp.original_filename,
+                        "mime_type": fp.mime_type,
+                        "size_bytes": fp.size_bytes,
+                        "created_at": fp.created_at,
+                    })
+                else:
+                    logger.warning(
+                        "[ClaudeCode] Attachment not found in context",
+                        agent_id=agent_id,
+                        filename=filename,
+                        available_files=list(filename_to_pointer.keys())
+                    )
 
         logger.info(
             "[ClaudeCode] Tool starting",
@@ -1017,13 +1028,14 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             # Get model from workflow instance (inherit parent's model)
             model = getattr(workflow_instance, 'model', 'rose-labs/rose-1-lite')
 
-            # Start activity
+            # Start activity with limited retries (expensive/long-running)
             activity_handle = workflow.start_activity(
                 spawn_claude_code_activity,
                 args=[user_id, agent_id, goal, tool_call_id, output_schema, attachments if attachments else None, model],
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=60),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
             # Poll for pause while activity runs

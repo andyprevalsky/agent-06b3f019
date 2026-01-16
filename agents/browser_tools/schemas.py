@@ -184,11 +184,32 @@ class CloseTabTool(BaseModel):
 
 class OpenNewTabTool(BaseModel):
     """Open a new tab and optionally navigate to a URL."""
-    
+
     tool: Literal["open_new_tab"]
     url: Optional[str] = Field(
         default=None,
         description="URL to open in new tab (defaults to about:blank)"
+    )
+
+
+# ============================================================================
+# FILE UPLOAD TOOLS
+# ============================================================================
+
+
+class UploadFileTool(BaseModel):
+    """Upload a file to a file input element.
+
+    Use this tool to upload files (like resumes, documents, images) to file input
+    elements on web forms. The file must be available in the session's available_files.
+    """
+
+    tool: Literal["upload_file"]
+    index: int = Field(
+        description="Element index of the file input (<input type='file'>) from the DOM tree"
+    )
+    filename: str = Field(
+        description="Filename to upload (must match a filename from the available_files list in the system state)"
     )
 
 
@@ -264,6 +285,8 @@ BROWSER_TOOL_MODELS = {
     "switch_tab": SwitchTabTool,
     "close_tab": CloseTabTool,
     "open_new_tab": OpenNewTabTool,
+    # File upload
+    "upload_file": UploadFileTool,
     # Completion
     # "done": DoneTool,  # Use attempt_completion instead - browser-use 'done' maps to attempt_completion
     "attempt_completion": AttemptCompletionBrowserTool,
@@ -328,6 +351,8 @@ __all__ = [
     "SwitchTabTool",
     "CloseTabTool",
     "OpenNewTabTool",
+    # File upload
+    "UploadFileTool",
     # Completion
     "DoneTool",
     "AttemptCompletionBrowserTool",

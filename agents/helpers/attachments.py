@@ -7,9 +7,10 @@ Handles resolving FilePointers to multimodal content for LLM messages.
 import base64
 import httpx
 import logging
-import os
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
+
+from config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +69,12 @@ class FilePointer:
 
 async def download_from_storage(storage_path: str) -> bytes:
     """Download a file from Supabase Storage."""
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    config = load_config()
+    supabase_url = config.supabase.url
+    supabase_key = config.supabase.service_role_key
 
-    if not supabase_url or not supabase_key:
-        raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables")
+    if not supabase_key:
+        raise ValueError("Missing SUPABASE_SERVICE_ROLE_KEY environment variable")
 
     url = f"{supabase_url}/storage/v1/object/attachments/{storage_path}"
 

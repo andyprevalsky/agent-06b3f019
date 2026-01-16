@@ -370,6 +370,45 @@ export async function injectUserCookies(
 }
 
 /**
+ * Upload a file to an active Steel session.
+ *
+ * @param sessionId - The Steel session ID
+ * @param fileBuffer - The file content as a Buffer
+ * @param filename - The original filename
+ * @param mimeType - The MIME type of the file
+ * @returns The remote path where the file is available in the session
+ */
+export async function uploadFileToSession(
+  sessionId: string,
+  fileBuffer: Buffer,
+  filename: string,
+  mimeType: string = 'application/octet-stream'
+): Promise<{ path: string; size: number }> {
+  console.log(`📎 Uploading file '${filename}' to Steel session ${sessionId}...`);
+
+  try {
+    // Create a readable stream from the buffer
+    const { Readable } = await import('stream');
+    const stream = Readable.from(fileBuffer);
+
+    // Steel SDK expects a ReadableStream or file object
+    const uploadedFile = await steel.sessions.files.upload(sessionId, {
+      file: stream as any,  // Steel SDK accepts various file-like objects
+    });
+
+    console.log(`  ✅ Uploaded ${filename} -> ${uploadedFile.path} (${uploadedFile.size} bytes)`);
+
+    return {
+      path: uploadedFile.path,
+      size: uploadedFile.size || fileBuffer.length
+    };
+  } catch (error) {
+    console.error(`  ❌ Failed to upload file '${filename}':`, error);
+    throw error;
+  }
+}
+
+/**
  * Close all active browser sessions (for cleanup).
  */
 export async function closeAllActiveSessions(): Promise<number> {

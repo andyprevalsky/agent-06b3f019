@@ -323,9 +323,9 @@ class AgentWorkflow:
             user_context_section = await workflow.execute_activity(
                 get_user_context,
                 args=[user_id],
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=RetryPolicy(maximum_attempts=3)
-                    )
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3)
+            )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
 

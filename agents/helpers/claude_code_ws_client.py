@@ -142,8 +142,10 @@ class ClaudeCodeWsClient:
             except asyncio.CancelledError:
                 logger.info("[ClaudeCodeWs] Listen cancelled")
                 break
+            except asyncio.TimeoutError as e:
+                logger.error("[ClaudeCodeWs] Receive timeout (no messages for 60s)", error=str(e))
             except Exception as e:
-                logger.error("[ClaudeCodeWs] Listen error", error=str(e))
+                logger.error("[ClaudeCodeWs] Listen error", error=str(e), error_type=type(e).__name__)
 
             # Don't reconnect if process exited or we're shutting down
             if self._exited or not self._running:
@@ -164,22 +166,28 @@ class ClaudeCodeWsClient:
         if not self._ws:
             return
 
+        msg_count = 0
         async for msg in self._ws:
             if not self._running:
+                logger.info("[ClaudeCodeWs] Loop stopped (not running)", msg_count=msg_count)
                 break
 
+            msg_count += 1
             if msg.type == aiohttp.WSMsgType.TEXT:
                 await self._handle_message(msg.data)
             elif msg.type == aiohttp.WSMsgType.ERROR:
-                logger.error("[ClaudeCodeWs] WS error", error=str(self._ws.exception()))
+                logger.error("[ClaudeCodeWs] WS error", error=str(self._ws.exception()), msg_count=msg_count)
                 break
             elif msg.type == aiohttp.WSMsgType.CLOSED:
-                logger.info("[ClaudeCodeWs] WS closed by server")
+                logger.info("[ClaudeCodeWs] WS closed by server", msg_count=msg_count)
                 break
 
             # Heartbeat on each message
             if self.heartbeat_fn:
                 self.heartbeat_fn("Processing Claude Code output")
+
+        # Log if loop exited without explicit break (e.g., receive_timeout)
+        logger.info("[ClaudeCodeWs] Listen loop ended", msg_count=msg_count, exited=self._exited)
 
     async def _handle_message(self, data: str) -> None:
         """Handle a WebSocket message."""
@@ -189,16 +197,22 @@ class ClaudeCodeWsClient:
 
             if msg_type == "buffer":
                 # Full buffer (initial connect or reconnect) - authoritative state
-                await self.on_output(msg.get("data", ""), True)
+                msg_data = msg.get("data", "")
+                logger.info("[ClaudeCodeWs] Received buffer", bytes=len(msg_data))
+                await self.on_output(msg_data, True)
 
             elif msg_type in ("stdout", "stderr"):
                 # Live output chunk
-                await self.on_output(msg.get("data", ""), False)
+                msg_data = msg.get("data", "")
+                logger.debug("[ClaudeCodeWs] Received output", type=msg_type, bytes=len(msg_data))
+                await self.on_output(msg_data, False)
 
             elif msg_type == "exit":
                 # Process exited - don't reconnect after this
+                exit_code = msg.get("code", 0)
+                logger.info("[ClaudeCodeWs] Process exited", exit_code=exit_code)
                 self._exited = True
-                await self.on_exit(msg.get("code", 0))
+                await self.on_exit(exit_code)
 
             elif msg_type == "error":
                 logger.error("[ClaudeCodeWs] Server error", error=msg.get("data"))
@@ -209,8 +223,12 @@ class ClaudeCodeWsClient:
             elif msg_type == "stdin_error":
                 logger.error("[ClaudeCodeWs] stdin error", error=msg.get("error"))
 
+            else:
+                logger.warning("[ClaudeCodeWs] Unknown message type", msg_type=msg_type)
+
         except json.JSONDecodeError:
             # Raw data, treat as stdout
+            logger.debug("[ClaudeCodeWs] Received raw data", bytes=len(data))
             await self.on_output(data, False)
 
     async def _reconnect(self) -> bool:

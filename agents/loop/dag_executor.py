@@ -200,7 +200,7 @@ def extract_plan_from_context(context: List[Dict]) -> Optional[Dict[str, Any]]:
         plan_data dict if found, None otherwise
     """
     for msg in reversed(context):
-        metadata = msg.get("metadata", {})
+        metadata = msg.get("metadata") or {}
         if (metadata.get("toolName") == "set_plan" and
             metadata.get("toolStatus") == "FINISHED"):
             return metadata.get("data")

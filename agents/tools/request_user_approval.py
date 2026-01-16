@@ -10,6 +10,7 @@ This is NOT called directly by the LLM - it's used internally by tools.
 
 from typing import Dict, Any, Optional, AsyncGenerator, List
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
 import httpx
@@ -75,6 +76,7 @@ class RequestUserApprovalManager(ToolManager):
                     metadata or None,
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
             
             if metadata or request_id:
@@ -327,6 +329,7 @@ async def request_user_approval_direct(
                 metadata or None,
             ],
             start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
         
         logger.info(

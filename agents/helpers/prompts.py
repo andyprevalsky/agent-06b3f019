@@ -187,6 +187,16 @@ def build_system_prompt(
     - For multiple files, use type='list[file_pointer]'
     - NEVER use type='str' for file paths - files will NOT be transferred from remote environments!
 
+    FILE ATTACHMENTS IN CONTEXT
+    ---------------------------
+    - If file_pointers exist in your context, these files are ALREADY AVAILABLE to YOU - no download needed
+    - DO NOT use spawn_browser_agent to "download" files that are already in your context!
+    - Sub-agents do NOT automatically inherit your files. To give a spawned agent access to a file:
+      - You MUST include it in the `attachments` parameter using the `original_filename` value from the file_pointer
+      - Example: if file_pointer has `"original_filename": "rs.jpeg"`, use `attachments: ["rs.jpeg"]`
+      - Do NOT use the file's `id` field, storage_path, or any other format - ONLY use `original_filename`
+      - This applies to: spawn_sub_agent, spawn_claude_code_agent, spawn_browser_agent
+
     GENERAL RULES
     -------------
     - Use only ENABLED tools NOW to gather information required for planning.
@@ -211,6 +221,16 @@ def build_system_prompt(
     - spawn_browser_agent is for short, simple web trajectories (purchases, form submissions, reading JS-heavy sites). It has a 25-step limit—do not use it for complex reasoning loops.
     - Do as much work as possible outside of spawn_browser_agent. It is slow and prone to failure—minimize the number of steps needed. Give it the deepest starting URL possible.
     - When the goal is completely accomplished with proof, call `attempt_completion`.
+
+    FILE ATTACHMENTS IN CONTEXT
+    ---------------------------
+    - If file_pointers exist in your context, these files are ALREADY AVAILABLE to YOU - no download needed
+    - DO NOT use spawn_browser_agent to "download" files that are already in your context!
+    - Sub-agents do NOT automatically inherit your files. To give a spawned agent access to a file:
+      - You MUST include it in the `attachments` parameter using the `original_filename` value from the file_pointer
+      - Example: if file_pointer has `"original_filename": "rs.jpeg"`, use `attachments: ["rs.jpeg"]`
+      - Do NOT use the file's `id` field, storage_path, or any other format - ONLY use `original_filename`
+      - This applies to: spawn_sub_agent, spawn_claude_code_agent, spawn_browser_agent
 
     CRITICAL - OUTPUT SCHEMA FILE HANDLING:
     When defining output_schema for spawn_sub_agent, spawn_claude_code_agent, or spawn_browser_agent:
@@ -577,14 +597,17 @@ Return ONLY valid JSON matching this schema:
     "tasks": [
         {{"goal": "<brief task objective>", "tool_name": "<tool_name or 'reasoning'>", "depends_on": [<indices>]}}
     ],
-    "dependencies_graph": {{"<task_idx>": ["<dep_idx>", ...]}},
+    "dependencies_graph": [
+        {{"task_idx": "<idx>", "depends_on": ["<dep_idx>", ...]}}
+    ],
     "join": "all" | "any"
 }}
 
 Rules:
 - tasks[i].depends_on must list indices of tasks that must complete first
+- dependencies_graph is a list of objects, each with task_idx and depends_on
 - dependencies_graph must mirror tasks[i].depends_on exactly
-- Use 0-based indices as strings in dependencies_graph ("0", "1", ...)
+- Use 0-based indices as strings ("0", "1", ...)
 - Graph must be acyclic
 - Do not add extra fields; the list index is the task ID
 
@@ -649,6 +672,14 @@ USER CONTEXT
 ------------
 {user_context if user_context else "No additional user context."}
 {response_schema_section}
+ATTACHED FILES (file_pointers)
+------------------------------
+- Files attached in the conversation (file_pointers) are ALREADY AVAILABLE - they are NOT on the web
+- Sub-agents do NOT automatically inherit files - you must pass them via the `attachments` parameter
+- Use the `original_filename` value from file_pointer objects (e.g., "rs.jpeg"), NOT the `id` field
+- Do NOT plan browser tasks to "download" attached files - just reference them by filename in sub-agent goals
+- Example: If file_pointer has `"original_filename": "rs.jpeg"`, use `attachments: ["rs.jpeg"]`
+
 CRITICAL REMINDERS
 ------------------
 - For acquisition goals (buy/get/order X), the plan MUST include actual purchase steps

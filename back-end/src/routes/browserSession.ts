@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import multer from 'multer';
 import { prisma } from '../lib/prisma';
 import { AuthRequest, authenticate } from '../middleware/auth';
 import {
@@ -8,8 +9,17 @@ import {
   closeSession,
   resumeSession,
   getSession,
-  injectUserCookies
+  injectUserCookies,
+  uploadFileToSession
 } from '../lib/steel';
+
+// Configure multer for file uploads (store in memory)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB max file size
+  }
+});
 
 const router = Router();
 
@@ -209,17 +219,54 @@ router.get('/context/:userId', authenticate, async (req: AuthRequest, res) => {
 router.get('/:sessionId', authenticate, async (req: AuthRequest, res) => {
   try {
     const { sessionId } = req.params;
-    
+
     const session = await getSession(sessionId);
-    
+
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
-    
+
     res.json({ session });
   } catch (error) {
     console.error('❌ Failed to get session:', error);
     res.status(500).json({ error: 'Failed to get session' });
+  }
+});
+
+/**
+ * POST /api/browser-session/:sessionId/files
+ * Upload a file to a Steel browser session.
+ * The file becomes available in the session's VM environment for use with file inputs.
+ */
+router.post('/:sessionId/files', authenticate, upload.single('file'), async (req: AuthRequest, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    console.log(`📎 Uploading file to session ${sessionId}: ${req.file.originalname} (${req.file.size} bytes)`);
+
+    const result = await uploadFileToSession(
+      sessionId,
+      req.file.buffer,
+      req.file.originalname,
+      req.file.mimetype
+    );
+
+    res.json({
+      success: true,
+      path: result.path,
+      size: result.size,
+      filename: req.file.originalname,
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to upload file to session:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to upload file to session'
+    });
   }
 });
 

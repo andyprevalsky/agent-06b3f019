@@ -101,9 +101,10 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  // Find timestamp of last ASSISTANT message - used to clean up orphaned IN_PROGRESS tools
+  // Find timestamp of last ASSISTANT message with text - used to clean up orphaned IN_PROGRESS tools
+  // Exclude empty ASSISTANT messages (e.g., file_pointer relays from sub-agents)
   const lastAssistantTimestamp = sortedMessages
-    .filter(m => m.role === 'ASSISTANT')
+    .filter(m => m.role === 'ASSISTANT' && m.text?.trim())
     .map(m => new Date(m.timestamp).getTime())
     .pop() ?? 0;
 

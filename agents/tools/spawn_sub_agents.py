@@ -5,6 +5,7 @@ from dataclasses import asdict
 from typing import List, Dict, Any, AsyncGenerator
 from datetime import timedelta
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 import httpx
 import structlog
 
@@ -172,6 +173,7 @@ class SpawnSubAgentManager(ToolManager):
                 spawn_sub_agent_activity,
                 args=[user_id, [sub_agent], parent_agent_id, parent_workflow_id, depth, parent_is_paused, parent_model, bus_id],
                 start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
             # 3. Set up child tracking and post initial message
@@ -198,8 +200,8 @@ class SpawnSubAgentManager(ToolManager):
 
             logger.info("✅ Spawned sub-agent, setting up tracking...")
 
-            # Generate unique tool call ID for this sub-agent
-            child_tool_id = workflow.uuid4()
+            # Use the passed tool_call_id for consistent message tracking
+            child_tool_id = tool_call_id
             child_agent_id = child_info["agent_id"]
 
             # Store mapping: agent_id -> tool_call_id

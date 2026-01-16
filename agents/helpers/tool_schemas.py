@@ -67,12 +67,18 @@ class PlannerTask(BaseModel):
     depends_on: List[int] = Field(default_factory=list, description="Indices of tasks this depends on (empty = no deps)")
 
 
+class DependencyEntry(BaseModel):
+    """A single entry in the dependencies graph."""
+    task_idx: str = Field(description="The task index (0-based, as string)")
+    depends_on: List[str] = Field(default_factory=list, description="List of task indices this task depends on")
+
+
 class PlannerResponse(BaseModel):
     """Structured output from the planner LLM."""
     title: str = Field(description="Short plan title")
     content: str = Field(description="Markdown explanation of the plan")
     tasks: List[PlannerTask] = Field(description="List of tasks with dependencies")
-    dependencies_graph: Dict[str, List[str]] = Field(description="Explicit dependency DAG: {'task_idx': ['dep_idx', ...]}")
+    dependencies_graph: List[DependencyEntry] = Field(description="Explicit dependency DAG as list of entries")
     join: Literal["all", "any"] = Field(description="How to combine results: 'all' (AND) or 'any' (OR)")
 
 
@@ -127,7 +133,7 @@ class SubAgentConfig(BaseModel):
     )
     attachments: Optional[List[str]] = Field(
         default=None,
-        description="List of filenames to pass to this sub-agent (must match files attached to parent agent's context)"
+        description="List of filenames to pass to this sub-agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'rs.jpeg'). Do NOT use the file's `id` field or any other format."
     )
 
 
@@ -272,6 +278,10 @@ class SpawnBrowserAgentTool(BaseModel):
         "you MUST use 'file_pointer' or 'list[file_pointer]' as the field type. Using 'str' for file paths will NOT work - "
         "files will not be transferred from the remote browser environment."
     )
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'photo.jpg'). Do NOT use the file's `id` field or any other format."
+    )
 
 
 class SpawnClaudeCodeAgentTool(BaseModel):
@@ -297,6 +307,10 @@ class SpawnClaudeCodeAgentTool(BaseModel):
         "IMPORTANT: If the agent needs to return any FILES (generated images, reports, processed data, etc.), "
         "you MUST use 'file_pointer' or 'list[file_pointer]' as the field type. Using 'str' for file paths will NOT work - "
         "files will not be transferred from the ephemeral E2B sandbox."
+    )
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'data.csv'). Do NOT use the file's `id` field or any other format."
     )
 
 
@@ -833,7 +847,7 @@ __all__ = [
     "MessagePersonTool",
     "SpawnBrowserAgentTool",
     "SpawnClaudeCodeAgentTool",
-    "SpawnSubAgentsTool",
+    "SpawnSubAgentTool",
     "SearchUserNetworkTool",
     "FindAllTool",
     "EnrichTool",

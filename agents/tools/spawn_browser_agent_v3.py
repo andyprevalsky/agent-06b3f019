@@ -26,6 +26,7 @@ from browser_tools.dom_service import DOMService, ActionHistory
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.prompts import build_verifier_prompt
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.attachments import extract_attachments_from_context
 from loop.activity_helper import call_temporal_activity_from_activity
 from config import load_config
 
@@ -480,14 +481,16 @@ async def execute_action(
     dom_service: DOMService,
     action_history: ActionHistory,
     action: Dict[str, Any],
+    available_file_paths: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
-    
+
     Args:
         dom_service: DOMService wrapping browser-use BrowserSession
         action_history: ActionHistory for recording actions
         action: UnifiedAction dict with action, index, coordinates, params, thinking
-        
+        available_file_paths: Dict mapping filename -> remote path for file uploads
+
     Returns:
         Result dict with success, message, and any additional data
     """
@@ -842,7 +845,60 @@ async def execute_action(
                 result={"success": True}
             )
             return {"success": True, "message_to_user": True, "message": message, "reason": reason}
-        
+
+        elif action_name == "upload_file":
+            from browser_use.browser.events import UploadFileEvent
+
+            filename = params.get("filename", "")
+            if not filename:
+                return {"success": False, "error": "Missing 'filename' parameter"}
+
+            # Validate file is available
+            if not available_file_paths or filename not in available_file_paths:
+                available_files = list(available_file_paths.keys()) if available_file_paths else []
+                return {
+                    "success": False,
+                    "error": f"File '{filename}' not available. Available files: {available_files}"
+                }
+
+            if not element:
+                return {"success": False, "error": "upload_file requires an element index for the file input"}
+
+            # Check if it's a file input
+            if not session.is_file_input(element):
+                return {"success": False, "error": f"Element {index} is not a file input (<input type='file'>)"}
+
+            remote_path = available_file_paths[filename]
+
+            # Get coordinates for visual cursor
+            coord_tuple = await dom_service.get_element_coordinates(index)
+            element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
+            if element_coords:
+                await move_visual_cursor(dom_service, element_coords["x"], element_coords["y"])
+
+            # Dispatch UploadFileEvent with the remote path
+            event = session.event_bus.dispatch(UploadFileEvent(node=element, file_path=remote_path))
+            await event
+            await event.event_result(raise_if_any=True, raise_if_none=False)
+
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="upload_file",
+                thinking=thinking,
+                index=index,
+                coordinates=element_coords,
+                params={"filename": filename},
+                result={"success": True}
+            )
+
+            logger.info(f"📎 Uploaded file '{filename}' to element {index}")
+            return {
+                "success": True,
+                "message": f"Successfully uploaded {filename}",
+                "uploaded": filename,
+                "to_index": index
+            }
+
         else:
             return {"success": False, "error": f"Unknown action: {action_name}"}
             
@@ -865,16 +921,39 @@ async def execute_action(
 # BROWSER SYSTEM PROMPT
 # ========================================
 
-def get_browser_system_prompt(goal: str, current_url: str, custom_instructions: str = "") -> str:
-    """Build browser agent system prompt."""
+def get_browser_system_prompt(
+    goal: str,
+    current_url: str,
+    custom_instructions: str = "",
+    available_files: Optional[List[str]] = None
+) -> str:
+    """Build browser agent system prompt.
+
+    Args:
+        goal: The task goal
+        current_url: Current browser URL
+        custom_instructions: Additional instructions
+        available_files: List of filenames available for upload
+    """
     current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+
+    # Build available files section if files are present
+    files_section = ""
+    if available_files:
+        files_section = f"""
+AVAILABLE FILES FOR UPLOAD:
+The following files are available to upload using the upload_file action.
+To upload a file, find a file input element (<input type="file">) and use upload_file with the filename.
+Files: {', '.join(available_files)}
+"""
+
     return f"""You are a browser automation agent. Your goal is to accomplish tasks by interacting with web pages.
 
 Current time: {current_time}
 
 CURRENT GOAL: {goal}
 CURRENT URL: {current_url}
-
+{files_section}
 You will receive:
 1. The current DOM tree with indexed elements like [1] button "Submit", [2] input[type=text], etc.
 2. A screenshot of the current page
@@ -894,6 +973,7 @@ AVAILABLE ACTIONS:
 - select_dropdown: Select an option from a dropdown
 - evaluate: Execute JavaScript
 - extract: Extract structured data from the page
+- upload_file: Upload a file to a file input element (requires filename from available_files)
 - attempt_completion: Signal you believe the task is complete
 - send_message_to_user: Request user assistance
 
@@ -916,7 +996,8 @@ async def spawn_browser_agent_activity_v3(
     session_id: Optional[str] = None,
     cdp_url: Optional[str] = None,
     is_resume: bool = False,
-    output_schema: Optional[Dict[str, Any]] = None
+    output_schema: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
     Browser agent activity using browser-use BrowserSession + Rose API.
@@ -929,6 +1010,7 @@ async def spawn_browser_agent_activity_v3(
 
     Args:
         output_schema: Response schema from parent agent's tool call (required for sub-agents)
+        attachments: List of FilePointer dicts for files to upload to the browser session
     """
     from helpers.llm import check_progress
     from tools.knowledge_base import query_blueprints_activity
@@ -1011,7 +1093,47 @@ async def spawn_browser_agent_activity_v3(
         await dom_service.connect()
         
         logger.info(f"🌐 Connected to browser via CDP")
-        
+
+        # ===== UPLOAD ATTACHMENTS TO STEEL SESSION =====
+        available_file_paths: Dict[str, str] = {}  # filename -> remote path
+        if attachments:
+            logger.info(f"📎 Uploading {len(attachments)} attachments to Steel session")
+            from helpers.attachments import download_from_storage
+
+            for fp in attachments:
+                try:
+                    filename = fp.get("original_filename", "")
+                    storage_path = fp.get("storage_path", "")
+                    if not filename or not storage_path:
+                        logger.warning(f"Skipping invalid attachment: {fp}")
+                        continue
+
+                    # Download file from Supabase Storage
+                    activity.heartbeat(f"Downloading {filename}...")
+                    file_content = await download_from_storage(storage_path)
+
+                    # Upload to Steel session via backend API
+                    activity.heartbeat(f"Uploading {filename} to browser session...")
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.post(
+                            f"{config.backend.api_url}/api/browser-session/{session_id}/files",
+                            headers={"x-api-key": config.backend.api_key or ""},
+                            files={"file": (filename, file_content, fp.get("mime_type", "application/octet-stream"))}
+                        )
+                        if response.status_code in [200, 201]:
+                            upload_result = response.json()
+                            remote_path = upload_result.get("path", f"/tmp/{filename}")
+                            available_file_paths[filename] = remote_path
+                            logger.info(f"📎 Uploaded {filename} -> {remote_path}")
+                        else:
+                            logger.error(f"Failed to upload {filename}: HTTP {response.status_code} - {response.text[:200]}")
+
+                except Exception as e:
+                    logger.error(f"Failed to upload attachment {fp.get('original_filename', '?')}: {e}")
+
+            if available_file_paths:
+                logger.info(f"📎 Available files for browser: {list(available_file_paths.keys())}")
+
         # ===== INJECT VISUAL CURSOR (persists across navigations) =====
         try:
             session = dom_service.session
@@ -1140,7 +1262,10 @@ async def spawn_browser_agent_activity_v3(
                 visited_urls.append(current_url)
             
             # 2. Build system prompt
-            system_prompt = get_browser_system_prompt(goal, current_url, custom_instructions)
+            system_prompt = get_browser_system_prompt(
+                goal, current_url, custom_instructions,
+                available_files=list(available_file_paths.keys()) if available_file_paths else None
+            )
             
             # 3. Build enriched task with user context
             enriched_task = goal
@@ -1548,7 +1673,15 @@ Based on this feedback, I need to continue working on the task and address the i
                 else:
                     title_progress = f"Selecting '{value}'..."
                     title_done = f"Selected '{value}'"
-            
+            elif action_name == "upload_file":
+                filename = unified_action.get("params", {}).get("filename", "file")
+                if element_desc:
+                    title_progress = f"Uploading {filename} to {element_desc}"
+                    title_done = f"Uploaded {filename} to {element_desc}"
+                else:
+                    title_progress = f"Uploading {filename}..."
+                    title_done = f"Uploaded {filename}"
+
             # Prepend model name to title_done for visibility (dev only)
             # if config.environment != "production":
             #     title_done = f"[{model_short}] {title_done}"
@@ -1562,7 +1695,7 @@ Based on this feedback, I need to continue working on the task and address the i
             )
             
             # Execute action
-            result = await execute_action(dom_service, action_history, unified_action)
+            result = await execute_action(dom_service, action_history, unified_action, available_file_paths)
             
             # Post FINISHED - use action_name for icon mapping
             if result.get("success", True):
@@ -1758,10 +1891,37 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         """Spawn browser agent with browser-use + Rose API."""
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")  # Response schema from parent's tool call
+        requested_attachments = tool_call.get("attachments")  # List of filenames from tool call
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
-        logger.info("Browser agent starting (v3)", goal=goal, has_output_schema=output_schema is not None)
+        # Resolve requested attachments from workflow context
+        # TODO: Browser agent attachment support - files need to be made accessible via URL
+        attachments = []
+        if requested_attachments and hasattr(workflow_instance, 'context'):
+            context_attachments = extract_attachments_from_context(workflow_instance.context)
+            filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
+
+            for filename in requested_attachments:
+                if filename in filename_to_pointer:
+                    fp = filename_to_pointer[filename]
+                    attachments.append({
+                        "id": fp.id,
+                        "storage_path": fp.storage_path,
+                        "original_filename": fp.original_filename,
+                        "mime_type": fp.mime_type,
+                        "size_bytes": fp.size_bytes,
+                        "created_at": fp.created_at,
+                    })
+                else:
+                    logger.warning(
+                        "[BrowserAgent] Attachment not found in context",
+                        agent_id=agent_id,
+                        filename=filename,
+                        available_files=list(filename_to_pointer.keys())
+                    )
+
+        logger.info("Browser agent starting (v3)", goal=goal, has_output_schema=output_schema is not None, num_attachments=len(attachments))
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -1771,14 +1931,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         )
 
         try:
-            # Start activity - no retry policy, let orchestrator agent decide to retry
-            # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema
+            # Start activity with limited retries (expensive/long-running)
+            # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema, attachments
             activity_handle = workflow.start_activity(
                 spawn_browser_agent_activity_v3,
-                args=[user_id, agent_id, goal, tool_call_id, None, None, None, False, output_schema],
+                args=[user_id, agent_id, goal, tool_call_id, None, None, None, False, output_schema, attachments if attachments else None],
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=30),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
             # Poll for pause while activity runs

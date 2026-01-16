@@ -2212,7 +2212,7 @@ async function raceModels(
       
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ ${model} failed: ${response.status} - ${errorText.slice(0, 100)}`);
+        console.error(`❌ ${model} failed: ${response.status} - ${errorText}`);
         return null;
       }
       
@@ -2665,6 +2665,7 @@ async function logUsage(supabase: any, apiKeyId: string, userId: string, input: 
   const { error } = await supabase
     .from('RoseApiKeyLog')
     .insert({
+      id: crypto.randomUUID(),
       apiKeyId,
       userId,
       input,

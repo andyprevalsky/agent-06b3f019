@@ -37,12 +37,22 @@ async def execute_browser_tool(
     dom_service: DOMService,
     action_history: ActionHistory,
     extract_model: str = "openai/gpt-4.1-mini",
+    available_file_paths: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Execute a browser automation tool using index-based selection."""
+    """Execute a browser automation tool using index-based selection.
+
+    Args:
+        tool_name: Name of the tool to execute
+        tool_args: Arguments for the tool
+        dom_service: DOM service for element interaction
+        action_history: Action history for recording actions
+        extract_model: Model to use for extract tool
+        available_file_paths: Dict mapping filename -> remote path for file uploads
+    """
     session = dom_service.session
     if not session:
         return {"success": False, "error": "Browser not connected"}
-    
+
     try:
         if tool_name == "click":
             return await _execute_click(dom_service, action_history, tool_args)
@@ -74,7 +84,7 @@ async def execute_browser_tool(
             return {"success": True, "attempt_completion": True}
         elif tool_name == "send_message_to_user":
             return {
-                "success": True, 
+                "success": True,
                 "message_to_user": True,
                 "message": tool_args.get("message", ""),
                 "reason": tool_args.get("reason", "other")
@@ -86,6 +96,9 @@ async def execute_browser_tool(
             return await _execute_close_tab(dom_service, tool_args)
         elif tool_name == "open_new_tab":
             return await _execute_open_new_tab(dom_service, tool_args)
+        # File upload
+        elif tool_name == "upload_file":
+            return await _execute_upload_file(dom_service, action_history, tool_args, available_file_paths)
         else:
             return {"success": False, "error": f"Unknown tool: {tool_name}"}
             
@@ -635,23 +648,109 @@ async def _execute_close_tab(dom_service: DOMService, args: Dict[str, Any]) -> D
 async def _execute_open_new_tab(dom_service: DOMService, args: Dict[str, Any]) -> Dict[str, Any]:
     """Open a new tab and optionally navigate to a URL."""
     from browser_use.browser.events import NavigateToUrlEvent
-    
+
     url = args.get("url", "about:blank")
     session = dom_service.session
-    
+
     try:
         # NavigateToUrlEvent with new_tab=True creates a new tab
         event = session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
         await event
-        
+
         # Get the new tab's target_id
         new_target_id = session.agent_focus_target_id
-        
+
         return {
-            "success": True, 
-            "opened_url": url, 
+            "success": True,
+            "opened_url": url,
             "new_tab_id": new_target_id[-4:] if new_target_id else None
         }
     except Exception as e:
         logger.error(f"Open new tab error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ============================================================================
+# File Upload Tool Implementation
+# ============================================================================
+
+
+async def _execute_upload_file(
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    args: Dict[str, Any],
+    available_file_paths: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Upload a file to a file input element using UploadFileEvent.
+
+    Args:
+        dom_service: DOM service for element interaction
+        action_history: Action history for recording actions
+        args: Tool arguments with 'index' and 'filename'
+        available_file_paths: Dict mapping filename -> remote file path in Steel session
+    """
+    from browser_use.browser.events import UploadFileEvent
+
+    index = args.get("index")
+    filename = args.get("filename")
+
+    if index is None:
+        return {"success": False, "error": "Missing 'index' parameter"}
+    if not filename:
+        return {"success": False, "error": "Missing 'filename' parameter"}
+
+    # Validate file is available
+    if not available_file_paths or filename not in available_file_paths:
+        available_files = list(available_file_paths.keys()) if available_file_paths else []
+        return {
+            "success": False,
+            "error": f"File '{filename}' not available. Available files: {available_files}"
+        }
+
+    remote_path = available_file_paths[filename]
+
+    session = dom_service.session
+    element = await dom_service.get_element_by_index(index)
+
+    if not element:
+        return {"success": False, "error": f"Element with index {index} not found"}
+
+    # Check if it's a file input
+    if not session.is_file_input(element):
+        return {"success": False, "error": f"Element {index} is not a file input (<input type='file'>)"}
+
+    try:
+        # Dispatch UploadFileEvent with the remote path
+        event = session.event_bus.dispatch(UploadFileEvent(node=element, file_path=remote_path))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
+
+        # Record the action
+        coord_tuple = await dom_service.get_element_coordinates(index)
+        coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
+        await action_history.record_action(
+            dom_service=dom_service,
+            action="upload_file",
+            index=index,
+            coordinates=coords,
+            params={"filename": filename},
+            result={"success": True}
+        )
+
+        logger.info(f"📎 Uploaded file '{filename}' to element {index}")
+        return {
+            "success": True,
+            "uploaded": filename,
+            "to_index": index,
+            "message": f"Successfully uploaded {filename}"
+        }
+    except Exception as e:
+        await action_history.record_action(
+            dom_service=dom_service,
+            action="upload_file",
+            index=index,
+            params={"filename": filename},
+            result={"success": False, "error": str(e)}
+        )
+        logger.error(f"Upload file error: {e}")
         return {"success": False, "error": str(e)}

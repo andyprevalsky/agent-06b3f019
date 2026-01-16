@@ -92,6 +92,22 @@ def validate_dependencies(tasks: List[str], deps: Dict[str, List[str]]) -> Optio
     return None  # Valid
 
 
+def _convert_dependencies_list_to_dict(deps_list: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """
+    Convert dependencies_graph from list format to dict format.
+
+    Input:  [{"task_idx": "0", "depends_on": ["1", "2"]}, ...]
+    Output: {"0": ["1", "2"], ...}
+    """
+    if not deps_list:
+        return {}
+    return {
+        entry.get("task_idx", ""): entry.get("depends_on", [])
+        for entry in deps_list
+        if entry.get("task_idx")
+    }
+
+
 def _get_planner_tools_description() -> str:
     """Get description of tools the planner can assign to tasks."""
     lines = []
@@ -114,7 +130,9 @@ def _validate_planner_result(planner_result: Dict[str, Any]) -> Optional[str]:
     """
     task_objects = planner_result.get("tasks", [])
     tasks = [t.get("goal", "") for t in task_objects]
-    dependencies = planner_result.get("dependencies_graph", {})
+    # Convert list format to dict format
+    deps_list = planner_result.get("dependencies_graph", [])
+    dependencies = _convert_dependencies_list_to_dict(deps_list)
     join = planner_result.get("join", "all")
 
     # Validate tasks
@@ -317,7 +335,8 @@ class SetPlanManager(ToolManager):
         task_objects = planner_result["tasks"]
         # Store full task objects with goal and tool_name (for DAG executor)
         tasks = [{"goal": t["goal"], "tool_name": t["tool_name"]} for t in task_objects]
-        deps = planner_result["dependencies_graph"] or {}
+        # Convert list format to dict format
+        deps = _convert_dependencies_list_to_dict(planner_result.get("dependencies_graph", []))
         title = planner_result["title"]
         content = planner_result["content"]
         join = planner_result["join"]

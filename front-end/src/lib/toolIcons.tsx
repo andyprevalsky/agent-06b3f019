@@ -39,6 +39,7 @@ import {
   Terminal,
   Brain,
   FileEdit,
+  Upload,
   type LucideIcon
 } from 'lucide-react';
 
@@ -158,6 +159,9 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'switch_tab': Layers,
   'close_tab': X,
   'open_new_tab': Plus,
+
+  // File upload
+  'upload_file': Upload,
   
   // Claude Code action_type mappings (from spawn_claude_code_agent)
   'spawn_claude_code_agent': Terminal,
@@ -195,6 +199,7 @@ const DISPLAY_PREFIX_ICONS: [string, LucideIcon][] = [
   ['Searching bazaar', Search],
   ['Paying for', CheckCircle],
   ['Requesting signup', AlertCircle],
+  ['Uploading', Upload],
 ];
 
 /**

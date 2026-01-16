@@ -48,6 +48,14 @@ When defining output_schema fields, if the output is a FILE (image, document, PD
 - NEVER use type='str' for file paths - files will NOT be transferred!
 The file_pointer type enables automatic file transfer from remote environments.
 
+FILE ATTACHMENTS - HOW TO PASS FILES TO SUB-AGENTS:
+When using spawn_sub_agent, spawn_claude_code_agent, or spawn_browser_agent:
+- Sub-agents do NOT automatically inherit files from your context
+- You MUST pass files via the `attachments` parameter
+- Use the EXACT `original_filename` value from file_pointer objects in your context
+- Example: if you see `"original_filename": "rs.jpeg"` in a file_pointer, use `attachments: ["rs.jpeg"]`
+- Do NOT use the file's `id` field, storage_path, or any `file:` prefix format
+
 Execute the task now by calling {tool_name} with the correct parameters."""
 
 
