@@ -22,17 +22,23 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * AGENT SELECTION STATES:
- * [NO_AGENT] <-- selectedAgentId: null, gate: open
+ * [NO_AGENT] <-- selectedAgentId: null, gate: open, URL: no agent-id param
  *     |
- *     v (setSelectedAgentId) → CLOSE GATE → KILL → FLUSH
- * [LOADING_AGENT] <-- fetch agent detail + subscribe, gate: closed
+ *     v (setSelectedAgentId) → SYNC URL → CLOSE GATE → KILL → FLUSH
+ * [LOADING_AGENT] <-- fetch agent detail + subscribe, gate: closed, URL: ?agent-id=X
  *     |
  *     v (subscription + fetch complete) → OPEN GATE
- * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[], gate: open
+ * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[], gate: open, URL: ?agent-id=X
  *     |
- *     | (change agent) → CLOSE GATE first, prevents cross-agent contamination
+ *     | (change agent) → SYNC URL → CLOSE GATE first, prevents cross-agent contamination
  *     v
  * [NO_AGENT] or [LOADING_AGENT]
+ *
+ * URL SYNC (bidirectional):
+ * - On mount: URL ?agent-id=X → selectedAgentId = X
+ * - On setSelectedAgentId(X): selectedAgentId = X → URL ?agent-id=X
+ * - On setSelectedAgentId(null): selectedAgentId = null → URL removes agent-id param
+ * - Refresh preserves agent selection via URL
  *
  * REALTIME STREAMING:
  * [IDLE] --> subscribed to Supabase realtime channel
@@ -274,10 +280,6 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
     // If selectedAgentId was initialized from URL and user is authenticated, load the agent
     if (selectedAgentId && canSubscribe && !agent) {
       loadAgentDetail(selectedAgentId);
-      // Clear the query param from URL after reading it
-      const url = new URL(window.location.href);
-      url.searchParams.delete('agent-id');
-      window.history.replaceState({}, '', url.toString());
     }
   }, [canSubscribe, selectedAgentId, agent, loadAgentDetail]);
 
@@ -287,6 +289,17 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
   // ═══════════════════════════════════════════════════════════════════════════
 
   const setSelectedAgentId = useCallback((id: string | null) => {
+    // ═══════════════════════════════════════════════════════════════════════
+    // 0. SYNC URL - update query param to match selected agent
+    // ═══════════════════════════════════════════════════════════════════════
+    const url = new URL(window.location.href);
+    if (id) {
+      url.searchParams.set('agent-id', id);
+    } else {
+      url.searchParams.delete('agent-id');
+    }
+    window.history.replaceState({}, '', url.toString());
+
     // ═══════════════════════════════════════════════════════════════════════
     // 1. CLOSE GATE - handlers immediately start discarding messages
     // ═══════════════════════════════════════════════════════════════════════
