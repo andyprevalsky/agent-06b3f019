@@ -29,6 +29,7 @@ from helpers.file_resolution import resolve_file_pointers_from_extracted, transf
 from helpers.attachments import extract_attachments_from_context
 from loop.activity_helper import call_temporal_activity_from_activity
 from config import load_config
+from helpers.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 
@@ -98,7 +99,7 @@ async def save_browser_action_message(
                 }
             )
     except Exception as e:
-        logger.error("Failed to save browser action message", error=str(e))
+        logger.error("Failed to save browser action message", error=extract_error_message(e))
 
 
 async def save_browser_assistant_message(
@@ -125,7 +126,7 @@ async def save_browser_assistant_message(
                 }
             )
     except Exception as e:
-        logger.error("Failed to save browser assistant message", error=str(e))
+        logger.error("Failed to save browser assistant message", error=extract_error_message(e))
 
 
 # ========================================
@@ -214,7 +215,7 @@ def decrypt_payment_info(encrypted_data: str, decryption_key_b64: str) -> Option
         
         return json.loads(plaintext.decode('utf-8'))
     except Exception as e:
-        logger.error("Failed to decrypt payment info", error=str(e))
+        logger.error("Failed to decrypt payment info", error=extract_error_message(e))
         return None
 
 
@@ -1840,7 +1841,7 @@ Based on this feedback, I need to continue working on the task and address the i
         }
 
     except Exception as e:
-        logger.error("Browser automation failed", error=str(e))
+        logger.error("Browser automation failed", error=extract_error_message(e))
 
         # Cleanup
         if dom_service:
@@ -1863,7 +1864,7 @@ Based on this feedback, I need to continue working on the task and address the i
         error_context = f"Failed during: {action_summary[-1] if action_summary else 'initialization'}"
         error_message = build_context_summary(
             success=False,
-            close_reasoning=str(e),
+            close_reasoning=extract_error_message(e),
             visited_urls=visited_urls,
             reasoning_messages=reasoning_messages,
             action_summary=action_summary,

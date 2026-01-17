@@ -5,6 +5,7 @@ import {
   subscribeToBus,
   unsubscribe,
   type AgentStateChangedPayload,
+  type FailureContext,
 } from '@/lib/realtime';
 
 // Re-export the type with frontend-friendly naming
@@ -18,6 +19,7 @@ export interface TreeNode {
   messageCount: number;
   outputSchema?: OutputSchema;
   structuredOutput?: Record<string, unknown>;
+  failureContext?: FailureContext;
 }
 
 // Convert API response to frontend format
@@ -148,6 +150,7 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
             messageCount: data.messageCount || 0,
             outputSchema: data.outputSchema,
             structuredOutput: data.structuredOutput,
+            failureContext: data.failureContext,
           };
 
           console.log('[useAgentTree] Updating node:', updatedNode);
@@ -246,6 +249,7 @@ export function filterTreeBySpawn(
  */
 export function getCircleState(node: TreeNode): string {
   if (node.status === 'COMPLETED') return '●';
+  if (node.status === 'FAILED') return '✗';
   if (node.progress >= 0.7) return '◕';
   if (node.progress > 0 && node.progress < 0.3) return '◔';
   if (node.messageCount > 0 && node.progress === 0) return '◑';
@@ -257,6 +261,8 @@ export function getCircleState(node: TreeNode): string {
  */
 export function getStatusText(node: TreeNode): string {
   if (node.status === 'COMPLETED') return '';
+  if (node.status === 'FAILED') return 'failed';
+  if (node.status === 'PAUSED') return 'paused';
   if (node.status === 'STARTING_UP') return 'spinning up...';
   if (node.messageCount === 0) return 'spinning up...';
   if (node.toolsInUse.length === 0) return 'thinking...';

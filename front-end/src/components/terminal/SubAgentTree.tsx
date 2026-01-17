@@ -23,7 +23,7 @@
  */
 
 import { useMemo, useState, memo } from 'react';
-import { ChevronRight, FileJson } from 'lucide-react';
+import { ChevronRight, FileJson, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   useAgentTree,
@@ -33,6 +33,7 @@ import {
   TreeNode,
 } from '@/hooks/useAgentTree';
 import { OutputSchema, OutputSchemaField, FilePointer } from '@/lib/api';
+import { FailureContext } from '@/lib/realtime';
 import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 
 // Format field type for display
@@ -97,13 +98,16 @@ const TREE_VERT = '│';     // U+2502 - vertical continuation
 interface OutputChipProps {
   schema?: OutputSchema;
   output?: Record<string, unknown>;
+  isPartial?: boolean;  // True for failed agents with partial data
+  failureReason?: string;  // Verifier reasoning for why not complete
 }
 
 /**
  * Chip that shows output schema and values on hover for agents.
- * Shows expected types from schema alongside actual extracted values (if completed).
+ * Shows expected types from schema alongside actual extracted values.
+ * For failed agents, shows partial data with a warning indicator.
  */
-function OutputChip({ schema, output }: OutputChipProps) {
+function OutputChip({ schema, output, isPartial, failureReason }: OutputChipProps) {
   const hasSchema = schema?.fields && schema.fields.length > 0;
   const hasOutput = output && Object.keys(output).length > 0;
 
@@ -114,11 +118,27 @@ function OutputChip({ schema, output }: OutputChipProps) {
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="cursor-help flex-shrink-0 inline-flex items-center self-center">
-            <FileJson className="h-4 w-4 text-gray-400" />
+            <FileJson className={cn(
+              "h-4 w-4",
+              isPartial ? "text-amber-500" : "text-gray-400"
+            )} />
           </span>
         </TooltipTrigger>
         <TooltipContent side="right" className="max-w-sm">
           <div className="text-xs space-y-1.5">
+            {/* Header for partial data */}
+            {isPartial && (
+              <div className="pb-1 mb-1 border-b border-border/60">
+                <div className="font-medium text-amber-600 dark:text-amber-400">
+                  ⚠️ Partial Data (Task Failed)
+                </div>
+                {failureReason && (
+                  <div className="text-muted-foreground text-[11px] mt-0.5">
+                    {failureReason.length > 150 ? failureReason.slice(0, 147) + '...' : failureReason}
+                  </div>
+                )}
+              </div>
+            )}
             {hasSchema ? (
               // Show schema fields with their expected types and actual values
               schema.fields.map((field) => {
@@ -131,7 +151,10 @@ function OutputChip({ schema, output }: OutputChipProps) {
                       <span className="text-muted-foreground text-[10px]">({formatFieldType(field.type)})</span>
                     </div>
                     {hasValue ? (
-                      <span className="text-foreground pl-2">
+                      <span className={cn(
+                        "pl-2",
+                        isPartial ? "text-amber-600 dark:text-amber-400" : "text-foreground"
+                      )}>
                         {formatValue(value, field.type)}
                       </span>
                     ) : (
@@ -145,11 +168,128 @@ function OutputChip({ schema, output }: OutputChipProps) {
               Object.entries(output || {}).map(([key, value]) => (
                 <div key={key}>
                   <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
-                  <span className="text-muted-foreground">
+                  <span className={cn(
+                    isPartial ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"
+                  )}>
                     {formatValue(value)}
                   </span>
                 </div>
               ))
+            )}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+interface FailureChipProps {
+  failureContext?: FailureContext;
+}
+
+/**
+ * Chip that shows failure details on hover for failed agents.
+ * Shows progress estimate, verifier reasoning, trajectory, and partial data.
+ */
+function FailureChip({ failureContext }: FailureChipProps) {
+  if (!failureContext) return null;
+
+  const { trajectory, progress_estimate, verifier_reasoning, partial_structured_response, last_reasoning, last_plan, steps_taken } = failureContext;
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="cursor-help flex-shrink-0 inline-flex items-center self-center">
+            <AlertCircle className="h-4 w-4 text-red-500" />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="right" className="max-w-md">
+          <div className="text-xs space-y-2">
+            {/* Progress */}
+            <div>
+              <span className="font-medium text-red-500">Progress:</span>{' '}
+              <span>{progress_estimate}</span>
+            </div>
+
+            {/* Verifier reasoning */}
+            {verifier_reasoning && (
+              <div>
+                <div className="font-medium text-muted-foreground">Why not complete:</div>
+                <div className="text-foreground pl-2 text-[11px]">{verifier_reasoning}</div>
+              </div>
+            )}
+
+            {/* Last reasoning */}
+            {last_reasoning && (
+              <div>
+                <div className="font-medium text-muted-foreground">Last thought:</div>
+                <div className="text-foreground pl-2 text-[11px] line-clamp-3">{last_reasoning}</div>
+              </div>
+            )}
+
+            {/* Plan */}
+            {last_plan && last_plan.length > 0 && (
+              <div>
+                <div className="font-medium text-muted-foreground">Plan was:</div>
+                <ul className="pl-2 text-[11px]">
+                  {last_plan.slice(0, 3).map((goal, i) => (
+                    <li key={i} className="truncate">• {goal}</li>
+                  ))}
+                  {last_plan.length > 3 && (
+                    <li className="text-muted-foreground">...and {last_plan.length - 3} more</li>
+                  )}
+                </ul>
+              </div>
+            )}
+
+            {/* Trajectory */}
+            {trajectory && trajectory.length > 0 && (
+              <div>
+                <div className="font-medium text-muted-foreground">
+                  Steps ({steps_taken}):
+                </div>
+                <ul className="pl-2 text-[11px]">
+                  {trajectory.slice(-5).map((step, i) => (
+                    <li key={i} className={cn(
+                      "flex items-center gap-1",
+                      step.success ? "text-green-600 dark:text-green-400" : "text-red-500"
+                    )}>
+                      <span>{step.success ? '✓' : '✗'}</span>
+                      <span className="truncate">{step.tool_name}</span>
+                      {step.error_message && (
+                        <span className="text-muted-foreground truncate">
+                          : {step.error_message.slice(0, 30)}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                  {trajectory.length > 5 && (
+                    <li className="text-muted-foreground">...{trajectory.length - 5} earlier steps</li>
+                  )}
+                </ul>
+              </div>
+            )}
+
+            {/* Partial structured response */}
+            {partial_structured_response && Object.keys(partial_structured_response).length > 0 && (
+              <div>
+                <div className="font-medium text-muted-foreground">Partial data extracted:</div>
+                <ul className="pl-2 text-[11px]">
+                  {Object.entries(partial_structured_response).slice(0, 3).map(([key, value]) => (
+                    <li key={key}>
+                      <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
+                      <span className="text-muted-foreground">
+                        {typeof value === 'string' ? value.slice(0, 50) : JSON.stringify(value).slice(0, 50)}
+                        {(typeof value === 'string' && value.length > 50) || (typeof value !== 'string' && JSON.stringify(value).length > 50) ? '...' : ''}
+                      </span>
+                    </li>
+                  ))}
+                  {Object.keys(partial_structured_response).length > 3 && (
+                    <li className="text-muted-foreground">...and {Object.keys(partial_structured_response).length - 3} more</li>
+                  )}
+                </ul>
+              </div>
             )}
           </div>
         </TooltipContent>
@@ -287,14 +427,18 @@ const SubAgentTree = memo(function SubAgentTree({
   // If depth >= 2, show collapsed view (leaf nodes + intermediary summary)
   const shouldCollapse = maxDepth >= 2 && !showAllIntermediaries;
 
-  // Check if all leaf nodes are completed
-  const allCompleted = leafNodes.length > 0 && leafNodes.every((node) => node.status === 'COMPLETED');
-  const clusterCircle = allCompleted ? '●' : '◑';
-  const clusterTitle = allCompleted ? 'All tasks completed' : 'Delegating tasks';
+  // Check if all leaf nodes are in a terminal state (COMPLETED or FAILED)
+  const isTerminal = (node: TreeNode) => node.status === 'COMPLETED' || node.status === 'FAILED';
+  const allTerminal = leafNodes.length > 0 && leafNodes.every(isTerminal);
+  const anyFailed = leafNodes.some((node) => node.status === 'FAILED');
+  const clusterCircle = allTerminal ? (anyFailed ? '✗' : '●') : '◑';
+  const clusterTitle = allTerminal
+    ? (anyFailed ? 'Some tasks failed' : 'All tasks completed')
+    : 'Delegating tasks';
 
   // Header line component (constant across both views)
   const headerLine = (
-    <div className={cn("flex items-center gap-1 py-0.5", allCompleted ? "text-gray-500" : "text-foreground")}>
+    <div className={cn("flex items-center gap-1 py-0.5", allTerminal ? (anyFailed ? "text-red-500" : "text-gray-500") : "text-foreground")}>
       {/* Circle - filled when all sub-agents complete, half-filled otherwise */}
       <span className="w-4 text-center select-none">{clusterCircle}</span>
       {/* Title */}
@@ -310,9 +454,9 @@ const SubAgentTree = memo(function SubAgentTree({
     return text.length > 80 ? text.slice(0, 77) + '...' : text;
   });
 
-  // Split leaf nodes into active and completed
-  const activeLeafNodes = leafNodes.filter((node) => node.status !== 'COMPLETED');
-  const completedLeafNodes = leafNodes.filter((node) => node.status === 'COMPLETED');
+  // Split leaf nodes into active and terminal (completed or failed)
+  const activeLeafNodes = leafNodes.filter((node) => !isTerminal(node));
+  const terminalLeafNodes = leafNodes.filter(isTerminal);
 
   if (shouldCollapse) {
     // Collapsed view:
@@ -322,16 +466,16 @@ const SubAgentTree = memo(function SubAgentTree({
     // └─ ◑ X intermediary agents
     //    ├─ active leaf 1
     //    ├─ active leaf 2
-    //    └─ ● X completed agents (collapsible, only if > 1 completed)
+    //    └─ ● X finished agents (collapsible, only if > 1 terminal)
 
     // Determine which leaves to show
-    const showCompletedSummary = completedLeafNodes.length > 1 && !showCompletedNodes;
-    const leavesToShow = showCompletedSummary ? activeLeafNodes : leafNodes;
+    const showTerminalSummary = terminalLeafNodes.length > 1 && !showCompletedNodes;
+    const leavesToShow = showTerminalSummary ? activeLeafNodes : leafNodes;
 
     return (
       <div className="font-mono text-sm">
         {/* Header */}
-        <div className={cn("py-0.5", allCompleted ? "text-gray-500" : "text-foreground")}>
+        <div className={cn("py-0.5", allTerminal ? "text-gray-500" : "text-foreground")}>
           <div className="flex items-center gap-1">
             <span className="w-4 flex-shrink-0 text-center select-none">{clusterCircle}</span>
             <span>{clusterTitle}</span>
@@ -347,14 +491,14 @@ const SubAgentTree = memo(function SubAgentTree({
         {intermediaryNodes.length > 0 && (
           <IntermediaryLine
             count={intermediaryNodes.length}
-            allCompleted={allCompleted}
+            allTerminal={allTerminal}
             onShowAll={() => setShowAllIntermediaries(true)}
           />
         )}
         {/* Active leaf nodes */}
         {leavesToShow.map((node, index) => {
           const isLastLeaf = index === leavesToShow.length - 1;
-          const isLast = isLastLeaf && !showCompletedSummary;
+          const isLast = isLastLeaf && !showTerminalSummary;
           return (
             <LeafNodeRow
               key={node.agentId}
@@ -366,14 +510,14 @@ const SubAgentTree = memo(function SubAgentTree({
           );
         })}
         {/* Completed agents summary line (only when > 1 completed and not expanded) */}
-        {showCompletedSummary && (
+        {showTerminalSummary && (
           <CompletedLine
-            count={completedLeafNodes.length}
+            count={terminalLeafNodes.length}
             onShowAll={() => setShowCompletedNodes(true)}
           />
         )}
         {/* Collapse button when showing all completed */}
-        {completedLeafNodes.length > 1 && showCompletedNodes && (
+        {terminalLeafNodes.length > 1 && showCompletedNodes && (
           <div
             className="flex items-center gap-1 py-0.5 cursor-pointer text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
             onClick={() => setShowCompletedNodes(false)}
@@ -382,7 +526,7 @@ const SubAgentTree = memo(function SubAgentTree({
             <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none flex-shrink-0">
               {TREE_LAST}
             </span>
-            <span className="text-xs">← Collapse {completedLeafNodes.length} completed</span>
+            <span className="text-xs">← Collapse {terminalLeafNodes.length} finished</span>
           </div>
         )}
       </div>
@@ -459,7 +603,8 @@ function TreeNodeRow({
       <div
         className={cn(
           'flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 rounded',
-          node.status === 'COMPLETED' && 'text-gray-500'
+          node.status === 'COMPLETED' && 'text-gray-500',
+          node.status === 'FAILED' && 'text-red-500'
         )}
         onClick={handleClick}
         onMouseEnter={() => setIsHovered(true)}
@@ -473,10 +618,23 @@ function TreeNodeRow({
         {/* Circle progress state */}
         <span className="w-4 text-center select-none transition-all duration-300">{circle}</span>
 
-        {/* Output chip for agents with schema (shows output values when completed) */}
+        {/* Output chip for agents with schema (shows output values when completed, partial data when failed) */}
         {node.outputSchema?.fields?.length ? (
-          <OutputChip schema={node.outputSchema} output={node.structuredOutput} />
+          <OutputChip
+            schema={node.outputSchema}
+            output={node.status === 'FAILED'
+              ? node.failureContext?.partial_structured_response || undefined
+              : node.structuredOutput
+            }
+            isPartial={node.status === 'FAILED'}
+            failureReason={node.failureContext?.verifier_reasoning}
+          />
         ) : null}
+
+        {/* Failure chip for failed agents without schema (shows failure details on hover) */}
+        {node.status === 'FAILED' && node.failureContext && !node.outputSchema?.fields?.length && (
+          <FailureChip failureContext={node.failureContext} />
+        )}
 
         {/* Goal with emoji */}
         <span className="flex-1 truncate">
@@ -487,7 +645,7 @@ function TreeNodeRow({
           )}
           <span
             className={cn(
-              node.status !== 'COMPLETED' &&
+              node.status !== 'COMPLETED' && node.status !== 'FAILED' &&
                 'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent'
             )}
           >
@@ -530,7 +688,7 @@ function TreeNodeRow({
 
 interface IntermediaryLineProps {
   count: number;
-  allCompleted: boolean;
+  allTerminal: boolean;
   onShowAll: () => void;
 }
 
@@ -538,9 +696,9 @@ interface IntermediaryLineProps {
  * Clickable line showing collapsed intermediary agents.
  * Shows "X intermediary agents" normally, "Show All X Intermediary Agents" on hover.
  */
-function IntermediaryLine({ count, allCompleted, onShowAll }: IntermediaryLineProps) {
+function IntermediaryLine({ count, allTerminal, onShowAll }: IntermediaryLineProps) {
   const [isHovered, setIsHovered] = useState(false);
-  const circle = allCompleted ? '●' : '◑';
+  const circle = allTerminal ? '●' : '◑';
 
   return (
     <div
@@ -577,8 +735,8 @@ interface CompletedLineProps {
 }
 
 /**
- * Clickable line showing collapsed completed agents.
- * Shows "X completed agents" normally, "Show All X Completed Agents" on hover.
+ * Clickable line showing collapsed terminal agents (completed or failed).
+ * Shows "X finished agents" normally, "Show All X Finished Agents" on hover.
  */
 function CompletedLine({ count, onShowAll }: CompletedLineProps) {
   const [isHovered, setIsHovered] = useState(false);
@@ -596,14 +754,14 @@ function CompletedLine({ count, onShowAll }: CompletedLineProps) {
         {TREE_LAST}
       </span>
 
-      {/* Filled circle (completed) */}
+      {/* Filled circle (finished) */}
       <span className="w-4 flex-shrink-0 text-center select-none">●</span>
 
       {/* Text changes on hover */}
       <span className="text-xs">
         {isHovered
-          ? `Show All ${count} Completed Agent${count !== 1 ? 's' : ''}`
-          : `${count} completed agent${count !== 1 ? 's' : ''}`}
+          ? `Show All ${count} Finished Agent${count !== 1 ? 's' : ''}`
+          : `${count} finished agent${count !== 1 ? 's' : ''}`}
       </span>
 
       {/* Chevron always visible, fixed size */}
@@ -642,7 +800,8 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
       <div
         className={cn(
           'flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 rounded',
-          node.status === 'COMPLETED' && 'text-gray-500'
+          node.status === 'COMPLETED' && 'text-gray-500',
+          node.status === 'FAILED' && 'text-red-500'
         )}
         onClick={handleClick}
         onMouseEnter={() => setIsHovered(true)}
@@ -656,10 +815,23 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
         {/* Circle progress state */}
         <span className="w-4 flex-shrink-0 text-center select-none transition-all duration-300">{circle}</span>
 
-        {/* Output chip for agents with schema (shows output values when completed) */}
+        {/* Output chip for agents with schema (shows output values when completed, partial data when failed) */}
         {node.outputSchema?.fields?.length ? (
-          <OutputChip schema={node.outputSchema} output={node.structuredOutput} />
+          <OutputChip
+            schema={node.outputSchema}
+            output={node.status === 'FAILED'
+              ? node.failureContext?.partial_structured_response || undefined
+              : node.structuredOutput
+            }
+            isPartial={node.status === 'FAILED'}
+            failureReason={node.failureContext?.verifier_reasoning}
+          />
         ) : null}
+
+        {/* Failure chip for failed agents without schema (shows failure details on hover) */}
+        {node.status === 'FAILED' && node.failureContext && !node.outputSchema?.fields?.length && (
+          <FailureChip failureContext={node.failureContext} />
+        )}
 
         {/* Goal with emoji - truncate text to 50 chars */}
         <span>
@@ -670,7 +842,7 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
           )}
           <span
             className={cn(
-              node.status !== 'COMPLETED' &&
+              node.status !== 'COMPLETED' && node.status !== 'FAILED' &&
                 'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent'
             )}
           >

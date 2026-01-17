@@ -36,6 +36,7 @@ export async function broadcastAssistantStream(
     topic: `agent:${agentId}`,
     event: 'ASSISTANT_STREAM',
     payload: {
+      agentId: agentId,
       stream_id: streamId,  // snake_case to match Python
       delta: delta,
       done: done,
@@ -74,6 +75,7 @@ export async function broadcastToolEvent(
     topic: `agent:${agentId}`,
     event: 'TOOL_STREAM',
     payload: {
+      agentId: agentId,
       stream_id: streamId,
       tool_call_id: toolCallId,
       tool_name: toolName,
@@ -123,6 +125,7 @@ export async function broadcastMessageInsert(
     topic: `agent:${agentId}`,
     event: 'INSERT',
     payload: {
+      agentId: agentId,
       id: message.id,
       timestamp: message.timestamp.toISOString(),
       text: message.text,

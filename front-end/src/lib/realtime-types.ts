@@ -398,6 +398,7 @@ export type ToolMessageMetadata =
  * Sent via Supabase Realtime when a message is inserted.
  */
 export interface InsertMessagePayload {
+  agentId: string;  // Used to filter messages for correct agent
   id: string;
   timestamp: string;  // ISO 8601 format
   text: string;
@@ -533,6 +534,8 @@ export interface DeleteMessagePayload {
  * Frontend accumulates deltas into streamingBubbles state.
  */
 export interface AssistantStreamPayload {
+  /** Agent ID for filtering messages to correct agent */
+  agentId: string;
   /** Unique ID for this streaming session */
   stream_id: string;
   /** New text chunk (delta, NOT accumulated) */
@@ -556,6 +559,8 @@ export interface AssistantStreamPayload {
  * INSERT with toolName="set_plan" and toolStatus="FINISHED".
  */
 export interface PlanStreamPayload {
+  /** Agent ID for filtering messages to correct agent */
+  agentId: string;
   /** Unique ID for this streaming session */
   stream_id: string;
   /** Links to the eventual set_plan tool execution */
@@ -576,6 +581,8 @@ export interface PlanStreamPayload {
  * Cleared when the real TOOL INSERT arrives with matching toolCallId.
  */
 export interface ToolStreamPayload {
+  /** Agent ID for filtering messages to correct agent */
+  agentId: string;
   /** Unique ID for this streaming session */
   stream_id: string;
   /** Links to the eventual tool execution */
@@ -597,6 +604,8 @@ export interface ToolStreamPayload {
  * because attention messages need to be displayed as a complete unit.
  */
 export interface AttentionStreamPayload {
+  /** Agent ID for filtering messages to correct agent */
+  agentId: string;
   /** Unique ID for this streaming session */
   stream_id: string;
   /** Links to the send_message_to_user tool execution */
@@ -639,6 +648,37 @@ export type BusChannelEvent = 'AGENT_STATE_CHANGED';
 // -----------------------------------------------------------------------------
 
 /**
+ * Trajectory step in failure context.
+ * Records each tool call with success/failure info.
+ */
+export interface TrajectoryStep {
+  tool_name: string;
+  success: boolean;
+  error_message?: string | null;
+}
+
+/**
+ * Failure context for failed agents.
+ * Contains information to help parent agents learn from failures.
+ */
+export interface FailureContext {
+  /** Trajectory of tool calls */
+  trajectory: TrajectoryStep[];
+  /** Last reasoning/thought from the agent */
+  last_reasoning?: string | null;
+  /** Plan tasks the agent was working on */
+  last_plan?: string[] | null;
+  /** Progress estimate (percentage or step count) */
+  progress_estimate: string;
+  /** Why the verifier thought the task wasn't complete */
+  verifier_reasoning?: string;
+  /** Partial structured data extracted before failure */
+  partial_structured_response?: Record<string, unknown> | null;
+  /** Number of tool calls made */
+  steps_taken: number;
+}
+
+/**
  * AGENT_STATE_CHANGED payload - Sub-agent state update.
  *
  * Broadcast by agents in a sub-agent tree to notify the frontend
@@ -663,6 +703,8 @@ export interface AgentStateChangedPayload {
   outputSchema?: OutputSchema;
   /** Structured output if available */
   structuredOutput?: Record<string, unknown>;
+  /** Failure context for failed agents */
+  failureContext?: FailureContext;
 }
 
 // =============================================================================
@@ -739,6 +781,7 @@ export function isInsertMessagePayload(payload: unknown): payload is InsertMessa
   return (
     typeof p === 'object' &&
     p !== null &&
+    typeof p.agentId === 'string' &&
     typeof p.id === 'string' &&
     typeof p.timestamp === 'string' &&
     typeof p.text === 'string' &&
@@ -755,6 +798,7 @@ export function isAssistantStreamPayload(payload: unknown): payload is Assistant
   return (
     typeof p === 'object' &&
     p !== null &&
+    typeof p.agentId === 'string' &&
     typeof p.stream_id === 'string' &&
     typeof p.delta === 'string' &&
     typeof p.done === 'boolean' &&
@@ -791,6 +835,7 @@ function validateInsertMessagePayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
+  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   if (typeof p.id !== 'string') return `Missing or invalid 'id' (got ${typeof p.id})`;
   if (typeof p.timestamp !== 'string') return `Missing or invalid 'timestamp' (got ${typeof p.timestamp})`;
   if (typeof p.text !== 'string') return `Missing or invalid 'text' (got ${typeof p.text})`;
@@ -845,6 +890,7 @@ function validateAssistantStreamPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
+  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   if (typeof p.stream_id !== 'string') return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
   if (typeof p.delta !== 'string') return `Missing or invalid 'delta' (got ${typeof p.delta})`;
   if (typeof p.done !== 'boolean') return `Missing or invalid 'done' (got ${typeof p.done})`;
@@ -861,6 +907,7 @@ function validatePlanStreamPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
+  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   if (typeof p.stream_id !== 'string') return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
   if (typeof p.tool_call_id !== 'string') return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
   if (typeof p.title !== 'string') return `Missing or invalid 'title' (got ${typeof p.title})`;
@@ -876,6 +923,7 @@ function validateToolStreamPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
+  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   if (typeof p.stream_id !== 'string') return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
   if (typeof p.tool_call_id !== 'string') return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
   if (typeof p.tool_name !== 'string') return `Missing or invalid 'tool_name' (got ${typeof p.tool_name})`;
@@ -892,6 +940,7 @@ function validateAttentionStreamPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
+  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   if (typeof p.stream_id !== 'string') return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
   if (typeof p.tool_call_id !== 'string') return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
   if (typeof p.message !== 'string') return `Missing or invalid 'message' (got ${typeof p.message})`;

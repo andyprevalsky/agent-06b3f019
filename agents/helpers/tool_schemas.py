@@ -47,11 +47,24 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "reasoning",  # Pure thinking/analysis step (no tool call)
 ]
 
-# Build enum dynamically from PLANNER_ASSIGNABLE_TOOLS
-PlanToolName = Enum(
-    "PlanToolName",
-    {name: name for name in PLANNER_ASSIGNABLE_TOOLS},
-    type=str,
+class PlanToolName(str, Enum):
+    """The tool to execute for this task, or 'reasoning' for thinking/analysis."""
+    spawn_browser_agent = "spawn_browser_agent"
+    spawn_claude_code_agent = "spawn_claude_code_agent"
+    spawn_sub_agent = "spawn_sub_agent"
+    wait_seconds = "wait_seconds"
+    web_search = "web_search"
+    people_search = "people_search"
+    send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
+    reasoning = "reasoning"
+
+
+# Runtime check to ensure PlanToolName stays in sync with PLANNER_ASSIGNABLE_TOOLS
+_plan_tool_values = {e.value for e in PlanToolName}
+_expected_tools = set(PLANNER_ASSIGNABLE_TOOLS)
+assert _plan_tool_values == _expected_tools, (
+    f"PlanToolName enum out of sync with PLANNER_ASSIGNABLE_TOOLS. "
+    f"Missing: {_expected_tools - _plan_tool_values}, Extra: {_plan_tool_values - _expected_tools}"
 )
 
 
@@ -63,7 +76,7 @@ PlanToolName = Enum(
 class PlannerTask(BaseModel):
     """A single task in the planner output."""
     goal: str = Field(description="Brief description of task objective")
-    tool_name: PlanToolName = Field(description="The tool to execute for this task, or 'reasoning' for thinking/analysis")
+    tool_name: PlanToolName
     depends_on: List[int] = Field(default_factory=list, description="Indices of tasks this depends on (empty = no deps)")
 
 
@@ -88,7 +101,7 @@ class PlannerResponse(BaseModel):
 
 
 class VerifierConfig(BaseModel):
-    """Verifier configuration for evaluating agent success."""
+    """Verifier configuration for evaluating agent success. Requires type='FLOAT_LLM_JUDGE' and an llm_judge_prompt."""
 
     type: Literal["FLOAT_LLM_JUDGE"] = Field(description="Must be 'FLOAT_LLM_JUDGE'")
     llm_judge_prompt: str = Field(description="Prompt for the LLM judge to evaluate the agent's performance")
@@ -109,7 +122,12 @@ class ResponseSchemaFieldConfig(BaseModel):
 
 
 class ResponseSchemaConfig(BaseModel):
-    """Configuration for the structured output schema that the agent must return."""
+    """Structured output schema defining what data the agent must return when complete.
+
+    IMPORTANT: If the agent needs to return any FILES (images, documents, screenshots,
+    downloads, generated artifacts, etc.), you MUST use 'file_pointer' or 'list[file_pointer]'
+    as the field type. Using 'str' for file paths will NOT work - files will not be
+    transferred from remote environments."""
 
     fields: List[ResponseSchemaFieldConfig] = Field(
         description="List of output fields that the agent must return when complete"
@@ -125,12 +143,8 @@ class SubAgentConfig(BaseModel):
         default=False,
         description="True if this sub-agent must stay read-only (plan-phase spawn), False for normal execution.",
     )
-    verifier: VerifierConfig = Field(description="Verifier config with type='FLOAT_LLM_JUDGE' and llm_judge_prompt")
-    output_schema: ResponseSchemaConfig = Field(
-        description="Structured output schema defining what data this sub-agent must return when complete. "
-        "IMPORTANT: If the sub-agent needs to return any FILES, you MUST use 'file_pointer' or 'list[file_pointer]' as the field type. "
-        "Using 'str' for file paths will NOT work - files will not be transferred."
-    )
+    verifier: VerifierConfig
+    output_schema: ResponseSchemaConfig
     attachments: Optional[List[str]] = Field(
         default=None,
         description="List of filenames to pass to this sub-agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'rs.jpeg'). Do NOT use the file's `id` field or any other format."
@@ -272,12 +286,7 @@ class SpawnBrowserAgentTool(BaseModel):
     goal: str = Field(
         description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy a black beanie under $35 from Amazon', 'Order a Chipotle bowl from Uber Eats with white rice, steak, fajita peppers, corn, pico de gallo, and hot sauce', 'Purchase the cheapest MacBook Pro M3 from Amazon, Best Buy, or Apple Store', 'Find the top 3 trending Python repos on GitHub and summarize their READMEs'"
     )
-    output_schema: ResponseSchemaConfig = Field(
-        description="Structured output schema defining what data the browser agent must return when complete. "
-        "IMPORTANT: If the agent needs to return any FILES (screenshots, downloads, PDFs, images, etc.), "
-        "you MUST use 'file_pointer' or 'list[file_pointer]' as the field type. Using 'str' for file paths will NOT work - "
-        "files will not be transferred from the remote browser environment."
-    )
+    output_schema: ResponseSchemaConfig
     attachments: Optional[List[str]] = Field(
         default=None,
         description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'photo.jpg'). Do NOT use the file's `id` field or any other format."
@@ -302,12 +311,7 @@ class SpawnClaudeCodeAgentTool(BaseModel):
     goal: str = Field(
         description="Complete coding goal for Claude Code to accomplish. Examples: 'Clone the repo at https://github.com/user/project, add TypeScript support, and push changes to a new branch', 'Create a Python script that analyzes CSV data and generates a report', 'Set up a new React project with Tailwind CSS and create a landing page component'"
     )
-    output_schema: ResponseSchemaConfig = Field(
-        description="Structured output schema defining what data the Claude Code agent must return when complete. "
-        "IMPORTANT: If the agent needs to return any FILES (generated images, reports, processed data, etc.), "
-        "you MUST use 'file_pointer' or 'list[file_pointer]' as the field type. Using 'str' for file paths will NOT work - "
-        "files will not be transferred from the ephemeral E2B sandbox."
-    )
+    output_schema: ResponseSchemaConfig
     attachments: Optional[List[str]] = Field(
         default=None,
         description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'data.csv'). Do NOT use the file's `id` field or any other format."
@@ -376,11 +380,17 @@ class ProcessorEnum(str, Enum):
 
 
 class CadenceEnum(str, Enum):
-    """Cadence types for Monitor operations."""
+    """Frequency of monitoring runs.
 
-    HOURLY = "hourly"  # Check every hour. Best for fast-moving topics
-    DAILY = "daily"  # Check once per day. Best for most news and updates
-    WEEKLY = "weekly"  # Check once per week. Best for slower changes
+    - 'hourly': Check every hour. Best for fast-moving topics requiring immediate updates.
+    - 'daily' [DEFAULT]: Check once per day. Best for most news, announcements, and regular updates.
+    - 'weekly': Check once per week. Best for slower changes, long-term trends, or when cost optimization matters.
+
+    Higher frequency = more runs = higher cost. Choose based on how quickly information changes."""
+
+    HOURLY = "hourly"
+    DAILY = "daily"
+    WEEKLY = "weekly"
 
 
 class FindAllTool(BaseModel):
@@ -530,16 +540,7 @@ class MonitorTool(BaseModel):
             "Maximum 5000 characters."
         ),
     )
-    cadence: CadenceEnum = Field(
-        default=CadenceEnum.DAILY,
-        description=(
-            "Frequency of monitoring runs. "
-            "- 'hourly': Check every hour. Best for fast-moving topics requiring immediate updates.\n"
-            "- 'daily' [DEFAULT]: Check once per day. Best for most news, announcements, and regular updates.\n"
-            "- 'weekly': Check once per week. Best for slower changes, long-term trends, or when cost optimization matters.\n"
-            "Higher frequency = more runs = higher cost. Choose based on how quickly information changes."
-        ),
-    )
+    cadence: CadenceEnum = CadenceEnum.DAILY
     webhook_url: Optional[str] = Field(
         default=None,
         description=(
@@ -640,7 +641,7 @@ class SpawnSubAgentTool(BaseModel):
     as the field type. Using 'str' for file paths will NOT work - files will not be transferred."""
 
     tool: Literal["spawn_sub_agent"]
-    sub_agent: SubAgentConfig = Field(description="Sub-agent configuration to spawn")
+    sub_agent: SubAgentConfig
 
 
 # ============================================================================

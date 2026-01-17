@@ -82,6 +82,7 @@ const createAgentSchema = z.object({
   // Response schema: passed by parent agent for sub-agents (required for sub-agents, generated async for root agents)
   response_schema: ResponseSchemaSchema.optional(),
   bus_id: z.string().uuid().optional(), // Optional: shared bus channel for sub-agent tree updates
+  max_iterations: z.number().int().min(1).optional(), // Optional: step limit for execute phase (sub-agents use 25)
   // Verifier is now optional - auto-generated from goal if not provided
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
@@ -346,6 +347,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           ...(body.parent_agent_id ? { parentAgentId: body.parent_agent_id } : {}),
           ...(body.depth !== undefined ? { depth: body.depth } : {}),
           ...(body.bus_id ? { busId: body.bus_id } : {}),
+          ...(body.max_iterations ? { maxIterations: body.max_iterations } : {}),
         });
 
         // Update agent with workflow ID

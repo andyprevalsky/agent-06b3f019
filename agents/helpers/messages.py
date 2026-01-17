@@ -56,12 +56,13 @@ async def stream_assistant_chunk(
         broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
         
         record = {
+            "agentId": agent_id,
             "stream_id": stream_id,
             "delta": delta,  # Send delta, not accumulated text
             "done": done,
             "sequence": sequence,
         }
-        
+
         # Include sub_agent_id if provided (for routing to browser panel's MessageList)
         if sub_agent_id:
             record["subAgentId"] = sub_agent_id
@@ -132,6 +133,7 @@ async def stream_plan_event(
                 "event": "PLAN_STREAM",
                 "payload": {
                     "record": {
+                        "agentId": agent_id,
                         "stream_id": stream_id,
                         "tool_call_id": tool_call_id,
                         "title": title,
@@ -197,6 +199,7 @@ async def stream_tool_event(
                 "event": "TOOL_STREAM",
                 "payload": {
                     "record": {
+                        "agentId": agent_id,
                         "stream_id": stream_id,
                         "tool_call_id": tool_call_id,
                         "tool_name": tool_name,
@@ -264,6 +267,7 @@ async def stream_attention_event(
                 "event": "ATTENTION_STREAM",
                 "payload": {
                     "record": {
+                        "agentId": agent_id,
                         "stream_id": stream_id,
                         "tool_call_id": tool_call_id,
                         "message": message,

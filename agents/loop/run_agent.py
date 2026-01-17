@@ -119,7 +119,7 @@ async def run_agent(
     iteration = iteration_offset
     blueprint_queried = False
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
-    
+
     # Track last_checked timestamp FOR THIS RUN - start with epoch if no context
     # This ensures we get ALL messages on first poll, not just recent ones
     last_checked = datetime.fromtimestamp(0, tz=timezone.utc)
@@ -758,8 +758,43 @@ async def run_agent(
                     "metadata": {"verifierMessage": True}
                 })
     
-    # Max iterations reached
+    # Max iterations reached - run final verifier to capture current state
     logger.warning(f"Max iterations reached: {max_iterations}")
+
+    # Run verifier one final time to get accurate progress and partial structured data
+    final_verifier_progress = 0.0
+    final_verifier_reasoning = ""
+    final_partial_structured_response = None
+
+    if verifier_prompt_generator and not skip_verification:
+        try:
+            logger.info("Running final verifier to capture failure context...")
+            final_verifier_result = await _run_verifier(
+                execute_activity=execute_activity,
+                context=context,
+                verifier_prompt_generator=verifier_prompt_generator,
+                model=model,
+                agent_id=agent_id,
+                task_id=task_id,
+                post_message=post_message,
+                response_schema=response_schema,
+                get_response_schema=get_response_schema,
+            )
+
+            # Track final verifier tokens
+            v_usage = final_verifier_result.get("usage", {})
+            tokens_in += v_usage.get("prompt_tokens", 0)
+            tokens_out += v_usage.get("completion_tokens", 0)
+            token_count += v_usage.get("total_tokens", 0)
+
+            final_verifier_progress = final_verifier_result.get("score", 0.0)
+            final_verifier_reasoning = final_verifier_result.get("reasoning", "")
+            final_partial_structured_response = final_verifier_result.get("structured_response")
+
+            logger.info(f"Final verifier: {final_verifier_progress * 100:.0f}% - {final_verifier_reasoning[:100]}...")
+        except Exception as e:
+            logger.error(f"Final verifier call failed: {e}")
+
     return {
         "status": "max_iterations",
         "context": context,
@@ -767,6 +802,10 @@ async def run_agent(
         "tokens_out": tokens_out,
         "token_count": token_count,
         "message": f"Reached max iterations ({max_iterations})",
+        # Final verifier results for failure context
+        "verifier_progress": final_verifier_progress,
+        "verifier_reasoning": final_verifier_reasoning,
+        "partial_structured_response": final_partial_structured_response,
     }
 
 

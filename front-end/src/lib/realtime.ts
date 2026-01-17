@@ -42,6 +42,8 @@ export {
   type ToolMessagePayload,
   // Bus channel payloads
   type AgentStateChangedPayload,
+  type FailureContext,
+  type TrajectoryStep,
   // User channel payloads (deprecated)
   type AttentionRequestPayload,
   // Handler types

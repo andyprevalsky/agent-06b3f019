@@ -17,6 +17,7 @@ import httpx  # Used with instructor
 
 from config import load_config
 from helpers.get_user_context import fetch_user_context
+from helpers.error_utils import extract_error_message
 from helpers.prompts import build_system_prompt, build_verifier_prompt
 from helpers.tool_schemas import (
     ProgressScore,
@@ -308,6 +309,29 @@ async def build_llm_messages(context: List[Dict], system_prompt: str) -> List[Di
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
+    # First pass: collect all unique file_pointers from context
+    # This builds an explicit list of available files for the LLM
+    available_files: Dict[str, str] = {}  # filename -> mime_type
+    for msg in context:
+        file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+        if file_pointer and isinstance(file_pointer, dict):
+            fp = FilePointer.from_dict(file_pointer)
+            if fp.original_filename and fp.original_filename not in available_files:
+                available_files[fp.original_filename] = fp.mime_type
+
+    # Append "Available Files" section to system prompt if files exist
+    # This ensures the LLM knows exactly what files it can pass to sub-agents
+    if available_files:
+        files_list = "\n".join([f"- {name} ({mime})" for name, mime in available_files.items()])
+        system_prompt = system_prompt + f"""
+
+## Available Files
+Files in your context (use exact filenames):
+{files_list}
+
+To pass files to spawn_browser_agent, spawn_claude_code_agent, or spawn_sub_agent:
+  attachments: [{", ".join([f'"{name}"' for name in available_files.keys()])}]"""
+
     messages = [{"role": "system", "content": system_prompt}]
 
     for msg in context:
@@ -806,7 +830,7 @@ async def call_llm_structured_streaming(
             
             response = response_model.model_validate(parsed_content)
         except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"Failed to parse streaming Rose response: json={accumulated_json[:500]}", error=str(e))
+            logger.error(f"Failed to parse streaming Rose response: json={accumulated_json[:500]}", error=extract_error_message(e))
             raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {str(e)}")
         
         # Use captured stream usage if available, otherwise fall back to estimates
@@ -1243,7 +1267,7 @@ async def call_llm(
         return result
         
     except Exception as e:
-        logger.error("LLM call failed", error=str(e))
+        logger.error("LLM call failed", error=extract_error_message(e))
         raise
 
 
@@ -1591,7 +1615,7 @@ async def check_progress(
             "structured_response": structured_response
         }
     except Exception as e:
-        logger.error("Failed to check progress", error=str(e))
+        logger.error("Failed to check progress", error=extract_error_message(e))
         # Return 0.5 on error to keep agent running, with empty usage
         error_message = f"Progress check failed: {str(e)}"
         return {
@@ -1730,7 +1754,7 @@ async def call_llm_activity(
         }
         
     except Exception as e:
-        logger.error("LLM activity failed", error=str(e))
+        logger.error("LLM activity failed", error=extract_error_message(e))
         raise
 
 
@@ -1844,7 +1868,7 @@ async def set_response_schema_activity(
         logger.error(
             "Failed to generate response schema",
             agent_id=agent_id,
-            error=str(e)
+            error=extract_error_message(e)
         )
         return None
 
@@ -1920,5 +1944,5 @@ async def call_planner_llm_activity(
         return result.model_dump()
 
     except Exception as e:
-        logger.error("Planner LLM failed", error=str(e))
+        logger.error("Planner LLM failed", error=extract_error_message(e))
         raise

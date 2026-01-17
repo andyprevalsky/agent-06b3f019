@@ -11,6 +11,8 @@ from datetime import timedelta
 from typing import Callable, Any, List, TypeVar, Optional
 import structlog
 
+from helpers.error_utils import extract_error_message
+
 logger = structlog.get_logger()
 
 T = TypeVar('T')
@@ -86,7 +88,7 @@ async def call_temporal_activity_from_activity(
             logger.warning(
                 f"Activity failed (attempt {attempt + 1}/{max_attempts})",
                 func=func.__name__,
-                error=str(e)
+                error=extract_error_message(e)
             )
         
         # If not the last attempt, wait before retry

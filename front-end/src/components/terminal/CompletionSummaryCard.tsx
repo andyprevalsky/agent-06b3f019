@@ -71,6 +71,10 @@ export interface CompletionSummaryData {
   durationSeconds?: number;
   /** Cost in dollars */
   costDollars?: number;
+  /** Whether the task failed */
+  error?: boolean;
+  /** Reason for failure (e.g., "max_iterations", "error") */
+  errorReason?: string;
 }
 
 interface CompletionSummaryCardProps {
@@ -143,20 +147,41 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
       >
         {/* Header */}
         <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/60">
-          <svg
-            className="w-4 h-4 text-emerald-600 dark:text-emerald-400"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M5 13l4 4L19 7"
-            />
-          </svg>
-          <span className="text-sm font-medium text-foreground">Task Complete</span>
+          {data.error ? (
+            <>
+              <svg
+                className="w-4 h-4 text-red-600 dark:text-red-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+              <span className="text-sm font-medium text-red-600 dark:text-red-400">Task Failed</span>
+            </>
+          ) : (
+            <>
+              <svg
+                className="w-4 h-4 text-emerald-600 dark:text-emerald-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+              <span className="text-sm font-medium text-foreground">Task Complete</span>
+            </>
+          )}
         </div>
 
         {/* Summary */}

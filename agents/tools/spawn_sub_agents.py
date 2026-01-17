@@ -243,10 +243,82 @@ class SpawnSubAgentManager(ToolManager):
                 lambda cid=child_agent_id: cid in workflow_instance.child_results
             )
 
+            # 6. Check if child failed
+            child_result = workflow_instance.child_results.get(child_agent_id, {})
+            child_status = child_result.get("status", "completed")
+
+            if child_status == "failed":
+                error_reason = child_result.get("error_reason", "unknown")
+                failure_context = child_result.get("failure_context", {})
+                trajectory = failure_context.get("trajectory", [])
+                last_reasoning = failure_context.get("last_reasoning")
+                last_plan = failure_context.get("last_plan")
+                progress_estimate = failure_context.get("progress_estimate", "Unknown")
+                verifier_reasoning = failure_context.get("verifier_reasoning")
+                partial_structured_response = failure_context.get("partial_structured_response")
+
+                logger.warning(f"❌ Sub-agent {child_agent_id} failed: {error_reason}")
+
+                # Build comprehensive error message for parent to learn from
+                error_parts = [f"Sub-agent failed: {error_reason}"]
+                error_parts.append(f"Progress: {progress_estimate}")
+
+                # Include verifier reasoning (why task isn't complete)
+                if verifier_reasoning:
+                    error_parts.append(f"\nWhy not complete:\n{verifier_reasoning[:400]}")
+
+                # Include partial structured data if extracted
+                if partial_structured_response and isinstance(partial_structured_response, dict):
+                    partial_lines = ["\nPartial data extracted:"]
+                    for key, value in list(partial_structured_response.items())[:5]:
+                        formatted_key = key.replace("_", " ").title()
+                        if isinstance(value, str) and len(value) > 100:
+                            value = value[:100] + "..."
+                        elif isinstance(value, list):
+                            value = f"[{len(value)} items]"
+                        partial_lines.append(f"- {formatted_key}: {value}")
+                    error_parts.append("\n".join(partial_lines))
+
+                # Include what the agent was trying to do (last reasoning)
+                if last_reasoning:
+                    error_parts.append(f"\nLast thought:\n{last_reasoning[:300]}...")
+
+                # Include the plan if it had one
+                if last_plan:
+                    error_parts.append(f"\nPlan was:\n" + "\n".join(f"- {g}" for g in last_plan[:5]))
+
+                # Include trajectory
+                if trajectory:
+                    trajectory_lines = []
+                    for step in trajectory[:10]:
+                        icon = "✓" if step.get("success") else "✗"
+                        tool = step.get("tool_name", "unknown")
+                        err = step.get("error_message", "")[:50] if not step.get("success") else ""
+                        trajectory_lines.append(f"{icon} {tool}" + (f": {err}" if err else ""))
+                    error_parts.append(f"\nTrajectory:\n" + "\n".join(trajectory_lines))
+
+                error_message = "\n".join(error_parts)
+
+                # Clean up stored result
+                workflow_instance.child_results.pop(child_agent_id, None)
+
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Sub-agent failed",
+                    message=error_message,
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "subAgentIds": [child_agent_id],
+                        "busId": bus_id,
+                        "error_reason": error_reason,
+                        "failure_context": failure_context,  # Include full context for structured access
+                    }
+                )
+                return  # Don't continue to success path
+
             logger.info(f"🎉 Sub-agent {child_agent_id} completed!")
 
-            # 6. Extract file pointers from child result and yield as ASSISTANT messages
-            child_result = workflow_instance.child_results.get(child_agent_id, {})
+            # 7. Extract file pointers from child result and yield as ASSISTANT messages
             structured_response = child_result.get("structured_response", {})
             output_schema = sub_agent.get("output_schema", {})
 
@@ -269,7 +341,7 @@ class SpawnSubAgentManager(ToolManager):
             # Clean up stored result
             workflow_instance.child_results.pop(child_agent_id, None)
 
-            # 7. Post final FINISHED message (replaces IN_PROGRESS via toolCallId dedup)
+            # 8. Post final FINISHED message (replaces IN_PROGRESS via toolCallId dedup)
             # Include structured_response so parent verifier can extract full FilePointers
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
@@ -417,6 +489,7 @@ async def spawn_sub_agent_activity(
                     # Pass output schema from tool call (required for sub-agents)
                     "response_schema": agent.get("output_schema"),
                     "bus_id": bus_id,  # Shared bus channel for tree updates
+                    "max_iterations": 1,  # TEMP: 1 for testing (should be 25)
                 }
 
                 # Add resolved attachments if any

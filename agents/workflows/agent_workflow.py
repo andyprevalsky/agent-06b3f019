@@ -45,6 +45,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.knowledge_base import save_blueprint_activity
     from tools.web_search import web_search
     from tools.spawn_sub_agents import spawn_sub_agent
+    from helpers.error_utils import extract_error_message
     from tools.send_sms_as_user import send_sms_as_user
     from tools.spawn_browser_agent_v3 import spawn_browser_agent  # V3: browser-use + Rose API
     from tools.spawn_claude_code_agent import spawn_claude_code_agent  # Claude Code in E2B sandbox
@@ -164,12 +165,14 @@ class AgentWorkflow:
         """Pause workflow execution."""
         workflow.logger.info("🔴 Received PAUSE signal")
         self.is_paused = True
-    
+        await self._update_tree_state(status="PAUSED")
+
     @workflow.signal
     async def resume(self):
         """Resume workflow execution."""
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
+        await self._update_tree_state(status="ACTIVE")
     
     @workflow.signal
     async def receive_user_response(self, response: str):
@@ -212,35 +215,56 @@ class AgentWorkflow:
     
     @workflow.signal
     async def child_completed(self, data: dict):
-        """Receive completion signal from child agent."""
+        """Receive completion signal from child agent (success or failure)."""
         child_agent_id = data.get("child_agent_id", "")
         result = data.get("result", {})
-
-        workflow.logger.info(f"✅ Child {child_agent_id[:8]} completed")
-
-        # Aggregate tool counts from child
-        child_counts = result.get("tool_counts", {})
-        for tool_name, count in child_counts.items():
-            self.child_tool_counts[tool_name] = self.child_tool_counts.get(tool_name, 0) + count
+        child_status = result.get("status", "completed")
 
         child_tool_id = self.child_tool_ids.get(child_agent_id)
-        if child_tool_id:
-            summary = result.get("summary", "")
-            goal_text = result.get("goal", "")
-            structured_response = result.get("structured_response")
-            await self._post_message(
-                summary if summary else f"Completed: {goal_text}",
-                "TOOL",
-                metadata={
-                    "toolCallId": child_tool_id,
-                    "toolName": "spawn_sub_agent",
-                    "toolStatus": "FINISHED",
-                    "title": f"Sub-agent completed: {goal_text[:30]}",
-                    "subAgentId": child_agent_id,
-                    "progress": 1.0,
-                    "structuredResponse": structured_response
-                }
-            )
+        goal_text = result.get("goal", "")
+
+        if child_status == "failed":
+            # Child agent failed
+            workflow.logger.warning(f"❌ Child {child_agent_id[:8]} failed: {result.get('error_reason', 'unknown')}")
+
+            if child_tool_id:
+                await self._post_message(
+                    result.get("summary", "Sub-agent failed"),
+                    "TOOL",
+                    metadata={
+                        "toolCallId": child_tool_id,
+                        "toolName": "spawn_sub_agent",
+                        "toolStatus": "ERROR",
+                        "title": f"❌ Sub-agent failed: {goal_text[:30]}",
+                        "subAgentId": child_agent_id,
+                        "error": True,
+                    }
+                )
+        else:
+            # Child agent succeeded
+            workflow.logger.info(f"✅ Child {child_agent_id[:8]} completed")
+
+            # Aggregate tool counts from child
+            child_counts = result.get("tool_counts", {})
+            for tool_name, count in child_counts.items():
+                self.child_tool_counts[tool_name] = self.child_tool_counts.get(tool_name, 0) + count
+
+            if child_tool_id:
+                summary = result.get("summary", "")
+                structured_response = result.get("structured_response")
+                await self._post_message(
+                    summary if summary else f"Completed: {goal_text}",
+                    "TOOL",
+                    metadata={
+                        "toolCallId": child_tool_id,
+                        "toolName": "spawn_sub_agent",
+                        "toolStatus": "FINISHED",
+                        "title": f"Sub-agent completed: {goal_text[:30]}",
+                        "subAgentId": child_agent_id,
+                        "progress": 1.0,
+                        "structuredResponse": structured_response
+                    }
+                )
 
         # Store result for file extraction in spawn_sub_agents after wait_condition
         self.child_results[child_agent_id] = result
@@ -278,6 +302,7 @@ class AgentWorkflow:
         depth: int = 0,
         bus_id: Optional[str] = None,
         start_phase: str = "plan",  # "plan" runs PLAN→EXECUTE, "execute" skips PLAN
+        max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         self.agent_id = agent_id
@@ -290,6 +315,7 @@ class AgentWorkflow:
         self.parent_agent_id = parent_agent_id
         self.depth = depth
         self.bus_id = bus_id
+        self.max_iterations = max_iterations
         self.start_time = workflow.now()  # Track start time for duration calculation
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
@@ -464,8 +490,9 @@ class AgentWorkflow:
             skip_blueprint_query=not skip_plan,  # Only skip if we ran PLAN phase
             response_schema=response_schema,
             get_response_schema=self._make_response_schema_getter(),
+            **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
-        
+
         self._track_tokens(execute_result)
 
         if execute_result["status"] == "completed":
@@ -663,19 +690,20 @@ class AgentWorkflow:
             return {"success": False, "message": "User paused the agent during browser execution"}
 
         except Exception as e:
-            workflow.logger.error(f"Tool {tool_name} failed: {e}")
+            error_msg = extract_error_message(e)
+            workflow.logger.error(f"Tool {tool_name} failed: {error_msg}")
             # Emit error event so it shows in frontend
             await self._handle_tool_event(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title=f"{tool_name} failed",
-                    message=str(e),
+                    message=error_msg,
                     status=MessageStatus.ERROR
                 ),
                 tool_call_id,
                 tool_name
             )
-            return {"error": True, "message": str(e)}
+            return {"error": True, "message": error_msg}
         finally:
             # Remove tool from in-use and broadcast tree state
             self.tools_in_use.discard(tool_display)
@@ -709,7 +737,13 @@ class AgentWorkflow:
         self.tokens_out += result.get("tokens_out", 0)
         self.token_count += result.get("token_count", 0)
 
-    async def _update_tree_state(self, progress: float = None, status: str = None, structured_output: Dict = None) -> None:
+    async def _update_tree_state(
+        self,
+        progress: float = None,
+        status: str = None,
+        structured_output: Dict = None,
+        failure_context: Dict = None,
+    ) -> None:
         """
         Broadcast tree state update to the bus channel and persist to DB.
 
@@ -722,11 +756,13 @@ class AgentWorkflow:
         tools_list = list(self.tools_in_use)
 
         # Build broadcast payload
+        # Default status: use is_paused flag to determine PAUSED vs ACTIVE
+        default_status = "PAUSED" if self.is_paused else "ACTIVE"
         broadcast_payload = {
             "agentId": self.agent_id,
             "parentAgentId": self.parent_agent_id,
             "goal": self.goal,
-            "status": status or "ACTIVE",
+            "status": status or default_status,
             "progress": progress if progress is not None else 0.0,
             "toolsInUse": tools_list,
             "messageCount": self.message_count,
@@ -739,6 +775,10 @@ class AgentWorkflow:
         # Include structured output (actual values) only for completed agents
         if structured_output:
             broadcast_payload["structuredOutput"] = structured_output
+
+        # Include failure context for failed agents
+        if failure_context:
+            broadcast_payload["failureContext"] = failure_context
 
         # Execute activity that does both broadcast AND DB persist
         # (broadcast must be in activity to avoid workflow sandbox httpx issues)
@@ -771,9 +811,211 @@ class AgentWorkflow:
                 depth=self.depth,
                 bus_id=self.bus_id,
             )
-
             return result
-            
+
+        if result["status"] == "max_iterations":
+            await self._mark_failed(
+                context=result.get("context", []),
+                reason="max_iterations",
+                message="Max Steps Reached",
+                verifier_progress=result.get("verifier_progress", 0.0),
+                verifier_reasoning=result.get("verifier_reasoning", ""),
+                partial_structured_response=result.get("partial_structured_response"),
+            )
+            return {"status": "failed", "reason": "max_iterations", "goal": self.goal}
+
+        if result["status"] == "error":
+            await self._mark_failed(
+                context=result.get("context", []),
+                reason="error",
+                message=result.get("message", "Unknown error"),
+                verifier_progress=result.get("verifier_progress", 0.0),
+                verifier_reasoning=result.get("verifier_reasoning", ""),
+                partial_structured_response=result.get("partial_structured_response"),
+            )
+            return {"status": "failed", "reason": "error", "goal": self.goal}
+
+        # Fallback for unknown statuses
+        return result
+
+    def _extract_failure_context(
+        self,
+        context: List[Dict],
+        verifier_progress: float = 0.0,
+        verifier_reasoning: str = "",
+        partial_structured_response: Optional[Dict] = None,
+    ) -> Dict:
+        """Extract comprehensive failure context for parent agent learning.
+
+        Returns dict with:
+        - trajectory: List of {tool_name, success, error_message}
+        - last_reasoning: Last ASSISTANT message (what agent was thinking)
+        - last_plan: Plan from set_plan if exists
+        - progress_estimate: Verifier-determined progress (0-100%)
+        - verifier_reasoning: Why verifier thinks agent isn't done
+        - partial_structured_response: Any partial structured data extracted
+        - steps_taken: Number of tool calls made
+        """
+        trajectory = []
+        seen_tool_calls = set()
+        last_reasoning = None
+        last_plan = None
+
+        for msg in context:
+            role = msg.get("role")
+            metadata = msg.get("metadata", {})
+
+            # Extract last assistant reasoning
+            if role == "ASSISTANT":
+                text = msg.get("text", "")
+                if text and not metadata.get("reasoning"):  # Skip pure reasoning blocks
+                    last_reasoning = text[:500]  # Truncate to 500 chars
+
+            # Extract plan from set_plan tool
+            if role == "TOOL":
+                tool_name = metadata.get("toolName")
+                tool_status = metadata.get("toolStatus")
+
+                if tool_name == "set_plan" and tool_status == "FINISHED":
+                    plan_data = metadata.get("data", {})
+                    tasks = plan_data.get("tasks", [])
+                    if tasks:
+                        # Extract task goals as plan summary
+                        plan_goals = []
+                        for task in tasks[:5]:  # Limit to 5 tasks
+                            if isinstance(task, dict):
+                                plan_goals.append(task.get("goal", str(task))[:100])
+                            else:
+                                plan_goals.append(str(task)[:100])
+                        last_plan = plan_goals
+
+                # Build trajectory (skip internal tools)
+                if not tool_name or tool_name in {"check_progress", "completion_summary", "set_plan"}:
+                    continue
+
+                tool_call_id = metadata.get("toolCallId")
+                if tool_call_id and tool_call_id in seen_tool_calls:
+                    continue
+                if tool_call_id:
+                    seen_tool_calls.add(tool_call_id)
+
+                if tool_status not in {"FINISHED", "ERROR"}:
+                    continue
+
+                is_error = metadata.get("error", False) or tool_status == "ERROR"
+                error_message = msg.get("text", "") if is_error else None
+
+                trajectory.append({
+                    "tool_name": tool_name,
+                    "success": not is_error,
+                    "error_message": error_message[:200] if error_message else None
+                })
+
+        # Use verifier progress if available, fallback to step-based estimate
+        steps_taken = len(trajectory)
+        if verifier_progress > 0:
+            progress_estimate = f"{verifier_progress * 100:.0f}%"
+        else:
+            successful_steps = sum(1 for t in trajectory if t["success"])
+            progress_estimate = f"{successful_steps}/{steps_taken} steps succeeded" if steps_taken > 0 else "No steps completed"
+
+        return {
+            "trajectory": trajectory,
+            "last_reasoning": last_reasoning,
+            "last_plan": last_plan,
+            "progress_estimate": progress_estimate,
+            "verifier_reasoning": verifier_reasoning,
+            "partial_structured_response": partial_structured_response,
+            "steps_taken": steps_taken,
+        }
+
+    async def _mark_failed(
+        self,
+        context: List[Dict],
+        reason: str,
+        message: str,
+        verifier_progress: float = 0.0,
+        verifier_reasoning: str = "",
+        partial_structured_response: Optional[Dict] = None,
+    ) -> None:
+        """Mark task as failed and signal parent.
+
+        Order:
+        1. Post FINISHED message with error → FE shows failure in CompletionSummaryCard
+        2. Update tree state (broadcast FAILED) with failure_context
+        3. Update DB status to FAILED
+        4. Signal parent with failure context for learning (if sub-agent)
+        """
+        workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
+
+        tool_call_id = str(workflow.uuid4())
+
+        # Extract comprehensive failure context for parent learning
+        failure_context = self._extract_failure_context(
+            context,
+            verifier_progress=verifier_progress,
+            verifier_reasoning=verifier_reasoning,
+            partial_structured_response=partial_structured_response,
+        )
+
+        # Calculate duration
+        duration_seconds = 0
+        if self.start_time:
+            duration_seconds = int((workflow.now() - self.start_time).total_seconds())
+
+        try:
+            # 1. Post FINISHED message with error details
+            await self._post_message("", "TOOL", {
+                "toolCallId": tool_call_id,
+                "toolName": "completion_summary",
+                "toolStatus": "ERROR",
+                "isFinalSummary": True,
+                "title": f"❌ {message}",
+                "completionSummary": {
+                    "summary": f"Agent failed: {message}",
+                    "outputs": [],
+                    "toolUsage": [],
+                    "totalToolCalls": failure_context["steps_taken"],
+                    "durationSeconds": duration_seconds,
+                    "costDollars": 0,
+                    "error": True,
+                    "errorReason": reason,
+                }
+            })
+
+            # 2. Broadcast FAILED status to tree with failure context
+            await self._update_tree_state(progress=1.0, status="FAILED", failure_context=failure_context)
+
+            # 3. Update DB status to FAILED
+            await workflow.execute_activity(
+                update_agent_status,
+                args=[self.agent_id, "FAILED", 1.0, message, self.token_count, 0, len(context), self.tokens_in, self.tokens_out],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3)
+            )
+
+        except Exception as e:
+            workflow.logger.error(f"Failed to mark failed: {e}")
+
+        # 4. Signal parent with failure context for learning
+        if self.parent_workflow_id:
+            try:
+                parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                await parent.signal("child_completed", {
+                    "child_agent_id": self.agent_id,
+                    "result": {
+                        "status": "failed",
+                        "goal": self.goal,
+                        "summary": f"Failed: {message}",
+                        "error_reason": reason,
+                        "failure_context": failure_context,  # Full context for parent learning
+                        "structured_response": None,
+                        "tool_counts": {}
+                    }
+                })
+            except Exception as e:
+                workflow.logger.warning(f"Failed to signal parent: {e}")
+
     def _format_outputs(self, structured_response: Optional[Dict]) -> List[Dict]:
         """Convert structured_response → CompletionSummaryCard outputs format."""
         if not structured_response or not self.output_schema:

@@ -25,6 +25,58 @@ FILE_RULES = """
 - Files in context are already available - don't re-download them
 """
 
+# ============================================================================
+# TOOL GUIDANCE DESCRIPTIONS (detailed text for each tool)
+# ============================================================================
+
+TOOL_GUIDANCE = {
+    "spawn_browser_agent": """Ephemeral session. 25-step limit. For short web trajectories (purchases, forms, JS-heavy sites).
+Do work OUTSIDE browser when possible. Give deepest starting URL.
+
+<bad-example>
+spawn_browser_agent("Login to site")
+spawn_browser_agent("Add item to cart")  ← SESSION LOST! Starts fresh.
+</bad-example>
+
+<good-example>
+spawn_browser_agent("Login, add item to cart, checkout")  ← Single session for full flow
+</good-example>""",
+
+    "spawn_claude_code_agent": """Ephemeral session. For general coding tasks: code execution, data processing, file generation, analysis.
+Define WHAT you want (inputs + outputs), not HOW to do it. The agent figures out implementation.
+- Pass files via `attachments: ["filename.ext"]`
+- Capture results via `output_schema`. Use type='file_pointer' for generated files.
+
+<bad-example>
+spawn_claude_code_agent("Process the data")  ← No attachments, no output_schema
+</bad-example>
+
+<good-example>
+spawn_claude_code_agent(
+  goal="Take test.csv, compute column averages, generate a bar chart",
+  attachments=["test.csv"],
+  output_schema=[{name: "averages", type: "str"}, {name: "chart", type: "file_pointer"}]
+)
+</good-example>""",
+
+    "spawn_sub_agent": """Context-independent parallelization only. Sub-agents run concurrently.
+Use for: parallel work, evaluating hypotheses, decomposing complex goals.""",
+
+    "send_message_to_user": """Must be ONLY tool in that turn. Use is_question=true for clarifications.""",
+
+    "attempt_completion": """Must be ONLY tool in that turn. Call when goal is 100% done with proof.""",
+
+    "web_search": """Search the web for real-time information. Use for current events, recent data, fact-checking.""",
+
+    "set_plan": """Signal readiness for plan generation. A dedicated planner LLM will analyze the conversation and generate an execution plan.""",
+
+    "wait_seconds": """Pause execution for a specified number of seconds (1-3600).""",
+
+    "people_search": """Search for people using Exa's people index. Natural language query for name, role, company, skills.""",
+
+    "send_message_to_user_execute_phase": """Send an informational message to the user during execution (non-blocking). Use for status updates.""",
+}
+
 BEHAVIORAL_RULES = """
 - Tool-first execution: favor action over narration
 - No simulation: don't claim tool ran unless it actually executed
@@ -143,56 +195,42 @@ EXECUTE - Follow the approved plan and deliver verifiable outcomes.
         """).rstrip()
 
     # ========================================================================
-    # 4. TOOL GUIDANCE
+    # 4. TOOL GUIDANCE (dynamic based on enabled/disabled tools)
     # ========================================================================
-    prompt += dedent("""
+    prompt += "\n\n# Tool Guidance"
 
+    # Helper to get tool names from list (handles both str and dict formats)
+    def get_tool_name(tool):
+        if isinstance(tool, str):
+            return tool
+        elif isinstance(tool, dict):
+            return tool.get("name", str(tool))
+        return str(tool)
 
-# Tool Guidance
+    enabled_tool_names = [get_tool_name(t) for t in enabled_tools] if enabled_tools else []
+    disabled_tool_names = [get_tool_name(t) for t in disabled_tools] if disabled_tools else []
 
-**spawn_browser_agent** [EXECUTE only]
-Ephemeral session. 25-step limit. For short web trajectories (purchases, forms, JS-heavy sites).
-Do work OUTSIDE browser when possible. Give deepest starting URL.
+    # ENABLED tools section
+    if enabled_tool_names:
+        prompt += "\n\n## ENABLED"
+        for tool_name in enabled_tool_names:
+            guidance = TOOL_GUIDANCE.get(tool_name, "")
+            prompt += f"\n\n**{tool_name}**"
+            if guidance:
+                prompt += f"\n{guidance}"
 
-<bad-example>
-spawn_browser_agent("Login to site")
-spawn_browser_agent("Add item to cart")  ← SESSION LOST! Starts fresh.
-</bad-example>
+    # DISABLED tools section
+    if disabled_tool_names:
+        prompt += "\n\n## DISABLED (available after set_plan → attempt_completion)"
+        prompt += "\nDo NOT use these tools now. They will be available in EXECUTE phase."
+        for tool_name in disabled_tool_names:
+            guidance = TOOL_GUIDANCE.get(tool_name, "")
+            prompt += f"\n\n**{tool_name}**"
+            if guidance:
+                prompt += f"\n{guidance}"
 
-<good-example>
-spawn_browser_agent("Login, add item to cart, checkout")  ← Single session for full flow
-</good-example>
-
-**spawn_claude_code_agent** [EXECUTE only]
-Ephemeral session. For general coding tasks: code execution, data processing, file generation, analysis.
-Define WHAT you want (inputs + outputs), not HOW to do it. The agent figures out implementation.
-- Pass files via `attachments: ["filename.ext"]`
-- Capture results via `output_schema`. Use type='file_pointer' for generated files.
-
-<bad-example>
-spawn_claude_code_agent("Process the data")  ← No attachments, no output_schema
-</bad-example>
-
-<good-example>
-spawn_claude_code_agent(
-  goal="Take test.csv, compute column averages, generate a bar chart",
-  attachments=["test.csv"],
-  output_schema=[{name: "averages", type: "str"}, {name: "chart", type: "file_pointer"}]
-)
-</good-example>
-
-**spawn_sub_agent** [EXECUTE only]
-Context-independent parallelization only. Sub-agents run concurrently.
-Use for: parallel work, evaluating hypotheses, decomposing complex goals.
-
-**send_message_to_user** [PLAN only]
-Must be ONLY tool in that turn. Use is_question=true for clarifications.
-
-**attempt_completion** [BOTH]
-Must be ONLY tool in that turn. Call when goal is 100% done with proof.
-
-**File attachments**: Sub-agents don't inherit files. Pass via `attachments: ["filename.ext"]` using original_filename from file_pointer.
-    """).rstrip()
+    # File attachments note (always include)
+    prompt += "\n\n**File attachments**: Sub-agents don't inherit files. Pass via `attachments: [\"filename.ext\"]` using original_filename from file_pointer."
 
     # ========================================================================
     # 5. RULES
@@ -498,6 +536,7 @@ Decision heuristic:
 - If uncertainty > decomposability → use join='any' (hypotheses to reduce uncertainty first)
 - If decomposability >= uncertainty → use join='all' (parallelize work)
 - Parallelism is only safe when entropy/uncertainty is low
+- To reduce uncertainty effectively, seek world-class references (industry experts, peer-reviewed sources, proven exemplars)
 
 DECOMPOSITION PRINCIPLES
 ------------------------

@@ -167,6 +167,9 @@ async def main():
         # helpers.llm uses threading.Lock via OpenAI/instructor clients
         # but workflow only calls activities via execute_activity, not directly
         "helpers.llm",
+        # helpers.attachments downloads files from storage using httpx
+        # called from build_llm_messages when resolving file attachments
+        "helpers.attachments",
     )
     
     # Create worker with all workflows and activities

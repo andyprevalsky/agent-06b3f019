@@ -3,22 +3,23 @@
  *
  * Central state management for agent conversations and real-time updates.
  *
- * AGENT SELECTION (Gate + Kill pattern):
+ * AGENT SELECTION (agentId filtering pattern):
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ SWITCH FROM AGENT A → AGENT B:                                         │
  * │                                                                         │
- * │ 1. CLOSE GATE ─────────► processingGateRef = false                     │
- * │                          (handlers discard all messages)               │
+ * │ 1. KILL CONNECTIONS ───► unsubscribe(channel), clear timeouts          │
  * │                                                                         │
- * │ 2. KILL CONNECTIONS ───► unsubscribe(channel), clear timeouts          │
+ * │ 2. FLUSH STATE ────────► setMessages([]), clear streaming state        │
  * │                                                                         │
- * │ 3. FLUSH STATE ────────► setMessages([]), clear streaming state        │
- * │                                                                         │
- * │ 4. CONNECT NEW ────────► subscribeToAgent(newAgentId)                  │
+ * │ 3. CONNECT NEW ────────► subscribeToAgent(newAgentId)                  │
  * │                          loadAgentDetail(newAgentId)                   │
  * │                                                                         │
- * │ 5. OPEN GATE ──────────► processingGateRef = true                      │
- * │                          (handlers process messages)                   │
+ * │ Message filtering: Each payload includes agentId, handlers check       │
+ * │ data.agentId === selectedAgentId to prevent cross-agent contamination. │
+ * │ Messages from wrong agent are simply discarded.                        │
+ * │                                                                         │
+ * │ Race prevention: loadAgentDetail merges API messages with any          │
+ * │ realtime messages that arrived, using message_id for deduplication.    │
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * AGENT SELECTION STATES:
@@ -43,7 +44,7 @@
  * REALTIME STREAMING:
  * [IDLE] --> subscribed to Supabase realtime channel
  *     |
- *     v (stream event, gate must be OPEN)
+ *     v (stream event with matching agentId)
  * [STREAMING] --> updates streamingBubbles, streamingPlans, streamingAttention, streamingTools
  *     |
  *     v (stream complete)
@@ -65,7 +66,6 @@
  * - streamingBubbles: Map<string, StreamingBubble>
  * - streamingPlans, streamingAttention, streamingTools: Maps
  * - isSending: boolean
- * - processingGateRef: boolean (prevents cross-agent message contamination)
  */
 
 import React, { createContext, useContext, useState, useRef, useCallback, useEffect } from 'react';
@@ -212,10 +212,6 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
   // Track streamed texts to skip re-animation on INSERT
   const streamedTextsRef = useRef<Set<string>>(new Set());
 
-  // Processing gate - when false, all handlers discard messages immediately
-  // Used during agent switch to prevent cross-agent message contamination
-  const processingGateRef = useRef<boolean>(true);
-
   const STREAM_TIMEOUT_MS = 15000;
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -260,7 +256,13 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
       setIsLoadingAgent(true);
       const data = await getAgent(agentId);
       setAgent(data.agent);
-      setMessages(data.messages);
+      // Merge API messages with any realtime messages that arrived during fetch
+      // This prevents the race condition where realtime messages get overwritten
+      setMessages(prev => {
+        const apiIds = new Set(data.messages.map(m => m.message_id));
+        const realtimeOnly = prev.filter(m => !apiIds.has(m.message_id));
+        return [...data.messages, ...realtimeOnly];
+      });
       // Set chat mode based on whether agent has a Temporal workflow
       setIsChatMode(!data.agent.temporal_workflow_id);
       // Mark initial load as done for this agent to avoid double-fetch in subscription setup
@@ -285,7 +287,7 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Set Selected Agent (with load)
-  // Gate + Kill pattern: close gate → kill connections → flush state → open gate after reconnect
+  // Kill connections → flush state → connect new (handlers filter by agentId)
   // ═══════════════════════════════════════════════════════════════════════════
 
   const setSelectedAgentId = useCallback((id: string | null) => {
@@ -320,7 +322,7 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
     isReconnectingRef.current = false;
 
     // ═══════════════════════════════════════════════════════════════════════
-    // 3. FLUSH STATE - clear all messages and streaming state
+    // 2. FLUSH STATE - clear all messages and streaming state
     // ═══════════════════════════════════════════════════════════════════════
     setMessages([]);
     setStreamingBubbles(prev => {
@@ -338,8 +340,8 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
     setIsChatMode(true); // Reset to chat mode default
 
     // ═══════════════════════════════════════════════════════════════════════
-    // 4. UPDATE SELECTED - triggers useEffect to subscribe to new channel
-    // Gate will be opened in useEffect after subscription is established
+    // 3. UPDATE SELECTED - triggers useEffect to subscribe to new channel
+    // Handlers filter by agentId so late messages from old agent are ignored
     // ═══════════════════════════════════════════════════════════════════════
     setSelectedAgentIdState(id);
 
@@ -443,9 +445,9 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
       try {
         const channel = await subscribeToAgent(selectedAgentId, {
           onInsert: (data: InsertMessagePayload) => {
-            // GATE CHECK - discard if gate is closed (during agent switch)
-            if (!processingGateRef.current) {
-              console.log('🚪 AgentContext: INSERT discarded (gate closed)');
+            // Filter by agentId to prevent cross-agent message contamination
+            if (data.agentId !== selectedAgentId) {
+              console.log('🚪 AgentContext: INSERT discarded (wrong agent)', { expected: selectedAgentId, got: data.agentId });
               return;
             }
 
@@ -517,13 +519,8 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onUpdate: (updated: UpdateAgentPayload) => {
-            // GATE CHECK - discard if gate is closed (during agent switch)
-            if (!processingGateRef.current) {
-              console.log('🚪 AgentContext: UPDATE discarded (gate closed)');
-              return;
-            }
-
-            // updated is already extracted from wrapper by subscribeToAgent
+            // Agent updates don't need agentId filtering - they're about the agent state,
+            // not messages. Late updates are harmless since they just update progress/status.
             setAgent(prev => {
               if (!prev) return prev;
               return {
@@ -553,9 +550,9 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onAssistantStream: (chunk: AssistantStreamPayload) => {
-            // GATE CHECK - discard if gate is closed (during agent switch)
-            if (!processingGateRef.current) {
-              console.log('🚪 AgentContext: ASSISTANT_STREAM discarded (gate closed)');
+            // Filter by agentId to prevent cross-agent message contamination
+            if (chunk.agentId !== selectedAgentId) {
+              console.log('🚪 AgentContext: ASSISTANT_STREAM discarded (wrong agent)', { expected: selectedAgentId, got: chunk.agentId });
               return;
             }
 
@@ -607,9 +604,9 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onPlanStream: (plan: PlanStreamPayload) => {
-            // GATE CHECK - discard if gate is closed (during agent switch)
-            if (!processingGateRef.current) {
-              console.log('🚪 AgentContext: PLAN_STREAM discarded (gate closed)');
+            // Filter by agentId to prevent cross-agent message contamination
+            if (plan.agentId !== selectedAgentId) {
+              console.log('🚪 AgentContext: PLAN_STREAM discarded (wrong agent)', { expected: selectedAgentId, got: plan.agentId });
               return;
             }
 
@@ -622,9 +619,9 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onAttentionStream: (attention: AttentionStreamPayload) => {
-            // GATE CHECK - discard if gate is closed (during agent switch)
-            if (!processingGateRef.current) {
-              console.log('🚪 AgentContext: ATTENTION_STREAM discarded (gate closed)');
+            // Filter by agentId to prevent cross-agent message contamination
+            if (attention.agentId !== selectedAgentId) {
+              console.log('🚪 AgentContext: ATTENTION_STREAM discarded (wrong agent)', { expected: selectedAgentId, got: attention.agentId });
               return;
             }
 
@@ -638,9 +635,9 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onToolStream: (tool: ToolStreamPayload) => {
-            // GATE CHECK - discard if gate is closed (during agent switch)
-            if (!processingGateRef.current) {
-              console.log('🚪 AgentContext: TOOL_STREAM discarded (gate closed)');
+            // Filter by agentId to prevent cross-agent message contamination
+            if (tool.agentId !== selectedAgentId) {
+              console.log('🚪 AgentContext: TOOL_STREAM discarded (wrong agent)', { expected: selectedAgentId, got: tool.agentId });
               return;
             }
 
@@ -657,10 +654,10 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
             });
           },
 
-          onAgentModeStarted: () => {
-            // GATE CHECK - discard if gate is closed (during agent switch)
-            if (!processingGateRef.current) {
-              console.log('🚪 AgentContext: AGENT_MODE_STARTED discarded (gate closed)');
+          onAgentModeStarted: (data) => {
+            // Filter by agentId to prevent cross-agent message contamination
+            if (data.agentId !== selectedAgentId) {
+              console.log('🚪 AgentContext: AGENT_MODE_STARTED discarded (wrong agent)', { expected: selectedAgentId, got: data.agentId });
               return;
             }
 
@@ -679,7 +676,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
         if (isReconnection && forceResubscribeCounter > 0) {
           try {
             const data = await getAgent(selectedAgentId);
-            setMessages(data.messages);
+            // Merge API messages with any realtime messages that arrived during fetch
+            setMessages(prev => {
+              const apiIds = new Set(data.messages.map(m => m.message_id));
+              const realtimeOnly = prev.filter(m => !apiIds.has(m.message_id));
+              return [...data.messages, ...realtimeOnly];
+            });
             setAgent(data.agent);
             // Update chat mode in case agent escalated while disconnected
             setIsChatMode(!data.agent.temporal_workflow_id);
@@ -688,11 +690,7 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           }
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // OPEN GATE - subscription is established, safe to process messages
-        // ═══════════════════════════════════════════════════════════════════════
-        processingGateRef.current = true;
-        console.log('🚪 AgentContext: Gate OPENED after subscription established');
+        console.log('✅ AgentContext: Subscription established for agent', selectedAgentId);
       } catch (error) {
         console.error('Failed to subscribe:', error);
         isReconnectingRef.current = false;

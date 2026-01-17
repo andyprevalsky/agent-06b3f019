@@ -24,6 +24,7 @@ from helpers.terminal_filter import TerminalFilter
 from helpers.claude_code_ws_client import ClaudeCodeWsClient
 from helpers.attachments import FilePointer, extract_attachments_from_context, get_file_from_pointer
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 
@@ -136,7 +137,7 @@ async def save_claude_code_message(
             "[ClaudeCode] Failed to save message",
             agent_id=agent_id,
             task_id=task_id,
-            error=str(e)
+            error=extract_error_message(e)
         )
 
 
@@ -280,7 +281,7 @@ Set attempt_completion=false when:
         logger.error(
             "[ClaudeCode] Parent LLM call failed",
             agent_id=agent_id,
-            error=str(e)
+            error=extract_error_message(e)
         )
         # Default to not completing and sending error response
         return {
@@ -755,7 +756,7 @@ async def spawn_claude_code_activity(
                 "[ClaudeCode] Failed to persist output",
                 agent_id=agent_id,
                 task_id=task_id,
-                error=str(e)
+                error=extract_error_message(e)
             )
 
         # 6. Close the session and extract output files
@@ -817,7 +818,7 @@ async def spawn_claude_code_activity(
                 "[ClaudeCode] Failed to close session",
                 agent_id=agent_id,
                 task_id=task_id,
-                error=str(e)
+                error=extract_error_message(e)
             )
 
         # 7. Resolve file pointers in structured_response using extracted files
@@ -920,14 +921,14 @@ async def spawn_claude_code_activity(
             "[ClaudeCode] Automation failed",
             agent_id=agent_id,
             task_id=task_id,
-            error=str(e),
+            error=extract_error_message(e),
             error_type=type(e).__name__
         )
 
         error_context = f"Failed during: {action_summary[-1] if action_summary else 'initialization'}"
         error_message = build_context_summary(
             success=False,
-            close_reasoning=str(e),
+            close_reasoning=extract_error_message(e),
             action_summary=action_summary,
             error_context=error_context
         )
@@ -1131,14 +1132,14 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             logger.error(
                 "[ClaudeCode] Tool failed",
                 agent_id=agent_id,
-                error=str(e),
+                error=extract_error_message(e),
                 error_type=type(e).__name__
             )
 
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Claude Code failed",
-                message=str(e),
+                message=extract_error_message(e),
                 status=MessageStatus.ERROR
             )
             raise
