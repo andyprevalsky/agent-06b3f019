@@ -20,11 +20,9 @@ const MODEL_POOLS = {
     'x-ai/grok-4-fast'
   ],
   'rose-1-ultra': [
+    'anthropic/claude-opus-4.5',
     'openai/gpt-5.2',
-    'anthropic/claude-sonnet-4.5',
-    'moonshotai/kimi-k2-thinking',
-    'google/gemini-3-pro-preview',
-    'x-ai/grok-4.1-fast'
+    'google/gemini-3-pro-preview'
   ]
 };
 
