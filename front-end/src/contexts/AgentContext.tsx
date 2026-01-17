@@ -3,23 +3,41 @@
  *
  * Central state management for agent conversations and real-time updates.
  *
- * AGENT SELECTION:
- * [NO_AGENT] <-- selectedAgentId: null
+ * AGENT SELECTION (Gate + Kill pattern):
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ SWITCH FROM AGENT A → AGENT B:                                         │
+ * │                                                                         │
+ * │ 1. CLOSE GATE ─────────► processingGateRef = false                     │
+ * │                          (handlers discard all messages)               │
+ * │                                                                         │
+ * │ 2. KILL CONNECTIONS ───► unsubscribe(channel), clear timeouts          │
+ * │                                                                         │
+ * │ 3. FLUSH STATE ────────► setMessages([]), clear streaming state        │
+ * │                                                                         │
+ * │ 4. CONNECT NEW ────────► subscribeToAgent(newAgentId)                  │
+ * │                          loadAgentDetail(newAgentId)                   │
+ * │                                                                         │
+ * │ 5. OPEN GATE ──────────► processingGateRef = true                      │
+ * │                          (handlers process messages)                   │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ *
+ * AGENT SELECTION STATES:
+ * [NO_AGENT] <-- selectedAgentId: null, gate: open
  *     |
- *     v (setSelectedAgentId)
- * [LOADING_AGENT] <-- fetch agent detail + subscribe to realtime
+ *     v (setSelectedAgentId) → CLOSE GATE → KILL → FLUSH
+ * [LOADING_AGENT] <-- fetch agent detail + subscribe, gate: closed
  *     |
- *     v (fetch complete)
- * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[]
+ *     v (subscription + fetch complete) → OPEN GATE
+ * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[], gate: open
  *     |
- *     | (change agent)
+ *     | (change agent) → CLOSE GATE first, prevents cross-agent contamination
  *     v
  * [NO_AGENT] or [LOADING_AGENT]
  *
  * REALTIME STREAMING:
  * [IDLE] --> subscribed to Supabase realtime channel
  *     |
- *     v (stream event)
+ *     v (stream event, gate must be OPEN)
  * [STREAMING] --> updates streamingBubbles, streamingPlans, streamingAttention, streamingTools
  *     |
  *     v (stream complete)
@@ -41,6 +59,7 @@
  * - streamingBubbles: Map<string, StreamingBubble>
  * - streamingPlans, streamingAttention, streamingTools: Maps
  * - isSending: boolean
+ * - processingGateRef: boolean (prevents cross-agent message contamination)
  */
 
 import React, { createContext, useContext, useState, useRef, useCallback, useEffect } from 'react';
@@ -186,7 +205,11 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
   
   // Track streamed texts to skip re-animation on INSERT
   const streamedTextsRef = useRef<Set<string>>(new Set());
-  
+
+  // Processing gate - when false, all handlers discard messages immediately
+  // Used during agent switch to prevent cross-agent message contamination
+  const processingGateRef = useRef<boolean>(true);
+
   const STREAM_TIMEOUT_MS = 15000;
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -260,23 +283,55 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Set Selected Agent (with load)
+  // Gate + Kill pattern: close gate → kill connections → flush state → open gate after reconnect
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const setSelectedAgentId = useCallback((id: string | null) => {
+    // ═══════════════════════════════════════════════════════════════════════
+    // 1. CLOSE GATE - handlers immediately start discarding messages
+    // ═══════════════════════════════════════════════════════════════════════
+    processingGateRef.current = false;
+    console.log('🚪 AgentContext: Gate CLOSED for agent switch');
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 2. KILL CONNECTIONS - synchronous, before any React state updates
+    // ═══════════════════════════════════════════════════════════════════════
+    if (channelRef.current) {
+      unsubscribe(channelRef.current);
+      channelRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    isReconnectingRef.current = false;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 3. FLUSH STATE - clear all messages and streaming state
+    // ═══════════════════════════════════════════════════════════════════════
+    setMessages([]);
+    setStreamingBubbles(prev => {
+      for (const [_, bubble] of prev) {
+        if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);
+      }
+      return new Map();
+    });
+    setStreamingPlan(null);
+    setStreamingAttention(null);
+    setStreamingTools(new Map());
+    setAgent(null);
+    streamedTextsRef.current.clear();
+    initialLoadDoneRef.current = null;
+    setIsChatMode(true); // Reset to chat mode default
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 4. UPDATE SELECTED - triggers useEffect to subscribe to new channel
+    // Gate will be opened in useEffect after subscription is established
+    // ═══════════════════════════════════════════════════════════════════════
     setSelectedAgentIdState(id);
-    
+
     if (id) {
       loadAgentDetail(id);
-    } else {
-      // Clear state when deselecting
-      setAgent(null);
-      setMessages([]);
-      setStreamingBubbles(new Map());
-      setStreamingPlan(null);
-      setStreamingAttention(null);
-      setIsChatMode(true); // Reset to chat mode default
-      // Reset initial load tracking
-      initialLoadDoneRef.current = null;
     }
   }, [loadAgentDetail]);
 
@@ -375,6 +430,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
       try {
         const channel = await subscribeToAgent(selectedAgentId, {
           onInsert: (data: InsertMessagePayload) => {
+            // GATE CHECK - discard if gate is closed (during agent switch)
+            if (!processingGateRef.current) {
+              console.log('🚪 AgentContext: INSERT discarded (gate closed)');
+              return;
+            }
+
             // data is already extracted from wrapper by subscribeToAgent
             const message: Message = {
               message_id: data.id,
@@ -443,6 +504,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onUpdate: (updated: UpdateAgentPayload) => {
+            // GATE CHECK - discard if gate is closed (during agent switch)
+            if (!processingGateRef.current) {
+              console.log('🚪 AgentContext: UPDATE discarded (gate closed)');
+              return;
+            }
+
             // updated is already extracted from wrapper by subscribeToAgent
             setAgent(prev => {
               if (!prev) return prev;
@@ -473,12 +540,18 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onAssistantStream: (chunk: AssistantStreamPayload) => {
+            // GATE CHECK - discard if gate is closed (during agent switch)
+            if (!processingGateRef.current) {
+              console.log('🚪 AgentContext: ASSISTANT_STREAM discarded (gate closed)');
+              return;
+            }
+
             console.log(`📡 AgentContext STREAM:`, {
               stream_id: chunk.stream_id,
               sequence: chunk.sequence,
               done: chunk.done,
             });
-            
+
             setStreamingBubbles(prev => {
               const newMap = new Map(prev);
               const existing = newMap.get(chunk.stream_id);
@@ -521,6 +594,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onPlanStream: (plan: PlanStreamPayload) => {
+            // GATE CHECK - discard if gate is closed (during agent switch)
+            if (!processingGateRef.current) {
+              console.log('🚪 AgentContext: PLAN_STREAM discarded (gate closed)');
+              return;
+            }
+
             console.log(`📋 AgentContext PLAN STREAM:`, plan);
             setStreamingPlan({
               stream_id: plan.stream_id,
@@ -530,6 +609,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onAttentionStream: (attention: AttentionStreamPayload) => {
+            // GATE CHECK - discard if gate is closed (during agent switch)
+            if (!processingGateRef.current) {
+              console.log('🚪 AgentContext: ATTENTION_STREAM discarded (gate closed)');
+              return;
+            }
+
             console.log(`📢 AgentContext ATTENTION STREAM:`, attention);
             setStreamingAttention({
               stream_id: attention.stream_id,
@@ -540,6 +625,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
           
           onToolStream: (tool: ToolStreamPayload) => {
+            // GATE CHECK - discard if gate is closed (during agent switch)
+            if (!processingGateRef.current) {
+              console.log('🚪 AgentContext: TOOL_STREAM discarded (gate closed)');
+              return;
+            }
+
             console.log(`🔧 AgentContext TOOL STREAM:`, tool);
             setStreamingTools(prev => {
               const newMap = new Map(prev);
@@ -554,6 +645,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
           },
 
           onAgentModeStarted: () => {
+            // GATE CHECK - discard if gate is closed (during agent switch)
+            if (!processingGateRef.current) {
+              console.log('🚪 AgentContext: AGENT_MODE_STARTED discarded (gate closed)');
+              return;
+            }
+
             console.log(`🚀 AgentContext AGENT_MODE_STARTED`);
             setIsChatMode(false);
           },
@@ -577,6 +674,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
             console.error('Failed to refetch after reconnection:', error);
           }
         }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // OPEN GATE - subscription is established, safe to process messages
+        // ═══════════════════════════════════════════════════════════════════════
+        processingGateRef.current = true;
+        console.log('🚪 AgentContext: Gate OPENED after subscription established');
       } catch (error) {
         console.error('Failed to subscribe:', error);
         isReconnectingRef.current = false;
