@@ -408,6 +408,48 @@ export async function uploadFileToSession(
 }
 
 /**
+ * File info returned by Steel's files.list() API
+ */
+export interface SteelFileInfo {
+  path: string;
+  size: number;
+  lastModified?: string;
+}
+
+/**
+ * List all files in a Steel browser session.
+ * This includes files downloaded by the browser and any uploaded files.
+ *
+ * @param sessionId - The Steel session ID
+ * @returns Array of file info objects
+ */
+export async function listSessionFiles(sessionId: string): Promise<SteelFileInfo[]> {
+  console.log(`📂 Listing files in Steel session ${sessionId}...`);
+
+  try {
+    const filesResponse = await steel.sessions.files.list(sessionId);
+
+    // Steel SDK returns an object with data or files array, extract it
+    const files = (filesResponse as any).data || (filesResponse as any).files || (filesResponse as unknown as any[]) || [];
+
+    console.log(`  ✅ Found ${files.length} file(s)`);
+    for (const file of files) {
+      console.log(`    - ${file.path} (${file.size} bytes)`);
+    }
+
+    return files.map((f: any) => ({
+      path: f.path,
+      size: f.size || 0,
+      lastModified: f.lastModified,
+    }));
+  } catch (error) {
+    console.error(`  ❌ Failed to list files:`, error);
+    // Return empty array on error (session may have no files)
+    return [];
+  }
+}
+
+/**
  * Close all active browser sessions (for cleanup).
  */
 export async function closeAllActiveSessions(): Promise<number> {

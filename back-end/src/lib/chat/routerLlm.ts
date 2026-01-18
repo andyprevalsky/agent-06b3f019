@@ -48,35 +48,42 @@ export interface RouterResponse {
 
 // ============================================
 // JSON Schema for OpenAI structured output
+// Uses oneOf discriminated union to match Zod schema - each action type has exactly the required fields
+// This satisfies OpenAI strict mode which requires all properties to be in 'required'
 // ============================================
 const ROUTER_JSON_SCHEMA = {
-  type: 'object',
-  properties: {
-    reasoning: {
-      type: 'string',
-      description: 'Brief explanation of why this action was chosen',
+  oneOf: [
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', const: 'direct_answer' },
+        reasoning: { type: 'string', description: 'Brief explanation of why this action was chosen' },
+      },
+      required: ['action', 'reasoning'],
+      additionalProperties: false,
     },
-    action: {
-      type: 'string',
-      enum: ['direct_answer', 'web_search', 'start_superintelligence'],
-      description: 'The action to take',
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', const: 'web_search' },
+        reasoning: { type: 'string', description: 'Brief explanation of why this action was chosen' },
+        query: { type: 'string', description: 'Search query for web search' },
+      },
+      required: ['action', 'reasoning', 'query'],
+      additionalProperties: false,
     },
-    query: {
-      type: 'string',
-      description: 'Search query (required if action is web_search)',
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', const: 'start_superintelligence' },
+        reasoning: { type: 'string', description: 'Brief explanation of why this action was chosen' },
+        goal: { type: 'string', description: 'Task goal for the agent' },
+        mode: { type: 'string', enum: ['plan', 'execute'], description: 'plan for 3+ tool calls, execute for 1-2 tool calls' },
+      },
+      required: ['action', 'reasoning', 'goal', 'mode'],
+      additionalProperties: false,
     },
-    goal: {
-      type: 'string',
-      description: 'Task goal (required if action is start_superintelligence)',
-    },
-    mode: {
-      type: 'string',
-      enum: ['plan', 'execute'],
-      description: 'plan for 3+ tool calls, execute for 1-2 tool calls (required if action is start_superintelligence)',
-    },
-  },
-  required: ['reasoning', 'action'],
-  additionalProperties: false,
+  ],
 };
 
 import { downloadFromStorage } from '../storage';

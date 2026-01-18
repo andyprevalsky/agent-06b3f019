@@ -180,7 +180,7 @@ class DOMService:
     
     def __init__(self, cdp_url: str, viewport_width: int = 1280, viewport_height: int = 800):
         """Initialize DOM service.
-        
+
         Args:
             cdp_url: WebSocket URL for CDP connection (from Browserbase)
             viewport_width: Browser viewport width (WXGA default)
@@ -194,29 +194,35 @@ class DOMService:
         
     async def connect(self) -> None:
         """Connect to the browser via CDP.
-        
+
         This must be called before any other methods.
         """
         try:
             from browser_use.browser.session import BrowserSession
             from browser_use.browser.profile import BrowserProfile
-            
+
             # Create profile with CDP URL for remote browser
+            # downloads_path="/files" is required for Steel's Files API to capture downloads
             profile = BrowserProfile(
                 cdp_url=self.cdp_url,
-                is_local=False,  # Remote browser (Browserbase)
+                is_local=False,  # Remote browser (Steel)
+                downloads_path="/files",  # Steel captures files from /files directory
             )
-            
-            self._session = BrowserSession(browser_profile=profile)
+
+            # Must pass cdp_url directly to prevent BrowserSession from overriding is_local=True
+            self._session = BrowserSession(browser_profile=profile, cdp_url=self.cdp_url)
             await self._session.start()
             logger.info(f"🌐 Connected to browser via CDP: {self.cdp_url[:50]}...")
+            # Note: Download behavior is configured automatically by browser-use DownloadsWatchdog
+            # using the downloads_path="/files" setting in BrowserProfile
+
         except ImportError as e:
             logger.error(f"browser-use not installed or import error: {e}")
             raise
         except Exception as e:
             logger.error(f"Failed to connect to browser: {e}")
             raise
-    
+
     async def disconnect(self) -> None:
         """Disconnect from the browser.
         
@@ -237,10 +243,10 @@ class DOMService:
     
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
-        
+
         Args:
             include_screenshot: Whether to include base64 screenshot
-            
+
         Returns:
             Dict with:
                 - url: Current page URL
@@ -255,7 +261,7 @@ class DOMService:
         """
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
-        
+
         # Get browser state summary from browser-use
         state = await self._session.get_browser_state_summary(
             include_screenshot=include_screenshot

@@ -365,6 +365,13 @@ To pass files to spawn_browser_agent, spawn_claude_code_agent, or spawn_sub_agen
                         metadata_texts.append(build_attachment_metadata_text(fp))
                         continue
 
+                    # Skip downloads in workflow context (httpx uses threading.local which Temporal sandbox blocks)
+                    # Downloads only work inside activity context
+                    if not activity.in_activity():
+                        logger.debug(f"Skipping attachment download in workflow context: {fp.original_filename}")
+                        metadata_texts.append(build_attachment_metadata_text(fp))
+                        continue
+
                     # Download file from storage (uses module-level cache)
                     try:
                         file_content, file_metadata = await get_file_from_pointer(fp)

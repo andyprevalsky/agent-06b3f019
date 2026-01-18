@@ -10,7 +10,9 @@ import {
   resumeSession,
   getSession,
   injectUserCookies,
-  uploadFileToSession
+  uploadFileToSession,
+  listSessionFiles,
+  SteelFileInfo
 } from '../lib/steel';
 
 // Configure multer for file uploads (store in memory)
@@ -266,6 +268,34 @@ router.post('/:sessionId/files', authenticate, upload.single('file') as any, asy
     console.error('❌ Failed to upload file to session:', error);
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to upload file to session'
+    });
+  }
+});
+
+/**
+ * GET /api/browser-session/:sessionId/files/list
+ * List all files in a Steel browser session.
+ * Returns files that have been downloaded by the browser or uploaded.
+ */
+router.get('/:sessionId/files/list', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    console.log(`📂 Listing files for session ${sessionId}`);
+
+    const files = await listSessionFiles(sessionId);
+
+    res.json({
+      success: true,
+      session_id: sessionId,
+      files,
+      count: files.length,
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to list session files:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to list session files'
     });
   }
 });

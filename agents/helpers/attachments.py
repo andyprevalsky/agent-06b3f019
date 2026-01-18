@@ -7,8 +7,10 @@ Handles resolving FilePointers to multimodal content for LLM messages.
 import base64
 import httpx
 import logging
+import uuid
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
+from datetime import datetime
 
 from config import load_config
 
@@ -88,6 +90,62 @@ async def download_from_storage(storage_path: str) -> bytes:
         )
         response.raise_for_status()
         return response.content
+
+
+async def upload_to_storage(
+    user_id: str,
+    file_content: bytes,
+    filename: str,
+    mime_type: str,
+) -> Dict[str, Any]:
+    """
+    Upload a file to Supabase Storage and return a FilePointer dict.
+
+    Args:
+        user_id: User ID for storage path prefix
+        file_content: Raw file bytes
+        filename: Original filename
+        mime_type: MIME type of the file
+
+    Returns:
+        FilePointer dict with id, storage_path, original_filename, mime_type, size_bytes, created_at
+    """
+    config = load_config()
+    supabase_url = config.supabase.url
+    supabase_key = config.supabase.service_role_key
+
+    if not supabase_key:
+        raise ValueError("Missing SUPABASE_SERVICE_ROLE_KEY environment variable")
+
+    # Generate storage path: {user_id}/{uuid}_{safe_filename}
+    file_id = str(uuid.uuid4())
+    safe_filename = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
+    storage_path = f"{user_id}/{file_id}_{safe_filename}"
+
+    url = f"{supabase_url}/storage/v1/object/attachments/{storage_path}"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": mime_type,
+            },
+            content=file_content,
+            timeout=60.0,
+        )
+        response.raise_for_status()
+
+    logger.info(f"[Storage] Uploaded {filename} to {storage_path} ({len(file_content)} bytes)")
+
+    return {
+        "id": file_id,
+        "storage_path": storage_path,
+        "original_filename": filename,
+        "mime_type": mime_type,
+        "size_bytes": len(file_content),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 async def get_file_content(file_pointer: FilePointer) -> bytes:

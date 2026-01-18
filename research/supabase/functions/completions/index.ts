@@ -23,7 +23,7 @@ const MODEL_POOLS: Record<string, string[]> = {
     'anthropic/claude-haiku-4.5'
   ],
   'rose-1-ultra': [
-    'anthropic/claude-opus-4.5',
+    'anthropic/claude-opus-4-5-20251101',
     'openai/gpt-5.2',
     'google/gemini-3-pro-preview'
   ],
@@ -926,7 +926,9 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   const normalizedAction = yutoriActionMap[actionType] || actionType;
   
   // Validate action is one we support (Yutori has limited actions)
-  const validYutoriActions = ['click', 'scroll', 'input_text', 'press_key', 'navback', 'goto', 'wait', 'attempt_completion', 'upload_file'];
+  // NOTE: upload_file is NOT included because yutori is a vision model that doesn't understand DOM indices.
+  // When yutori tries to return upload_file, we reject it and fall back to browser-use.
+  const validYutoriActions = ['click', 'scroll', 'input_text', 'press_key', 'navback', 'goto', 'wait', 'attempt_completion'];
   if (!validYutoriActions.includes(normalizedAction)) {
     throw new Error(`normalizeYutoriResponse: Unknown action "${normalizedAction}" (raw: "${actionType}") - add to yutoriActionMap or validYutoriActions`);
   }
@@ -944,7 +946,7 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   // File upload - filename is at top level in Yutori response
   if (firstAction.filename) normalizedParams.filename = firstAction.filename;
   if (firstAction.file_path) normalizedParams.file_path = firstAction.file_path;
-  
+
   // Key presses - map 'keys' and 'key_comb' to 'key'
   // Yutori uses 'key_comb' for keyboard shortcuts (e.g., "Control+o")
   if (firstAction.key) normalizedParams.key = firstAction.key;

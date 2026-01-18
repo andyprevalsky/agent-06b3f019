@@ -431,9 +431,10 @@ class AgentWorkflow:
             execute_context = plan_result.get("context", [])
         else:
             # Poll messages to get context if we skipped PLAN
+            # Use epoch timestamp to get ALL messages (not None - that crashes poll_new_messages)
             execute_context = await workflow.execute_activity(
                 poll_new_messages,
-                args=[agent_id, None],  # No task_id filter
+                args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

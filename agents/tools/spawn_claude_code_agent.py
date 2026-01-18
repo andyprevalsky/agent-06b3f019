@@ -182,6 +182,7 @@ async def call_parent_llm(
     conversation_history: List[Dict[str, str]],
     agent_id: str,
     on_chunk: Callable[[str, int], Awaitable[None]],
+    model: str = "rose-labs/rose-1-lite",
 ) -> Dict[str, Any]:
     """
     Call the parent agent's LLM to decide whether to respond or complete.
@@ -263,7 +264,7 @@ Set attempt_completion=false when:
     try:
         result, usage, _ = await call_llm_structured_streaming(
             messages=messages,
-            model="rose-labs/rose-1-lite",  # Fast model for quick decisions
+            model=model,  # Inherited from parent agent
             temperature=0.3,
             max_tokens=500,
             response_model=ClaudeCodeParentResponse,
@@ -431,7 +432,7 @@ async def spawn_claude_code_activity(
         activity.heartbeat("Connecting to Claude Code WebSocket")
 
         # Model pricing for usage tracking
-        model_pricing = await get_model_pricing_with_fallback("claude-sonnet-4-20250514")
+        model_pricing = await get_model_pricing_with_fallback(model)
 
         # Terminal filter (pyte) for processing ANSI codes like xterm.js
         terminal = TerminalFilter(cols=200, rows=500)
@@ -557,6 +558,7 @@ async def spawn_claude_code_activity(
                             conversation_history=conversation_history,
                             agent_id=agent_id,
                             on_chunk=on_chunk,
+                            model=model,
                         )
 
                         # Track usage

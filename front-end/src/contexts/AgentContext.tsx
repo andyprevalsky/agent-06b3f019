@@ -39,6 +39,7 @@
  * - On mount: URL ?agent-id=X → selectedAgentId = X
  * - On setSelectedAgentId(X): selectedAgentId = X → URL ?agent-id=X
  * - On setSelectedAgentId(null): selectedAgentId = null → URL removes agent-id param
+ * - On popstate (back/forward): URL ?agent-id=X → selectedAgentId = X (syncs URL → state)
  * - Refresh preserves agent selection via URL
  *
  * REALTIME STREAMING:
@@ -269,6 +270,12 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
       initialLoadDoneRef.current = agentId;
     } catch (error) {
       console.error('Failed to load agent:', error);
+      // Agent not found or not accessible - clear selection and URL
+      // This handles cases like: user logged out, agent deleted, wrong user
+      setSelectedAgentIdState(null);
+      const url = new URL(window.location.href);
+      url.searchParams.delete('agent-id');
+      window.history.replaceState({}, '', url.toString());
     } finally {
       setIsLoadingAgent(false);
     }
@@ -303,13 +310,7 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
     window.history.replaceState({}, '', url.toString());
 
     // ═══════════════════════════════════════════════════════════════════════
-    // 1. CLOSE GATE - handlers immediately start discarding messages
-    // ═══════════════════════════════════════════════════════════════════════
-    processingGateRef.current = false;
-    console.log('🚪 AgentContext: Gate CLOSED for agent switch');
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // 2. KILL CONNECTIONS - synchronous, before any React state updates
+    // 1. KILL CONNECTIONS - synchronous, before any React state updates
     // ═══════════════════════════════════════════════════════════════════════
     if (channelRef.current) {
       unsubscribe(channelRef.current);
@@ -739,9 +740,31 @@ export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }:
   }, [selectedAgentId]);
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // URL → State sync (popstate listener for browser back/forward)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const urlAgentId = params.get('agent-id');
+
+      // Only update if URL agent-id differs from current state
+      if (urlAgentId !== selectedAgentId) {
+        console.log('🔄 AgentContext: URL changed via popstate', { urlAgentId, selectedAgentId });
+        // Use the full setSelectedAgentId to trigger proper cleanup/reconnection
+        // The URL is already correct so the replaceState in setSelectedAgentId is a no-op
+        setSelectedAgentId(urlAgentId);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [selectedAgentId, setSelectedAgentId]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // Clear streaming on pause
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   useEffect(() => {
     if (agent?.status === 'PAUSED') {
       setStreamingBubbles(new Map());

@@ -34,6 +34,7 @@ Run all services via Conductor (see `conductor.json`).
 ```bash
 cd back-end && npm run test:api         # Backend API tests
 cd agents && python tests/run_all_tests.py  # Agent tool tests
+cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
 ```
 
 ## Log Files

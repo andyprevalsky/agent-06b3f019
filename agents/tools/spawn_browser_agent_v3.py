@@ -19,7 +19,7 @@ import json
 import uuid as uuid_module
 import base64
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem, AssistantEvent
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
 from browser_tools.schemas import BROWSER_TOOL_MODELS, AVAILABLE_ACTIONS
 from browser_tools.dom_service import DOMService, ActionHistory
@@ -172,6 +172,193 @@ def build_context_summary(
             summary_parts.append(f"  • {action}")
     
     return "\n".join(summary_parts)
+
+
+# ========================================
+# STEEL FILES HELPERS
+# ========================================
+
+async def list_session_files(session_id: str) -> List[Dict[str, Any]]:
+    """
+    List all files in a Steel browser session by calling Steel API directly.
+    Returns list of file info dicts with path, size, lastModified.
+    """
+    import os
+    steel_api_key = os.environ.get("STEEL_API_KEY")
+    if not steel_api_key:
+        logger.warning("STEEL_API_KEY not set, cannot list session files")
+        return []
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"https://api.steel.dev/v1/sessions/{session_id}/files",
+                headers={"steel-api-key": steel_api_key}
+            )
+            logger.info(f"[Steel Files API] session={session_id}, status={response.status_code}, body={response.text[:500]}")
+            if response.status_code == 200:
+                data = response.json()
+                # Steel API returns files in "data" field (or "files" for backwards compat)
+                files = data.get("data") or data.get("files") or data if isinstance(data, dict) else data
+                logger.info(f"[Steel Files API] Parsed files count: {len(files) if isinstance(files, list) else 0}")
+                return files if isinstance(files, list) else []
+            else:
+                logger.warning(
+                    "Failed to list session files from Steel",
+                    session_id=session_id,
+                    status=response.status_code
+                )
+                return []
+    except Exception as e:
+        logger.warning(
+            "Error listing session files from Steel",
+            session_id=session_id,
+            error=extract_error_message(e)
+        )
+        return []
+
+
+async def download_file_from_steel(session_id: str, file_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Download a file directly from Steel API.
+
+    Args:
+        session_id: Steel session ID
+        file_path: File path as returned by Steel list API (e.g., "/files/tinified.zip")
+
+    Returns:
+        Dict with content (bytes), filename, mime_type, or None on failure
+    """
+    import os
+    steel_api_key = os.environ.get("STEEL_API_KEY")
+    if not steel_api_key:
+        logger.warning("STEEL_API_KEY not set, cannot download file")
+        return None
+
+    # Steel download API expects relative path (strip leading /files/ if present)
+    relative_path = file_path
+    if relative_path.startswith("/files/"):
+        relative_path = relative_path[7:]  # Remove "/files/"
+    elif relative_path.startswith("/"):
+        relative_path = relative_path[1:]  # Remove leading "/"
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                f"https://api.steel.dev/v1/sessions/{session_id}/files/download",
+                params={"path": relative_path},
+                headers={"steel-api-key": steel_api_key},
+            )
+            if response.status_code == 200:
+                # Extract filename from path
+                filename = file_path.split("/")[-1] or "download"
+
+                # Guess MIME type from extension
+                ext = filename.split(".")[-1].lower() if "." in filename else ""
+                mime_types = {
+                    "pdf": "application/pdf",
+                    "csv": "text/csv",
+                    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "xls": "application/vnd.ms-excel",
+                    "doc": "application/msword",
+                    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "png": "image/png",
+                    "jpg": "image/jpeg",
+                    "jpeg": "image/jpeg",
+                    "gif": "image/gif",
+                    "zip": "application/zip",
+                    "json": "application/json",
+                    "txt": "text/plain",
+                }
+                mime_type = mime_types.get(ext, "application/octet-stream")
+
+                logger.info(
+                    f"[Steel] Downloaded {filename} ({len(response.content)} bytes)",
+                    session_id=session_id,
+                )
+                return {
+                    "content": response.content,
+                    "filename": filename,
+                    "mime_type": mime_type,
+                }
+            else:
+                logger.warning(
+                    f"[Steel] Failed to download file",
+                    session_id=session_id,
+                    path=file_path,
+                    status=response.status_code,
+                    response=response.text[:200],
+                )
+                return None
+    except Exception as e:
+        logger.warning(
+            f"[Steel] Error downloading file",
+            session_id=session_id,
+            path=file_path,
+            error=extract_error_message(e),
+        )
+        return None
+
+
+async def extract_session_files(session_id: str, user_id: str, config) -> List[Dict[str, Any]]:
+    """
+    Extract all files from a Steel browser session:
+    1. List files in session (direct Steel API call)
+    2. Download each file from Steel (direct Steel API call)
+    3. Upload to Supabase storage (direct Supabase API call)
+    4. Return list of FilePointer dicts
+
+    This function does NOT go through the backend - it calls Steel and Supabase directly.
+    """
+    from helpers.attachments import upload_to_storage
+
+    # 1. List files in session
+    session_files = await list_session_files(session_id)
+    if not session_files:
+        logger.info("No files to extract from session", session_id=session_id)
+        return []
+
+    logger.info(f"[Extract] Found {len(session_files)} file(s) in session {session_id}")
+
+    # 2. Download each file and upload to Supabase
+    output_files: List[Dict[str, Any]] = []
+
+    for file_info in session_files:
+        file_path = file_info.get("path", "")
+        if not file_path:
+            continue
+
+        logger.info(f"[Extract] Processing: {file_path}")
+
+        # Download from Steel
+        downloaded = await download_file_from_steel(session_id, file_path)
+        if not downloaded:
+            logger.warning(f"[Extract] Failed to download: {file_path}")
+            continue
+
+        # Upload to Supabase storage
+        try:
+            file_pointer = await upload_to_storage(
+                user_id=user_id,
+                file_content=downloaded["content"],
+                filename=downloaded["filename"],
+                mime_type=downloaded["mime_type"],
+            )
+            output_files.append(file_pointer)
+            logger.info(
+                f"[Extract] Uploaded: {downloaded['filename']} -> {file_pointer['storage_path']}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Extract] Failed to upload {downloaded['filename']}: {extract_error_message(e)}"
+            )
+            continue
+
+    logger.info(
+        f"[Extract] Extracted {len(output_files)}/{len(session_files)} files",
+        session_id=session_id,
+    )
+    return output_files
 
 
 # ========================================
@@ -1446,7 +1633,16 @@ BROWSER CONTEXT:
 - Title: {browser_state.get('title', 'Unknown')}
 - Interactive Elements: {page_stats.get('interactive', 0)}
 - Scroll Position: Page {pages_above + 1} of {total_pages}"""
-                    
+
+                    # List files in session so verifier knows what's been downloaded
+                    session_files = await list_session_files(session_id)
+                    files_text = "Downloaded Files in Session:\n"
+                    if session_files:
+                        for f in session_files:
+                            files_text += f"  - {f.get('path', 'unknown')} ({f.get('size', 0)} bytes)\n"
+                    else:
+                        files_text += "  (no files downloaded)\n"
+
                     # Only expose tool results to verifier, not assistant reasoning
                     # (assistant messages are prone to reward hacking)
                     verifier_context = [
@@ -1455,7 +1651,9 @@ BROWSER CONTEXT:
                         # Message 2: TOOL - Current page state
                         {"role": "TOOL", "text": page_state, "metadata": {"toolName": "browser_state", "toolStatus": "FINISHED"}},
                         # Message 3: TOOL - Action execution log (last 30)
-                        {"role": "TOOL", "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown):\n\n{actions_text}", "metadata": {"toolName": "action_history", "toolStatus": "FINISHED"}}
+                        {"role": "TOOL", "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown):\n\n{actions_text}", "metadata": {"toolName": "action_history", "toolStatus": "FINISHED"}},
+                        # Message 4: TOOL - Downloaded files in session
+                        {"role": "TOOL", "text": files_text, "metadata": {"toolName": "session_files", "toolStatus": "FINISHED"}}
                     ]
                     
                     verifier_prompt = build_verifier_prompt("EXECUTE", f"Goal: {goal}\n\nVerify browser task completion.")
@@ -1497,12 +1695,22 @@ BROWSER CONTEXT:
                         execution_time_ms = (_safe_time() - start_time) * 1000
                         structured_response = progress_result.get("structured_response")
 
-                        # TODO: Add file extraction for file_pointer support
-                        # When browser session close endpoint supports file extraction:
-                        # 1. Get output_files from close response
-                        # 2. Resolve file pointers: structured_response = resolve_file_pointers_from_extracted(
-                        #        structured_response, output_schema, output_files)
-                        # 3. Emit output files as assistant events
+                        # Extract files from session BEFORE closing (requires active session)
+                        # 1. Download all files from Steel and upload to Supabase
+                        output_files = await extract_session_files(session_id, user_id, config)
+
+                        # 2. Resolve file pointers in structured_response using extracted files
+                        if structured_response and output_files:
+                            structured_response = resolve_file_pointers_from_extracted(
+                                structured_response=structured_response,
+                                output_schema=response_schema,
+                                extracted_files=output_files,
+                            )
+                            logger.info(
+                                "Resolved file pointers in browser agent response",
+                                agent_id=agent_id,
+                                file_count=len(output_files)
+                            )
 
                         # Disconnect and close session
                         await dom_service.disconnect()
@@ -1562,7 +1770,8 @@ BROWSER CONTEXT:
                             "browser_url": browser_url,
                             "usage_items": usage_items,
                             "execution_time_ms": execution_time_ms,
-                            "structured_response": structured_response
+                            "structured_response": structured_response,
+                            "output_files": output_files  # FilePointer dicts for yielding as AssistantEvent
                         }
                     
                     # Not complete - record verifier feedback as thinking for next iteration
@@ -2004,6 +2213,20 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     tool_name="spawn_browser_agent",
                     usage_items=usage_items
                 )
+
+            # Post output files as separate ASSISTANT messages (like spawn_claude_code)
+            output_files = result.get("output_files", [])
+            if output_files:
+                logger.info(
+                    "[BrowserAgent] Posting output files as ASSISTANT messages",
+                    agent_id=agent_id,
+                    file_count=len(output_files),
+                )
+                for fp in output_files:
+                    yield AssistantEvent(
+                        message="",  # Empty text for file-only messages
+                        file_pointer=fp,
+                    )
 
             # Yield final result
             yield ToolEvent(

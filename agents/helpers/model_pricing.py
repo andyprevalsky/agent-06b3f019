@@ -51,9 +51,11 @@ async def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
     # Fetch from Supabase cost endpoint
     try:
         config = load_config()
-        
-        # Build URL for cost endpoint
-        cost_url = f"{config.supabase.url}/functions/v1/cost?model={normalized_model}"
+
+        # Build URL for cost endpoint - derive from rose.api_url to respect dev/prod environment
+        # config.rose.api_url is "http://localhost:54321/functions/v1/completions" in dev
+        # and "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions" in prod
+        cost_url = config.rose.api_url.replace("/completions", f"/cost?model={normalized_model}")
         
         logger.info("🔄 Fetching fresh pricing from Supabase", model=model, url=cost_url)
         
@@ -150,23 +152,29 @@ def get_default_pricing(model: str) -> Dict[str, float]:
 
 async def get_model_pricing_with_fallback(model: str) -> Dict[str, float]:
     """
-    Get model pricing with fallback to defaults if API call fails.
-    
+    Get model pricing from API. Raises error if pricing cannot be fetched.
+
+    This function intentionally does NOT use fallback pricing to ensure
+    pricing configuration issues are surfaced as errors rather than silently
+    using incorrect values.
+
     Args:
         model: Model identifier
-        
+
     Returns:
         Dict with 'input_cents_per_1k' and 'output_cents_per_1k'
+
+    Raises:
+        RuntimeError: If pricing cannot be fetched from API
     """
     pricing = await get_model_pricing(model)
-    
+
     if pricing is None:
-        logger.warning(
-            "Using fallback pricing (API fetch failed)",
-            model=model
+        raise RuntimeError(
+            f"Failed to fetch pricing for model '{model}'. "
+            f"Ensure the model is configured in the cost endpoint (research/supabase/functions/cost/index.ts MODEL_POOLS)."
         )
-        return get_default_pricing(model)
-    
+
     return pricing
 
 
