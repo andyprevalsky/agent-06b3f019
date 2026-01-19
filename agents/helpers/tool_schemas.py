@@ -18,6 +18,7 @@ logger = structlog.get_logger(__name__)
 # Tools available during PLAN phase (research + create execution plan)
 PLAN_PHASE_TOOLS = [
     "web_search",
+    "web_fetch",
     "send_message_to_user",
     "set_plan",
     "attempt_completion",
@@ -163,6 +164,16 @@ class WebSearchTool(BaseModel):
 
     tool: Literal["web_search"]
     query: str = Field(description="Search query or question about current/recent information")
+
+
+class WebFetchTool(BaseModel):
+    """Tool call for fetching and extracting content from URLs with JavaScript rendering support."""
+
+    tool: Literal["web_fetch"]
+    urls: List[str] = Field(description="URLs to fetch and extract content from")
+    objective: str = Field(description="What content to focus on extracting from the pages")
+    excerpts: bool = Field(default=True, description="Return focused excerpts aligned to objective")
+    full_content: bool = Field(default=False, description="Return complete page content instead of excerpts")
 
 
 class PeopleSearchTool(BaseModel):
@@ -724,6 +735,7 @@ class PayForX402BazaarServiceTool(BaseModel):
 TOOL_MODELS = {
     "wait_seconds": WaitSecondsTool,
     "web_search": WebSearchTool,
+    "web_fetch": WebFetchTool,
     "people_search": PeopleSearchTool,
     "deep_research": DeepResearchTool,
     "send_message_to_user": SendMessageToUserTool,

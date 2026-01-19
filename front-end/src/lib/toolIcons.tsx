@@ -80,6 +80,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'query_blueprints': BookOpen,
   'save_blueprint': Save,
   'web_search': Search,
+  'web_fetch': Globe,
   'wait_seconds': Clock,
   'deep_research': FileSearch,
   'people_search': Users,
@@ -181,6 +182,8 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
  */
 const DISPLAY_PREFIX_ICONS: [string, LucideIcon][] = [
   ['Searching the web', Search],
+  ['Fetching web content', Globe],
+  ['Extracting from', Globe],
   ['Searching for people', Users],
   ['Browsing the web', Globe],
   ['Delegating', Users],

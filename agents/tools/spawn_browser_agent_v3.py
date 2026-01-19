@@ -245,8 +245,7 @@ async def download_file_from_steel(session_id: str, file_path: str) -> Optional[
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(
-                f"https://api.steel.dev/v1/sessions/{session_id}/files/download",
-                params={"path": relative_path},
+                f"https://api.steel.dev/v1/sessions/{session_id}/files/{relative_path}",
                 headers={"steel-api-key": steel_api_key},
             )
             if response.status_code == 200:
@@ -300,7 +299,7 @@ async def download_file_from_steel(session_id: str, file_path: str) -> Optional[
         return None
 
 
-async def extract_session_files(session_id: str, user_id: str, config) -> List[Dict[str, Any]]:
+async def extract_session_files(session_id: str, user_id: str, config, exclude_paths: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """
     Extract all files from a Steel browser session:
     1. List files in session (direct Steel API call)
@@ -309,6 +308,9 @@ async def extract_session_files(session_id: str, user_id: str, config) -> List[D
     4. Return list of FilePointer dicts
 
     This function does NOT go through the backend - it calls Steel and Supabase directly.
+
+    Args:
+        exclude_paths: List of Steel file paths to exclude (e.g., files we uploaded)
     """
     from helpers.attachments import upload_to_storage
 
@@ -318,7 +320,15 @@ async def extract_session_files(session_id: str, user_id: str, config) -> List[D
         logger.info("No files to extract from session", session_id=session_id)
         return []
 
-    logger.info(f"[Extract] Found {len(session_files)} file(s) in session {session_id}")
+    # Filter out excluded paths (e.g., files we uploaded to the session)
+    exclude_set = set(exclude_paths or [])
+    if exclude_set:
+        original_count = len(session_files)
+        session_files = [f for f in session_files if f.get("path") not in exclude_set]
+        if len(session_files) < original_count:
+            logger.info(f"[Extract] Filtered out {original_count - len(session_files)} uploaded file(s)")
+
+    logger.info(f"[Extract] Found {len(session_files)} file(s) to extract in session {session_id}")
 
     # 2. Download each file and upload to Supabase
     output_files: List[Dict[str, Any]] = []
@@ -1697,7 +1707,9 @@ BROWSER CONTEXT:
 
                         # Extract files from session BEFORE closing (requires active session)
                         # 1. Download all files from Steel and upload to Supabase
-                        output_files = await extract_session_files(session_id, user_id, config)
+                        # Exclude files we uploaded to avoid re-extracting them
+                        uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
+                        output_files = await extract_session_files(session_id, user_id, config, exclude_paths=uploaded_paths)
 
                         # 2. Resolve file pointers in structured_response using extracted files
                         if structured_response and output_files:

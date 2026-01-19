@@ -393,6 +393,7 @@ export async function uploadFileToSession(
 
     const uploadedFile = await steel.sessions.files.upload(sessionId, {
       file: file,
+      path: filename,  // Preserve original filename instead of UUID
     });
 
     console.log(`  ✅ Uploaded ${filename} -> ${uploadedFile.path} (${uploadedFile.size} bytes)`);

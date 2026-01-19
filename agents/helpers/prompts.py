@@ -160,30 +160,59 @@ Do NOT emit any tool_calls this turn.
         prompt += dedent("""
 PLAN - Research and create execution plan.
 
-┌──────────────────────────────────────────────────────────────┐
-│  RESEARCH ←──→ CLARIFY (loop)   │  ← flexible, any order     │
-│              ↓ when ready                                    │
-│  set_plan() → attempt_completion │  ← STRICT: consecutive    │
-│                                                              │
-│ Once you call set_plan, ONLY action is attempt_completion.   │
-└──────────────────────────────────────────────────────────────┘
+TOOL CALL STATE MACHINE
+=======================
+This state machine governs your tool call execution during the PLAN phase.
 
-Workflow:
-1. Research unknowns (web_search, deep_research)
-2. Clarify with user (send_message_to_user with is_question=true)
-3. When ready: call set_plan() ONCE
-4. Immediately after: call attempt_completion()
+┌─────────────────────────────────────────────────────────────────┐
+│  [RESEARCH] ──► [SET_PLAN] ──► [ASK_QUESTION] ──► [EXIT]       │
+│       ▲              ▲               │                          │
+│       │              │               │                          │
+│       └──────────────┴───────────────┘                          │
+│              (loop back if needed)                              │
+└─────────────────────────────────────────────────────────────────┘
+
+NODE: RESEARCH (entry point)
+────────────────────────────
+ENABLED tools
+-> web_search
+-> web_fetch
+-> send_message_to_user
+
+To Progress From this Node in the State Machine
+-> call set_plan to progress to SET_PLAN Node
+
+NODE: SET_PLAN
+──────────────
+ENABLED TOOLS
+-> send_message_to_user
+
+To Progress From this Node in the State Machine
+-> call send_message_to_user to progress to ASK_QUESTION Node
+-> call attempt_completion to progress to EXIT Node
+
+NODE: ASK_QUESTION
+─────────────────────────────
+ENABLED TOOLS
+-> send_message_to_user
+
+To Progress From this Node in the State Machine
+-> call attempt_completion to progress to EXIT Node
+-> call any of the RESEARCH Node ENABLED tools to progress to RESEARCH Node
+-> call set_plan to progress to SET_PLAN Node
+
+NODE: EXIT (terminal)
+─────────────────────
+orchestration layer will handle this for you once you are here
 
 TWO-AXIS PLANNING:
-- If uncertainty > decomposability → reduce uncertainty first
-- If decomposability >= uncertainty → parallelize work
-- Parallelism is only safe when uncertainty is low
+- If uncertainty > decomposability → stay in RESEARCH
+- If decomposability >= uncertainty → proceed to SET_PLAN
 
 For "get/buy/order X" goals: plan MUST include purchase step, not just recommendations.
 
-IMPORTANT: Once you move to EXECUTE phase, you can no longer get user input.
-Ask necessary clarifying questions BEFORE calling set_plan.
-Permission gates activate automatically—don't fear taking action.
+IMPORTANT: Once in EXECUTE phase, no more user input possible.
+Ask clarifying questions BEFORE calling attempt_completion.
         """).rstrip()
     else:
         prompt += dedent("""

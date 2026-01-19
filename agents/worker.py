@@ -33,6 +33,7 @@ from tools.spawn_claude_code_agent import spawn_claude_code_activity  # Claude C
 from tools.deep_research import deep_research_activity
 from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
 from tools.web_search import web_search_activity
+from tools.web_fetch import web_fetch_activity
 from tools.people_search import people_search_activity
 from tools.find_all import (
     find_all_ingest_activity,
@@ -189,6 +190,7 @@ async def main():
             # New event-driven tool activities
             deep_research_activity,
             web_search_activity,
+            web_fetch_activity,
             people_search_activity,
             # Find All activities (split into sub-activities)
             find_all_ingest_activity,

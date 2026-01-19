@@ -44,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.request_user_approval import request_user_approval_direct
     from tools.knowledge_base import save_blueprint_activity
     from tools.web_search import web_search
+    from tools.web_fetch import web_fetch
     from tools.spawn_sub_agents import spawn_sub_agent
     from helpers.error_utils import extract_error_message
     from tools.send_sms_as_user import send_sms_as_user
@@ -82,6 +83,7 @@ TOOL_EXECUTORS = {
     "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
     "enable_write_permissions": enable_write_permissions,
     "web_search": web_search,
+    "web_fetch": web_fetch,
     "spawn_sub_agent": spawn_sub_agent,
     "send_sms_as_user": send_sms_as_user,
     "search_user_network_for_people": search_user_network_for_people,
@@ -662,7 +664,7 @@ class AgentWorkflow:
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
             # These return results and call handle_tool_event internally
             NEW_SIGNATURE_TOOLS = {
-                "web_search", "send_email", "send_sms", "send_sms_as_user",
+                "web_search", "web_fetch", "send_email", "send_sms", "send_sms_as_user",
                 "search_user_network_for_people", "read_message_history_with_person",
                 "monitor", "check_monitor_events",
                 "deep_research", "attempt_completion",
