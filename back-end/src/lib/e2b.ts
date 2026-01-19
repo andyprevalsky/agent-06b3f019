@@ -93,8 +93,10 @@ export async function createClaudeCodeSession(
   const wsUrl = `wss://${wsHost}`;
 
   // Start the WebSocket server (runs Claude Code internally)
+  // timeoutMs: 0 = no timeout (default is 60s which was killing the process!)
   sandbox.commands.run('node /home/user/ws-server.mjs', {
     background: true,
+    timeoutMs: 0,
   }).catch(err => console.error(`[E2B] Failed to start WS server:`, err));
 
   // Wait for WS server to be ready

@@ -489,7 +489,7 @@ async def spawn_sub_agent_activity(
                     # Pass output schema from tool call (required for sub-agents)
                     "response_schema": agent.get("output_schema"),
                     "bus_id": bus_id,  # Shared bus channel for tree updates
-                    "max_iterations": 1,  # TEMP: 1 for testing (should be 25)
+                    "max_iterations": 25,
                 }
 
                 # Add resolved attachments if any

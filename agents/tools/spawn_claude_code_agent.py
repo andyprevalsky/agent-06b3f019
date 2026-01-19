@@ -25,6 +25,7 @@ from helpers.claude_code_ws_client import ClaudeCodeWsClient
 from helpers.attachments import FilePointer, extract_attachments_from_context, get_file_from_pointer
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 from helpers.error_utils import extract_error_message
+from helpers.e2b_log_collector import SandboxLogCollector
 
 logger = structlog.get_logger()
 
@@ -331,6 +332,7 @@ async def spawn_claude_code_activity(
     sandbox_id = None
     ws_url = None
     start_time = _safe_time()
+    log_collector: Optional[SandboxLogCollector] = None
 
     # Token tracking for usage
     total_input_tokens = 0
@@ -401,6 +403,10 @@ async def spawn_claude_code_activity(
             uploaded_files=len(uploaded_files)
         )
         action_summary.append(f"Created E2B sandbox: {sandbox_id}")
+
+        # Start E2B sandbox log collector for debugging visibility
+        log_collector = SandboxLogCollector(sandbox_id, agent_id, task_id)
+        await log_collector.start()
         if uploaded_files:
             action_summary.append(f"Uploaded {len(uploaded_files)} files to /home/user/attachments/")
 
@@ -531,7 +537,62 @@ async def spawn_claude_code_activity(
                         agent_id=agent_id,
                         task_id=task_id
                     )
-                    action_summary.append("WebSocket connection lost - all reconnect attempts failed")
+
+                    # Check if E2B sandbox is still alive to determine root cause
+                    sandbox_health = None
+                    try:
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            health_resp = await client.get(
+                                f"{config.backend.api_url}/api/claude-code-session/{sandbox_id}/health",
+                                headers={"x-api-key": config.backend.api_key or ""}
+                            )
+                            if health_resp.status_code == 200:
+                                sandbox_health = health_resp.json()
+                    except Exception as health_err:
+                        logger.warning(
+                            "[ClaudeCode] Failed to check sandbox health",
+                            error=str(health_err)
+                        )
+
+                    # Log detailed diagnosis
+                    if sandbox_health:
+                        if sandbox_health.get("alive"):
+                            ws_running = sandbox_health.get("ws_server_running", False)
+                            claude_running = sandbox_health.get("claude_running", False)
+                            diagnostics = sandbox_health.get("diagnostics", {})
+
+                            logger.error(
+                                "[ClaudeCode] DIAGNOSIS: E2B sandbox is ALIVE but WS disconnected",
+                                sandbox_id=sandbox_id,
+                                ws_server_running=ws_running,
+                                claude_running=claude_running,
+                                diagnosis="ws-server.mjs or claude process crashed" if not ws_running else "WS connection issue"
+                            )
+
+                            # Log detailed diagnostics if available
+                            if diagnostics:
+                                logger.error(
+                                    "[ClaudeCode] DIAGNOSTICS extracted from sandbox",
+                                    sandbox_id=sandbox_id,
+                                    oom_check=diagnostics.get("oom_check", "N/A")[:500],
+                                    memory=diagnostics.get("memory", "N/A")[:500],
+                                    processes=diagnostics.get("processes", "N/A")[:1000],
+                                    crash_files=diagnostics.get("crash_files", "N/A")[:200],
+                                    ws_log=diagnostics.get("ws_log", "N/A")[:1000],
+                                )
+
+                            action_summary.append(f"DIAGNOSIS: Sandbox alive (ws={ws_running}, claude={claude_running}) - internal crash")
+                        else:
+                            logger.error(
+                                "[ClaudeCode] DIAGNOSIS: E2B sandbox is DEAD",
+                                sandbox_id=sandbox_id,
+                                error=sandbox_health.get("error"),
+                                diagnosis="E2B infrastructure killed the sandbox"
+                            )
+                            action_summary.append(f"DIAGNOSIS: Sandbox DEAD - {sandbox_health.get('error', 'unknown')}")
+                    else:
+                        action_summary.append("DIAGNOSIS: Could not determine sandbox health")
+
                     raise Exception("WebSocket connection to Claude Code sandbox lost after all reconnect attempts")
 
                 # Check for silence timeout with pending output
@@ -868,6 +929,10 @@ async def spawn_claude_code_activity(
             }
         ]
 
+        # Stop log collector before returning
+        if log_collector:
+            await log_collector.stop()
+
         return {
             "status": "completed",
             "success": success,
@@ -886,6 +951,10 @@ async def spawn_claude_code_activity(
             agent_id=agent_id,
             task_id=task_id
         )
+
+        # Stop log collector on cancel
+        if log_collector:
+            await log_collector.stop()
 
         if task_id:
             try:
@@ -926,6 +995,10 @@ async def spawn_claude_code_activity(
             error=extract_error_message(e),
             error_type=type(e).__name__
         )
+
+        # Stop log collector on error
+        if log_collector:
+            await log_collector.stop()
 
         error_context = f"Failed during: {action_summary[-1] if action_summary else 'initialization'}"
         error_message = build_context_summary(

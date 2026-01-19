@@ -47,43 +47,37 @@ export interface RouterResponse {
 }
 
 // ============================================
-// JSON Schema for OpenAI structured output
-// Uses oneOf discriminated union to match Zod schema - each action type has exactly the required fields
-// This satisfies OpenAI strict mode which requires all properties to be in 'required'
+// JSON Schema for structured output (universal compatibility)
+// Flat object with all fields required - works across OpenAI, Anthropic, and Gemini
+// Action-specific fields use empty string when not applicable
 // ============================================
 const ROUTER_JSON_SCHEMA = {
-  oneOf: [
-    {
-      type: 'object',
-      properties: {
-        action: { type: 'string', const: 'direct_answer' },
-        reasoning: { type: 'string', description: 'Brief explanation of why this action was chosen' },
-      },
-      required: ['action', 'reasoning'],
-      additionalProperties: false,
+  type: 'object',
+  properties: {
+    reasoning: {
+      type: 'string',
+      description: 'Brief explanation of why this action was chosen',
     },
-    {
-      type: 'object',
-      properties: {
-        action: { type: 'string', const: 'web_search' },
-        reasoning: { type: 'string', description: 'Brief explanation of why this action was chosen' },
-        query: { type: 'string', description: 'Search query for web search' },
-      },
-      required: ['action', 'reasoning', 'query'],
-      additionalProperties: false,
+    action: {
+      type: 'string',
+      enum: ['direct_answer', 'web_search', 'start_superintelligence'],
+      description: 'The action to take',
     },
-    {
-      type: 'object',
-      properties: {
-        action: { type: 'string', const: 'start_superintelligence' },
-        reasoning: { type: 'string', description: 'Brief explanation of why this action was chosen' },
-        goal: { type: 'string', description: 'Task goal for the agent' },
-        mode: { type: 'string', enum: ['plan', 'execute'], description: 'plan for 3+ tool calls, execute for 1-2 tool calls' },
-      },
-      required: ['action', 'reasoning', 'goal', 'mode'],
-      additionalProperties: false,
+    query: {
+      type: 'string',
+      description: 'Search query. Required for web_search, empty string for other actions.',
     },
-  ],
+    goal: {
+      type: 'string',
+      description: 'Task goal for the agent. Required for start_superintelligence, empty string for other actions.',
+    },
+    mode: {
+      type: 'string',
+      description: 'Execution mode: "plan" for 3+ tool calls, "execute" for 1-2 tool calls. Required for start_superintelligence, empty string for other actions.',
+    },
+  },
+  required: ['reasoning', 'action', 'query', 'goal', 'mode'],
+  additionalProperties: false,
 };
 
 import { downloadFromStorage } from '../storage';
