@@ -313,6 +313,10 @@ class SpawnClaudeCodeAgentTool(BaseModel):
     - Git (clone repos, create branches, commit)
     - Package managers (npm, pip, etc.)
 
+    TASK SCOPING: If a task can be broken into 2+ subtasks with no context dependency between them,
+    you MUST split them into separate Claude Code agents. Tasks timeout after 10 minutes, so anything
+    too complex that isn't broken down will fail. Each agent should have ONE focused deliverable.
+
     Provide a complete, high-level coding goal. Note: Sandboxes are ephemeral -
     files don't persist after the session ends. Use git to push changes to preserve work,
     or use file_pointer in output_schema to return generated files.

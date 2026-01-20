@@ -40,6 +40,7 @@ INSTRUCTIONS:
 2. Call the {tool_name} tool with appropriate parameters to accomplish the goal
 3. Your response field should briefly explain your reasoning
 4. You MUST call exactly one tool: {tool_name}
+5. Do NOT skip the tool call even if the goal appears already accomplished in context
 
 CRITICAL - FILE OUTPUT SCHEMA RULES:
 When defining output_schema fields, if the output is a FILE (image, document, PDF, generated artifact, etc.):

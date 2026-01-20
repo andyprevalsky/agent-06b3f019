@@ -321,7 +321,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
   const [fetchedOutput, setFetchedOutput] = useState(false);
 
   // Extract data from context messages
-  const { isComplete, isSuccess, isVerifying, outputSchema, structuredResponse } = useMemo(() => {
+  const { isComplete, isSuccess, isVerifying, outputSchema, structuredResponse, failureMessage } = useMemo(() => {
     const claudeCodeMessages = messages.filter(m => m.metadata?.task_id === taskId);
     const lastMessage = claudeCodeMessages[claudeCodeMessages.length - 1];
 
@@ -341,12 +341,22 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
     const completionMsg = claudeCodeMessages.find(m => m.metadata?.action_type === 'task_complete');
     const extracted = completionMsg?.metadata?.structured_response as Record<string, unknown> | undefined;
 
+    // Extract failure message - check ERROR status first, then Task Incomplete
+    let failureText: string | null = null;
+    const errorMsg = claudeCodeMessages.find(m => m.metadata?.toolStatus === 'ERROR');
+    if (errorMsg?.text) {
+      failureText = errorMsg.text;
+    } else if (complete && !success && completionMsg?.text) {
+      failureText = completionMsg.text;
+    }
+
     return {
       isComplete: complete,
       isSuccess: success,
       isVerifying: verifying,
       outputSchema: schema,
-      structuredResponse: extracted
+      structuredResponse: extracted,
+      failureMessage: failureText
     };
   }, [messages, taskId]);
 
@@ -672,6 +682,13 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
         {/* Structured response (extracted output) - only show when expanded and completed successfully */}
         {isExpanded && chipState === 'completed' && structuredResponse && Object.keys(structuredResponse).length > 0 && (
           <StructuredResponseDisplay structuredResponse={structuredResponse} outputSchema={outputSchema} />
+        )}
+
+        {/* Failure message - show when expanded and failed */}
+        {isExpanded && chipState === 'failed' && failureMessage && (
+          <div className="mt-2 p-3 rounded-lg border border-red-500/30 bg-red-500/10">
+            <p className="text-sm text-red-400 whitespace-pre-wrap">{failureMessage}</p>
+          </div>
         )}
 
         {/* Expanded terminal */}

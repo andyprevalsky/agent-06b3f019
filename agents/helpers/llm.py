@@ -680,6 +680,22 @@ async def call_llm_structured_streaming(
                                     
                                     # Only detect if this is a new occurrence
                                     if existing_count < tool_matches.count(tool_name) and existing_count == current_position:
+                                        # Log previous tool's params before emitting IN_PROGRESS for this tool
+                                        if len(detected_tools_ordered) > 0:
+                                            completed_tools = _extract_completed_tool_calls(accumulated_json)
+                                            prev_tool_idx = len(detected_tools_ordered) - 1
+                                            if prev_tool_idx < len(completed_tools):
+                                                prev_tool = completed_tools[prev_tool_idx]
+                                                logger.info(
+                                                    f"📋 Tool #{prev_tool_idx + 1} params captured before tool #{len(detected_tools_ordered) + 1} IN_PROGRESS: "
+                                                    f"name={prev_tool.get('tool')} params={prev_tool}"
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    f"⚠️ Could not parse tool #{prev_tool_idx + 1} params before tool #{len(detected_tools_ordered) + 1} detection. "
+                                                    f"accumulated_json_tail={accumulated_json[-500:] if len(accumulated_json) > 500 else accumulated_json}"
+                                                )
+
                                         tool_call_id = str(uuid.uuid4())
                                         detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
                                         detected_tool_positions[tool_name] = current_position + 1
@@ -1041,6 +1057,46 @@ async def call_llm_structured_streaming(
     }
 
     return final_response, usage, []  # No tool detection in OpenRouter path
+
+
+def _extract_completed_tool_calls(accumulated_json: str) -> List[Dict[str, Any]]:
+    """
+    Extract fully-formed tool call objects from partial JSON stream.
+    Returns list of tool calls that have complete params (closed braces).
+    """
+    completed = []
+
+    # Find tool_calls array start
+    tc_match = re.search(r'"tool_calls"\s*:\s*\[', accumulated_json)
+    if not tc_match:
+        return completed
+
+    # Extract content after tool_calls: [
+    array_start = tc_match.end()
+    content = accumulated_json[array_start:]
+
+    # Find complete objects by tracking brace depth
+    depth = 0
+    obj_start = None
+
+    for i, char in enumerate(content):
+        if char == '{':
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                # Complete object found
+                obj_str = content[obj_start:i+1]
+                try:
+                    obj = json.loads(obj_str)
+                    completed.append(obj)
+                except json.JSONDecodeError:
+                    pass  # Incomplete or malformed
+                obj_start = None
+
+    return completed
 
 
 def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Optional[str]:

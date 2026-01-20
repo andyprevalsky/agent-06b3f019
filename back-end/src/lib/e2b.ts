@@ -19,7 +19,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
 }
 
 const WS_PORT = 3000;
-const SANDBOX_TIMEOUT_MS = 600000; // 10 minutes
+const SANDBOX_TIMEOUT_MS = 1800000; // 30 minutes
 const WS_READY_TIMEOUT_MS = 10000;
 const WS_READY_POLL_INTERVAL_MS = 100;
 
