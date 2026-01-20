@@ -167,11 +167,11 @@ class WebSearchTool(BaseModel):
 
 
 class WebFetchTool(BaseModel):
-    """Tool call for fetching and extracting content from URLs with JavaScript rendering support."""
+    """Tool call for fetching and extracting content from a URL with JavaScript rendering support."""
 
     tool: Literal["web_fetch"]
-    urls: List[str] = Field(description="URLs to fetch and extract content from")
-    objective: str = Field(description="What content to focus on extracting from the pages")
+    url: str = Field(description="URL to fetch and extract content from")
+    objective: str = Field(description="What content to focus on extracting from the page")
     excerpts: bool = Field(default=True, description="Return focused excerpts aligned to objective")
     full_content: bool = Field(default=False, description="Return complete page content instead of excerpts")
 
@@ -326,6 +326,10 @@ class SpawnClaudeCodeAgentTool(BaseModel):
     attachments: Optional[List[str]] = Field(
         default=None,
         description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'data.csv'). Do NOT use the file's `id` field or any other format."
+    )
+    github_repo_link: Optional[str] = Field(
+        default=None,
+        description="GitHub repository URL to clone into the sandbox before starting. The agent will work inside the cloned repo directory and automatically push changes to main. Format: 'https://github.com/{owner}/{repo}' (e.g., 'https://github.com/acme-corp/my-project'). Only repos you have been granted access to can be cloned."
     )
 
 

@@ -1,4 +1,4 @@
-"""Web fetch tool - fetch and extract content from URLs with JavaScript rendering support."""
+"""Web fetch tool - fetch and extract content from a URL with JavaScript rendering support."""
 
 from typing import Dict, Any, Optional, Callable, Awaitable, List
 from temporalio import activity
@@ -47,7 +47,7 @@ class WebFetchManager(ToolManager):
 
         Args:
             execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
-            tool_call: Tool call dict with 'urls', 'objective', optional 'excerpts', 'full_content'
+            tool_call: Tool call dict with 'url', 'objective', optional 'excerpts', 'full_content'
             tool_call_id: Unique ID for this tool call
             agent_id: Agent ID for event routing
             user_id: User ID for usage tracking
@@ -55,7 +55,7 @@ class WebFetchManager(ToolManager):
         Returns:
             Result dict with content, sources, objective
         """
-        urls = tool_call.get("urls", [])
+        url = tool_call.get("url", "")
         objective = tool_call.get("objective", "")
         excerpts = tool_call.get("excerpts", True)
         full_content = tool_call.get("full_content", False)
@@ -65,14 +65,13 @@ class WebFetchManager(ToolManager):
 
         # Truncate long objective for display
         display_objective = objective if len(objective) <= 100 else objective[:97] + "..."
-        url_count = len(urls) if isinstance(urls, list) else 1
 
         # 1. Pre-execution status
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="🌐 Fetching web content",
-                message=f"Extracting from {url_count} URL(s): {display_objective}",
+                message=f"Extracting from {url}: {display_objective}",
                 status=MessageStatus.IN_PROGRESS
             ),
             agent_id=agent_id,
@@ -84,10 +83,10 @@ class WebFetchManager(ToolManager):
 
         # 2. Execute web fetch activity
         try:
-            logger.info("Calling web_fetch_activity", url_count=url_count, objective_len=len(objective))
+            logger.info("Calling web_fetch_activity", url=url, objective_len=len(objective))
             result = await execute_activity(
                 web_fetch_activity,
-                args=[urls, objective, excerpts, full_content],
+                args=[url, objective, excerpts, full_content],
                 start_to_close_timeout=timedelta(seconds=120),  # Longer timeout for JS rendering
                 retry_policy=RetryPolicy(
                     maximum_attempts=3,
@@ -99,9 +98,8 @@ class WebFetchManager(ToolManager):
 
             # 3. Calculate elapsed time and cost
             elapsed_time = _safe_time() - start_time
-            # Parallel AI Extract pricing: estimate based on URL count
-            # Assume similar to search pricing: ~$0.005 per URL
-            total_cost_cents = 0.5 * url_count
+            # Parallel AI Extract pricing: ~$0.005 per URL
+            total_cost_cents = 0.5
 
             # Format success message using standardized format
             message = format_tool_message(
@@ -175,7 +173,8 @@ class WebFetchManager(ToolManager):
                 user_id=user_id,
             )
 
-            return {"error": str(e), "urls": urls, "objective": objective}
+            # Re-raise so workflow knows the tool failed (like spawn_browser_agent)
+            raise
 
 
 # ========================================
@@ -209,7 +208,7 @@ async def web_fetch(
 
     Args:
         execute_activity: workflow.execute_activity or call_temporal_activity_from_activity
-        tool_call: Tool call dict with 'urls', 'objective', optional 'excerpts', 'full_content'
+        tool_call: Tool call dict with 'url', 'objective', optional 'excerpts', 'full_content'
         tool_call_id: Unique ID for this tool call
         agent_id: Agent ID for event routing
         user_id: User ID for usage tracking
@@ -257,33 +256,33 @@ def _format_extract_results(results: List[Dict[str, Any]], full_content: bool) -
 
 @activity.defn
 async def web_fetch_activity(
-    urls: List[str],
+    url: str,
     objective: str,
     excerpts: bool = True,
     full_content: bool = False
 ) -> Dict[str, Any]:
     """
-    Activity: Fetch and extract content from URLs with JavaScript rendering support.
+    Activity: Fetch and extract content from a URL with JavaScript rendering support.
 
     Uses Parallel AI's extract API for content extraction from JS-rendered pages.
 
     Best for: SPAs, dynamic content, pages requiring JavaScript to load.
 
     Args:
-        urls: List of URLs to fetch and extract from
+        url: URL to fetch and extract from
         objective: What content to focus on extracting
         excerpts: Return focused excerpts (default: True)
         full_content: Return complete page content (default: False)
 
     Returns:
         Dict with:
-            - content: Extracted content from all URLs
+            - content: Extracted content from the URL
             - sources: List of source URLs
             - objective: Original objective
             - results: Raw results from API
     """
     try:
-        activity.heartbeat(f"Fetching {len(urls)} URL(s): {objective[:50]}...")
+        activity.heartbeat(f"Fetching {url}: {objective[:50]}...")
 
         config = load_config()
         api_key = config.parallel.api_key
@@ -294,8 +293,9 @@ async def web_fetch_activity(
             "Content-Type": "application/json"
         }
 
+        # Parallel AI API requires urls as an array
         payload = {
-            "urls": urls,
+            "urls": [url],
             "objective": objective,
             "excerpts": excerpts,
             "full_content": full_content
@@ -333,7 +333,7 @@ async def web_fetch_activity(
 
         logger.info(
             "Web fetch completed",
-            urls=urls,
+            url=url,
             objective=objective[:100],
             content_length=len(content),
             results_count=len(results),
@@ -343,5 +343,5 @@ async def web_fetch_activity(
         return result
 
     except Exception as e:
-        logger.error("Web fetch failed", error=str(e), urls=urls, objective=objective)
+        logger.error("Web fetch failed", error=str(e), url=url, objective=objective)
         raise

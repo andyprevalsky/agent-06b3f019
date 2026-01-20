@@ -7,10 +7,11 @@
  * - Manages multiple client connections
  * - Agent worker is responsible for persisting output to DB
  * - Logs to /tmp/ws-server.log for debugging
+ * - If GITHUB_REPO_URL is set, clones the repo before starting Claude Code
  */
 
 import { WebSocketServer } from 'ws';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { appendFileSync } from 'fs';
 
 // Log to both console and file for debugging
@@ -29,6 +30,8 @@ function log(level, message, data = {}) {
 const PORT = 3000;
 const GOAL = process.env.CLAUDE_CODE_GOAL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 // Validate required env vars
 if (!ANTHROPIC_API_KEY) {
@@ -180,6 +183,80 @@ writeFileSync(join(home, '.claude', 'projects.json'), JSON.stringify(projects));
 
 log('info', 'Configuration written');
 
+// Clone GitHub repo if specified
+let workDir = '/home/user';
+let repoName = null;
+
+if (GITHUB_REPO_URL) {
+  console.log(`[Setup] Cloning GitHub repo: ${GITHUB_REPO_URL}`);
+
+  // Extract repo name for working directory
+  const repoMatch = GITHUB_REPO_URL.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+  if (!repoMatch) {
+    console.error(`[Setup] Invalid GitHub URL: ${GITHUB_REPO_URL}`);
+    process.exit(1);
+  }
+  const owner = repoMatch[1];
+  repoName = repoMatch[2].replace(/\.git$/, '');
+  workDir = `/home/user/${repoName}`;
+
+  // Build authenticated clone URL
+  const authUrl = GITHUB_TOKEN
+    ? GITHUB_REPO_URL.replace('https://github.com', `https://x-access-token:${GITHUB_TOKEN}@github.com`)
+    : GITHUB_REPO_URL;
+
+  try {
+    // Clone repo
+    execSync(`git clone ${authUrl} ${workDir}`, {
+      stdio: 'inherit',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
+
+    // Configure git for commits
+    execSync(`git config user.name "Rose Agent"`, { cwd: workDir });
+    execSync(`git config user.email "agent@roselabs.ai"`, { cwd: workDir });
+
+    // Write repo-specific CLAUDE.md with auto-push instructions
+    const claudeMd = `# Rose Labs Agent - ${repoName}
+
+You are working in a cloned GitHub repository: ${GITHUB_REPO_URL}
+
+## CRITICAL: Auto-Push Instructions
+
+After completing your task, you MUST push your changes:
+1. Stage all changes: \`git add -A\`
+2. Commit with a descriptive message: \`git commit -m "feat: [description]"\`
+3. Push to main: \`git push origin main\`
+
+If there are merge conflicts:
+1. Pull latest: \`git pull origin main --rebase\`
+2. Resolve any conflicts
+3. Continue rebase: \`git rebase --continue\`
+4. Push: \`git push origin main\`
+
+IMPORTANT: Always push your changes before the session ends. The sandbox is ephemeral - unpushed changes will be lost!
+
+## Repository Info
+- Repo: ${GITHUB_REPO_URL}
+- Working directory: ${workDir}
+
+## File Locations
+- **User attachments**: \`/home/user/attachments/\` - Files uploaded by the user
+- **Output files**: \`/home/user/output/\` - Place files user needs (auto-extracted)
+`;
+    writeFileSync(join(workDir, 'CLAUDE.md'), claudeMd);
+
+    // Trust the repo directory for Claude Code
+    projects[workDir] = { allowedTools: ['*'], hasTrustDialogAccepted: true };
+    writeFileSync(join(home, '.claude', 'projects.json'), JSON.stringify(projects));
+
+    console.log(`[Setup] Repo cloned to ${workDir}`);
+  } catch (err) {
+    console.error(`[Setup] Failed to clone repo:`, err.message);
+    // Continue without clone - Claude will see the error in goal context
+  }
+}
+
 // Start Claude Code with PTY via script command
 log('info', 'Starting Claude Code', { goal: GOAL.slice(0, 100) });
 
@@ -190,6 +267,7 @@ const claude = spawn('script', [
   '-q', '/dev/null',
   '-c', 'claude --dangerously-skip-permissions "$CLAUDE_GOAL"'
 ], {
+  cwd: workDir,
   env: {
     ...process.env,
     TERM: 'xterm-256color',

@@ -254,7 +254,11 @@ def format_result(result: Dict[str, Any]) -> str:
     # Common result fields - NO TRUNCATION
     if "answer" in result:
         lines.append(f"{result['answer']}")
-    
+
+    # web_fetch uses "content" instead of "answer"
+    if "content" in result and "answer" not in result:
+        lines.append(f"{result['content']}")
+
     if "candidates" in result:
         candidates = result["candidates"]
         if isinstance(candidates, list):

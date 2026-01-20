@@ -147,7 +147,7 @@ class WebSearchManager(ToolManager):
         except Exception as e:
             # Calculate elapsed time even on error
             elapsed_time = _safe_time() - start_time
-            
+
             # Format error message using standardized format
             error_message = format_error_message(
                 params=tool_call,
@@ -155,7 +155,7 @@ class WebSearchManager(ToolManager):
                 time_elapsed=elapsed_time,
                 cost_cents=0
             )
-            
+
             # Error status
             await handle_tool_event(
                 event=ToolEvent(
@@ -170,8 +170,9 @@ class WebSearchManager(ToolManager):
                 execute_activity=execute_activity,
                 user_id=user_id,
             )
-            
-            return {"error": str(e), "query": query}
+
+            # Re-raise so workflow knows the tool failed (like spawn_browser_agent)
+            raise
 
 
 # ========================================

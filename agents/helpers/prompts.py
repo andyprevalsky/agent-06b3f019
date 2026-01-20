@@ -213,6 +213,8 @@ For "get/buy/order X" goals: plan MUST include purchase step, not just recommend
 
 IMPORTANT: Once in EXECUTE phase, no more user input possible.
 Ask clarifying questions BEFORE calling attempt_completion.
+
+All execution of the plan should be done strictly in the execute phase. If you are ready to start working on the plan, call attempt_completion to proceed to the execution phase.
         """).rstrip()
     else:
         prompt += dedent("""

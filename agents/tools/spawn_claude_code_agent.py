@@ -306,12 +306,13 @@ async def spawn_claude_code_activity(
     output_schema: Optional[Dict[str, Any]] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
     model: str = "rose-labs/rose-1-lite",
+    github_repo_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Claude Code agent activity using E2B Desktop Sandbox.
 
     Flow:
-    1. Call back-end API to create E2B session (with file attachments)
+    1. Call back-end API to create E2B session (with file attachments, optional GitHub repo)
     2. Post init message with stream_url
     3. Monitor Claude Code output via polling
     4. Run verifier to confirm completion
@@ -321,6 +322,7 @@ async def spawn_claude_code_activity(
         output_schema: Response schema from parent agent's tool call (required for structured responses)
         attachments: File attachments from context to upload to sandbox
         model: Model to use for verifier (inherited from parent agent)
+        github_repo_url: Optional GitHub repo URL to clone before starting Claude Code
     """
     from helpers.llm import check_progress
     from helpers.prompts import build_verifier_prompt
@@ -365,9 +367,12 @@ async def spawn_claude_code_activity(
         create_payload = {
             "agent_id": agent_id,
             "goal": goal,
+            "user_id": user_id,  # Required for GitHub repo access check
         }
         if attachments:
             create_payload["attachments"] = attachments
+        if github_repo_url:
+            create_payload["github_repo_url"] = github_repo_url
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
@@ -1055,6 +1060,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")  # Response schema from parent's tool call
         requested_attachments = tool_call.get("attachments")  # List of filenames from tool call
+        github_repo_url = tool_call.get("github_repo_link")  # Optional GitHub repo to clone
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
@@ -1090,7 +1096,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             agent_id=agent_id,
             goal=goal[:200],
             has_output_schema=output_schema is not None,
-            num_attachments=len(attachments)
+            num_attachments=len(attachments),
+            github_repo_url=github_repo_url
         )
 
         yield ToolEvent(
@@ -1107,7 +1114,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             # Start activity with limited retries (expensive/long-running)
             activity_handle = workflow.start_activity(
                 spawn_claude_code_activity,
-                args=[user_id, agent_id, goal, tool_call_id, output_schema, attachments if attachments else None, model],
+                args=[user_id, agent_id, goal, tool_call_id, output_schema, attachments if attachments else None, model, github_repo_url],
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=60),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,

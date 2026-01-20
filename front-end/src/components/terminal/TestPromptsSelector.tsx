@@ -90,6 +90,35 @@ const TEST_PROMPTS: TestPrompt[] = [
     prompt: 'upload this image to tinypng.com and compress it\n\nno sub agents\nno questions asked',
     attachmentUrl: '/test-assets/rs.jpeg',
   },
+  {
+    title: 'Test Code Gen',
+    description: 'Tests Claude Code with GitHub repo cloning - Dallas MMA Boxing site rebuild',
+    prompt: `Understand the entire structure of https://dallasmmaboxing.com
+This is my Dad's old website.
+But it needs a full revamp.
+
+I've initialized a github repo that your claude code agents can use
+https://github.com/andyprevalsky/dallasmmaboxing
+-> pass this link to all claude code agents
+
+Rebuild the site in a modern stack with
+-> React
+-> Vercel
+-> Render for BE
+-> Stripe
+
+The site should contain the exact same content, the exact same structure, but the styling should be updated to feel refined, high-quality, modern, cohesive, responsive, and trustworthy.
+
+We will add one additional feature which will be a checkout option
+The checkout will be on a hidden url that is givin via QR Code in the gym
+Clients will
+1. select the classes that they want to attend
+2. sign a release form
+3. be directed to stripe to complete payment
+4. once payment is completed we will create a new row in the database that details the clients information, a link to their signed form, we wil text 972-977-5605 and send georgeprevalsky@gmail.com (and the user email and sms) a link to a confirmation page that will contain their confirmation page + a link to their signed released form
+
+For any services that require a API Key or Credential, mock the service for now and then return back to me a list of API keys I need to give to you in order to finish the implementation.`,
+  },
 ];
 
 interface TestPromptsSelectorProps {

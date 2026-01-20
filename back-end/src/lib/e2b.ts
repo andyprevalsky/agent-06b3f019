@@ -33,17 +33,35 @@ const OUTPUT_DIR = '/home/user/output';
  * @param agentId - The agent creating this session
  * @param goal - The goal for Claude Code to accomplish
  * @param attachments - Optional file attachments to upload to sandbox
+ * @param githubRepoUrl - Optional GitHub repo URL to clone before starting Claude
  * @returns Session info including WebSocket URL for terminal streaming
  */
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
-  attachments?: FilePointer[]
+  attachments?: FilePointer[],
+  githubRepoUrl?: string
 ): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
   console.log(`[E2B] Creating Claude Code session for agent ${agentId}...`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('E2B or ANTHROPIC_API_KEY environment variables not configured');
+  }
+
+  // Build environment variables for sandbox
+  const envs: Record<string, string> = {
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    CLAUDE_CODE_GOAL: goal,
+  };
+
+  // Add GitHub config if repo specified
+  if (githubRepoUrl) {
+    if (!process.env.GITHUB_TOKEN) {
+      throw new Error('GITHUB_TOKEN not configured - cannot clone repositories');
+    }
+    envs.GITHUB_REPO_URL = githubRepoUrl;
+    envs.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+    console.log(`[E2B] GitHub repo configured: ${githubRepoUrl}`);
   }
 
   // Generate taskId upfront
@@ -53,10 +71,7 @@ export async function createClaudeCodeSession(
   const sandbox = await Sandbox.create(process.env.E2B_CLAUDE_CODE_TEMPLATE_ID, {
     apiKey: process.env.E2B_API_KEY,
     timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs: {
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-      CLAUDE_CODE_GOAL: goal,
-    },
+    envs,
   });
 
   console.log(`[E2B] Created sandbox: ${sandbox.sandboxId}`);

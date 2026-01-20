@@ -51,7 +51,7 @@ async def test_web_fetch_success():
     mock_execute_activity.return_value = mock_result
 
     tool_call = {
-        "urls": ["https://python.org"],
+        "url": "https://python.org",
         "objective": "What is Python?",
         "excerpts": True,
         "full_content": False
@@ -89,7 +89,7 @@ async def test_web_fetch_success():
 
 
 async def test_web_fetch_error():
-    """Test web fetch error handling."""
+    """Test web fetch error handling - should raise exception like spawn_browser_agent."""
     manager = get_manager()
 
     # Mock execute_activity callable that fails
@@ -97,7 +97,7 @@ async def test_web_fetch_error():
     mock_execute_activity.side_effect = Exception("API error")
 
     tool_call = {
-        "urls": ["https://example.com"],
+        "url": "https://example.com",
         "objective": "test",
         "excerpts": True,
         "full_content": False
@@ -108,17 +108,18 @@ async def test_web_fetch_error():
 
     # Mock handle_tool_event
     with patch('tools.web_fetch.handle_tool_event', new_callable=AsyncMock) as mock_handle:
-        result = await manager.execute_tool(
-            execute_activity=mock_execute_activity,
-            tool_call=tool_call,
-            tool_call_id=tool_call_id,
-            agent_id=agent_id,
-            user_id=user_id,
-        )
-
-        # Should return error result (not raise)
-        assert "error" in result
-        assert "API error" in result["error"]
+        try:
+            await manager.execute_tool(
+                execute_activity=mock_execute_activity,
+                tool_call=tool_call,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            assert False, "Should have raised exception"
+        except Exception as e:
+            # Should re-raise the exception (hard fail like spawn_browser_agent)
+            assert "API error" in str(e)
 
         # Should have called handle_tool_event twice (IN_PROGRESS and ERROR)
         assert mock_handle.call_count == 2
@@ -163,7 +164,7 @@ async def test_web_fetch_activity_success():
 
             with patch('temporalio.activity.heartbeat'):
                 result = await web_fetch_activity(
-                    urls=["https://python.org"],
+                    url="https://python.org",
                     objective="What is Python?",
                     excerpts=True,
                     full_content=False
@@ -195,7 +196,7 @@ async def test_web_fetch_activity_error():
             with patch('temporalio.activity.heartbeat'):
                 try:
                     await web_fetch_activity(
-                        urls=["https://example.com"],
+                        url="https://example.com",
                         objective="test query"
                     )
                     assert False, "Should have raised exception"
@@ -203,57 +204,6 @@ async def test_web_fetch_activity_error():
                     assert "API error" in str(e)
 
     print("✅ test_web_fetch_activity_error passed")
-
-
-async def test_web_fetch_multiple_urls():
-    """Test fetching multiple URLs."""
-    from tools.web_fetch import web_fetch_activity
-
-    # Mock Parallel AI response with multiple results
-    mock_response_data = {
-        "results": [
-            {
-                "url": "https://python.org",
-                "title": "Python",
-                "excerpts": ["Python programming"]
-            },
-            {
-                "url": "https://rust-lang.org",
-                "title": "Rust",
-                "excerpts": ["Rust programming"]
-            }
-        ],
-        "errors": []
-    }
-
-    mock_config = MagicMock()
-    mock_config.parallel.api_key = "test-key"
-
-    mock_response = MagicMock()
-    mock_response.json.return_value = mock_response_data
-    mock_response.raise_for_status = MagicMock()
-
-    with patch('tools.web_fetch.load_config', return_value=mock_config):
-        with patch('tools.web_fetch.httpx.AsyncClient') as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-            mock_client_class.return_value = mock_client
-
-            with patch('temporalio.activity.heartbeat'):
-                result = await web_fetch_activity(
-                    urls=["https://python.org", "https://rust-lang.org"],
-                    objective="Compare programming languages",
-                    excerpts=True,
-                    full_content=False
-                )
-
-            assert len(result["sources"]) == 2
-            assert "Python programming" in result["content"]
-            assert "Rust programming" in result["content"]
-
-    print("✅ test_web_fetch_multiple_urls passed")
 
 
 async def run_all_tests():
@@ -271,7 +221,6 @@ async def run_all_tests():
         await test_web_fetch_error()
         await test_web_fetch_activity_success()
         await test_web_fetch_activity_error()
-        await test_web_fetch_multiple_urls()
 
         print("\n✅ All web_fetch tests passed!")
         return True

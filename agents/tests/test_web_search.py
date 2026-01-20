@@ -64,17 +64,21 @@ async def test_web_search_success():
             user_id=user_id,
         )
         
-        # Verify handle_tool_event was called twice (IN_PROGRESS and FINISHED)
-        assert mock_handle.call_count == 2
-        
+        # Verify handle_tool_event was called 3 times (IN_PROGRESS, FINISHED, USAGE)
+        assert mock_handle.call_count == 3
+
         # First call should be IN_PROGRESS
         first_call = mock_handle.call_args_list[0]
         assert first_call.kwargs['event'].status == MessageStatus.IN_PROGRESS
         assert "What is Python?" in first_call.kwargs['event'].message
-        
+
         # Second call should be FINISHED
         second_call = mock_handle.call_args_list[1]
         assert second_call.kwargs['event'].status == MessageStatus.FINISHED
+
+        # Third call should be USAGE
+        third_call = mock_handle.call_args_list[2]
+        assert third_call.kwargs['event'].type == EventType.USAGE
         
         # Verify result
         assert "Python" in result["answer"]
@@ -83,37 +87,38 @@ async def test_web_search_success():
 
 
 async def test_web_search_error():
-    """Test web search error handling."""
+    """Test web search error handling - should raise exception like spawn_browser_agent."""
     manager = get_manager()
-    
+
     # Mock execute_activity callable that fails
     mock_execute_activity = AsyncMock()
     mock_execute_activity.side_effect = Exception("API error")
-    
+
     tool_call = {"query": "test", "max_tokens": 1500}
     tool_call_id = "test-error"
     agent_id = "agent-123"
     user_id = "user-123"
-    
+
     # Mock handle_tool_event
     with patch('tools.web_search.handle_tool_event', new_callable=AsyncMock) as mock_handle:
-        result = await manager.execute_tool(
-            execute_activity=mock_execute_activity,
-            tool_call=tool_call,
-            tool_call_id=tool_call_id,
-            agent_id=agent_id,
-            user_id=user_id,
-        )
-        
-        # Should return error result (not raise)
-        assert "error" in result
-        assert "API error" in result["error"]
-        
+        try:
+            await manager.execute_tool(
+                execute_activity=mock_execute_activity,
+                tool_call=tool_call,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            assert False, "Should have raised exception"
+        except Exception as e:
+            # Should re-raise the exception (hard fail like spawn_browser_agent)
+            assert "API error" in str(e)
+
         # Should have called handle_tool_event twice (IN_PROGRESS and ERROR)
         assert mock_handle.call_count == 2
         second_call = mock_handle.call_args_list[1]
         assert second_call.kwargs['event'].status == MessageStatus.ERROR
-    
+
     print("✅ test_web_search_error passed")
 
 

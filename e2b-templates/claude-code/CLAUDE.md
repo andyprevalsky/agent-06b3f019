@@ -12,5 +12,15 @@ This is an isolated E2B sandbox environment for completing coding tasks.
 - **Working directory**: `/home/user`
 - **Python**: Available via `python3` (pip via `pip3`)
 - **Node.js**: Available via `node` (npm via `npm`)
+- **Git**: Available for version control
 
 This is an ephemeral sandbox - changes won't persist after the session ends.
+
+## Git Workflow (when working with repositories)
+
+If you are working in a cloned GitHub repository, always push your changes before completing your task:
+1. Stage all changes: `git add -A`
+2. Commit with a descriptive message: `git commit -m "feat: [description]"`
+3. Push to main: `git push origin main`
+
+Unpushed changes will be lost when the sandbox closes!

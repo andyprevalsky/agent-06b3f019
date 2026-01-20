@@ -9,6 +9,7 @@ import {
   connectToSandbox,
 } from '../lib/e2b';
 import { FilePointer } from '../lib/storage';
+import { checkGithubRepoAccess } from '../lib/github';
 
 const router = Router();
 
@@ -28,6 +29,8 @@ const createSessionSchema = z.object({
   agent_id: z.string().uuid(),
   goal: z.string(),
   attachments: z.array(filePointerSchema).optional(),
+  github_repo_url: z.string().optional(),
+  user_id: z.string().uuid().optional(), // Required for GitHub repo access check
 });
 
 const closeSessionSchema = z.object({
@@ -45,11 +48,38 @@ const closeSessionSchema = z.object({
  */
 router.post('/create', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { agent_id, goal, attachments } = createSessionSchema.parse(req.body);
+    const { agent_id, goal, attachments, github_repo_url, user_id } = createSessionSchema.parse(req.body);
 
-    console.log(`[ClaudeCode] Creating session for agent ${agent_id}${attachments?.length ? ` with ${attachments.length} attachments` : ''}`);
+    console.log(`[ClaudeCode] Creating session for agent ${agent_id}${attachments?.length ? ` with ${attachments.length} attachments` : ''}${github_repo_url ? ` with GitHub repo ${github_repo_url}` : ''}`);
 
-    const session = await createClaudeCodeSession(agent_id, goal, attachments as FilePointer[] | undefined);
+    // Check GitHub repo access if specified
+    let normalizedRepoUrl: string | undefined;
+    if (github_repo_url) {
+      if (!user_id) {
+        return res.status(400).json({
+          error: 'user_id is required when using github_repo_url',
+          code: 'MISSING_USER_ID',
+        });
+      }
+
+      const accessCheck = await checkGithubRepoAccess(user_id, github_repo_url);
+      if (!accessCheck.allowed) {
+        console.log(`[ClaudeCode] GitHub access denied for user ${user_id}: ${accessCheck.error}`);
+        return res.status(403).json({
+          error: accessCheck.error,
+          code: 'GITHUB_ACCESS_DENIED',
+        });
+      }
+      normalizedRepoUrl = accessCheck.normalizedUrl!;
+      console.log(`[ClaudeCode] GitHub access granted for ${normalizedRepoUrl}`);
+    }
+
+    const session = await createClaudeCodeSession(
+      agent_id,
+      goal,
+      attachments as FilePointer[] | undefined,
+      normalizedRepoUrl
+    );
 
     res.json({
       success: true,
