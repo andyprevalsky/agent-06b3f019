@@ -83,7 +83,7 @@ export default function OnePager() {
         {/* Intro */}
         <section className="mb-14">
           <p className="text-xl leading-relaxed text-[#3d3a36] mb-6">
-            Hi, I’m <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline underline-offset-2 transition-colors">Andy</a>, and I’m building Rose Labs, a frontier AI research company in San Francisco.
+            Hi, we're <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline underline-offset-2 transition-colors">Andy</a> and <a href="https://www.linkedin.com/in/aaditya-shidham/" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 underline underline-offset-2 transition-colors">Aaditya</a>, and we're building Rose Labs, a frontier AI research company in San Francisco.
           </p>
           <p className="text-xl leading-relaxed text-[#3d3a36]">
             Rose Labs is pioneering <strong>Mass Agent Networks (MANs)</strong> which we believe is the architecture that will produce the first real superintelligence.
@@ -233,7 +233,7 @@ export default function OnePager() {
             className="text-2xl font-medium mb-6 text-[#1a1a18]"
             style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.01em' }}
           >
-            Founder
+            Founders
           </h2>
           <ul className="space-y-4 text-lg text-[#3d3a36]">
             <li className="flex gap-3">
@@ -276,6 +276,42 @@ export default function OnePager() {
               <span className="text-[#c9c5be] select-none">-</span>
               <span>
                 Mentored for six years by Michael Seibel
+              </span>
+            </li>
+            <li className="flex gap-3 mt-6">
+              <span className="text-[#c9c5be] select-none">•</span>
+              <span>
+                <strong>Aaditya Shidham</strong>
+              </span>
+            </li>
+            <li className="flex gap-3 ml-6">
+              <span className="text-[#c9c5be] select-none">-</span>
+              <span>
+                Previously invested at a16z, focused on infra
+              </span>
+            </li>
+            <li className="flex gap-3 ml-6">
+              <span className="text-[#c9c5be] select-none">-</span>
+              <span>
+                Built the MPC web3 wallet at Coinbase from 0 to 1
+              </span>
+            </li>
+            <li className="flex gap-3 ml-6">
+              <span className="text-[#c9c5be] select-none">-</span>
+              <span>
+                Product Lead at Protocol Labs, scaled FVM to 635K users and $280M TVL
+              </span>
+            </li>
+            <li className="flex gap-3 ml-6">
+              <span className="text-[#c9c5be] select-none">-</span>
+              <span>
+                Stanford CS undergrad and graduate
+              </span>
+            </li>
+            <li className="flex gap-3 ml-6">
+              <span className="text-[#c9c5be] select-none">-</span>
+              <span>
+                Thiel Fellow Finalist
               </span>
             </li>
           </ul>
