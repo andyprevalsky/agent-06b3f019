@@ -18,7 +18,7 @@ from helpers.tool_schemas import TOOL_MODELS, PLANNER_ASSIGNABLE_TOOLS
 
 # Manual descriptions for planning-only tools (not in TOOL_MODELS)
 PLANNING_TOOL_DESCRIPTIONS = {
-    "sub_agent": "Delegate a complex task to a sub-agent with its own planning/execution cycle. Use for tasks too complex for a single tool call.",
+    "spawn_sub_agent": "Delegate a complex task to a sub-agent with its own planning/execution cycle. Use for tasks too complex for a single tool call.",
     "reasoning": "Pure thinking/analysis step with no external tool call. Use for synthesizing results or making decisions.",
 }
 

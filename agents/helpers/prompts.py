@@ -571,34 +571,59 @@ Decision heuristic:
 
 DECOMPOSITION PRINCIPLES
 ------------------------
-- Minimality: Decompose only as much as necessary to reach the goal
+- Prefer decomposition: If a task CAN be decomposed into sub-tasks, it SHOULD be (beware to not break other invariants in the process, such as spawn_browser_agent and spawn_claude_code_agent ephemerality)
 - MECE: Tasks should not overlap; together they fully cover the goal
 - Parallelization: Prefer independent tasks with final synthesis step
-- Granularity: 3-8 tasks maximum. If you need more, you're planning at too low a level.
+- Granularity: 3-8 tasks maximum. If you need more, use spawn_sub_agent to delegate complexity.
 - Determinism: Each task has clear, verifiable completion condition
 
 TASK COUNT LIMITS
 -----------------
 - Target: 3-8 tasks per plan
-- If you're tempted to add 10+ tasks, use `sub_agent` to delegate complexity
+- If you're tempted to add 10+ tasks, use `spawn_sub_agent` to delegate complexity
 - Long sequential chains (8+ steps) are a code smell - decompose hierarchically instead
 
-SUB_AGENT TOOL
---------------
-Use `tool_name: "sub_agent"` when a task is too complex for a single tool call.
+SPAWN_SUB_AGENT TOOL
+--------------------
+Use `tool_name: "spawn_sub_agent"` when a task is too complex for a single tool call.
 The sub-agent gets its own planning and execution cycle to handle the complexity.
 
-GOOD use of sub_agent:
-  Task 0: sub_agent "Research and book a venue in Austin"  ← complex multi-step task
-  Task 1: sub_agent "Plan team activities"                 ← needs research + decisions
-  Task 2: reasoning "Compile final itinerary"              ← synthesis
+GOOD use of spawn_sub_agent:
+  Task 0: spawn_sub_agent "Research and book a venue in Austin"  ← complex multi-step task
+  Task 1: spawn_sub_agent "Plan team activities"                 ← needs research + decisions
+  Task 2: reasoning "Compile final itinerary"                    ← synthesis
 
-BAD (too granular, should use sub_agent):
+BAD (too granular, should use spawn_sub_agent):
   Task 0: web_search "venues in Austin"
   Task 1: web_search "venue A reviews"
   Task 2: web_search "venue B reviews"
   Task 3: reasoning "compare venues"
-  Task 4: spawn_browser_agent "book venue"  ← should be one sub_agent task
+  Task 4: spawn_browser_agent "book venue"  ← should be one spawn_sub_agent task
+
+SPAWN_CLAUDE_CODE_AGENT GRANULARITY
+-----------------------------------
+spawn_claude_code_agent is for SINGLE, focused coding tasks - not entire projects.
+
+BAD (monolithic):
+  Task 0: spawn_claude_code_agent "Build React frontend with home, about, schedule, class pages"
+
+GOOD Option 1 (decomposed at top level):
+  Task 0: spawn_claude_code_agent "Initialize React project with routing scaffold"
+  Task 1: spawn_claude_code_agent "Create Home page component" → after 0
+  Task 2: spawn_claude_code_agent "Create About page component" → after 0
+  Task 3: spawn_claude_code_agent "Create Schedule page component" → after 0
+  Task 4: spawn_claude_code_agent "Create Class page component" → after 0
+
+GOOD Option 2 (delegate decomposition to sub-agent):
+  Task 0: spawn_sub_agent "Build React frontend with home, about, schedule, class pages"
+  (sub-agent will decompose into scaffold → parallel page creation)
+
+Use Option 2 to compress the number of tasks and avoid surpassing task limits.
+
+Heuristics for decomposition:
+- Scaffold/initialize first
+- One component/page/feature per task
+- Parallelize independent features after scaffold
 
 DEPENDENCY PATTERNS
 -------------------
@@ -645,9 +670,9 @@ Task 0: spawn_browser_agent "Login, add item to cart, complete checkout"  ← Fu
 OTHER REMINDERS:
 - For acquisition goals (buy/get/order X), the plan MUST include actual purchase steps
 - Do not end with "send recommendations" when user asked to GET something
-- Use sub_agent for complex tasks that need their own planning cycle
+- Use spawn_sub_agent for complex tasks that need their own planning cycle
 - spawn_browser_agent is for short web trajectories (purchases, form fills) - 25 step limit
-- Keep plans high-level (3-8 tasks). Delegate complexity to sub_agents, don't micromanage.
+- Keep plans high-level (3-8 tasks). Delegate complexity to spawn_sub_agent, don't micromanage.
 
 OUTPUT JSON ONLY - no prose, no commentary outside the JSON structure."""
 
