@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rose Labs One Pager</title>
+  <meta name="description" content="Rose Labs investor one pager - Frontier Research for Agentic Superintelligence.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@300;400;500;600&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      color: #1a1a18;
+      font-family: 'Crimson Pro', Georgia, Cambria, 'Times New Roman', Times, serif;
+      background: linear-gradient(180deg, #fdfcfa 0%, #f9f7f3 100%);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .dm-sans {
+      font-family: 'DM Sans', sans-serif;
+    }
+
+    a {
+      text-decoration: none;
+    }
+
+    /* Header */
+    header {
+      max-width: 48rem;
+      margin: 0 auto;
+      padding: 2.5rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .back-link {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.875rem;
+      letter-spacing: 0.04em;
+      color: #8a8680;
+      transition: color 0.2s;
+    }
+
+    .back-link:hover {
+      color: #1a1a18;
+    }
+
+    /* Article */
+    article {
+      max-width: 48rem;
+      margin: 0 auto;
+      padding: 0 2rem 6rem;
+    }
+
+    /* Title Block */
+    .title-block {
+      margin-bottom: 4rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 2rem;
+    }
+
+    .logo {
+      width: 3rem;
+      height: 3rem;
+      flex-shrink: 0;
+    }
+
+    h1 {
+      font-size: 3.75rem;
+      font-weight: 300;
+      letter-spacing: -0.02em;
+      margin-bottom: 1rem;
+      line-height: 1;
+    }
+
+    .tagline {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 1.125rem;
+      color: #6b6860;
+    }
+
+    /* Sections */
+    section {
+      margin-bottom: 3.5rem;
+    }
+
+    h2 {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 1.5rem;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+      color: #1a1a18;
+      margin-bottom: 1.5rem;
+    }
+
+    p {
+      font-size: 1.125rem;
+      line-height: 1.75;
+      color: #3d3a36;
+      margin-bottom: 1rem;
+    }
+
+    p:last-child {
+      margin-bottom: 0;
+    }
+
+    p.intro {
+      font-size: 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .text-link {
+      color: #2563eb;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      transition: color 0.2s;
+    }
+
+    .text-link:hover {
+      color: #1e40af;
+    }
+
+    strong {
+      font-weight: 600;
+    }
+
+    /* Lists */
+    ul {
+      list-style: none;
+    }
+
+    .bullet-list li {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+      font-size: 1.125rem;
+      color: #3d3a36;
+    }
+
+    .bullet {
+      color: #c9c5be;
+      user-select: none;
+    }
+
+    .numbered-list li {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 2rem;
+      font-size: 1.125rem;
+      color: #3d3a36;
+    }
+
+    .number {
+      color: #c9c5be;
+      font-size: 1.25rem;
+      font-weight: 300;
+      user-select: none;
+    }
+
+    .list-content strong {
+      display: block;
+      margin-bottom: 0.5rem;
+    }
+
+    .list-content p {
+      color: #6b6860;
+      font-size: 1.125rem;
+      margin: 0;
+    }
+
+    .nested-list {
+      margin-left: 1.5rem;
+    }
+
+    .nested-list li {
+      margin-bottom: 0.5rem;
+    }
+
+    .dash {
+      color: #c9c5be;
+      user-select: none;
+    }
+
+    .founder-item {
+      margin-top: 1.5rem;
+    }
+
+    /* Horizontal Rule */
+    hr {
+      border: none;
+      border-top: 1px solid #e5e2dc;
+      margin: 3.5rem 0;
+    }
+
+    /* Contact */
+    .contact {
+      text-align: center;
+    }
+
+    .contact a {
+      color: #6b6860;
+      text-decoration: underline;
+      text-decoration-color: #c9c5be;
+      text-underline-offset: 4px;
+      transition: text-decoration-color 0.2s;
+    }
+
+    .contact a:hover {
+      text-decoration-color: #1a1a18;
+    }
+
+    /* Footer */
+    footer {
+      max-width: 48rem;
+      margin: 0 auto;
+      padding: 2.5rem 2rem;
+      border-top: 1px solid #e5e2dc;
+    }
+
+    footer p {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.875rem;
+      color: #8a8680;
+      text-align: center;
+      margin: 0;
+    }
+
+    /* Print styles */
+    @media print {
+      body {
+        background: white;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+
+      .back-link {
+        display: none;
+      }
+
+      a {
+        color: #2563eb !important;
+      }
+
+      /* Prevent page breaks inside sections */
+      section {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      /* Keep headings with their content */
+      h2 {
+        page-break-after: avoid;
+        break-after: avoid;
+      }
+
+      /* Keep lists together */
+      ul, ol {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      /* Keep list items together */
+      li {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      /* Keep numbered list items with their content */
+      .numbered-list li {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      /* Avoid breaks after HRs */
+      hr {
+        page-break-after: avoid;
+        break-after: avoid;
+      }
+
+      /* Keep title block on first page */
+      .title-block {
+        page-break-after: avoid;
+        break-after: avoid;
+      }
+    }
+
+    @media (max-width: 768px) {
+      h1 {
+        font-size: 3rem;
+      }
+
+      .title-block {
+        flex-direction: column;
+        gap: 1rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <!-- Header -->
+    <header>
+      <a href="https://roselabs.ai" class="back-link">← Back to terminal</a>
+    </header>
+
+    <!-- Main Content -->
+    <article>
+      <!-- Title Block -->
+      <div class="title-block">
+        <svg class="logo" viewBox="21 62 220 222" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="onepager-logo-gradient" x1="100%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stop-color="#FE7503" />
+              <stop offset="25%" stop-color="#FC585C" />
+              <stop offset="50%" stop-color="#E062CC" />
+              <stop offset="75%" stop-color="#A76CED" />
+              <stop offset="100%" stop-color="#7A6BEC" />
+            </linearGradient>
+          </defs>
+          <g transform="translate(0,303) scale(0.1,-0.1)" fill="url(#onepager-logo-gradient)">
+            <path d="M1276 2378 c-145 -192 -231 -442 -211 -616 8 -68 41 -202 61 -251 8 -19 13 -35 11 -37 -2 -2 -30 7 -62 21 -249 100 -537 54 -784 -124 -36 -25 -69 -49 -75 -53 -17 -11 22 -46 119 -105 163 -101 300 -144 460 -144 92 -1 226 24 301 56 20 8 38 15 39 15 2 0 -10 -39 -25 -87 -69 -213 -58 -395 36 -600 31 -69 136 -237 154 -248 10 -6 114 144 152 220 37 73 75 199 88 293 14 101 1 206 -40 330 -15 48 -27 88 -26 89 1 2 26 -7 55 -18 195 -74 423 -66 611 22 98 46 217 118 245 149 18 20 18 21 -1 35 -177 139 -396 225 -570 225 -79 0 -195 -23 -282 -56 -44 -16 -63 -20 -59 -11 27 72 60 196 68 260 17 132 -17 300 -89 442 -36 72 -124 209 -141 219 -5 4 -21 -8 -35 -26z m40 -935 c7 -46 50 -92 109 -119 27 -13 41 -23 31 -23 -11 -1 -38 -12 -62 -26 -49 -29 -83 -90 -85 -151 -1 -37 -2 -36 -9 13 -4 29 -17 67 -28 85 -22 35 -86 77 -118 79 -11 0 1 9 26 20 79 35 118 90 121 168 1 25 3 28 6 11 2 -14 6 -39 9 -57z"/>
+          </g>
+        </svg>
+        <div>
+          <h1>Rose Labs</h1>
+          <p class="tagline">Frontier Research for Agentic Superintelligence</p>
+        </div>
+      </div>
+
+      <!-- Intro -->
+      <section>
+        <p class="intro">
+          Hi, we're <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" class="text-link">Andy</a> and <a href="https://www.linkedin.com/in/aaditya-shidham/" target="_blank" rel="noopener noreferrer" class="text-link">Aaditya</a>, and we're building Rose Labs, a frontier AI research company in San Francisco.
+        </p>
+        <p class="intro">
+          Rose Labs is pioneering <strong>Mass Agent Networks (MANs)</strong> which we believe is the architecture that will produce the first real superintelligence.
+        </p>
+      </section>
+
+      <hr>
+
+      <!-- Why Mass Agent Networks Are the Evolutionary Leap -->
+      <section>
+        <h2>Why Mass Agent Networks Are the Evolutionary Leap</h2>
+        <p>
+          Today's AI systems resemble unicellular organisms. They are large, monolithic, indivisible blocks of compute that cannot parallelize well. Scaling increases parameter count but not organizational intelligence.
+        </p>
+        <p>
+          Mass Agent Networks are a massive leap in the seemingly obvious direction these systems are headed, the transition from unicellular → multicellular.
+        </p>
+        <p>
+          Instead of one large model doing everything, MANs are societies of specialized agents that:
+        </p>
+        <ul class="bullet-list">
+          <li><span class="bullet">•</span><span>divide complex tasks into small tractable components</span></li>
+          <li><span class="bullet">•</span><span>keep context small where models perform best</span></li>
+          <li><span class="bullet">•</span><span>run thousands of reasoning paths in parallel</span></li>
+          <li><span class="bullet">•</span><span>cross verify each other's work to avoid error and drift</span></li>
+          <li><span class="bullet">•</span><span>self organize into higher order structures over time</span></li>
+        </ul>
+        <p style="margin-top: 1.5rem;">
+          Just as multicellular organisms outcompete unicellular ones, agent societies outperform monolithic models, especially in real world action.
+        </p>
+      </section>
+
+      <!-- Why MANs Lead to Superintelligence -->
+      <section>
+        <h2>Why MANs Lead to Superintelligence</h2>
+        <p>
+          Superintelligence is not the ability to one shot every problem. It is the ability to efficiently explore, iterate, and adapt.
+        </p>
+        <ul class="bullet-list">
+          <li><span class="bullet">•</span><span>Small agent networks explore too slowly.</span></li>
+          <li><span class="bullet">•</span><span>Monolithic models explore too shallowly.</span></li>
+        </ul>
+        <p style="margin-top: 1.5rem;">
+          Mass Agent Networks explore at ecosystem scale. They generate and evaluate thousands of hypotheses in parallel, recombine strategies, and improve through specialization and cooperation.
+        </p>
+        <p>
+          Future AI systems will run orders of magnitude more agents than anything that exists today. The shift is from single reasoning passes to evolving intelligent societies.
+        </p>
+      </section>
+
+      <!-- What We Built in Less Than 60 Days -->
+      <section>
+        <h2>What We Built in Less Than 60 Days</h2>
+        <ul class="numbered-list">
+          <li>
+            <span class="number">1.</span>
+            <div class="list-content">
+              <strong>A <a href="https://roselabs.ai" target="_blank" rel="noopener noreferrer" class="text-link">full stack product</a> and desktop app implementing early MANs</strong>
+              <p>Built from scratch. A working beta where real agent societies coordinate reasoning and action in real time. Rose Labs agents can live forever, are fault tolerant, and made to reach convergence over time through relentless exploration.</p>
+            </div>
+          </li>
+          <li>
+            <span class="number">2.</span>
+            <div class="list-content">
+              <strong>A new model competitive with major labs</strong>
+              <p>A custom architecture performing on par with leading frontier models across general tasks using MAN driven methods.</p>
+            </div>
+          </li>
+          <li>
+            <span class="number">3.</span>
+            <div class="list-content">
+              <strong>Foundational research breakthroughs</strong>
+              <p>Including Prompt Braiding, a technique for maximizing genetic diversity and exploration across large agent populations, resulting in stronger generality and self improving reasoning loops.</p>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <!-- Vision -->
+      <section>
+        <h2>Vision</h2>
+        <p>Within a decade:</p>
+        <ul class="bullet-list">
+          <li><span class="bullet">•</span><span>We will have AI systems that have as many agents as current models have parameters. Rose Labs will create the first billion / trillion agent systems.</span></li>
+          <li><span class="bullet">•</span><span>Pre-training & post-training will be saturated and all the big labs will be spending most of their resources in designing mass agent architectures.</span></li>
+          <li><span class="bullet">•</span><span>Mass Agent Networks will be the dominant architecture for consumer superintelligence. If you don't have an agentic army at your disposal then you will be completely left behind.</span></li>
+        </ul>
+        <p style="margin-top: 1.5rem;">
+          Rose Labs is building the foundation for this architecture.
+        </p>
+      </section>
+
+      <!-- Founders -->
+      <section>
+        <h2>Founders</h2>
+        <ul class="bullet-list">
+          <li><span class="bullet">•</span><span><strong>Andy Prevalsky</strong></span></li>
+        </ul>
+        <ul class="bullet-list nested-list">
+          <li><span class="dash">-</span><span>Built Hotplate from zero to PMF, the company is now highly profitable and doing 5M ARR</span></li>
+          <li><span class="dash">-</span><span>Sole engineer at Hotplate for the first three years while also leading strategy & distribution.</span></li>
+          <li><span class="dash">-</span><span>10 years of machine learning experience from building high frequency trading models with RNNs, LSTMs, and Markov Chains in 2018 to developing a full ML pipeline at Hotplate in 2021 that measured every potential customer in the market and identified the highest value ones driving 95 percent of user acquisition</span></li>
+          <li><span class="dash">-</span><span>Ex Google and Meta AI</span></li>
+          <li><span class="dash">-</span><span>Previously backed by Michael Seibel, Connie Chan at A16Z, and YC</span></li>
+          <li><span class="dash">-</span><span>Mentored for six years by Michael Seibel</span></li>
+        </ul>
+        <ul class="bullet-list founder-item">
+          <li><span class="bullet">•</span><span><strong>Aaditya Shidham</strong></span></li>
+        </ul>
+        <ul class="bullet-list nested-list">
+          <li><span class="dash">-</span><span>Previously invested at a16z, focused on infra</span></li>
+          <li><span class="dash">-</span><span>Built the MPC web3 wallet at Coinbase from 0 to 1</span></li>
+          <li><span class="dash">-</span><span>Product Lead at Protocol Labs, scaled FVM to 635K users and $280M TVL</span></li>
+          <li><span class="dash">-</span><span>Stanford CS undergrad and graduate</span></li>
+          <li><span class="dash">-</span><span>Thiel Fellow Finalist</span></li>
+        </ul>
+      </section>
+
+      <!-- Raise -->
+      <section>
+        <h2>Raise</h2>
+        <ul class="bullet-list">
+          <li><span class="bullet">•</span><span>$3M</span></li>
+          <li><span class="bullet">•</span><span>Hire engineers, acquire GPUs.</span></li>
+          <li>
+            <span class="bullet">•</span>
+            <span>
+              We want investors that:
+              <ul class="bullet-list" style="margin-top: 0.5rem; margin-left: 1.5rem;">
+                <li><span class="dash">-</span><span>Will connect us with customers.</span></li>
+                <li><span class="dash">-</span><span>Help us hire top talent.</span></li>
+                <li><span class="dash">-</span><span>Have deep expertise in AI, infra, and/or security.</span></li>
+              </ul>
+            </span>
+          </li>
+        </ul>
+      </section>
+
+      <hr>
+
+      <!-- Contact -->
+      <section class="contact">
+        <h2>Contact</h2>
+        <p>
+          <a href="mailto:andy@roselabs.ai">andy@roselabs.ai</a>
+        </p>
+      </section>
+    </article>
+
+    <!-- Footer -->
+    <footer>
+      <p>© 2025 Rose Labs</p>
+    </footer>
+  </main>
+</body>
+</html>
