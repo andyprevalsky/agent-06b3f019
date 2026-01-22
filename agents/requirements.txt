@@ -16,6 +16,7 @@ google-generativeai==0.8.3
 google-genai>=0.1.0
 stagehand==0.5.5
 browser-use>=0.11.0
+playwright>=1.40.0  # For humanized input via CDP (separate from browser-use)
 
 # Utilities
 python-dotenv>=1.0.0

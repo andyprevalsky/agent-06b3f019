@@ -213,6 +213,23 @@ class DOMService:
             self._session = BrowserSession(browser_profile=profile, cdp_url=self.cdp_url)
             await self._session.start()
             logger.info(f"🌐 Connected to browser via CDP: {self.cdp_url[:50]}...")
+
+            # Hide scrollbars to ensure viewport matches screenshot dimensions (1280x800)
+            # This prevents coordinate mismatch between reported viewport and captured screenshot
+            # which causes Yutori to misclick (viewport reports 1265 with scrollbar, screenshot is 1280)
+            try:
+                page = await self._session.get_current_page()
+                await page.add_style_tag(content="""
+                    ::-webkit-scrollbar { display: none !important; }
+                    html, body {
+                        -ms-overflow-style: none !important;
+                        scrollbar-width: none !important;
+                    }
+                """)
+                logger.info("📏 Injected scrollbar-hiding CSS for consistent 1280x800 viewport")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to inject scrollbar CSS: {e}")
+
             # Note: Download behavior is configured automatically by browser-use DownloadsWatchdog
             # using the downloads_path="/files" setting in BrowserProfile
 
@@ -368,39 +385,37 @@ class DOMService:
             import os
             import time as time_module
 
-            # Screenshot debug logging disabled
-            # try:
-            #     screenshot_bytes = base64.b64decode(state.screenshot)
-            #     logger.info(f"📸 [SCREENSHOT] Captured: size_kb={round(len(screenshot_bytes) / 1024, 1)}")
-            #
-            #     # Get dimensions using PIL
-            #     try:
-            #         from PIL import Image
-            #         img = Image.open(BytesIO(screenshot_bytes))
-            #         dimension_match = (img.width == viewport_width and img.height == viewport_height)
-            #         logger.info(
-            #             f"📸 [SCREENSHOT] Dimensions: actual={img.width}x{img.height}, "
-            #             f"expected={viewport_width}x{viewport_height}, match={dimension_match}"
-            #         )
-            #         if not dimension_match:
-            #             logger.warning(
-            #                 f"⚠️ [SCREENSHOT] DIMENSION MISMATCH - may include browser chrome! "
-            #                 f"width_diff={img.width - viewport_width}, height_diff={img.height - viewport_height}"
-            #             )
-            #     except ImportError:
-            #         logger.warning("📸 PIL not available for dimension check")
-            #
-            #     # Always save screenshots to disk for debugging
-            #     debug_dir = "/tmp/browser_screenshots"
-            #     os.makedirs(debug_dir, exist_ok=True)
-            #     filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
-            #     with open(filename, "wb") as f:
-            #         f.write(screenshot_bytes)
-            #     logger.info(f"📸 [DEBUG] Saved to {filename}")
-            #
-            # except Exception as e:
-            #     logger.error(f"📸 Failed to analyze screenshot: {e}")
-            pass
+            try:
+                screenshot_bytes = base64.b64decode(state.screenshot)
+                logger.info(f"📸 [SCREENSHOT] Captured: size_kb={round(len(screenshot_bytes) / 1024, 1)}")
+
+                # Get dimensions using PIL
+                try:
+                    from PIL import Image
+                    img = Image.open(BytesIO(screenshot_bytes))
+                    dimension_match = (img.width == viewport_width and img.height == viewport_height)
+                    logger.info(
+                        f"📸 [SCREENSHOT] Dimensions: actual={img.width}x{img.height}, "
+                        f"expected={viewport_width}x{viewport_height}, match={dimension_match}"
+                    )
+                    if not dimension_match:
+                        logger.warning(
+                            f"⚠️ [SCREENSHOT] DIMENSION MISMATCH - may include browser chrome! "
+                            f"width_diff={img.width - viewport_width}, height_diff={img.height - viewport_height}"
+                        )
+                except ImportError:
+                    logger.warning("📸 PIL not available for dimension check")
+
+                # Always save screenshots to disk for debugging
+                debug_dir = "/tmp/browser_screenshots"
+                os.makedirs(debug_dir, exist_ok=True)
+                filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
+                with open(filename, "wb") as f:
+                    f.write(screenshot_bytes)
+                logger.info(f"📸 [DEBUG] Saved to {filename}")
+
+            except Exception as e:
+                logger.error(f"📸 Failed to analyze screenshot: {e}")
 
         return result
     
@@ -513,7 +528,48 @@ class DOMService:
                 return (int(element.center_coords[0]), int(element.center_coords[1]))
         
         return None
-    
+
+    async def get_element_rect(self, index: int) -> Optional[Dict[str, int]]:
+        """Get full bounding rect for element.
+
+        Similar to get_element_coordinates but returns the full bounding box,
+        useful for input field clicks where we want to click in a specific
+        region of the element (e.g., right side for text inputs).
+
+        Args:
+            index: Element index (backend_node_id) from DOM tree
+
+        Returns:
+            Dict with {x, y, width, height} or None if not found
+        """
+        if not self._session:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        try:
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                logger.warning("No focused target, cannot get element rect")
+                return None
+
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            rect = await self._session.get_element_coordinates(
+                backend_node_id=index,
+                cdp_session=cdp_session
+            )
+
+            if rect:
+                return {
+                    "x": int(rect.x),
+                    "y": int(rect.y),
+                    "width": int(rect.width),
+                    "height": int(rect.height)
+                }
+
+        except Exception as e:
+            logger.warning(f"Failed to get rect for index {index}: {e}")
+
+        return None
+
     async def get_element_at_coordinates(self, x: int, y: int) -> Optional[Any]:
         """Convert viewport coordinates to element.
         

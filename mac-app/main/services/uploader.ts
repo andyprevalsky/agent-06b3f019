@@ -144,6 +144,22 @@ export class Uploader {
           },
           body: formData,
         });
+      } else if (integrationType === 'browser_fingerprint') {
+        // Fingerprint goes to the dedicated fingerprint endpoint
+        const { encrypted, iv, key } = Crypto.encrypt(data);
+
+        const formData = new FormData();
+        formData.append('data', encrypted);
+        formData.append('iv', iv);
+        formData.append('key', key);
+
+        response = await fetch(`${config.apiUrl}/api/integrations/fingerprint/upload`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          body: formData,
+        });
       } else {
         const { encrypted, iv, key } = Crypto.encrypt(data);
 

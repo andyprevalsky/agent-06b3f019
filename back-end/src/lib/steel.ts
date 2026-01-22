@@ -72,8 +72,18 @@ export async function createSessionWithContext(
   const session = await steel.sessions.create({
     profileId: dbContext.contextId || undefined,  // Use existing profile if available
     persistProfile: true,  // Auto-persist browser state to profile on session close
-    useProxy: true,  // Enable Steel's proxy network
+    useProxy: {
+      geolocation: {
+        country: 'US',
+        state: 'TX',
+        city: 'DALLAS',
+      },
+    },  // Residential proxy in Dallas, TX (testing for Amazon bot detection)
     solveCaptcha: true,  // Auto-solve CAPTCHAs
+    stealthConfig: {
+      humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
+      skipFingerprintInjection: false,  // Inject fake fingerprints for anti-detection
+    },
     timeout: 900000,  // 15 minutes
     dimensions: {
       width: 1288,  // 1280 + 8 for borders → 1280 viewport
@@ -187,8 +197,18 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
   // Dimensions adjusted for browser chrome (see createSessionWithContext comments)
   const session = await steel.sessions.create({
     profileId: oldSession.context.contextId,
-    useProxy: true,
+    useProxy: {
+      geolocation: {
+        country: 'US',
+        state: 'TX',
+        city: 'DALLAS',
+      },
+    },  // Residential proxy in Dallas, TX (testing for Amazon bot detection)
     solveCaptcha: true,
+    stealthConfig: {
+      humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
+      skipFingerprintInjection: false,  // Inject fake fingerprints for anti-detection
+    },
     timeout: 900000,  // 15 minutes (hobby plan max)
     dimensions: {
       width: 1288,  // 1280 + 8 for borders → 1280 viewport
@@ -256,95 +276,305 @@ export async function getSession(sessionId: string) {
 }
 
 /**
- * Inject user's stored cookies into a browser session.
- * Cookies are fetched from the deduplicated Cookie table (all browsers merged).
+ * Fingerprint data structure from mac-app
+ */
+interface FingerprintData {
+  navigator: {
+    userAgent: string;
+    platform: string;
+    language: string;
+    languages: string[];
+    hardwareConcurrency: number;
+    deviceMemory: number | null;
+    maxTouchPoints: number;
+    vendor: string;
+    doNotTrack: string | null;
+  };
+  screen: {
+    width: number;
+    height: number;
+    availWidth: number;
+    availHeight: number;
+    colorDepth: number;
+    pixelDepth: number;
+    devicePixelRatio: number;
+  };
+  webgl: {
+    vendor: string;
+    renderer: string;
+  };
+  canvas: {
+    hash: string;
+  };
+  audio: {
+    hash: string;
+  };
+  timezone: string;
+  fonts: string[];
+  plugins: string[];
+  collectedAt: string;
+}
+
+/**
+ * Inject user's stored cookies and fingerprint into a browser session.
+ * Uses a single CDP connection for both operations, then disconnects.
  *
  * @param sessionId - The Steel session ID
- * @param userId - The user's ID to fetch cookies for
- * @returns Object with injected count and whether cookies were found
+ * @param userId - The user's ID to fetch data for
+ * @returns Object with injection results for both cookies and fingerprint
  */
-export async function injectUserCookies(
+export async function injectUserData(
   sessionId: string,
   userId: string
-): Promise<{ injected: boolean; cookieCount: number }> {
-  console.log(`🍪 Checking for stored cookies for user ${userId}...`);
+): Promise<{
+  cookies: { injected: boolean; cookieCount: number };
+  fingerprint: { injected: boolean };
+}> {
+  const startTime = Date.now();
+  console.log(`🔐 [injectUserData] START for session ${sessionId}`);
 
-  // Fetch user's cookies from deduplicated Cookie table
-  const cookies = await prisma.cookie.findMany({
-    where: { userId },
+  // Fetch cookies and fingerprint in parallel
+  console.log(`  [1/6] Fetching cookies and fingerprint from DB...`);
+  const [cookies, integration] = await Promise.all([
+    prisma.cookie.findMany({ where: { userId } }),
+    prisma.integration.findUnique({
+      where: { userId_name: { userId, name: 'browser_fingerprint' } },
+    }),
+  ]);
+  console.log(`  [1/6] DB fetch complete (${Date.now() - startTime}ms)`);
+
+  const hasCookies = cookies.length > 0;
+  const fp = (integration?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
+  const hasFingerprint = !!fp;
+
+  console.log(`  Cookies: ${hasCookies ? cookies.length : 'none'}, Fingerprint: ${hasFingerprint ? 'yes' : 'no'}`);
+
+  // Note: We always need CDP connection now to inject scrollbar CSS
+  // (previously returned early when no cookies/fingerprint)
+
+  // Get session info to get WebSocket URL
+  console.log(`  [2/6] Fetching session wsUrl from DB...`);
+  const dbSession = await prisma.browserSession.findUnique({
+    where: { sessionId }
   });
+  console.log(`  [2/6] Session fetch complete (${Date.now() - startTime}ms)`);
 
-  if (cookies.length === 0) {
-    console.log(`  No cookies found for user`);
-    return { injected: false, cookieCount: 0 };
+  if (!dbSession?.wsUrl) {
+    throw new Error('No WebSocket URL found for session');
   }
 
-  console.log(`  Found ${cookies.length} stored cookies, injecting...`);
+  // Connect via Playwright (single connection for both operations)
+  const { chromium } = await import('playwright');
+  let browser;
 
   try {
-    // Get session info to get WebSocket URL
-    const dbSession = await prisma.browserSession.findUnique({
-      where: { sessionId }
-    });
-
-    if (!dbSession?.wsUrl) {
-      throw new Error('No WebSocket URL found for session');
-    }
-
-    // Connect via Playwright
-    const { chromium } = await import('playwright');
-    const browser = await chromium.connectOverCDP(dbSession.wsUrl);
+    console.log(`  [3/6] Connecting to CDP...`);
+    browser = await chromium.connectOverCDP(dbSession.wsUrl);
     const context = browser.contexts()[0];
+    console.log(`  [3/6] CDP connected (${Date.now() - startTime}ms)`);
 
-    // Transform cookies to Playwright format
-    const CHROME_EPOCH_OFFSET = 11644473600;
-    const playwrightCookies = cookies.map((cookie) => {
-      let expires: number | undefined;
+    let cookieResult = { injected: false, cookieCount: 0 };
+    let fingerprintResult = { injected: false };
 
-      if (cookie.expiresUtc && cookie.expiresUtc > 0n) {
-        expires = Math.floor(Number(cookie.expiresUtc) / 1000000) - CHROME_EPOCH_OFFSET;
-        if (expires < Date.now() / 1000) {
-          expires = undefined;
-        }
-      }
-
-      return {
-        name: cookie.name,
-        value: cookie.value,
-        domain: cookie.domain,  // Use original format from Chrome's host_key
-        path: cookie.path || '/',
-        expires,
-        secure: cookie.isSecure,
-        httpOnly: cookie.isHttpOnly,
-        sameSite: 'Lax' as const,
-      };
-    });
-
-    // Filter out invalid cookies
-    const validCookies = playwrightCookies.filter(c => c.name && c.value);
-
-    // Inject cookies in batches
-    const BATCH_SIZE = 100;
-    let injectedCount = 0;
-
-    for (let i = 0; i < validCookies.length; i += BATCH_SIZE) {
-      const batch = validCookies.slice(i, i + BATCH_SIZE);
+    // 1. Inject cookies if available
+    if (hasCookies) {
       try {
-        await context.addCookies(batch);
-        injectedCount += batch.length;
-      } catch (batchError) {
-        console.error(`  ⚠️ Failed to inject cookie batch ${i}-${i + batch.length}:`, batchError);
+        console.log(`  [4/6] Transforming ${cookies.length} cookies...`);
+        const CHROME_EPOCH_OFFSET = 11644473600;
+        const playwrightCookies = cookies.map((cookie) => {
+          let expires: number | undefined;
+
+          if (cookie.expiresUtc && cookie.expiresUtc > 0n) {
+            expires = Math.floor(Number(cookie.expiresUtc) / 1000000) - CHROME_EPOCH_OFFSET;
+            if (expires < Date.now() / 1000) {
+              expires = undefined;
+            }
+          }
+
+          return {
+            name: cookie.name,
+            value: cookie.value,
+            domain: cookie.domain,
+            path: cookie.path || '/',
+            expires,
+            secure: cookie.isSecure,
+            httpOnly: cookie.isHttpOnly,
+            sameSite: 'Lax' as const,
+          };
+        });
+
+        const validCookies = playwrightCookies.filter(c => c.name && c.value);
+        console.log(`  [4/6] Transform complete, ${validCookies.length} valid (${Date.now() - startTime}ms)`);
+
+        // Inject all cookies in one CDP call
+        console.log(`  [4/6] Injecting cookies via CDP...`);
+        await context.addCookies(validCookies);
+        console.log(`  [4/6] ✅ Cookies injected (${Date.now() - startTime}ms)`);
+        cookieResult = { injected: true, cookieCount: validCookies.length };
+      } catch (error) {
+        console.error(`  [4/6] ❌ Failed to inject cookies:`, error);
       }
     }
 
-    console.log(`  ✅ Injected ${injectedCount}/${validCookies.length} cookies`);
+    // 2. Inject fingerprint script if available
+    if (hasFingerprint && fp) {
+      try {
+        console.log(`  [5/6] Injecting fingerprint script...`);
+        const fingerprintScript = `
+          // Fingerprint spoofing script - injected to match user's real browser
+          (function() {
+            'use strict';
 
-    return { injected: true, cookieCount: injectedCount };
-  } catch (error) {
-    console.error(`  ❌ Failed to inject cookies:`, error);
-    return { injected: false, cookieCount: 0 };
+            const fp = ${JSON.stringify(fp)};
+
+            // Override navigator properties
+            const navigatorProps = {
+              userAgent: { value: fp.navigator.userAgent },
+              platform: { value: fp.navigator.platform },
+              language: { value: fp.navigator.language },
+              languages: { value: Object.freeze([...fp.navigator.languages]) },
+              hardwareConcurrency: { value: fp.navigator.hardwareConcurrency },
+              deviceMemory: { value: fp.navigator.deviceMemory },
+              maxTouchPoints: { value: fp.navigator.maxTouchPoints },
+              vendor: { value: fp.navigator.vendor },
+              doNotTrack: { value: fp.navigator.doNotTrack },
+            };
+
+            for (const [prop, desc] of Object.entries(navigatorProps)) {
+              try {
+                Object.defineProperty(Navigator.prototype, prop, {
+                  get: () => desc.value,
+                  configurable: true,
+                });
+              } catch (e) {}
+            }
+
+            // Override screen properties
+            const screenProps = {
+              width: fp.screen.width,
+              height: fp.screen.height,
+              availWidth: fp.screen.availWidth,
+              availHeight: fp.screen.availHeight,
+              colorDepth: fp.screen.colorDepth,
+              pixelDepth: fp.screen.pixelDepth,
+            };
+
+            for (const [prop, value] of Object.entries(screenProps)) {
+              try {
+                Object.defineProperty(Screen.prototype, prop, {
+                  get: () => value,
+                  configurable: true,
+                });
+              } catch (e) {}
+            }
+
+            // Override devicePixelRatio
+            try {
+              Object.defineProperty(window, 'devicePixelRatio', {
+                get: () => fp.screen.devicePixelRatio,
+                configurable: true,
+              });
+            } catch (e) {}
+
+            // Override WebGL
+            const getParameterProxyHandler = {
+              apply: function(target, thisArg, args) {
+                const param = args[0];
+                const UNMASKED_VENDOR_WEBGL = 0x9245;
+                const UNMASKED_RENDERER_WEBGL = 0x9246;
+
+                if (param === UNMASKED_VENDOR_WEBGL) {
+                  return fp.webgl.vendor;
+                }
+                if (param === UNMASKED_RENDERER_WEBGL) {
+                  return fp.webgl.renderer;
+                }
+                return target.apply(thisArg, args);
+              }
+            };
+
+            try {
+              WebGLRenderingContext.prototype.getParameter = new Proxy(
+                WebGLRenderingContext.prototype.getParameter,
+                getParameterProxyHandler
+              );
+              WebGL2RenderingContext.prototype.getParameter = new Proxy(
+                WebGL2RenderingContext.prototype.getParameter,
+                getParameterProxyHandler
+              );
+            } catch (e) {}
+
+            // Override timezone
+            const originalDateTimeFormat = Intl.DateTimeFormat;
+            Intl.DateTimeFormat = function(...args) {
+              const instance = new originalDateTimeFormat(...args);
+              const originalResolvedOptions = instance.resolvedOptions.bind(instance);
+              instance.resolvedOptions = function() {
+                const options = originalResolvedOptions();
+                options.timeZone = fp.timezone;
+                return options;
+              };
+              return instance;
+            };
+            Intl.DateTimeFormat.prototype = originalDateTimeFormat.prototype;
+            Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
+
+            console.log('[Fingerprint] ✅ Fingerprint spoofing injected');
+          })();
+        `;
+
+        await context.addInitScript(fingerprintScript);
+        console.log(`  [5/6] ✅ Fingerprint injected (${Date.now() - startTime}ms)`);
+        fingerprintResult = { injected: true };
+      } catch (error) {
+        console.error(`  [5/6] ❌ Failed to inject fingerprint:`, error);
+      }
+    }
+
+    // 3. Always inject scrollbar-hiding CSS to ensure viewport matches screenshot (1280x800)
+    // This prevents coordinate mismatch where viewport reports 1265 (with scrollbar) but screenshot is 1280
+    try {
+      const scrollbarHideScript = `
+        (function() {
+          const style = document.createElement('style');
+          style.id = 'yutori-scrollbar-hide';
+          style.textContent = \`
+            /* Hide scrollbars on ALL elements for consistent 1280x800 viewport */
+            *::-webkit-scrollbar {
+              display: none !important;
+              width: 0 !important;
+              height: 0 !important;
+            }
+            * {
+              -ms-overflow-style: none !important;
+              scrollbar-width: none !important;
+            }
+          \`;
+          if (document.head) {
+            document.head.appendChild(style);
+          } else {
+            document.addEventListener('DOMContentLoaded', () => document.head.appendChild(style));
+          }
+        })();
+      `;
+      await context.addInitScript(scrollbarHideScript);
+      console.log(`  [5.5/6] ✅ Scrollbar CSS injected for consistent 1280x800 viewport`);
+    } catch (error) {
+      console.error(`  [5.5/6] ⚠️ Failed to inject scrollbar CSS:`, error);
+    }
+
+    console.log(`  [6/6] Returning results (${Date.now() - startTime}ms)`);
+    return { cookies: cookieResult, fingerprint: fingerprintResult };
+  } finally {
+    // Always disconnect from the browser (doesn't close the Steel session)
+    if (browser) {
+      console.log(`  [6/6] Closing CDP connection...`);
+      await browser.close();
+      console.log(`🔐 [injectUserData] COMPLETE (${Date.now() - startTime}ms total)`);
+    }
   }
 }
+
 
 /**
  * Upload a file to an active Steel session.

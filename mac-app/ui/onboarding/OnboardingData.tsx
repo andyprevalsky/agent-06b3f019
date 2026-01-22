@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Check, Loader2, ArrowRight, X, RefreshCw } from 'lucide-react';
+import { Check, Loader2, ArrowRight, X, RefreshCw, Fingerprint } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import AtlasPasswordModal from '../components/AtlasPasswordModal';
 import type { BrowserInfo, BrowserType } from '../../shared/types/ipc';
@@ -31,6 +31,7 @@ interface Integration {
     connectedEmail?: string;
     connectedEmails?: string[];
     cookieCount?: number;
+    fingerprint?: unknown;
   };
 }
 
@@ -182,6 +183,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const [atlasModalOpen, setAtlasModalOpen] = useState(false);
   const [pendingAtlasBrowser, setPendingAtlasBrowser] = useState<BrowserType | null>(null);
 
+  // Fingerprint state
+  const [fingerprintCollected, setFingerprintCollected] = useState(false);
+  const [fingerprintLoading, setFingerprintLoading] = useState(false);
+
   // Fetch installed browsers and existing integrations on mount
   useEffect(() => {
     const fetchData = async () => {
@@ -224,6 +229,12 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             }
           }
           setConnectedBrowsers(newConnectedBrowsers);
+
+          // Check for fingerprint integration
+          const fingerprintIntegration = integrations.find(i => i.name === 'browser_fingerprint');
+          if (fingerprintIntegration?.status === 'CONNECTED') {
+            setFingerprintCollected(true);
+          }
 
           // Check for gmail integration(s) - use connectedEmails array if available, fallback to connectedEmail
           // Treat CONNECTED or SYNCING as connected (SYNCING means OAuth succeeded, just processing emails)
@@ -303,6 +314,27 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       throw err; // Let the modal handle the error display
     } finally {
       setBrowserSyncLoading(null);
+    }
+  };
+
+  // Handle fingerprint collection
+  const handleFingerprintConnect = async () => {
+    setFingerprintLoading(true);
+    try {
+      if (!window.api?.collectFingerprint) {
+        console.error('[OnboardingData] collectFingerprint API not available');
+        return;
+      }
+
+      const fingerprint = await window.api.collectFingerprint();
+      if (fingerprint) {
+        await window.api.uploadFingerprint(fingerprint);
+        setFingerprintCollected(true);
+      }
+    } catch (err) {
+      console.error('Failed to collect fingerprint:', err);
+    } finally {
+      setFingerprintLoading(false);
     }
   };
 
@@ -518,6 +550,16 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
               </div>
             )}
           </div>
+
+          {/* Browser Fingerprint */}
+          <IntegrationItem
+            icon={<Fingerprint className="w-5 h-5 text-purple-500" />}
+            name="Browser Fingerprint"
+            description="Match your browser identity for seamless auth"
+            connected={fingerprintCollected}
+            loading={fingerprintLoading}
+            onConnect={handleFingerprintConnect}
+          />
 
           <IntegrationItem
             icon={

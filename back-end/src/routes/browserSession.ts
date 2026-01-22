@@ -9,7 +9,7 @@ import {
   closeSession,
   resumeSession,
   getSession,
-  injectUserCookies,
+  injectUserData,
   uploadFileToSession,
   listSessionFiles,
   SteelFileInfo
@@ -62,10 +62,10 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     
     // 2. Create temporary session for this task
     const session = await createSessionWithContext(contextId, agent_id);
-    
-    // 3. Inject user's stored Chrome cookies (if available)
-    const cookieResult = await injectUserCookies(session.sessionId, user_id);
-    
+
+    // 3. Inject user's cookies and fingerprint in a single CDP connection
+    const injectionResult = await injectUserData(session.sessionId, user_id);
+
     res.json({
       success: true,
       task_id: session.taskId,  // Stable ID for grouping browser actions
@@ -74,8 +74,9 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       debug_url: session.debugUrl,
       ws_url: session.wsUrl,  // CDP WebSocket URL for browser-use
       // project_id no longer needed for Steel
-      cookies_injected: cookieResult.injected,
-      cookies_count: cookieResult.cookieCount,
+      cookies_injected: injectionResult.cookies.injected,
+      cookies_count: injectionResult.cookies.cookieCount,
+      fingerprint_injected: injectionResult.fingerprint.injected,
     });
     
   } catch (error) {
@@ -134,12 +135,12 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
       include: { context: true }
     });
     
-    // Inject cookies into resumed session
-    let cookieResult = { injected: false, cookieCount: 0 };
+    // Inject cookies and fingerprint into resumed session
+    let injectionResult = { cookies: { injected: false, cookieCount: 0 }, fingerprint: { injected: false } };
     if (session?.context?.userId) {
-      cookieResult = await injectUserCookies(result.sessionId, session.context.userId);
+      injectionResult = await injectUserData(result.sessionId, session.context.userId);
     }
-    
+
     res.json({
       success: true,
       task_id,  // Same stable task ID
@@ -148,8 +149,9 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
       ws_url: result.wsUrl,  // CDP WebSocket URL for browser-use
       saved_url: result.savedUrl,  // URL to navigate back to
       status: 'ACTIVE',
-      cookies_injected: cookieResult.injected,
-      cookies_count: cookieResult.cookieCount,
+      cookies_injected: injectionResult.cookies.injected,
+      cookies_count: injectionResult.cookies.cookieCount,
+      fingerprint_injected: injectionResult.fingerprint.injected,
     });
     
   } catch (error) {

@@ -32,6 +32,8 @@ import { cn } from '@/lib/utils';
 import { getStoredSession } from '@/lib/supabase';
 import { MessageList } from './MessageList';
 import { useAgentContext } from '@/contexts/AgentContext';
+import BrowserBorderGlow from './BrowserBorderGlow';
+import BrowserCursorOverlay from './BrowserCursorOverlay';
 
 // API Configuration - match pattern used in lib/api.ts
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
@@ -365,12 +367,18 @@ export default function BrowserViewPanel({
               <iframe
                 ref={iframeRef}
                 src={currentBrowserUrl}
-                className="w-full h-full border-0"
+                className="w-full h-full border-0 absolute inset-0 z-0"
                 allow="clipboard-read; clipboard-write"
                 sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
                 title="Browser Session"
               />
-              
+
+              {/* Animated border glow overlay */}
+              <BrowserBorderGlow />
+
+              {/* Cursor overlay - animates to action coordinates */}
+              <BrowserCursorOverlay taskId={taskId} messages={messages} />
+
               {/* Disconnected overlay */}
               {isDisconnected && (
                 <div className="absolute inset-0 backdrop-blur-md flex items-center justify-center">

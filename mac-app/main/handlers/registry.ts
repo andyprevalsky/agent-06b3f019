@@ -5,6 +5,7 @@ import { promisify } from 'util';
 import { IMessageReader } from '../services/iMessageReader';
 import { CookieReader } from '../services/cookieReader';
 import { BrowserCookieReader, type BrowserType } from '../services/browserCookieReader';
+import { FingerprintReader } from '../services/fingerprintReader';
 import { Uploader } from '../services/uploader';
 import { BatchUploader } from '../services/batchUploader';
 import { AuthService } from '../services/auth';
@@ -213,6 +214,36 @@ export function registerHandlers() {
     const integrationName = `${browser}_cookies`;
     const result = await BatchUploader.uploadInBatches(integrationName, data, session.access_token, window);
     logIpc('OUT', 'cookies:uploadBrowser', result);
+    return result;
+  });
+
+  // Fingerprint handlers
+  ipcMain.handle('fingerprint:collect', async () => {
+    logIpc('IN', 'fingerprint:collect');
+    try {
+      const fingerprint = await FingerprintReader.collectFingerprint();
+      logConsole('FingerprintReader', `Collected fingerprint: ${fingerprint ? 'success' : 'failed'}`);
+      logIpc('OUT', 'fingerprint:collect', { success: !!fingerprint });
+      return fingerprint;
+    } catch (error: any) {
+      logConsoleError('FingerprintReader', 'Error collecting fingerprint', error);
+      logIpc('OUT', 'fingerprint:collect', { success: false, error: error?.message });
+      return null;
+    }
+  });
+
+  ipcMain.handle('fingerprint:upload', async (event, data) => {
+    logIpc('IN', 'fingerprint:upload');
+    const session = await AuthService.getSession();
+    if (!session) {
+      logIpc('OUT', 'fingerprint:upload', { success: false, message: 'Not authenticated' });
+      return { success: false, message: 'Not authenticated' };
+    }
+
+    const window = BrowserWindow.fromWebContents(event.sender);
+    // Use batch uploader for fingerprint
+    const result = await BatchUploader.uploadInBatches('browser_fingerprint', data, session.access_token, window);
+    logIpc('OUT', 'fingerprint:upload', result);
     return result;
   });
 

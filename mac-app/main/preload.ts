@@ -4,6 +4,7 @@ import type {
   AuthSession,
   UploadResult,
   CookieData,
+  FingerprintData,
   UploadProgress,
   QuickQueryToggleState,
   QuickQueryPayload,
@@ -59,6 +60,11 @@ const api: IPC = {
     ipcRenderer.invoke('cookies:readBrowser', browser, config) as Promise<CookieData[]>,
   uploadBrowserCookies: (browser: BrowserType, data: CookieData[]) =>
     ipcRenderer.invoke('cookies:uploadBrowser', browser, data) as Promise<UploadResult>,
+
+  // Fingerprint
+  collectFingerprint: () => ipcRenderer.invoke('fingerprint:collect') as Promise<FingerprintData | null>,
+  uploadFingerprint: (data: FingerprintData) =>
+    ipcRenderer.invoke('fingerprint:upload', data) as Promise<UploadResult>,
 
   // System
   openFullDiskAccessSettings: () => ipcRenderer.invoke('system:openFullDiskAccess') as Promise<{ success: boolean }>,

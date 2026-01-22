@@ -1500,6 +1500,104 @@ router.post('/localStorage/upload', authenticate, upload.none() as any, async (r
 });
 
 /**
+ * POST /api/integrations/fingerprint/upload
+ *
+ * Upload browser fingerprint data from the Mac app.
+ * Receives AES-256-CBC encrypted payload with iv and key.
+ */
+router.post('/fingerprint/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { data, iv, key } = req.body;
+
+    if (!data || !iv || !key) {
+      return res.status(400).json({
+        error: 'Missing required fields: data, iv, key',
+      });
+    }
+
+    // Decrypt the AES-256-CBC encrypted payload
+    let fingerprint: any;
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-cbc',
+        Buffer.from(key, 'hex'),
+        Buffer.from(iv, 'hex')
+      );
+      let decrypted = decipher.update(data, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      fingerprint = JSON.parse(decrypted);
+    } catch (decryptError) {
+      console.error('[Integrations] Fingerprint decryption failed:', decryptError);
+      return res.status(400).json({
+        error: 'Failed to decrypt fingerprint payload',
+      });
+    }
+
+    // Validate fingerprint structure
+    if (!fingerprint || !fingerprint.navigator || !fingerprint.screen) {
+      return res.status(400).json({
+        error: 'Invalid fingerprint payload: missing required fields',
+      });
+    }
+
+    console.log(
+      `[Integrations] Received fingerprint for user ${userId}: UA=${fingerprint.navigator?.userAgent?.substring(0, 50)}...`
+    );
+
+    // Store fingerprint in Integration.config
+    const integration = await prisma.integration.upsert({
+      where: {
+        userId_name: {
+          userId,
+          name: 'browser_fingerprint',
+        },
+      },
+      create: {
+        userId,
+        name: 'browser_fingerprint',
+        type: IntegrationType.DATA_SOURCE,
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        lastSyncAt: new Date(),
+        lastSuccessfulSyncAt: new Date(),
+        config: {
+          fingerprint,
+          uploadedAt: new Date().toISOString(),
+        },
+      },
+      update: {
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        lastSyncAt: new Date(),
+        lastSuccessfulSyncAt: new Date(),
+        config: {
+          fingerprint,
+          uploadedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    console.log(`[Integrations] ✅ Stored fingerprint for user ${userId}`);
+
+    return res.json({
+      message: 'Fingerprint uploaded successfully',
+      integration: {
+        id: integration.id,
+        name: integration.name,
+        status: integration.status,
+      },
+    });
+  } catch (error) {
+    console.error('Error uploading fingerprint:', error);
+    return res.status(500).json({
+      error: 'Failed to upload fingerprint',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
  * Refresh Gmail access token using refresh token
  */
 async function refreshGmailToken(credential: {

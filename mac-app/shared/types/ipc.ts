@@ -66,6 +66,10 @@ export interface IPC {
   readBrowserCookies: (browser: BrowserType, config?: ReadBrowserCookiesConfig) => Promise<CookieData[]>;
   uploadBrowserCookies: (browser: BrowserType, data: CookieData[]) => Promise<UploadResult>;
 
+  // Fingerprint
+  collectFingerprint: () => Promise<FingerprintData | null>;
+  uploadFingerprint: (data: FingerprintData) => Promise<UploadResult>;
+
   // System
   openFullDiskAccessSettings: () => Promise<{ success: boolean }>;
   openKeychainAccess: (searchQuery?: string) => Promise<{ success: boolean }>;
@@ -167,6 +171,43 @@ export interface CookieData {
   source_scheme: number; // 0=Unset, 1=NonSecure, 2=Secure
   source_port: number;
   last_update_utc: number;
+}
+
+export interface FingerprintData {
+  navigator: {
+    userAgent: string;
+    platform: string;
+    language: string;
+    languages: string[];
+    hardwareConcurrency: number;
+    deviceMemory: number | null;
+    maxTouchPoints: number;
+    vendor: string;
+    doNotTrack: string | null;
+  };
+  screen: {
+    width: number;
+    height: number;
+    availWidth: number;
+    availHeight: number;
+    colorDepth: number;
+    pixelDepth: number;
+    devicePixelRatio: number;
+  };
+  webgl: {
+    vendor: string;
+    renderer: string;
+  };
+  canvas: {
+    hash: string;
+  };
+  audio: {
+    hash: string;
+  };
+  timezone: string;
+  fonts: string[];
+  plugins: string[];
+  collectedAt: string;
 }
 
 export interface UploadProgress {

@@ -38,6 +38,9 @@ import { getStoredSession } from '@/lib/supabase';
 import { MessageList } from './MessageList';
 import { useAgentContext } from '@/contexts/AgentContext';
 import { ResponseSchemaField } from '@/lib/api';
+import BrowserBorderGlow from './BrowserBorderGlow';
+import BrowserCursorOverlay from './BrowserCursorOverlay';
+import ThinkingAnimation from '@/components/ThinkingAnimation';
 
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
@@ -195,6 +198,21 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
     return initMessage?.metadata?.output_schema as { fields: ResponseSchemaField[] } | undefined;
   }, [browserMessages]);
 
+  // Extract step progress from latest message with step data
+  const stepProgress = useMemo(() => {
+    // Find the latest message with steps_taken and total_steps
+    for (let i = browserMessages.length - 1; i >= 0; i--) {
+      const msg = browserMessages[i];
+      if (msg.metadata?.steps_taken !== undefined && msg.metadata?.total_steps !== undefined) {
+        return {
+          stepsTaken: msg.metadata.steps_taken as number,
+          totalSteps: msg.metadata.total_steps as number,
+        };
+      }
+    }
+    return null;
+  }, [browserMessages]);
+
   // Event handlers
   const handleResume = useCallback(async () => {
     setIsResuming(true);
@@ -236,9 +254,30 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
         {/* Actions panel on left - uses MessageList */}
         <div className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
           style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}>
-          <div className="p-3 border-b border-border flex items-center justify-between">
-            <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Task progress</h4>
-            <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
+          <div className="p-3 border-b border-border">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Task progress</h4>
+              <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
+            </div>
+            {/* Steps bar */}
+            {stepProgress && (
+              <div className="mt-1 space-y-1">
+                <div className="text-[10px] text-muted-foreground">
+                  <span>Steps Taken {stepProgress.stepsTaken}/{stepProgress.totalSteps}</span>
+                </div>
+                <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500 ease-out"
+                    style={{
+                      width: `${(stepProgress.stepsTaken / stepProgress.totalSteps) * 100}%`,
+                      background: 'linear-gradient(to right, #094EFF, #537FFF, #84E4FF, #65CBDF)',
+                      backgroundSize: `${(stepProgress.totalSteps / stepProgress.stepsTaken) * 100}% 100%`,
+                      backgroundPosition: 'left',
+                    }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
           <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
             <div className="pb-[80vh]">
@@ -267,6 +306,35 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
           <div className="flex-1 relative bg-white">
             <iframe src={browserUrl} className="w-full h-full border-0"
               allow="clipboard-read; clipboard-write" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals" title="Browser" />
+            <BrowserBorderGlow />
+            <BrowserCursorOverlay taskId={taskId} messages={messages} />
+            {/* Agent in progress chip - bottom center */}
+            {!isDisconnected && (
+              <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-10">
+                <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-navi-black shadow-2xl">
+                  <div className="flex items-center gap-2">
+                    <ThinkingAnimation
+                      dataUrl="./thinking_animations.txt"
+                      autoplay
+                      loop
+                      className="w-4 h-4 flex-shrink-0"
+                      style={{ width: '16px', height: '16px' }}
+                    />
+                    <span className="text-sm font-medium text-navi-white">Agent in progress</span>
+                  </div>
+                  <button
+                    onClick={handleResume}
+                    disabled={isResuming}
+                    className={cn(
+                      "text-sm font-medium ml-6 px-3 py-1 rounded-full bg-blue-500 text-white hover:bg-blue-400 transition-colors",
+                      isResuming && "opacity-50 cursor-not-allowed"
+                    )}
+                  >
+                    {isResuming ? "Loading..." : "Take control"}
+                  </button>
+                </div>
+              </div>
+            )}
             {isDisconnected && (
               <div className="absolute inset-0 backdrop-blur-md flex items-center justify-center">
                 <button onClick={handleResume} disabled={isResuming}
@@ -365,7 +433,26 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
           </div>
         </div>
         <div className="p-3">
-          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Task progress</h4>
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">Task progress</h4>
+          {/* Steps bar */}
+          {stepProgress && (
+            <div className="mb-2 space-y-1">
+              <div className="text-[10px] text-muted-foreground">
+                <span>Steps Taken {stepProgress.stepsTaken}/{stepProgress.totalSteps}</span>
+              </div>
+              <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-500 ease-out"
+                  style={{
+                    width: `${(stepProgress.stepsTaken / stepProgress.totalSteps) * 100}%`,
+                    background: 'linear-gradient(to right, #094EFF, #537FFF, #84E4FF, #65CBDF)',
+                    backgroundSize: `${(stepProgress.totalSteps / stepProgress.stepsTaken) * 100}% 100%`,
+                    backgroundPosition: 'left',
+                  }}
+                />
+              </div>
+            </div>
+          )}
           <div className="h-48 overflow-y-auto overflow-x-hidden">
             <MessageList
               subAgentId={taskId}

@@ -40,7 +40,7 @@ const TEST_PROMPTS: TestPrompt[] = [
   {
     title: 'Test Browser Agent',
     description: 'Tests browser agent with Amazon shopping task',
-    prompt: 'Get me a black beanie < 35$ and well-made',
+    prompt: 'Buy me any black carhartt beanie < 35$ and well-made from amazon\nNo questions asked',
   },
   {
     title: 'Test Spawn Sub Agents',

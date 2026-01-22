@@ -23,6 +23,7 @@ from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageTy
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
 from browser_tools.schemas import BROWSER_TOOL_MODELS, AVAILABLE_ACTIONS
 from browser_tools.dom_service import DOMService, ActionHistory
+from browser_tools.humanizer import BrowserHumanizer
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.prompts import build_verifier_prompt
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
@@ -58,6 +59,8 @@ async def save_browser_action_message(
     tool_call_id: str = None,
     is_init_message: bool = False,
     output_schema: dict = None,
+    steps_taken: int = None,
+    total_steps: int = None,
 ):
     """Save browser sub-action message directly to DB."""
     try:
@@ -74,6 +77,12 @@ async def save_browser_action_message(
             "action_type": action_type,
             "auxiliary": auxiliary or {}
         }
+
+        # Include step progress for FE display
+        if steps_taken is not None:
+            metadata["steps_taken"] = steps_taken
+        if total_steps is not None:
+            metadata["total_steps"] = total_steps
 
         # Include output schema in init message for FE display
         if output_schema:
@@ -657,24 +666,6 @@ def get_element_description(element, max_length: int = 40) -> str:
     return desc[:max_length]
 
 
-async def move_visual_cursor(dom_service: DOMService, x: int, y: int) -> None:
-    """Move the injected visual cursor to coordinates."""
-    try:
-        session = dom_service.session
-        if not session:
-            return
-        cdp_session = await session.get_or_create_cdp_session(focus=True)
-        await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={
-                "expression": f"if (window.__moveRoseCursor) window.__moveRoseCursor({x}, {y});",
-                "returnByValue": True
-            },
-            session_id=cdp_session.session_id
-        )
-    except:
-        pass  # Visual cursor is optional
-
-
 async def execute_action(
     dom_service: DOMService,
     action_history: ActionHistory,
@@ -682,6 +673,7 @@ async def execute_action(
     available_file_paths: Optional[Dict[str, str]] = None,
     session_id: Optional[str] = None,
     config: Any = None,
+    humanizer: Optional[BrowserHumanizer] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -692,6 +684,7 @@ async def execute_action(
         available_file_paths: Dict mapping filename -> remote path for file uploads
         session_id: Steel session ID for localStorage injection
         config: App config for backend API calls
+        humanizer: BrowserHumanizer for human-like mouse/keyboard interactions
 
     Returns:
         Result dict with success, message, and any additional data
@@ -731,18 +724,26 @@ async def execute_action(
         if action_name == "click":
             if element:
                 # Index-based click (DOM models)
-                # Get coordinates first to move visual cursor
+                # Get element coordinates for humanizer (cursor movement handled internally)
                 coord_tuple = await dom_service.get_element_coordinates(index)
                 element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
-                if element_coords:
-                    await move_visual_cursor(dom_service, element_coords["x"], element_coords["y"])
-                
+
                 # Browser-use highlight (fire-and-forget)
                 asyncio.create_task(session.highlight_interaction_element(element))
-                
-                event = session.event_bus.dispatch(ClickElementEvent(node=element))
-                await event
-                await event.event_result(raise_if_any=True, raise_if_none=False)
+
+                # Human-like mouse movement + click
+                if humanizer and element_coords:
+                    await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
+                else:
+                    # Fallback to browser-use if no humanizer or no coordinates
+                    if not humanizer:
+                        logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use ClickElementEvent")
+                    else:
+                        logger.error(f"⚠️ HUMANIZATION FALLBACK: No coordinates for element {index}, using browser-use ClickElementEvent (not humanized!)")
+                    event = session.event_bus.dispatch(ClickElementEvent(node=element))
+                    await event
+                    await event.event_result(raise_if_any=True, raise_if_none=False)
+
                 await action_history.record_action(
                     dom_service=dom_service,
                     action="click",
@@ -754,19 +755,23 @@ async def execute_action(
                 return {"success": True, "message": ""}
             elif coords:
                 # Coordinate-based click (vision models like Yutori)
-                # Move visual cursor first
-                await move_visual_cursor(dom_service, int(coords["x"]), int(coords["y"]))
-                
+                # Cursor movement handled internally by humanizer
+
                 # Browser-use highlight (fire-and-forget)
                 asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
-                
-                event = session.event_bus.dispatch(ClickCoordinateEvent(
-                    coordinate_x=int(coords["x"]),
-                    coordinate_y=int(coords["y"])
-                ))
-                await event
-                await event.event_result(raise_if_any=True, raise_if_none=False)
-                
+
+                # Human-like mouse movement + click
+                if humanizer:
+                    await humanizer.click_at_coords(int(coords["x"]), int(coords["y"]))
+                else:
+                    logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use ClickCoordinateEvent")
+                    event = session.event_bus.dispatch(ClickCoordinateEvent(
+                        coordinate_x=int(coords["x"]),
+                        coordinate_y=int(coords["y"])
+                    ))
+                    await event
+                    await event.event_result(raise_if_any=True, raise_if_none=False)
+
                 await action_history.record_action(
                     dom_service=dom_service,
                     action="click",
@@ -782,18 +787,27 @@ async def execute_action(
             text = params.get("text", "")
             if element:
                 # Index-based input (DOM models)
-                # Get coordinates first to move visual cursor
+                # Get element coordinates for humanizer (cursor movement handled internally)
                 coord_tuple = await dom_service.get_element_coordinates(index)
                 element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
-                if element_coords:
-                    await move_visual_cursor(dom_service, element_coords["x"], element_coords["y"])
-                
+
                 # Browser-use highlight (fire-and-forget)
                 asyncio.create_task(session.highlight_interaction_element(element))
-                
-                event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text))
-                await event
-                await event.event_result(raise_if_any=True, raise_if_none=False)
+
+                # Human-like click to focus, then type
+                if humanizer and element_coords:
+                    await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
+                    await humanizer.type_text(text)
+                else:
+                    # Fallback to browser-use
+                    if not humanizer:
+                        logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use TypeTextEvent")
+                    else:
+                        logger.error(f"⚠️ HUMANIZATION FALLBACK: No coordinates for element {index}, using browser-use TypeTextEvent (not humanized!)")
+                    event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text))
+                    await event
+                    await event.event_result(raise_if_any=True, raise_if_none=False)
+
                 await action_history.record_action(
                     dom_service=dom_service,
                     action="input_text",
@@ -806,28 +820,29 @@ async def execute_action(
                 return {"success": True, "message": ""}
             elif coords:
                 # Coordinate-based input (vision models like Yutori)
-                # Move visual cursor first
-                await move_visual_cursor(dom_service, int(coords["x"]), int(coords["y"]))
-                
+                # Cursor movement handled internally by humanizer
+
                 # Browser-use highlight (fire-and-forget)
                 asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
-                
-                # First click to focus the element
-                click_event = session.event_bus.dispatch(ClickCoordinateEvent(
-                    coordinate_x=int(coords["x"]),
-                    coordinate_y=int(coords["y"])
-                ))
-                await click_event
-                await click_event.event_result(raise_if_any=True, raise_if_none=False)
-                
-                # Small delay to ensure focus
-                await asyncio.sleep(0.1)
-                
-                # Then type using SendKeysEvent (types to focused element)
-                type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
-                await type_event
-                await type_event.event_result(raise_if_any=True, raise_if_none=False)
-                
+
+                # Human-like click to focus, then type
+                if humanizer:
+                    await humanizer.click_at_coords(int(coords["x"]), int(coords["y"]))
+                    await humanizer.type_text(text)
+                else:
+                    logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use events")
+                    # First click to focus the element
+                    click_event = session.event_bus.dispatch(ClickCoordinateEvent(
+                        coordinate_x=int(coords["x"]),
+                        coordinate_y=int(coords["y"])
+                    ))
+                    await click_event
+                    await click_event.event_result(raise_if_any=True, raise_if_none=False)
+                    await asyncio.sleep(0.1)
+                    type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
+                    await type_event
+                    await type_event.event_result(raise_if_any=True, raise_if_none=False)
+
                 await action_history.record_action(
                     dom_service=dom_service,
                     action="input_text",
@@ -839,10 +854,14 @@ async def execute_action(
                 return {"success": True, "message": ""}
             else:
                 # Fallback: no index or coords - type to currently focused element
-                type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
-                await type_event
-                await type_event.event_result(raise_if_any=True, raise_if_none=False)
-                
+                if humanizer:
+                    await humanizer.type_text(text)
+                else:
+                    logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
+                    type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
+                    await type_event
+                    await type_event.event_result(raise_if_any=True, raise_if_none=False)
+
                 await action_history.record_action(
                     dom_service=dom_service,
                     action="input_text",
@@ -854,10 +873,14 @@ async def execute_action(
         
         elif action_name == "press_key":
             key = params.get("key", "")
-            event = session.event_bus.dispatch(SendKeysEvent(keys=key))
-            await event
-            await event.event_result(raise_if_any=True, raise_if_none=False)
-            
+            if humanizer:
+                await humanizer.press_key(key)
+            else:
+                logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
+                event = session.event_bus.dispatch(SendKeysEvent(keys=key))
+                await event
+                await event.event_result(raise_if_any=True, raise_if_none=False)
+
             await action_history.record_action(
                 dom_service=dom_service,
                 action="press_key",
@@ -870,16 +893,23 @@ async def execute_action(
         elif action_name == "scroll":
             direction = params.get("direction", "down")
             amount = params.get("amount", 300)
-            
-            # ScrollEvent uses direction (up/down/left/right), amount (pixels), and node (optional)
-            event = session.event_bus.dispatch(ScrollEvent(
-                direction=direction,
-                amount=amount,
-                node=element if index is not None else None
-            ))
-            await event
-            await event.event_result(raise_if_any=True, raise_if_none=False)
-            
+
+            # Convert direction to delta_y (positive = down, negative = up)
+            delta_y = amount if direction == "down" else -amount
+
+            # Human-like scrolling with momentum
+            if humanizer:
+                await humanizer.scroll(delta_y)
+            else:
+                logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use ScrollEvent")
+                event = session.event_bus.dispatch(ScrollEvent(
+                    direction=direction,
+                    amount=amount,
+                    node=element if index is not None else None
+                ))
+                await event
+                await event.event_result(raise_if_any=True, raise_if_none=False)
+
             await action_history.record_action(
                 dom_service=dom_service,
                 action="scroll",
@@ -1096,11 +1126,11 @@ async def execute_action(
 
             remote_path = available_file_paths[filename]
 
-            # Get coordinates for visual cursor
+            # Get coordinates for humanizer cursor movement
             coord_tuple = await dom_service.get_element_coordinates(index)
             element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
-            if element_coords:
-                await move_visual_cursor(dom_service, element_coords["x"], element_coords["y"])
+            if humanizer and element_coords:
+                await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
 
             # Dispatch UploadFileEvent with the remote path
             event = session.event_bus.dispatch(UploadFileEvent(node=element, file_path=remote_path))
@@ -1317,8 +1347,35 @@ async def spawn_browser_agent_activity_v3(
         
         dom_service = DOMService(cdp_url=cdp_url)
         await dom_service.connect()
-        
+
         logger.info(f"🌐 Connected to browser via CDP")
+
+        # Initialize humanizer for human-like mouse movements and typing
+        # Architecture:
+        # - browser-use Page (dom_page): For DOM operations (evaluate, coordinate lookup) - READ ONLY
+        # - Playwright Page (input_page): For Input events (mouse, keyboard) - WRITE ONLY
+        # These use different CDP domains so no race conditions
+        from playwright.async_api import async_playwright
+
+        # Get browser-use Page for DOM operations
+        dom_page = await dom_service.session.get_current_page()
+
+        # Create separate Playwright CDP connection for input events
+        playwright_instance = await async_playwright().start()
+        playwright_browser = await playwright_instance.chromium.connect_over_cdp(cdp_url)
+        playwright_context = playwright_browser.contexts[0]
+        input_page = playwright_context.pages[0]
+
+        # Create humanizer with both pages
+        humanizer = BrowserHumanizer(
+            dom_page=dom_page,      # browser-use Page for evaluate(), DOM reads
+            input_page=input_page,  # Playwright Page for mouse/keyboard input
+            fast=False
+        )
+        logger.info(f"🤖 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
+
+        # Initialize cursor at starting position
+        await humanizer.initialize_cursor(start_pos=(640, 400))
 
         # ===== UPLOAD ATTACHMENTS TO STEEL SESSION =====
         available_file_paths: Dict[str, str] = {}  # filename -> remote path
@@ -1360,39 +1417,8 @@ async def spawn_browser_agent_activity_v3(
             if available_file_paths:
                 logger.info(f"📎 Available files for browser: {list(available_file_paths.keys())}")
 
-        # ===== INJECT VISUAL CURSOR (persists across navigations) =====
-        try:
-            session = dom_service.session
-            cdp_session = await session.get_or_create_cdp_session(focus=True)
-            # Use addScriptToEvaluateOnNewDocument so cursor persists across navigations
-            cursor_script = """
-                (() => {
-                    if (window.__roseCursorInjected) return;
-                    window.__roseCursorInjected = true;
-                    const existing = document.getElementById('rose-agent-cursor');
-                    if (existing) existing.remove();
-                    const cursor = document.createElement('div');
-                    cursor.id = 'rose-agent-cursor';
-                    cursor.style.cssText = `
-                        position: fixed; width: 20px; height: 20px;
-                        background: radial-gradient(circle, rgba(239,68,68,0.9) 0%, rgba(239,68,68,0.4) 50%, transparent 70%);
-                        border-radius: 50%; pointer-events: none; z-index: 999999;
-                        transform: translate(-50%, -50%); transition: left 0.15s ease-out, top 0.15s ease-out;
-                        box-shadow: 0 0 10px rgba(239,68,68,0.5); display: none;
-                    `;
-                    document.body.appendChild(cursor);
-                    window.__moveRoseCursor = (x, y) => { cursor.style.left = x + 'px'; cursor.style.top = y + 'px'; cursor.style.display = 'block'; };
-                    window.__hideRoseCursor = () => { cursor.style.display = 'none'; };
-                })();
-            """
-            # Register script to run on every new document (survives navigation)
-            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
-                params={"source": cursor_script, "runImmediately": True},
-                session_id=cdp_session.session_id
-            )
-            logger.info("🎯 Injected visual cursor (persistent)")
-        except Exception as e:
-            logger.warning(f"Failed to inject visual cursor: {e}")
+        # Visual cursor is now handled by CursorVisualizer inside BrowserHumanizer
+        # It's injected on demand and re-injected on navigation
         
         # ===== REPLACE BROWSER-USE LOGO WITH ROSE LOGO =====
         try:
@@ -1945,25 +1971,35 @@ Based on this feedback, I need to continue working on the task and address the i
             # Prepend model name to title_done for visibility (dev only)
             # if config.environment != "production":
             #     title_done = f"[{model_short}] {title_done}"
-            
-            
+
+            # Get coordinates for cursor overlay (vision models have coords, index models need lookup)
+            coords_for_cursor = coords  # From unified_action.get("coordinates")
+            if not coords_for_cursor and idx is not None:
+                coord_tuple = await dom_service.get_element_coordinates(idx)
+                if coord_tuple:
+                    coords_for_cursor = {"x": coord_tuple[0], "y": coord_tuple[1]}
+
             # Post IN_PROGRESS - use action_name for icon mapping
             await save_browser_action_message(
                 agent_id=agent_id, title=title_progress, task_id=task_id,
                 message="", status=MessageStatus.IN_PROGRESS,
-                browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action
+                browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action,
+                steps_taken=iteration, total_steps=max_iterations,
+                auxiliary={"coordinates": coords_for_cursor} if coords_for_cursor else None
             )
-            
+
             # Execute action
-            result = await execute_action(dom_service, action_history, unified_action, available_file_paths, session_id, config)
-            
-            # Post FINISHED - use action_name for icon mapping
+            result = await execute_action(dom_service, action_history, unified_action, available_file_paths, session_id, config, humanizer)
+
+            # Post FINISHED - use action_name for icon mapping, include coordinates for cursor ripple
             if result.get("success", True):
                 logger.info(f"Action {action_name} successful", agent_id=agent_id, title=title_done, task_id=task_id)
                 await save_browser_action_message(
                     agent_id=agent_id, title=title_done, task_id=task_id,
                     message=result.get("message", ""), status=MessageStatus.FINISHED,
-                    browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action
+                    browser_url=browser_url, action_type=action_name, tool_call_id=tool_call_id_action,
+                    steps_taken=iteration, total_steps=max_iterations,
+                    auxiliary={"coordinates": coords_for_cursor} if coords_for_cursor else None
                 )
             else:
                 logger.error(f"Action {action_name} failed",  agent_id=agent_id, title=title_done, task_id=task_id,
@@ -1973,7 +2009,9 @@ Based on this feedback, I need to continue working on the task and address the i
                 await save_browser_action_message(
                     agent_id=agent_id, title=title_done, task_id=task_id,
                     message=result.get("error", "Failed"), status=MessageStatus.ERROR,
-                    browser_url=browser_url, action_type="error", tool_call_id=tool_call_id_action
+                    browser_url=browser_url, action_type="error", tool_call_id=tool_call_id_action,
+                    steps_taken=iteration, total_steps=max_iterations,
+                    auxiliary={"coordinates": coords_for_cursor} if coords_for_cursor else None
                 )
             
             # Small delay between iterations

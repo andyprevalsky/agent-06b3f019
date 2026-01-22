@@ -32,6 +32,7 @@ FILE_RULES = """
 TOOL_GUIDANCE = {
     "spawn_browser_agent": """Ephemeral session. 25-step limit. For short web trajectories (purchases, forms, JS-heavy sites).
 Do work OUTSIDE browser when possible. Give deepest starting URL.
+Do NOT use for information gathering - use web_search/web_fetch instead. Only use browser if those tools have failed.
 
 <bad-example>
 spawn_browser_agent("Login to site")
@@ -571,7 +572,9 @@ Decision heuristic:
 
 DECOMPOSITION PRINCIPLES
 ------------------------
-- Prefer decomposition: If a task CAN be decomposed into sub-tasks, it SHOULD be (beware to not break other invariants in the process, such as spawn_browser_agent and spawn_claude_code_agent ephemerality)
+- Prefer decomposition: If a task CAN be decomposed into sub-tasks, it SHOULD be
+- EXCEPTION - BROWSER FLOWS: NEVER split stateful web flows across multiple spawn_browser_agent calls.
+  Login → add to cart → checkout → confirm = ONE spawn_browser_agent task (sessions are ephemeral, cart/auth state is lost between calls)
 - MECE: Tasks should not overlap; together they fully cover the goal
 - Parallelization: Prefer independent tasks with final synthesis step
 - Granularity: 3-8 tasks maximum. If you need more, use spawn_sub_agent to delegate complexity.
