@@ -264,35 +264,104 @@ const upload = multer({
   dest: '/tmp/integration-uploads/',
   limits: {
     fileSize: 500 * 1024 * 1024, // 500MB max file size
-    fieldSize: 50 * 1024 * 1024,  // 50MB max field size (for cookie uploads)
+    fieldSize: 200 * 1024 * 1024,  // 200MB max field size (for localStorage uploads which can be large)
   },
 });
 
+// Auth cookie name patterns that indicate a logged-in session
+const AUTH_COOKIE_PATTERNS = [
+  'session', 'sess', 'auth', 'token', 'login', 'logged', 'user', 'usr',
+  'sso', 'jwt', 'bearer', 'access', 'refresh', 'credential', 'identity',
+  'account', 'member', 'subscriber',
+];
+
+// False positive patterns (tracking cookies, not auth)
+const FALSE_POSITIVE_COOKIES = [
+  'cf_clearance', '_ga', '_gid', '_gcl', '_fbp', '_fbc', 'mp_',
+  '_hp5_', '_hjSession', 'OptanonConsent', '_pin_unauth', 'intercom-',
+  '__stripe_mid', '_rdt_uuid', '_tt_enable_cookie', '_ttp', '_uetvid',
+  'hubspotutk', '__hstc', '__kla_id', 'ajs_anonymous_id', 'ph_phc_',
+  '_clck', '_clsk', '_scid', '_sctr', 'FPID', 'FPAU', '_derived_epik',
+  '_zitok', 'receive-cookie-deprecation',
+];
+
+// Ad/tracking domains to exclude
+const AD_TRACKING_DOMAINS = [
+  'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
+  'facebook.com', 'fbcdn.net', 'analytics.google.com',
+];
+
+// Chromium epoch offset (Jan 1, 1601 to Jan 1, 1970 in microseconds)
+const CHROME_EPOCH_OFFSET_MICROSECONDS = 11644473600n * 1000000n;
+
 /**
  * GET /api/integrations
- * 
- * Get all integrations for the authenticated user
+ *
+ * Get all integrations for the authenticated user.
+ * Also returns authenticatedDomains computed from the Cookie table.
  */
 router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     // For internal calls (API key auth), get user_id from X-User-Id header
     // For user calls (JWT auth), get from req.user
-    const userId = req.isInternal 
-      ? (req.headers['x-user-id'] as string) 
+    const userId = req.isInternal
+      ? (req.headers['x-user-id'] as string)
       : req.user?.id;
-    
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    
-    const integrations = await prisma.integration.findMany({
-      where: { userId },
-      orderBy: { updatedAt: 'desc' },
-    });
-    
+
+    // Fetch integrations and cookies in parallel
+    const [integrations, cookies] = await Promise.all([
+      prisma.integration.findMany({
+        where: { userId },
+        orderBy: { updatedAt: 'desc' },
+      }),
+      prisma.cookie.findMany({
+        where: { userId },
+        select: { domain: true, name: true, expiresUtc: true },
+      }),
+    ]);
+
+    // Compute authenticated domains from non-expired auth cookies
+    const nowMicroseconds = BigInt(Date.now()) * 1000n + CHROME_EPOCH_OFFSET_MICROSECONDS;
+    const authenticatedDomains = new Set<string>();
+
+    for (const cookie of cookies) {
+      // Skip expired cookies
+      if (cookie.expiresUtc && cookie.expiresUtc > 0n && cookie.expiresUtc < nowMicroseconds) {
+        continue;
+      }
+
+      const nameLower = cookie.name.toLowerCase();
+      const domain = cookie.domain.replace(/^\./, '');
+
+      // Skip tracking domains
+      if (AD_TRACKING_DOMAINS.some(ad => domain.includes(ad))) {
+        continue;
+      }
+
+      // Skip false positive cookies
+      if (FALSE_POSITIVE_COOKIES.some(fp => nameLower.includes(fp.toLowerCase()))) {
+        continue;
+      }
+
+      // Check if cookie name matches auth patterns
+      if (AUTH_COOKIE_PATTERNS.some(pattern => nameLower.includes(pattern))) {
+        // Extract base domain (e.g., "mail.google.com" -> "google.com")
+        const parts = domain.split('.');
+        const baseDomain = parts.length >= 2
+          ? parts.slice(-2).join('.')
+          : domain;
+        authenticatedDomains.add(baseDomain);
+      }
+    }
+
     return res.json({
       integrations,
       count: integrations.length,
+      authenticatedDomains: Array.from(authenticatedDomains).sort(),
     });
   } catch (error) {
     console.error('Error fetching integrations:', error);
@@ -1031,13 +1100,28 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
 /**
  * POST /api/integrations/cookies/upload
  *
- * Upload encrypted Chrome cookies from the Mac app.
+ * Upload encrypted browser cookies from the Mac app.
  * Receives AES-256-CBC encrypted payload with iv and key.
+ * Supports multiple browsers via the 'browser' parameter.
+ *
+ * Cookies are deduplicated across browsers in the Cookie table.
+ * When the same cookie (domain, name, path) exists in multiple browsers,
+ * the one that expires latest wins.
  */
 router.post('/cookies/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const { data, iv, key } = req.body;
+    const { data, iv, key, browser = 'chrome' } = req.body;
+
+    // Validate browser type
+    const validBrowsers = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas'];
+    if (!validBrowsers.includes(browser)) {
+      return res.status(400).json({
+        error: `Invalid browser type: ${browser}. Valid types: ${validBrowsers.join(', ')}`,
+      });
+    }
+
+    const integrationName = `${browser}_cookies`;
 
     if (!data || !iv || !key) {
       return res.status(400).json({
@@ -1070,10 +1154,8 @@ router.post('/cookies/upload', authenticate, upload.none() as any, async (req: A
     }
 
     // Sanitize cookies: remove null bytes that PostgreSQL can't store
-    // Some decrypted cookie values may contain \u0000 characters
     const sanitizeString = (str: string): string => {
       if (typeof str !== 'string') return str;
-      // Remove null bytes and other control characters except newlines/tabs
       return str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
     };
 
@@ -1082,31 +1164,33 @@ router.post('/cookies/upload', authenticate, upload.none() as any, async (req: A
       value: sanitizeString(cookie.value || ''),
       name: sanitizeString(cookie.name || ''),
       host_key: sanitizeString(cookie.host_key || ''),
-      path: sanitizeString(cookie.path || ''),
-    })).filter((cookie: any) => cookie.name && cookie.value); // Remove cookies with empty names/values
+      domain: sanitizeString(cookie.host_key || ''),  // Preserve original format (with or without leading dot)
+      path: sanitizeString(cookie.path || '/') || '/',
+      top_frame_site_key: sanitizeString(cookie.top_frame_site_key || ''),
+    })).filter((cookie: any) => cookie.name && cookie.value);
 
     console.log(
-      `[Integrations] Received ${cookies.length} cookies, ${sanitizedCookies.length} after sanitization for user ${userId}`
+      `[Integrations] Received ${cookies.length} ${browser} cookies, ${sanitizedCookies.length} after sanitization for user ${userId}`
     );
 
-    // Store cookies in Integration.config
+    // 1. Update Integration row for status tracking (no cookie data in config)
     const integration = await prisma.integration.upsert({
       where: {
         userId_name: {
           userId,
-          name: 'chrome_cookies',
+          name: integrationName,
         },
       },
       create: {
         userId,
-        name: 'chrome_cookies',
+        name: integrationName,
         type: IntegrationType.DATA_SOURCE,
         status: IntegrationStatus.CONNECTED,
         isActive: true,
         lastSyncAt: new Date(),
         lastSuccessfulSyncAt: new Date(),
         config: {
-          cookies: sanitizedCookies,
+          browser,
           cookieCount: sanitizedCookies.length,
           uploadedAt: new Date().toISOString(),
         },
@@ -1117,14 +1201,126 @@ router.post('/cookies/upload', authenticate, upload.none() as any, async (req: A
         lastSyncAt: new Date(),
         lastSuccessfulSyncAt: new Date(),
         config: {
-          cookies: sanitizedCookies,
+          browser,
           cookieCount: sanitizedCookies.length,
           uploadedAt: new Date().toISOString(),
         },
       },
     });
 
-    console.log(`[Integrations] ✅ Stored ${sanitizedCookies.length} cookies for user ${userId}`);
+    // 2. Upsert cookies to Cookie table - only update if expires later
+    // Use batched raw SQL for performance
+    // Unique key: (userId, domain, name, path, topFrameSiteKey) - this matches what makes a cookie unique in Chromium
+    if (sanitizedCookies.length > 0) {
+      const BATCH_SIZE = 100;
+      let processedCount = 0;
+
+      // Get count before to measure updates vs inserts
+      const countBefore = await prisma.cookie.count({ where: { userId } });
+
+      for (let i = 0; i < sanitizedCookies.length; i += BATCH_SIZE) {
+        const batch = sanitizedCookies.slice(i, i + BATCH_SIZE);
+
+        // Dedupe within batch: keep cookie with latest expiry for each unique key
+        const cookiesByKey = new Map<string, any>();
+        let dupCount = 0;
+        for (const cookie of batch) {
+          const uniqueKey = `${cookie.domain}|${cookie.name}|${cookie.path}|${cookie.top_frame_site_key || ''}`;
+          const existing = cookiesByKey.get(uniqueKey);
+          if (existing) {
+            dupCount++;
+            // Keep the one with later expiry (or the new one if expiry is null/0)
+            const existingExpiry = BigInt(existing.expires_utc || 0);
+            const newExpiry = BigInt(cookie.expires_utc || 0);
+            if (newExpiry > existingExpiry) {
+              console.log(`[Integrations] Deduping cookie ${uniqueKey}: keeping expiry ${newExpiry} over ${existingExpiry}`);
+              cookiesByKey.set(uniqueKey, cookie);
+            }
+          } else {
+            cookiesByKey.set(uniqueKey, cookie);
+          }
+        }
+
+        // Use deduped batch
+        const dedupedBatch = Array.from(cookiesByKey.values());
+        if (dupCount > 0) {
+          console.log(`[Integrations] Deduped batch ${Math.floor(i / BATCH_SIZE) + 1}: ${batch.length} -> ${dedupedBatch.length} cookies (${dupCount} duplicates removed, kept latest expiry)`);
+        }
+
+        // Build VALUES clause for batch upsert (19 columns)
+        const values = dedupedBatch.map((_, idx) => {
+          const base = idx * 19;
+          return `(gen_random_uuid(), $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::bigint, $${base + 7}::boolean, $${base + 8}::boolean, $${base + 9}, NOW(), $${base + 10}::bigint, $${base + 11}, $${base + 12}::bigint, $${base + 13}::boolean, $${base + 14}::boolean, $${base + 15}::int, $${base + 16}::int, $${base + 17}::int, $${base + 18}::int, $${base + 19}::bigint)`;
+        }).join(', ');
+
+        // Flatten params (19 values per cookie)
+        const params: (string | number | bigint | boolean | null)[] = [];
+        for (const cookie of dedupedBatch) {
+          params.push(
+            userId,
+            cookie.domain,
+            cookie.name,
+            cookie.path,
+            cookie.value,
+            cookie.expires_utc ? BigInt(cookie.expires_utc) : null,
+            cookie.is_secure ?? false,
+            cookie.is_httponly ?? false,
+            browser,
+            // New fields
+            cookie.creation_utc ? BigInt(cookie.creation_utc) : null,
+            cookie.top_frame_site_key || null,
+            cookie.last_access_utc ? BigInt(cookie.last_access_utc) : null,
+            cookie.has_expires ?? true,
+            cookie.is_persistent ?? true,
+            cookie.priority ?? 1,
+            cookie.samesite ?? -1,
+            cookie.source_scheme ?? 0,
+            cookie.source_port ?? -1,
+            cookie.last_update_utc ? BigInt(cookie.last_update_utc) : null
+          );
+        }
+
+        // Upsert with conditional update: only update if incoming expiresUtc is greater
+        // Unique key now includes topFrameSiteKey for partitioned cookies (CHIPS)
+        // If both are null, or existing is greater, keep existing
+        await prisma.$executeRawUnsafe(`
+          INSERT INTO "Cookie" (id, "userId", domain, name, path, value, "expiresUtc", "isSecure", "isHttpOnly", "browserSource", "syncedAt", "creationUtc", "topFrameSiteKey", "lastAccessUtc", "hasExpires", "isPersistent", priority, "sameSite", "sourceScheme", "sourcePort", "lastUpdateUtc")
+          VALUES ${values}
+          ON CONFLICT ("userId", domain, name, path, "topFrameSiteKey") DO UPDATE SET
+            value = EXCLUDED.value,
+            "expiresUtc" = EXCLUDED."expiresUtc",
+            "isSecure" = EXCLUDED."isSecure",
+            "isHttpOnly" = EXCLUDED."isHttpOnly",
+            "browserSource" = EXCLUDED."browserSource",
+            "syncedAt" = NOW(),
+            "creationUtc" = EXCLUDED."creationUtc",
+            "lastAccessUtc" = EXCLUDED."lastAccessUtc",
+            "hasExpires" = EXCLUDED."hasExpires",
+            "isPersistent" = EXCLUDED."isPersistent",
+            priority = EXCLUDED.priority,
+            "sameSite" = EXCLUDED."sameSite",
+            "sourceScheme" = EXCLUDED."sourceScheme",
+            "sourcePort" = EXCLUDED."sourcePort",
+            "lastUpdateUtc" = EXCLUDED."lastUpdateUtc"
+          WHERE
+            -- Update if incoming expires later, or if existing has no expiry but incoming does
+            EXCLUDED."expiresUtc" > COALESCE("Cookie"."expiresUtc", 0)
+            OR (EXCLUDED."expiresUtc" IS NOT NULL AND "Cookie"."expiresUtc" IS NULL)
+        `, ...params);
+
+        processedCount += dedupedBatch.length;
+      }
+
+      // Calculate how many were actually inserted vs updated (for conflict visibility)
+      const countAfter = await prisma.cookie.count({ where: { userId } });
+      const newlyInserted = countAfter - countBefore;
+      const conflictsResolved = processedCount - newlyInserted;
+
+      console.log(
+        `[Integrations] ✅ Processed ${processedCount} ${browser} cookies for user ${userId}: ` +
+        `${newlyInserted} new, ${conflictsResolved} conflicts (kept cookie with later expiry)`
+      );
+    }
 
     return res.json({
       message: 'Cookies uploaded successfully',
@@ -1139,6 +1335,165 @@ router.post('/cookies/upload', authenticate, upload.none() as any, async (req: A
     console.error('Error uploading cookies:', error);
     return res.status(500).json({
       error: 'Failed to upload cookies',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/localStorage/upload
+ *
+ * Upload encrypted Chrome localStorage batch from the Mac app.
+ * Directly bulk-upserts all origins in the batch to LocalStorageOrigin table.
+ * No staging table, no finalize step needed.
+ *
+ * Payload: { byOrigin, hashes, batchIndex, totalBatches, entryCount, originCount }
+ */
+router.post('/localStorage/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { data, iv, key, compressed } = req.body;
+
+    if (!data || !iv || !key) {
+      return res.status(400).json({
+        error: 'Missing required fields: data, iv, key',
+      });
+    }
+
+    // Decrypt the AES-256-CBC encrypted payload
+    let localStorageData: {
+      byOrigin: Record<string, { key: string; value: string }[]>;
+      hashes: Record<string, string>;
+      batchIndex: number;
+      totalBatches: number;
+      entryCount: number;
+      originCount: number;
+    };
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-cbc',
+        Buffer.from(key, 'hex'),
+        Buffer.from(iv, 'hex')
+      );
+
+      const decryptedBuffer = Buffer.concat([
+        decipher.update(Buffer.from(data, 'hex')),
+        decipher.final(),
+      ]);
+
+      let jsonString: string;
+      if (compressed === 'true') {
+        const zlib = await import('zlib');
+        const { promisify } = await import('util');
+        const gunzip = promisify(zlib.gunzip);
+        const decompressed = await gunzip(decryptedBuffer);
+        jsonString = decompressed.toString('utf8');
+      } else {
+        jsonString = decryptedBuffer.toString('utf8');
+      }
+
+      localStorageData = JSON.parse(jsonString);
+    } catch (decryptError) {
+      console.error('[Integrations] localStorage decryption/decompression failed:', decryptError);
+      return res.status(400).json({
+        error: 'Failed to decrypt localStorage payload',
+      });
+    }
+
+    if (!localStorageData.byOrigin || typeof localStorageData.byOrigin !== 'object') {
+      return res.status(400).json({
+        error: 'Invalid localStorage payload: expected byOrigin object',
+      });
+    }
+
+    const batchInfo = ` (batch ${localStorageData.batchIndex + 1}/${localStorageData.totalBatches})`;
+
+    // Sanitize values: remove null bytes and fix malformed Unicode that PostgreSQL can't store
+    const sanitizeString = (str: string): string => {
+      if (typeof str !== 'string') return str;
+      // Remove null bytes and control characters
+      let sanitized = str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+      // Remove orphan Unicode surrogates character by character
+      // High surrogates: 0xD800-0xDBFF, Low surrogates: 0xDC00-0xDFFF
+      const chars = [...sanitized];
+      const filtered: string[] = [];
+      for (let i = 0; i < chars.length; i++) {
+        const code = chars[i].charCodeAt(0);
+        if (code >= 0xD800 && code <= 0xDBFF) {
+          // High surrogate - keep only if followed by low surrogate
+          const nextCode = chars[i + 1]?.charCodeAt(0);
+          if (nextCode >= 0xDC00 && nextCode <= 0xDFFF) {
+            filtered.push(chars[i], chars[i + 1]);
+            i++; // Skip the low surrogate we just added
+          }
+          // Otherwise drop the orphan high surrogate
+        } else if (code >= 0xDC00 && code <= 0xDFFF) {
+          // Low surrogate without preceding high - drop it
+        } else {
+          filtered.push(chars[i]);
+        }
+      }
+      return filtered.join('');
+    };
+
+    const sanitizedByOrigin: Record<string, { key: string; value: string }[]> = {};
+    let batchEntryCount = 0;
+
+    for (const [origin, entries] of Object.entries(localStorageData.byOrigin)) {
+      const sanitizedOrigin = sanitizeString(origin);
+      sanitizedByOrigin[sanitizedOrigin] = entries.map((entry: { key: string; value: string }) => ({
+        key: sanitizeString(entry.key),
+        value: sanitizeString(entry.value),
+      })).filter((entry: { key: string; value: string }) => entry.key && entry.value);
+      batchEntryCount += sanitizedByOrigin[sanitizedOrigin].length;
+    }
+
+    const batchOriginCount = Object.keys(sanitizedByOrigin).length;
+
+    console.log(
+      `[Integrations] Received${batchInfo} ${localStorageData.entryCount} localStorage entries from ${localStorageData.originCount} origins, ${batchEntryCount} after sanitization for user ${userId}`
+    );
+
+    // Bulk upsert all origins in this batch using raw SQL
+    const origins = Object.keys(sanitizedByOrigin);
+    if (origins.length > 0) {
+      // Build VALUES clause for bulk upsert
+      const values = origins.map((origin, i) => {
+        const entries = sanitizedByOrigin[origin];
+        const hash = localStorageData.hashes[origin] || '';
+        return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
+      }).join(', ');
+
+      // Flatten params: [userId, origin, entries, hash, userId, origin, entries, hash, ...]
+      const params: (string | object)[] = [];
+      for (const origin of origins) {
+        params.push(userId, origin, JSON.stringify(sanitizedByOrigin[origin]), localStorageData.hashes[origin] || '');
+      }
+
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "LocalStorageOrigin" (id, "userId", origin, entries, hash, "updatedAt")
+        VALUES ${values}
+        ON CONFLICT ("userId", origin) DO UPDATE SET
+          entries = EXCLUDED.entries,
+          hash = EXCLUDED.hash,
+          "updatedAt" = NOW()
+        WHERE "LocalStorageOrigin".hash IS DISTINCT FROM EXCLUDED.hash
+      `, ...params);
+    }
+
+    console.log(`[Integrations] ✅ Upserted${batchInfo} ${batchOriginCount} origins for user ${userId}`);
+
+    return res.json({
+      message: 'Batch uploaded',
+      batchIndex: localStorageData.batchIndex,
+      totalBatches: localStorageData.totalBatches,
+      entryCount: batchEntryCount,
+      originCount: batchOriginCount,
+    });
+  } catch (error) {
+    console.error('Error uploading localStorage batch:', error);
+    return res.status(500).json({
+      error: 'Failed to upload localStorage batch',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }
@@ -1376,7 +1731,7 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
 
 /**
  * PATCH /api/integrations/:name
- * 
+ *
  * Update an integration's status or config
  */
 router.patch('/:name', authenticate, async (req: AuthRequest, res: Response) => {

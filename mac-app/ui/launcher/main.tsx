@@ -78,10 +78,12 @@ style.textContent = `
     background-color: transparent !important;
     width: 100% !important;
     height: 100% !important;
+    overflow: hidden !important;
   }
   body {
     background: transparent !important;
     background-color: transparent !important;
+    overflow: hidden !important;
   }
   .drag-region {
     -webkit-app-region: drag;
@@ -158,10 +160,11 @@ const Launcher = () => {
         className="drag-region"
         style={{
           position: 'absolute',
-          top: 8,
-          left: 8,
-          right: 8,
-          bottom: 8,
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: 384,
+          height: 52,
           borderRadius: 9999,
           boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1)',
         }}

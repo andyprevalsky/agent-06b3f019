@@ -680,6 +680,8 @@ async def execute_action(
     action_history: ActionHistory,
     action: Dict[str, Any],
     available_file_paths: Optional[Dict[str, str]] = None,
+    session_id: Optional[str] = None,
+    config: Any = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -688,6 +690,8 @@ async def execute_action(
         action_history: ActionHistory for recording actions
         action: UnifiedAction dict with action, index, coordinates, params, thinking
         available_file_paths: Dict mapping filename -> remote path for file uploads
+        session_id: Steel session ID for localStorage injection
+        config: App config for backend API calls
 
     Returns:
         Result dict with success, message, and any additional data
@@ -891,7 +895,31 @@ async def execute_action(
             event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
             await event
             await event.event_result(raise_if_any=True, raise_if_none=False)
-            
+
+            # Inject localStorage for this origin after navigation
+            if session_id and config:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url)
+                    origin = f"{parsed.scheme}://{parsed.netloc}"
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        inject_response = await client.post(
+                            f"{config.backend.api_url}/api/browser-session/{session_id}/inject-localStorage",
+                            headers={
+                                "x-api-key": config.backend.api_key or "",
+                                "Content-Type": "application/json"
+                            },
+                            json={"origin": origin}
+                        )
+                        if inject_response.status_code == 200:
+                            result_data = inject_response.json()
+                            if result_data.get("injected"):
+                                logger.info(f"💾 Injected {result_data.get('count', 0)} localStorage entries for {origin}")
+                        else:
+                            logger.warning(f"Failed to inject localStorage: HTTP {inject_response.status_code}")
+                except Exception as e:
+                    logger.warning(f"Failed to inject localStorage for {url}: {e}")
+
             await action_history.record_action(
                 dom_service=dom_service,
                 action="goto",
@@ -1927,7 +1955,7 @@ Based on this feedback, I need to continue working on the task and address the i
             )
             
             # Execute action
-            result = await execute_action(dom_service, action_history, unified_action, available_file_paths)
+            result = await execute_action(dom_service, action_history, unified_action, available_file_paths, session_id, config)
             
             # Post FINISHED - use action_name for icon mapping
             if result.get("success", True):

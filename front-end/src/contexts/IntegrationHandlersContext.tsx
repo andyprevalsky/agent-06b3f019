@@ -4,23 +4,56 @@
  * This context is stateless - provides integration handlers from Mac app.
  * Handlers are passed in via props from main.tsx.
  *
- * [MOUNTED] --> provides handlers: { iMessage?, chromeCookies? }
+ * [MOUNTED] --> provides handlers: { iMessage?, chromeCookies?, browserCookies? }
  *
  * Each handler has:
  * - onClick: async function to execute integration
  * - isAvailable: boolean (whether feature is available in current environment)
+ *
+ * browserCookies handler provides multi-browser support:
+ * - getInstalledBrowsers(): returns list of installed browsers
+ * - syncBrowser(type, password?): syncs cookies for a specific browser
+ * - storeAtlasPassword(password): stores Atlas password locally
+ * - openKeychainAccess(searchQuery?): opens Keychain Access app
  */
 
 import { createContext, useContext, ReactNode } from 'react';
+
+// Browser types for multi-browser cookie sync
+export type BrowserType =
+  | 'chrome'
+  | 'edge'
+  | 'brave'
+  | 'arc'
+  | 'opera'
+  | 'vivaldi'
+  | 'chromium'
+  | 'atlas';
+
+export interface BrowserInfo {
+  type: BrowserType;
+  name: string;
+  isInstalled: boolean;
+  needsManualPassword: boolean;
+}
 
 export interface IntegrationHandler {
   onClick: () => Promise<void>;
   isAvailable: boolean;
 }
 
+export interface BrowserCookiesHandler {
+  isAvailable: boolean;
+  getInstalledBrowsers: () => Promise<BrowserInfo[]>;
+  syncBrowser: (browserType: BrowserType, keychainPassword?: string) => Promise<void>;
+  storeAtlasPassword: (password: string) => Promise<{ success: boolean; error?: string }>;
+  openKeychainAccess: (searchQuery?: string) => Promise<{ success: boolean }>;
+}
+
 export interface IntegrationHandlers {
   iMessage?: IntegrationHandler;
   chromeCookies?: IntegrationHandler;
+  browserCookies?: BrowserCookiesHandler;
 }
 
 const IntegrationHandlersContext = createContext<IntegrationHandlers>({});

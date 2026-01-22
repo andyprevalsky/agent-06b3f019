@@ -4,6 +4,28 @@ export interface ShortcutConfig {
   key: string;
 }
 
+// Browser types for multi-browser cookie sync
+export type BrowserType =
+  | 'chrome'
+  | 'edge'
+  | 'brave'
+  | 'arc'
+  | 'opera'
+  | 'vivaldi'
+  | 'chromium'
+  | 'atlas';
+
+export interface BrowserInfo {
+  type: BrowserType;
+  name: string;
+  isInstalled: boolean;
+  needsManualPassword: boolean;
+}
+
+export interface ReadBrowserCookiesConfig {
+  keychainPassword?: string;
+}
+
 // IPC method signatures
 export interface IPC {
   auth: {
@@ -35,12 +57,18 @@ export interface IPC {
   startIMessageUpload: () => Promise<UploadResult>;
   sendIMessage: (payload: DirectIMessagePayload) => Promise<{ success: boolean; message?: string }>;
 
-  // Cookies
+  // Cookies (legacy Chrome-only methods)
   readChromeCookies: () => Promise<CookieData[]>;
   uploadCookies: (data: CookieData[]) => Promise<UploadResult>;
 
+  // Browser cookies (multi-browser support)
+  getInstalledBrowsers: () => Promise<BrowserInfo[]>;
+  readBrowserCookies: (browser: BrowserType, config?: ReadBrowserCookiesConfig) => Promise<CookieData[]>;
+  uploadBrowserCookies: (browser: BrowserType, data: CookieData[]) => Promise<UploadResult>;
+
   // System
   openFullDiskAccessSettings: () => Promise<{ success: boolean }>;
+  openKeychainAccess: (searchQuery?: string) => Promise<{ success: boolean }>;
 
   // Events
   onProgress: (callback: (progress: UploadProgress) => void) => void;
@@ -63,6 +91,13 @@ export interface IPC {
   // Payment events
   onPaymentComplete: (callback: (data: { success: boolean }) => void) => void;
   removePaymentCompleteListener: () => void;
+
+  // Atlas credentials
+  atlas?: {
+    storePassword: (password: string) => Promise<{ success: boolean; error?: string }>;
+    hasPassword: () => Promise<boolean>;
+    clearPassword: () => Promise<{ success: boolean }>;
+  };
 }
 
 // Data types
@@ -121,6 +156,17 @@ export interface CookieData {
   expires_utc: number;
   is_secure: boolean;
   is_httponly: boolean;
+  // Additional Chrome cookie fields
+  creation_utc: number;
+  top_frame_site_key: string;
+  last_access_utc: number;
+  has_expires: boolean;
+  is_persistent: boolean;
+  priority: number; // 0=Low, 1=Medium, 2=High
+  samesite: number; // -1=Unspecified, 0=None, 1=Lax, 2=Strict
+  source_scheme: number; // 0=Unset, 1=NonSecure, 2=Secure
+  source_port: number;
+  last_update_utc: number;
 }
 
 export interface UploadProgress {

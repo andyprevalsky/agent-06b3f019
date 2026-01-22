@@ -234,17 +234,18 @@ model BrowserContext {
 }
 
 model BrowserSession {
-  id         String               @id @default(uuid())
-  contextId  String
-  agentId    String
-  sessionId  String               @unique
-  status     BrowserSessionStatus @default(ACTIVE)
-  debugUrl   String?
-  wsUrl      String?              // CDP WebSocket URL for browser-use
-  currentUrl String?
-  createdAt  DateTime             @default(now())
-  closedAt   DateTime?
-  context    BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
+  id              String               @id @default(uuid())
+  contextId       String
+  agentId         String
+  sessionId       String               @unique
+  status          BrowserSessionStatus @default(ACTIVE)
+  debugUrl        String?
+  wsUrl           String?              // CDP WebSocket URL for browser-use
+  currentUrl      String?
+  injectedOrigins Json?                // Map of origin -> hash for localStorage injection tracking
+  createdAt       DateTime             @default(now())
+  closedAt        DateTime?
+  context         BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
 
   @@index([contextId])
   @@index([agentId])
@@ -571,4 +572,64 @@ enum IntegrationStatus {
 enum EmailProvider {
   GMAIL
   YAHOO
+}
+
+// Temporary storage for batched localStorage uploads
+// Each batch is stored separately, then merged on finalize
+model PendingLocalStorageBatch {
+  id         String   @id @default(uuid())
+  userId     String
+  uploadId   String   // Groups batches from same upload session
+  batchIndex Int
+  totalBatches Int
+  data       Json     // { byOrigin: {...}, hashes: {...} }
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, uploadId, batchIndex])
+  @@index([userId, uploadId])
+}
+
+// Per-origin localStorage storage for efficient reads
+// One row per origin allows O(1) lookup when injecting
+model LocalStorageOrigin {
+  id        String   @id @default(uuid())
+  userId    String
+  origin    String   // "https://google.com"
+  entries   Json     // [{ key: "token", value: "..." }, ...]
+  hash      String   // For cache invalidation
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, origin])
+  @@index([userId])
+}
+
+// Deduplicated cookie storage across all browsers
+// When same cookie exists in multiple browsers, the one that expires latest wins
+model Cookie {
+  id              String   @id @default(uuid())
+  userId          String
+  domain          String   // Normalized host_key (e.g., ".google.com" -> "google.com")
+  name            String   // Cookie name
+  path            String   @default("/")
+  value           String   // Decrypted cookie value
+  expiresUtc      BigInt?  // Chromium timestamp (microseconds since 1601-01-01)
+  isSecure        Boolean  @default(false)
+  isHttpOnly      Boolean  @default(false)
+  browserSource   String   // Which browser this came from (for debugging)
+  syncedAt        DateTime @default(now()) @updatedAt
+  // Additional Chrome cookie fields
+  creationUtc     BigInt?  // When cookie was created
+  topFrameSiteKey String?  // For partitioned cookies
+  lastAccessUtc   BigInt?  // When cookie was last read
+  hasExpires      Boolean  @default(true)
+  isPersistent    Boolean  @default(true)
+  priority        Int      @default(1) // 0=Low, 1=Medium, 2=High
+  sameSite        Int      @default(-1) // -1=Unspecified, 0=None, 1=Lax, 2=Strict
+  sourceScheme    Int      @default(0) // 0=Unset, 1=NonSecure, 2=Secure
+  sourcePort      Int      @default(-1)
+  lastUpdateUtc   BigInt?  // When cookie was last modified
+
+  @@unique([userId, domain, name, path, topFrameSiteKey])
+  @@index([userId])
+  @@index([userId, domain])
 }

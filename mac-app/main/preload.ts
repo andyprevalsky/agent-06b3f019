@@ -10,6 +10,9 @@ import type {
   DirectIMessagePayload,
   UpdateStatusPayload,
   ShortcutConfig,
+  BrowserType,
+  BrowserInfo,
+  ReadBrowserCookiesConfig,
 } from '../shared/types/ipc';
 
 // Expose type-safe API to renderer
@@ -45,13 +48,22 @@ const api: IPC = {
   sendIMessage: (payload: DirectIMessagePayload) =>
     ipcRenderer.invoke('imessage:sendDirect', payload) as Promise<{ success: boolean; message?: string }>,
   
-  // Cookies
+  // Cookies (legacy Chrome-only)
   readChromeCookies: () => ipcRenderer.invoke('cookies:readChrome') as Promise<CookieData[]>,
   uploadCookies: (data: CookieData[]) =>
     ipcRenderer.invoke('cookies:upload', data) as Promise<UploadResult>,
-  
+
+  // Browser cookies (multi-browser support)
+  getInstalledBrowsers: () => ipcRenderer.invoke('cookies:getInstalledBrowsers') as Promise<BrowserInfo[]>,
+  readBrowserCookies: (browser: BrowserType, config?: ReadBrowserCookiesConfig) =>
+    ipcRenderer.invoke('cookies:readBrowser', browser, config) as Promise<CookieData[]>,
+  uploadBrowserCookies: (browser: BrowserType, data: CookieData[]) =>
+    ipcRenderer.invoke('cookies:uploadBrowser', browser, data) as Promise<UploadResult>,
+
   // System
   openFullDiskAccessSettings: () => ipcRenderer.invoke('system:openFullDiskAccess') as Promise<{ success: boolean }>,
+  openKeychainAccess: (searchQuery?: string) =>
+    ipcRenderer.invoke('system:openKeychainAccess', searchQuery) as Promise<{ success: boolean }>,
   
   // Events
   onProgress: (callback: (progress: UploadProgress) => void) => {
@@ -88,6 +100,16 @@ const api: IPC = {
   },
   removePaymentCompleteListener: () => {
     ipcRenderer.removeAllListeners('payment-complete');
+  },
+
+  // Atlas credentials
+  atlas: {
+    storePassword: (password: string) =>
+      ipcRenderer.invoke('atlas:storePassword', password) as Promise<{ success: boolean; error?: string }>,
+    hasPassword: () =>
+      ipcRenderer.invoke('atlas:hasPassword') as Promise<boolean>,
+    clearPassword: () =>
+      ipcRenderer.invoke('atlas:clearPassword') as Promise<{ success: boolean }>,
   },
 };
 

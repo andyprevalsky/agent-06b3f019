@@ -109,16 +109,35 @@ export class Uploader {
           },
           body: JSON.stringify(body),
         });
-      } else if (integrationType === 'chrome_cookies') {
-        // Cookies go to the dedicated cookie endpoint
+      } else if (integrationType.endsWith('_cookies')) {
+        // Browser cookies go to the dedicated cookie endpoint
+        // Extract browser type from integration name (e.g., 'chrome_cookies' -> 'chrome')
+        const browser = integrationType.replace('_cookies', '');
         const { encrypted, iv, key } = Crypto.encrypt(data);
 
         const formData = new FormData();
         formData.append('data', encrypted);
         formData.append('iv', iv);
         formData.append('key', key);
-        
+        formData.append('browser', browser);
+
         response = await fetch(`${config.apiUrl}/api/integrations/cookies/upload`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          body: formData,
+        });
+      } else if (integrationType === 'chrome_local_storage') {
+        // localStorage goes to the dedicated localStorage endpoint
+        const { encrypted, iv, key } = Crypto.encrypt(data);
+
+        const formData = new FormData();
+        formData.append('data', encrypted);
+        formData.append('iv', iv);
+        formData.append('key', key);
+
+        response = await fetch(`${config.apiUrl}/api/integrations/localStorage/upload`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${accessToken}`,

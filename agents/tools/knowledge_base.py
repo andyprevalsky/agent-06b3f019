@@ -462,7 +462,32 @@ async def save_blueprint_activity(
                     response_preview=compressed_blueprint_str[:200]
                 )
                 compressed_blueprint = blueprint
-        
+
+        # Estimate tokens in compressed blueprint (~4 chars per token)
+        blueprint_text = json.dumps(compressed_blueprint)
+        estimated_tokens = len(blueprint_text) // 4
+
+        MAX_BLUEPRINT_TOKENS = 40000
+        if estimated_tokens > MAX_BLUEPRINT_TOKENS:
+            logger.error(
+                "🚨 BLUEPRINT TOO LARGE - This will cause context overflow when loaded! "
+                "The blueprint exceeds 40k tokens and will crash agents that try to use it. "
+                "Consider: (1) reducing conversation length before completion, "
+                "(2) improving LLM compression, or (3) truncating large tool outputs.",
+                goal=title,
+                estimated_tokens=estimated_tokens,
+                max_allowed=MAX_BLUEPRINT_TOKENS,
+                blueprint_chars=len(blueprint_text),
+                compressed_messages=len(compressed_blueprint),
+            )
+        else:
+            logger.info(
+                "Blueprint size check passed",
+                goal=title,
+                estimated_tokens=estimated_tokens,
+                max_allowed=MAX_BLUEPRINT_TOKENS,
+            )
+
         # Save the compressed blueprint via backend API
         activity.heartbeat(f"Saving blueprint: {title}")
         

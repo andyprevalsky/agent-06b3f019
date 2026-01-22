@@ -1,7 +1,13 @@
 import { useState, useEffect } from 'react';
-import { useIntegrationHandlers } from '@/contexts/IntegrationHandlersContext';
-import { Check, Loader2, ArrowRight, X, Plus } from 'lucide-react';
+import { Check, Loader2, ArrowRight, X, RefreshCw } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
+import AtlasPasswordModal from '../components/AtlasPasswordModal';
+import type { BrowserInfo, BrowserType } from '../../shared/types/ipc';
+
+// Browser icons
+import chromeIcon from '../assets/chrome-icon.png';
+import chatgptIcon from '../assets/chatgpt-icon.webp';
+import braveIcon from '../assets/brave-icon.webp';
 
 interface OnboardingDataProps {
   onComplete: () => void;
@@ -52,21 +58,18 @@ const IntegrationItem = ({
       <button
         onClick={onConnect}
         disabled={loading}
-        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 ${
+        className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
           connected
             ? 'bg-green-100 text-green-700'
             : 'bg-foreground text-background hover:bg-foreground/90'
         }`}
       >
         {loading ? (
-          <Loader2 className="w-3 h-3 animate-spin" />
+          <Loader2 className="w-4 h-4 animate-spin" />
         ) : connected ? (
-          <span className="flex items-center gap-1">
-            <Check className="w-3 h-3" />
-            Connected
-          </span>
+          <Check className="w-4 h-4" />
         ) : (
-          'Connect'
+          <RefreshCw className="w-4 h-4" />
         )}
       </button>
     </div>
@@ -89,18 +92,112 @@ const EmailChip = ({ email, onRemove }: { email: string; onRemove?: () => void }
   </div>
 );
 
+// Browser icon component
+const BrowserIcon = ({ type, className = "w-4 h-4" }: { type: BrowserType; className?: string }) => {
+  switch (type) {
+    case 'chrome':
+      return <img src={chromeIcon} alt="Chrome" className={className} />;
+    case 'edge':
+      return (
+        <svg className={className} viewBox="0 0 48 48">
+          <defs>
+            <linearGradient id="edge1" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#0078D4"/>
+              <stop offset="100%" stopColor="#1AEBFF"/>
+            </linearGradient>
+            <linearGradient id="edge2" x1="0%" y1="100%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#50E6FF"/>
+              <stop offset="100%" stopColor="#32BEDD"/>
+            </linearGradient>
+          </defs>
+          <path fill="url(#edge1)" d="M24 4C12.95 4 4 12.95 4 24c0 6.63 3.23 12.5 8.2 16.15 1.15-5.35 5.8-9.35 11.35-9.35 3.05 0 5.85 1.2 7.95 3.15C37.5 31.5 42 28.1 42 24c0-11.05-8.05-20-18-20z"/>
+          <path fill="url(#edge2)" d="M23.55 30.8c-5.55 0-10.2 4-11.35 9.35C16.35 43.1 20 44 24 44c11.05 0 20-8.95 20-20 0 4.1-4.5 7.5-10.5 9.95-2.1-1.95-4.9-3.15-7.95-3.15z"/>
+        </svg>
+      );
+    case 'brave':
+      return <img src={braveIcon} alt="Brave" className={`${className} bg-white rounded`} />;
+    case 'arc':
+      return (
+        <svg className={className} viewBox="0 0 48 48">
+          <defs>
+            <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor="#FF6B6B"/>
+              <stop offset="25%" stopColor="#FF8E53"/>
+              <stop offset="50%" stopColor="#FFCD56"/>
+              <stop offset="75%" stopColor="#6BCB77"/>
+              <stop offset="100%" stopColor="#4D96FF"/>
+            </linearGradient>
+          </defs>
+          <circle cx="24" cy="24" r="20" fill="url(#arcGrad)"/>
+          <circle cx="24" cy="24" r="12" fill="white"/>
+        </svg>
+      );
+    case 'opera':
+      return (
+        <svg className={className} viewBox="0 0 48 48">
+          <ellipse cx="24" cy="24" rx="20" ry="22" fill="#FF1B2D"/>
+          <ellipse cx="24" cy="24" rx="10" ry="16" fill="white"/>
+        </svg>
+      );
+    case 'vivaldi':
+      return (
+        <svg className={className} viewBox="0 0 48 48">
+          <circle cx="24" cy="24" r="22" fill="#EF3939"/>
+          <path fill="white" d="M24 8c-8.8 0-16 7.2-16 16s7.2 16 16 16c4 0 7.6-1.5 10.4-3.9L24 24l10.4-12.1C31.6 9.5 28 8 24 8z"/>
+        </svg>
+      );
+    case 'chromium':
+      return (
+        <svg className={className} viewBox="0 0 48 48">
+          <circle cx="24" cy="24" r="22" fill="#4587F3"/>
+          <path fill="#7BAAF7" d="M24 2C12.95 2 4 10.95 4 22h20l9.5-16.5A21.9 21.9 0 0024 2z"/>
+          <path fill="#A8C7FA" d="M4 22c0 11.05 8.95 20 20 20 4.57 0 8.78-1.53 12.17-4.1L26.5 22H4z"/>
+          <path fill="#669DF6" d="M24 42c8.28 0 15.35-5.03 18.37-12.2L33.5 16.5 24 22v20z"/>
+          <circle cx="24" cy="24" r="10" fill="white"/>
+          <circle cx="24" cy="24" r="8" fill="#4587F3"/>
+        </svg>
+      );
+    case 'atlas':
+      return <img src={chatgptIcon} alt="ChatGPT" className={`${className} rounded`} />;
+    default:
+      return (
+        <svg className={className} viewBox="0 0 48 48">
+          <circle cx="24" cy="24" r="20" fill="#888"/>
+          <circle cx="24" cy="24" r="8" fill="white"/>
+        </svg>
+      );
+  }
+};
+
 const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
-  const handlers = useIntegrationHandlers();
-  const [cookiesConnected, setCookiesConnected] = useState(false);
   const [connectedEmails, setConnectedEmails] = useState<string[]>([]);
-  const [cookiesLoading, setCookiesLoading] = useState(false);
   const [gmailLoading, setGmailLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
 
-  // Fetch existing integrations on mount
+  // Browser cookies state
+  const [installedBrowsers, setInstalledBrowsers] = useState<BrowserInfo[]>([]);
+  const [connectedBrowsers, setConnectedBrowsers] = useState<Set<BrowserType>>(new Set());
+  const [browserSyncLoading, setBrowserSyncLoading] = useState<BrowserType | null>(null);
+  const [browsersExpanded, setBrowsersExpanded] = useState(false);
+  const [atlasModalOpen, setAtlasModalOpen] = useState(false);
+  const [pendingAtlasBrowser, setPendingAtlasBrowser] = useState<BrowserType | null>(null);
+
+  // Fetch installed browsers and existing integrations on mount
   useEffect(() => {
-    const fetchIntegrations = async () => {
+    const fetchData = async () => {
       try {
+        // Fetch installed browsers
+        console.log('[OnboardingData] Checking for getInstalledBrowsers API...');
+        if (window.api?.getInstalledBrowsers) {
+          console.log('[OnboardingData] Calling getInstalledBrowsers...');
+          const browsers = await window.api.getInstalledBrowsers();
+          console.log('[OnboardingData] Got browsers:', browsers);
+          setInstalledBrowsers(browsers);
+        } else {
+          console.log('[OnboardingData] getInstalledBrowsers API not available');
+        }
+
+        // Fetch existing integrations
         const { data: { session } } = await supabase.auth.getSession();
         if (!session?.access_token) {
           setInitialLoading(false);
@@ -118,11 +215,15 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           const data = await response.json();
           const integrations: Integration[] = data.integrations || [];
 
-          // Check for chrome_cookies integration
-          const cookiesIntegration = integrations.find(i => i.name === 'chrome_cookies');
-          if (cookiesIntegration?.status === 'CONNECTED') {
-            setCookiesConnected(true);
+          // Check for browser cookie integrations (chrome_cookies, atlas_cookies, etc.)
+          const newConnectedBrowsers = new Set<BrowserType>();
+          for (const integration of integrations) {
+            if (integration.name.endsWith('_cookies') && integration.status === 'CONNECTED') {
+              const browserType = integration.name.replace('_cookies', '') as BrowserType;
+              newConnectedBrowsers.add(browserType);
+            }
           }
+          setConnectedBrowsers(newConnectedBrowsers);
 
           // Check for gmail integration(s) - use connectedEmails array if available, fallback to connectedEmail
           // Treat CONNECTED or SYNCING as connected (SYNCING means OAuth succeeded, just processing emails)
@@ -137,29 +238,71 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           }
         }
       } catch (err) {
-        console.error('Failed to fetch integrations:', err);
+        console.error('Failed to fetch data:', err);
       } finally {
         setInitialLoading(false);
       }
     };
 
-    fetchIntegrations();
+    fetchData();
   }, []);
 
-  // Continue is only available when cookies are connected and at least one email
-  const canContinue = cookiesConnected && connectedEmails.length > 0;
+  // Continue is only available when at least one browser is connected and at least one email
+  const canContinue = connectedBrowsers.size > 0 && connectedEmails.length > 0;
 
-  const handleCookiesConnect = async () => {
-    if (!handlers?.chromeCookies?.isAvailable) return;
+  // Handle browser sync click
+  const handleBrowserSync = async (browserType: BrowserType) => {
+    const browser = installedBrowsers.find(b => b.type === browserType);
+    if (!browser) return;
 
-    setCookiesLoading(true);
+    // For Atlas (or any browser needing manual password), open the password modal
+    if (browser.needsManualPassword) {
+      setPendingAtlasBrowser(browserType);
+      setAtlasModalOpen(true);
+      return;
+    }
+
+    // For Chrome (automatic keychain access)
+    setBrowserSyncLoading(browserType);
     try {
-      await handlers.chromeCookies.onClick();
-      setCookiesConnected(true);
+      const cookies = await window.api.readBrowserCookies(browserType);
+      if (cookies.length > 0) {
+        await window.api.uploadBrowserCookies(browserType, cookies);
+        setConnectedBrowsers(prev => new Set([...prev, browserType]));
+      }
     } catch (err) {
-      console.error('Failed to connect cookies:', err);
+      console.error(`Failed to sync ${browserType} cookies:`, err);
     } finally {
-      setCookiesLoading(false);
+      setBrowserSyncLoading(null);
+    }
+  };
+
+  // Handle Atlas password modal sync
+  const handleAtlasSync = async (password: string) => {
+    if (!pendingAtlasBrowser) return;
+
+    setBrowserSyncLoading(pendingAtlasBrowser);
+    try {
+      const cookies = await window.api.readBrowserCookies(pendingAtlasBrowser, { keychainPassword: password });
+      if (cookies.length > 0) {
+        await window.api.uploadBrowserCookies(pendingAtlasBrowser, cookies);
+        setConnectedBrowsers(prev => new Set([...prev, pendingAtlasBrowser]));
+
+        // Store the password securely for background sync
+        if (window.api.atlas?.storePassword) {
+          const result = await window.api.atlas.storePassword(password);
+          if (!result.success) {
+            console.warn('[OnboardingData] Failed to store Atlas password:', result.error);
+          }
+        }
+      }
+      setAtlasModalOpen(false);
+      setPendingAtlasBrowser(null);
+    } catch (err) {
+      console.error(`Failed to sync ${pendingAtlasBrowser} cookies:`, err);
+      throw err; // Let the modal handle the error display
+    } finally {
+      setBrowserSyncLoading(null);
     }
   };
 
@@ -290,18 +433,91 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
         {/* Integrations */}
         <div className="space-y-3 mb-8">
-          <IntegrationItem
-            icon={
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-              </svg>
-            }
-            name="Chrome Cookies"
-            description="Enable web automation and browsing"
-            connected={cookiesConnected}
-            loading={cookiesLoading}
-            onConnect={handleCookiesConnect}
-          />
+          {/* Browser Cookies - Expandable */}
+          <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
+            {/* Main row */}
+            <div className="p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                    <defs>
+                      <radialGradient id="browserCookieGradient" cx="30%" cy="30%" r="70%">
+                        <stop offset="26%" stopColor="rgb(9,78,255)" />
+                        <stop offset="63%" stopColor="rgb(33,130,255)" />
+                        <stop offset="100%" stopColor="rgb(57,182,255)" />
+                      </radialGradient>
+                    </defs>
+                    <path fill="url(#browserCookieGradient)" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div className="font-medium text-sm text-foreground">Browser Cookies</div>
+                  <div className="text-xs text-muted-foreground">Enable web automation and browsing</div>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setBrowsersExpanded(!browsersExpanded)}
+                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                  connectedBrowsers.size > 0
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-foreground text-background hover:bg-foreground/90'
+                }`}
+              >
+                {connectedBrowsers.size > 0 ? (
+                  <Check className="w-4 h-4" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+
+            {/* Expanded browser list */}
+            {browsersExpanded && (
+              <div className="border-t border-border">
+                {installedBrowsers.length === 0 ? (
+                  <div className="px-4 py-3 text-xs text-muted-foreground">
+                    No supported browsers detected. Install Chrome, Edge, Brave, Arc, or another Chromium-based browser.
+                  </div>
+                ) : installedBrowsers.map((browser, index) => {
+                  const isConnected = connectedBrowsers.has(browser.type);
+                  const isLoading = browserSyncLoading === browser.type;
+
+                  return (
+                    <div
+                      key={browser.type}
+                      className={`px-4 py-2 flex items-center justify-between ${
+                        index < installedBrowsers.length - 1 ? 'border-b border-border/50' : ''
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <BrowserIcon type={browser.type} className="w-6 h-6" />
+                        <span className="text-sm text-foreground">{browser.name}</span>
+                      </div>
+
+                      <button
+                        onClick={() => handleBrowserSync(browser.type)}
+                        disabled={isLoading}
+                        className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                          isConnected
+                            ? 'bg-green-100 text-green-700'
+                            : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {isLoading ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : isConnected ? (
+                          <Check className="w-3.5 h-3.5" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
 
           <IntegrationItem
             icon={
@@ -356,6 +572,16 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           Skip for now
         </button>
       </div>
+
+      {/* Atlas Password Modal */}
+      <AtlasPasswordModal
+        isOpen={atlasModalOpen}
+        onClose={() => {
+          setAtlasModalOpen(false);
+          setPendingAtlasBrowser(null);
+        }}
+        onSync={handleAtlasSync}
+      />
     </div>
   );
 };

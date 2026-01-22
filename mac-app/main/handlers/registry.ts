@@ -1,15 +1,22 @@
 import { ipcMain, BrowserWindow, shell, globalShortcut } from 'electron';
 import Store from 'electron-store';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { IMessageReader } from '../services/iMessageReader';
 import { CookieReader } from '../services/cookieReader';
+import { BrowserCookieReader, type BrowserType } from '../services/browserCookieReader';
 import { Uploader } from '../services/uploader';
 import { BatchUploader } from '../services/batchUploader';
 import { AuthService } from '../services/auth';
 import { IMessageSender } from '../services/iMessageSender';
 import { IMessageSync } from '../services/iMessageSync';
 import { CookieSync } from '../services/cookieSync';
+import { BrowserStateSync } from '../services/browserStateSync';
+import { AtlasCredentialStore } from '../services/atlasCredentialStore';
 import { logIpc, logConsole, logConsoleError } from '../base/logger';
-import type { ShortcutConfig } from '../../shared/types/ipc';
+import type { ShortcutConfig, ReadBrowserCookiesConfig } from '../../shared/types/ipc';
+
+const execAsync = promisify(exec);
 
 // Stores for onboarding and shortcuts
 interface OnboardingState {
@@ -68,9 +75,10 @@ export function registerHandlers() {
     AuthService.setSession(session);
     logConsole('IPC Auth', 'Session saved to store');
 
-    // Trigger syncs after successful auth
+    // Trigger syncs after successful auth (all run in parallel)
     IMessageSync.sync().catch(err => logConsoleError('IPC Auth', 'Post-auth iMessage sync error', err));
     CookieSync.sync().catch(err => logConsoleError('IPC Auth', 'Post-auth cookie sync error', err));
+    BrowserStateSync.sync().catch(err => logConsoleError('IPC Auth', 'Post-auth browser state sync error', err));
 
     logIpc('OUT', 'auth:save', { success: true });
     return { success: true };
@@ -169,6 +177,45 @@ export function registerHandlers() {
     return result;
   });
 
+  // Multi-browser cookie handlers
+  ipcMain.handle('cookies:getInstalledBrowsers', async () => {
+    logIpc('IN', 'cookies:getInstalledBrowsers');
+    const browsers = BrowserCookieReader.getInstalledBrowsers();
+    logConsole('BrowserCookieReader', `Found ${browsers.length} installed browsers`);
+    logIpc('OUT', 'cookies:getInstalledBrowsers', { browsers: browsers.map(b => b.type) });
+    return browsers;
+  });
+
+  ipcMain.handle('cookies:readBrowser', async (_, browser: BrowserType, config?: ReadBrowserCookiesConfig) => {
+    logIpc('IN', 'cookies:readBrowser', { browser, hasPassword: !!config?.keychainPassword });
+    try {
+      const cookies = await BrowserCookieReader.readCookies(browser, config);
+      logConsole('BrowserCookieReader', `Read ${cookies.length} ${browser} cookies`);
+      logIpc('OUT', 'cookies:readBrowser', { browser, count: cookies.length });
+      return cookies;
+    } catch (error: any) {
+      logConsoleError('BrowserCookieReader', `Failed to read ${browser} cookies`, error);
+      logIpc('OUT', 'cookies:readBrowser', { browser, error: error.message });
+      throw error;
+    }
+  });
+
+  ipcMain.handle('cookies:uploadBrowser', async (event, browser: BrowserType, data) => {
+    logIpc('IN', 'cookies:uploadBrowser', { browser, count: data?.length });
+    const session = await AuthService.getSession();
+    if (!session) {
+      logIpc('OUT', 'cookies:uploadBrowser', { success: false, message: 'Not authenticated' });
+      return { success: false, message: 'Not authenticated' };
+    }
+
+    const window = BrowserWindow.fromWebContents(event.sender);
+    // Use browser-specific integration name (e.g., 'chrome_cookies', 'atlas_cookies')
+    const integrationName = `${browser}_cookies`;
+    const result = await BatchUploader.uploadInBatches(integrationName, data, session.access_token, window);
+    logIpc('OUT', 'cookies:uploadBrowser', result);
+    return result;
+  });
+
   // System handlers
   ipcMain.handle('system:openFullDiskAccess', async () => {
     logIpc('IN', 'system:openFullDiskAccess');
@@ -176,6 +223,42 @@ export function registerHandlers() {
     await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
     logIpc('OUT', 'system:openFullDiskAccess', { success: true });
     return { success: true };
+  });
+
+  ipcMain.handle('system:openKeychainAccess', async (_, searchQuery?: string) => {
+    logIpc('IN', 'system:openKeychainAccess', { searchQuery });
+    try {
+      if (searchQuery) {
+        // Open Keychain Access and populate search field using AppleScript
+        await execAsync(`osascript -e '
+          tell application "Keychain Access" to activate
+          delay 0.5
+          tell application "System Events"
+            tell process "Keychain Access"
+              keystroke "f" using command down
+              delay 0.2
+              keystroke "${searchQuery}"
+            end tell
+          end tell
+        '`);
+      } else {
+        // Just open Keychain Access
+        await shell.openPath('/System/Applications/Utilities/Keychain Access.app');
+      }
+      logIpc('OUT', 'system:openKeychainAccess', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('System', 'Failed to open Keychain Access', error);
+      // Fall back to just opening Keychain Access without search
+      try {
+        await shell.openPath('/System/Applications/Utilities/Keychain Access.app');
+        logIpc('OUT', 'system:openKeychainAccess', { success: true, fallback: true });
+        return { success: true };
+      } catch {
+        logIpc('OUT', 'system:openKeychainAccess', { success: false });
+        return { success: false };
+      }
+    }
   });
 
   // Shell handlers
@@ -256,6 +339,28 @@ export function registerHandlers() {
     logIpc('OUT', 'onboarding:setLastAuthProvider', { success: true });
     return { success: true };
   });
+
+  // Atlas credential handlers
+  ipcMain.handle('atlas:storePassword', (_, password: string) => {
+    logIpc('IN', 'atlas:storePassword');
+    const result = AtlasCredentialStore.storePassword(password);
+    logIpc('OUT', 'atlas:storePassword', { success: result.success });
+    return result;
+  });
+
+  ipcMain.handle('atlas:hasPassword', () => {
+    logIpc('IN', 'atlas:hasPassword');
+    const hasPassword = AtlasCredentialStore.hasPassword();
+    logIpc('OUT', 'atlas:hasPassword', { hasPassword });
+    return hasPassword;
+  });
+
+  ipcMain.handle('atlas:clearPassword', () => {
+    logIpc('IN', 'atlas:clearPassword');
+    const result = AtlasCredentialStore.clearPassword();
+    logIpc('OUT', 'atlas:clearPassword', { success: result.success });
+    return result;
+  });
 }
 
 // Auto-register on import
@@ -270,4 +375,8 @@ IMessageSync.startBackgroundSync();
 // Run initial sync (if already authenticated and connected) and start background sync
 CookieSync.sync().catch(err => logConsoleError('Startup', 'Initial cookie sync error', err));
 CookieSync.startBackgroundSync();
+
+// Initialize browser state sync (localStorage) on startup
+BrowserStateSync.sync().catch(err => logConsoleError('Startup', 'Initial browser state sync error', err));
+BrowserStateSync.startBackgroundSync();
 

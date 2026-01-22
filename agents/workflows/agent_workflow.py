@@ -569,18 +569,19 @@ class AgentWorkflow:
     async def _handle_context_overflow(self, compressed_context: List[Dict]) -> None:
         """Handle context overflow via continue_as_new."""
         workflow.logger.info("Context overflow → continue_as_new")
+        # Must pass args positionally - continue_as_new uses *args, not **kwargs
         workflow.continue_as_new(
-            agent_id=self.agent_id,
-            user_id=self.user_id,
-            goal=self.goal,
-            model=self.model,
-            reasoning_max_tokens=self.reasoning_max_tokens,
-            verifier=self.verifier,
-            context=compressed_context,
-            parent_workflow_id=self.parent_workflow_id,
-            parent_agent_id=self.parent_agent_id,
-            depth=self.depth,
-            bus_id=self.bus_id,
+            self.agent_id,
+            self.user_id,
+            self.goal,
+            self.model,
+            self.reasoning_max_tokens,
+            self.verifier,
+            compressed_context,
+            self.parent_workflow_id,
+            self.parent_agent_id,
+            self.depth,
+            self.bus_id,
         )
     
     async def _check_credits(self) -> None:
@@ -801,18 +802,19 @@ class AgentWorkflow:
 
         if result["status"] == "paused":
             await workflow.wait_condition(lambda: not self.is_paused)
+            # Must pass args positionally - continue_as_new uses *args, not **kwargs
             workflow.continue_as_new(
-                agent_id=self.agent_id,
-                user_id=self.user_id,
-                goal=self.goal,
-                model=self.model,
-                reasoning_max_tokens=self.reasoning_max_tokens,
-                verifier=self.verifier,
-                context=result.get("context"),
-                parent_workflow_id=self.parent_workflow_id,
-                parent_agent_id=self.parent_agent_id,
-                depth=self.depth,
-                bus_id=self.bus_id,
+                self.agent_id,
+                self.user_id,
+                self.goal,
+                self.model,
+                self.reasoning_max_tokens,
+                self.verifier,
+                result.get("context"),
+                self.parent_workflow_id,
+                self.parent_agent_id,
+                self.depth,
+                self.bus_id,
             )
             return result
 

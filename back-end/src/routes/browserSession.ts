@@ -41,6 +41,10 @@ const resumeSessionSchema = z.object({
   task_id: z.string().uuid(),  // Use stable task ID instead of session_id
 });
 
+const injectLocalStorageSchema = z.object({
+  origin: z.string().url(),
+});
+
 /**
  * POST /api/browser-session/init
  * Initialize or get browser session for user.
@@ -296,6 +300,137 @@ router.get('/:sessionId/files/list', authenticate, async (req: AuthRequest, res)
     console.error('❌ Failed to list session files:', error);
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Failed to list session files'
+    });
+  }
+});
+
+/**
+ * POST /api/browser-session/:sessionId/inject-localStorage
+ * Inject localStorage for a specific origin if not already injected or data has changed.
+ * Called by browser agent after navigation to inject user's localStorage.
+ *
+ * Uses LocalStorageOrigin table for O(1) lookup by origin.
+ */
+router.post('/:sessionId/inject-localStorage', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { origin } = injectLocalStorageSchema.parse(req.body);
+
+    console.log(`🍪 Inject localStorage request: session=${sessionId}, origin=${origin}`);
+
+    // 1. Get session with context to find userId
+    const session = await prisma.browserSession.findUnique({
+      where: { sessionId },
+      include: { context: true }
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (!session.context?.userId) {
+      return res.status(400).json({ error: 'Session has no associated user' });
+    }
+
+    const userId = session.context.userId;
+
+    // 2. Get localStorage for this specific origin (O(1) indexed lookup)
+    const originData = await prisma.localStorageOrigin.findUnique({
+      where: { userId_origin: { userId, origin } },
+    });
+
+    if (!originData) {
+      console.log(`  No localStorage data for origin ${origin}`);
+      return res.json({
+        injected: false,
+        reason: 'no_data_for_origin',
+        count: 0
+      });
+    }
+
+    const entries = originData.entries as { key: string; value: string }[];
+    const currentHash = originData.hash;
+
+    if (!entries || entries.length === 0) {
+      console.log(`  No localStorage entries for origin ${origin}`);
+      return res.json({
+        injected: false,
+        reason: 'no_data_for_origin',
+        count: 0
+      });
+    }
+
+    // 3. Check if already injected with same hash
+    const injectedOrigins = (session.injectedOrigins as Record<string, string>) || {};
+    const injectedHash = injectedOrigins[origin];
+
+    if (injectedHash && injectedHash === currentHash) {
+      console.log(`  Origin ${origin} already injected with same hash, skipping`);
+      return res.json({
+        injected: false,
+        reason: 'already_injected',
+        count: entries.length
+      });
+    }
+
+    // 4. Inject via CDP
+    if (!session.wsUrl) {
+      return res.status(400).json({ error: 'Session has no WebSocket URL for CDP' });
+    }
+
+    try {
+      const { chromium } = await import('playwright');
+      const browser = await chromium.connectOverCDP(session.wsUrl);
+      const context = browser.contexts()[0];
+      const page = context.pages()[0];
+
+      // Inject localStorage entries
+      await page.evaluate((entries: { key: string; value: string }[]) => {
+        for (const { key, value } of entries) {
+          try {
+            localStorage.setItem(key, value);
+          } catch (e) {
+            // Ignore individual entry errors (e.g., quota exceeded)
+            console.warn(`Failed to set localStorage key ${key}:`, e);
+          }
+        }
+      }, entries);
+
+      console.log(`  ✅ Injected ${entries.length} localStorage entries for ${origin}`);
+
+    } catch (cdpError) {
+      console.error(`  ❌ Failed to inject via CDP:`, cdpError);
+      return res.status(500).json({
+        error: 'Failed to inject localStorage via CDP',
+        details: cdpError instanceof Error ? cdpError.message : 'Unknown error'
+      });
+    }
+
+    // 5. Update session with injected origin and hash
+    const updatedInjectedOrigins = {
+      ...injectedOrigins,
+      [origin]: currentHash || 'unknown',
+    };
+
+    await prisma.browserSession.update({
+      where: { sessionId },
+      data: {
+        injectedOrigins: updatedInjectedOrigins,
+      },
+    });
+
+    console.log(`  📝 Updated session injectedOrigins with ${origin}`);
+
+    return res.json({
+      injected: true,
+      reason: injectedHash ? 'data_changed' : 'first_injection',
+      count: entries.length,
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to inject localStorage:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to inject localStorage'
     });
   }
 });

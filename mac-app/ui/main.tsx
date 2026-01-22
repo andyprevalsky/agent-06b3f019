@@ -35,6 +35,36 @@ const electronHandlers = {
       }
     },
   },
+  browserCookies: {
+    isAvailable: true,
+    getInstalledBrowsers: async () => {
+      return window.api.getInstalledBrowsers();
+    },
+    syncBrowser: async (browserType: string, keychainPassword?: string) => {
+      const cookies = await window.api.readBrowserCookies(
+        browserType as import('../shared/types/ipc').BrowserType,
+        keychainPassword ? { keychainPassword } : undefined
+      );
+      if (cookies.length > 0) {
+        const result = await window.api.uploadBrowserCookies(
+          browserType as import('../shared/types/ipc').BrowserType,
+          cookies
+        );
+        if (!result.success) {
+          throw new Error(result.message || 'Upload failed');
+        }
+      }
+    },
+    storeAtlasPassword: async (password: string) => {
+      if (window.api.atlas?.storePassword) {
+        return window.api.atlas.storePassword(password);
+      }
+      return { success: false, error: 'Atlas password storage not available' };
+    },
+    openKeychainAccess: async (searchQuery?: string) => {
+      return window.api.openKeychainAccess(searchQuery);
+    },
+  },
 };
 
 const DragOverlay = () => (

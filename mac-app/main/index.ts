@@ -1,5 +1,4 @@
 import { app, BrowserWindow, nativeImage, globalShortcut, ipcMain, screen, Menu } from 'electron';
-import { exec } from 'child_process';
 import path from 'path';
 import Store from 'electron-store';
 import { config } from './base/config';
@@ -100,6 +99,7 @@ let mainWindow: BrowserWindow | null = null;
 let quickQueryWindow: BrowserWindow | null = null;
 let quickQueryBlurEnabled = false;
 let quickQueryLastHiddenAt = 0;
+let quickQueryShownAt = 0; // Track when window was shown for 1s hide protection
 let quickQueryFocusTimeouts: NodeJS.Timeout[] = [];
 
 // Listen for parent process death (stdin close) - quit when Conductor dies
@@ -181,10 +181,13 @@ function createMainWindow() {
 
 function createQuickQueryWindow() {
   quickQueryWindow = new BrowserWindow({
-    width: 400,
-    minHeight: 88,
-    height: 88,
-    maxHeight: 88,
+    width: 500,
+    height: 100,
+    minWidth: 500,
+    maxWidth: 500,
+    minHeight: 100,
+    maxHeight: 100,
+    useContentSize: true,
     resizable: false,
     movable: true,
     minimizable: false,
@@ -205,6 +208,8 @@ function createQuickQueryWindow() {
     },
   });
 
+  // Force content size to ensure window is exactly 500x100
+  quickQueryWindow.setContentSize(500, 100);
   quickQueryWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   quickQueryWindow.setAlwaysOnTop(true, 'screen-saver');
   if (process.platform === 'darwin') {
@@ -216,6 +221,16 @@ function createQuickQueryWindow() {
   } else {
     quickQueryWindow.loadFile(path.join(__dirname, '../../ui/launcher.html'));
   }
+
+  // Debug: log actual window sizes after load
+  quickQueryWindow.webContents.once('did-finish-load', () => {
+    const size = quickQueryWindow?.getSize();
+    const contentSize = quickQueryWindow?.getContentSize();
+    const bounds = quickQueryWindow?.getBounds();
+    console.log('[QuickQuery] Window size:', size);
+    console.log('[QuickQuery] Content size:', contentSize);
+    console.log('[QuickQuery] Bounds:', bounds);
+  });
 
   quickQueryWindow.on('blur', () => {
     if (quickQueryBlurEnabled) {
@@ -266,14 +281,12 @@ function showQuickQueryWindow() {
 
   // Debounce: ignore show requests within 2 seconds of hiding
   const timeSinceHide = Date.now() - quickQueryLastHiddenAt;
-  console.log(`[QuickQuery] showQuickQueryWindow called, timeSinceHide=${timeSinceHide}ms, lastHiddenAt=${quickQueryLastHiddenAt}`);
   if (timeSinceHide < 2000) {
-    console.log(`[QuickQuery] BLOCKED show request (within 2s debounce)`);
     return;
   }
 
-  console.log(`[QuickQuery] Showing window`);
   quickQueryBlurEnabled = false; // Disable blur while showing
+  quickQueryShownAt = Date.now(); // Track show time for 1s hide protection
 
   positionQuickQueryWindow();
 
@@ -283,16 +296,6 @@ function showQuickQueryWindow() {
   quickQueryWindow.show();
   quickQueryWindow.focus();
   quickQueryWindow.focusOnWebView();
-
-  // Nuclear option: Use AppleScript to send Escape (closes ChatGPT) and activate our app
-  if (process.platform === 'darwin') {
-    // Send Escape key to dismiss any other popups (like ChatGPT)
-    exec(`osascript -e 'tell application "System Events" to key code 53'`);
-    // Small delay then activate our app
-    setTimeout(() => {
-      exec(`osascript -e 'tell application "Rose" to activate'`);
-    }, 50);
-  }
 
   // Clear any pending focus timeouts from previous show
   quickQueryFocusTimeouts.forEach(t => clearTimeout(t));
@@ -341,7 +344,7 @@ function showQuickQueryWindow() {
 
   emitQuickQueryToggle(true);
 
-  // Enable blur after window has focus and a small delay
+  // Enable blur after a short delay (root-level 5s protection handles ChatGPT)
   setTimeout(() => {
     quickQueryBlurEnabled = true;
   }, 200);
@@ -349,7 +352,12 @@ function showQuickQueryWindow() {
 
 function hideQuickQueryWindow({ focusMain }: { focusMain?: boolean } = {}) {
   if (!quickQueryWindow) return;
-  console.log(`[QuickQuery] hideQuickQueryWindow called, focusMain=${focusMain}`);
+
+  // FORCED VISIBLE: Block ALL hide attempts for 1 second after showing
+  const timeSinceShow = Date.now() - quickQueryShownAt;
+  if (timeSinceShow < 1000) {
+    return;
+  }
 
   // Cancel all pending focus timeouts to prevent them from re-showing the window
   quickQueryFocusTimeouts.forEach(t => clearTimeout(t));
@@ -357,7 +365,6 @@ function hideQuickQueryWindow({ focusMain }: { focusMain?: boolean } = {}) {
 
   quickQueryBlurEnabled = false; // Disable blur when hiding
   quickQueryLastHiddenAt = Date.now(); // Record hide time to debounce show
-  console.log(`[QuickQuery] Set lastHiddenAt=${quickQueryLastHiddenAt}`);
   if (!quickQueryWindow.isDestroyed()) {
     quickQueryWindow.hide();
     emitQuickQueryToggle(false);
@@ -385,6 +392,7 @@ function registerGlobalShortcuts() {
     }
 
     if (quickQueryWindow.isVisible()) {
+      // Note: hideQuickQueryWindow will be blocked for 1s after show (FORCED VISIBLE)
       hideQuickQueryWindow({ focusMain: true });
     } else {
       showQuickQueryWindow();

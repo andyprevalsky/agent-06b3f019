@@ -129,14 +129,24 @@ export class CookieReader {
     
     try {
       const rows = db.prepare(`
-        SELECT 
+        SELECT
           host_key,
           name,
           encrypted_value,
           path,
           expires_utc,
           is_secure,
-          is_httponly
+          is_httponly,
+          creation_utc,
+          top_frame_site_key,
+          last_access_utc,
+          has_expires,
+          is_persistent,
+          priority,
+          samesite,
+          source_scheme,
+          source_port,
+          last_update_utc
         FROM cookies
       `).all() as any[];
       
@@ -160,6 +170,16 @@ export class CookieReader {
           expires_utc: row.expires_utc,
           is_secure: row.is_secure === 1,
           is_httponly: row.is_httponly === 1,
+          creation_utc: row.creation_utc,
+          top_frame_site_key: row.top_frame_site_key,
+          last_access_utc: row.last_access_utc,
+          has_expires: row.has_expires === 1,
+          is_persistent: row.is_persistent === 1,
+          priority: row.priority,
+          samesite: row.samesite,
+          source_scheme: row.source_scheme,
+          source_port: row.source_port,
+          last_update_utc: row.last_update_utc,
         });
       }
       

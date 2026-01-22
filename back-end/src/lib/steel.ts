@@ -256,20 +256,8 @@ export async function getSession(sessionId: string) {
 }
 
 /**
- * Cookie data structure from mac-app
- */
-interface StoredCookie {
-  host_key: string;
-  name: string;
-  value: string;
-  path: string;
-  expires_utc: number;
-  is_secure: boolean;
-  is_httponly: boolean;
-}
-
-/**
- * Inject user's stored Chrome cookies into a browser session.
+ * Inject user's stored cookies into a browser session.
+ * Cookies are fetched from the deduplicated Cookie table (all browsers merged).
  *
  * @param sessionId - The Steel session ID
  * @param userId - The user's ID to fetch cookies for
@@ -281,28 +269,17 @@ export async function injectUserCookies(
 ): Promise<{ injected: boolean; cookieCount: number }> {
   console.log(`🍪 Checking for stored cookies for user ${userId}...`);
 
-  // Fetch user's chrome_cookies integration
-  const integration = await prisma.integration.findUnique({
-    where: {
-      userId_name: {
-        userId,
-        name: 'chrome_cookies',
-      },
-    },
+  // Fetch user's cookies from deduplicated Cookie table
+  const cookies = await prisma.cookie.findMany({
+    where: { userId },
   });
 
-  if (!integration || !integration.config) {
-    console.log(`  No chrome_cookies integration found for user`);
+  if (cookies.length === 0) {
+    console.log(`  No cookies found for user`);
     return { injected: false, cookieCount: 0 };
   }
 
-  const config = integration.config as { cookies?: StoredCookie[] };
-  if (!config.cookies || !Array.isArray(config.cookies) || config.cookies.length === 0) {
-    console.log(`  No cookies stored in integration`);
-    return { injected: false, cookieCount: 0 };
-  }
-
-  console.log(`  Found ${config.cookies.length} stored cookies, injecting...`);
+  console.log(`  Found ${cookies.length} stored cookies, injecting...`);
 
   try {
     // Get session info to get WebSocket URL
@@ -320,12 +297,12 @@ export async function injectUserCookies(
     const context = browser.contexts()[0];
 
     // Transform cookies to Playwright format
-    const playwrightCookies = config.cookies.map((cookie: StoredCookie) => {
-      const CHROME_EPOCH_OFFSET = 11644473600;
+    const CHROME_EPOCH_OFFSET = 11644473600;
+    const playwrightCookies = cookies.map((cookie) => {
       let expires: number | undefined;
 
-      if (cookie.expires_utc && cookie.expires_utc > 0) {
-        expires = Math.floor(cookie.expires_utc / 1000000) - CHROME_EPOCH_OFFSET;
+      if (cookie.expiresUtc && cookie.expiresUtc > 0n) {
+        expires = Math.floor(Number(cookie.expiresUtc) / 1000000) - CHROME_EPOCH_OFFSET;
         if (expires < Date.now() / 1000) {
           expires = undefined;
         }
@@ -334,11 +311,11 @@ export async function injectUserCookies(
       return {
         name: cookie.name,
         value: cookie.value,
-        domain: cookie.host_key,
+        domain: cookie.domain,  // Use original format from Chrome's host_key
         path: cookie.path || '/',
         expires,
-        secure: cookie.is_secure,
-        httpOnly: cookie.is_httponly,
+        secure: cookie.isSecure,
+        httpOnly: cookie.isHttpOnly,
         sameSite: 'Lax' as const,
       };
     });

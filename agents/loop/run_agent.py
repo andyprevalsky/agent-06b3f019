@@ -654,8 +654,8 @@ async def run_agent(
                     goal = "your goal"
                     for msg in context:
                         if msg.get("role") == "USER":
-                            full_goal = msg.get("text", "your goal")
-                            goal = full_goal[:300] + "..." if len(full_goal) > 300 else full_goal
+                            full_goal = msg.get("text", "your goal").strip()
+                            goal = (full_goal[:300] + "...") if len(full_goal) > 300 else full_goal
                             break
 
                     fyi_message = f"Looks like I have everything I need in order to accomplish your goal - **{goal}**\n\nWe will now proceed to fulfill your request, just sit back, relax, and let us figure out the rest :)"

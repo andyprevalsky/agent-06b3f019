@@ -968,6 +968,19 @@ function validateAgentStateChangedPayload(payload: unknown): string | null {
   return null;
 }
 
+/**
+ * Validate AgentModeStartedPayload structure.
+ * Returns error message if invalid, null if valid.
+ */
+function validateAgentModeStartedPayload(payload: unknown): string | null {
+  if (typeof payload !== 'object' || payload === null) {
+    return 'Payload is not an object';
+  }
+  const p = payload as Record<string, unknown>;
+  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  return null;
+}
+
 // =============================================================================
 // Strict Extraction Functions (with validation + error logging)
 // =============================================================================
@@ -1072,6 +1085,13 @@ export function extractAttentionStreamPayload(wrapper: unknown): AttentionStream
  */
 export function extractAgentStateChangedPayload(wrapper: unknown): AgentStateChangedPayload | null {
   return extractAndValidate<AgentStateChangedPayload>(wrapper, 'AGENT_STATE_CHANGED', validateAgentStateChangedPayload);
+}
+
+/**
+ * Extract and validate AGENT_MODE_STARTED payload.
+ */
+export function extractAgentModeStartedPayload(wrapper: unknown): AgentModeStartedPayload | null {
+  return extractAndValidate<AgentModeStartedPayload>(wrapper, 'AGENT_MODE_STARTED', validateAgentModeStartedPayload);
 }
 
 // =============================================================================

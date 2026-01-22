@@ -57,9 +57,14 @@ const ElectronAppInner = () => {
           const complete = !!data.onboardingCompletedAt;
           setOnboardingComplete(complete);
 
-          // If already completed, enable shortcuts
-          if (complete && window.api?.shortcut?.enable) {
-            await window.api.shortcut.enable();
+          // If already completed, sync local electron store and enable shortcuts
+          if (complete) {
+            if (window.api?.onboarding?.setComplete) {
+              await window.api.onboarding.setComplete(true);
+            }
+            if (window.api?.shortcut?.enable) {
+              await window.api.shortcut.enable();
+            }
           }
         } else {
           setOnboardingComplete(false);
@@ -91,7 +96,10 @@ const ElectronAppInner = () => {
       console.error('Failed to complete onboarding on backend:', err);
     }
 
-    // Enable global shortcuts now that onboarding is done
+    // Sync local electron store and enable global shortcuts now that onboarding is done
+    if (window.api?.onboarding?.setComplete) {
+      await window.api.onboarding.setComplete(true);
+    }
     if (window.api?.shortcut?.enable) {
       await window.api.shortcut.enable();
     }

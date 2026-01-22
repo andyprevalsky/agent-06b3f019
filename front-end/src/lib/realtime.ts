@@ -69,6 +69,7 @@ export {
   extractToolStreamPayload,
   extractAttentionStreamPayload,
   extractAgentStateChangedPayload,
+  extractAgentModeStartedPayload,
   // Legacy utility (deprecated)
   extractRecord,
 } from './realtime-types';
@@ -82,6 +83,7 @@ import {
   type UpdateAgentPayload,
   type DeleteMessagePayload,
   type AgentStateChangedPayload,
+  type AgentModeStartedPayload,
   extractInsertPayload,
   extractUpdatePayload,
   extractDeletePayload,
@@ -90,6 +92,7 @@ import {
   extractToolStreamPayload,
   extractAttentionStreamPayload,
   extractAgentStateChangedPayload,
+  extractAgentModeStartedPayload,
 } from './realtime-types';
 
 // Legacy type aliases for backward compatibility
@@ -239,8 +242,9 @@ export async function subscribeToAgent(
     };
   }
   if (handlers.onAgentModeStarted) {
-    eventHandlers['AGENT_MODE_STARTED'] = () => {
-      handlers.onAgentModeStarted!();
+    eventHandlers['AGENT_MODE_STARTED'] = (wrapper: unknown) => {
+      const record = extractAgentModeStartedPayload(wrapper);
+      if (record) handlers.onAgentModeStarted!(record);
     };
   }
 

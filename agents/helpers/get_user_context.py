@@ -140,59 +140,12 @@ def _is_auth_cookie(cookie: dict) -> bool:
     return False
 
 
-def _extract_authenticated_sites(integrations: List[dict]) -> List[str]:
-    """Extract list of authenticated site domains from integrations."""
-    authenticated_sites = []
-    
-    # Find chrome_cookies integration
-    chrome_cookies_integration = None
-    for integration in integrations:
-        if integration.get('name') == 'chrome_cookies':
-            chrome_cookies_integration = integration
-            break
-    
-    if not chrome_cookies_integration:
-        return authenticated_sites
-    
-    config = chrome_cookies_integration.get('config', {})
-    cookies = config.get('cookies', [])
-    
-    if not cookies:
-        return authenticated_sites
-    
-    # Group cookies by domain
-    domain_cookies: Dict[str, List[dict]] = defaultdict(list)
-    for cookie in cookies:
-        host_key = cookie.get('host_key', '')
-        domain = _normalize_domain(host_key)
-        base = _get_base_domain(domain)
-        domain_cookies[base].append(cookie)
-    
-    # Find domains with auth cookies
-    for domain, domain_cookie_list in domain_cookies.items():
-        # Skip ad/tracking domains
-        if domain in AD_TRACKING_DOMAINS:
-            continue
-        
-        # Skip adult sites
-        if any(kw in domain for kw in ADULT_KEYWORDS):
-            continue
-        
-        # Check if any cookie looks like auth
-        for cookie in domain_cookie_list:
-            if _is_auth_cookie(cookie):
-                authenticated_sites.append(domain)
-                break
-    
-    return sorted(authenticated_sites)
-
-
 # ============================================================================
 # Backend API Calls
 # ============================================================================
 
-async def _fetch_integrations(client: httpx.AsyncClient, config, user_id: str) -> List[dict]:
-    """Fetch user's integrations from backend."""
+async def _fetch_integrations_and_auth_domains(client: httpx.AsyncClient, config, user_id: str) -> tuple[List[dict], List[str]]:
+    """Fetch user's integrations and authenticated domains from backend."""
     try:
         response = await client.get(
             f"{config.backend.api_url}/api/integrations",
@@ -204,10 +157,12 @@ async def _fetch_integrations(client: httpx.AsyncClient, config, user_id: str) -
         )
         response.raise_for_status()
         data = response.json()
-        return data.get('integrations', [])
+        integrations = data.get('integrations', [])
+        authenticated_domains = data.get('authenticatedDomains', [])
+        return integrations, authenticated_domains
     except Exception as e:
         logger.warning("Failed to fetch integrations", user_id=user_id, error=str(e))
-        return []
+        return [], []
 
 
 async def _fetch_user_settings(client: httpx.AsyncClient, config, user_id: str) -> dict:
@@ -489,20 +444,17 @@ async def fetch_user_context(user_id: str) -> str:
         
         async with httpx.AsyncClient() as client:
             # Make all 4 calls in parallel
-            integrations_task = _fetch_integrations(client, config, user_id)
+            integrations_task = _fetch_integrations_and_auth_domains(client, config, user_id)
             user_settings_task = _fetch_user_settings(client, config, user_id)
             messages_task = _fetch_recent_messages(client, config, user_id, limit=200)
             contacts_task = _fetch_frequent_contacts(client, config, user_id)
-            
-            integrations, user_settings, recent_messages, frequent_contacts = await asyncio.gather(
+
+            (integrations, authenticated_sites), user_settings, recent_messages, frequent_contacts = await asyncio.gather(
                 integrations_task,
                 user_settings_task,
                 messages_task,
                 contacts_task
             )
-        
-        # Extract authenticated sites from cookies
-        authenticated_sites = _extract_authenticated_sites(integrations)
         
         # Format the context string
         context = _format_user_context(
