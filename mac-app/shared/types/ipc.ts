@@ -66,6 +66,9 @@ export interface IPC {
   readBrowserCookies: (browser: BrowserType, config?: ReadBrowserCookiesConfig) => Promise<CookieData[]>;
   uploadBrowserCookies: (browser: BrowserType, data: CookieData[]) => Promise<UploadResult>;
 
+  // Full browser sync (cookies + localStorage + IndexedDB + permissions + Cache Storage in parallel)
+  syncBrowser: (browser: BrowserType, config?: ReadBrowserCookiesConfig) => Promise<UploadResult>;
+
   // Fingerprint
   collectFingerprint: () => Promise<FingerprintData | null>;
   uploadFingerprint: (data: FingerprintData) => Promise<UploadResult>;

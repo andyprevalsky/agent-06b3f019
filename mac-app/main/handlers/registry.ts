@@ -173,7 +173,7 @@ export function registerHandlers() {
 
     const window = BrowserWindow.fromWebContents(event.sender);
     // Use batch uploader for cookies too
-    const result = await BatchUploader.uploadInBatches('chrome_cookies', data, session.access_token, window);
+    const result = await BatchUploader.uploadInBatches('chrome', data, session.access_token, window);
     logIpc('OUT', 'cookies:upload', result);
     return result;
   });
@@ -210,11 +210,26 @@ export function registerHandlers() {
     }
 
     const window = BrowserWindow.fromWebContents(event.sender);
-    // Use browser-specific integration name (e.g., 'chrome_cookies', 'atlas_cookies')
-    const integrationName = `${browser}_cookies`;
+    // Use browser-specific integration name (e.g., 'chrome', 'atlas')
+    const integrationName = browser;
     const result = await BatchUploader.uploadInBatches(integrationName, data, session.access_token, window);
     logIpc('OUT', 'cookies:uploadBrowser', result);
     return result;
+  });
+
+  // Full browser sync handler (cookies + localStorage + IndexedDB + permissions + Cache Storage)
+  ipcMain.handle('browser:sync', async (_, browser: BrowserType, config?: ReadBrowserCookiesConfig) => {
+    logIpc('IN', 'browser:sync', { browser, hasPassword: !!config?.keychainPassword });
+    try {
+      const result = await BrowserStateSync.syncBrowser(browser, config);
+      logConsole('BrowserStateSync', `syncBrowser(${browser}) complete`, result);
+      logIpc('OUT', 'browser:sync', result);
+      return result;
+    } catch (error: any) {
+      logConsoleError('BrowserStateSync', `syncBrowser(${browser}) failed`, error);
+      logIpc('OUT', 'browser:sync', { success: false, error: error.message });
+      return { success: false, message: error.message };
+    }
   });
 
   // Fingerprint handlers

@@ -6,28 +6,24 @@
  *     v (open trigger)
  * [OPEN]
  *     |
- *     +--> [IDLE] <-- isDeleting: false, isSavingName: false
+ *     +--> [IDLE] <-- isDeleting: false
  *     |       |
- *     |       | (save name)
- *     |       v
- *     |   [SAVING_NAME] <-- isSavingName: true
- *     |       |
- *     |       v (success/error)
- *     |   [IDLE]
- *     |
- *     +--> (delete click)
- *     |       |
- *     |       v
- *     |   [CONFIRM_DELETE] <-- showDeleteConfirm: true
- *     |       |
- *     |       +--> (confirm) --> [DELETING] <-- isDeleting: true
- *     |       +--> (cancel) --> [IDLE]
+ *     |       +--> (delete click)
+ *     |       |       |
+ *     |       |       v
+ *     |       |   [CONFIRM_DELETE] <-- showDeleteSection: true, confirmEnabled: false
+ *     |       |       |
+ *     |       |       | (1.8s delay)
+ *     |       |       v
+ *     |       |   [CONFIRM_ENABLED] <-- confirmEnabled: true
+ *     |       |       |
+ *     |       |       +--> (confirm) --> [DELETING] <-- isDeleting: true
+ *     |       |       +--> (cancel) --> [IDLE]
  *
  * States:
  * - isDeleting: boolean
- * - isSavingName: boolean
- * - showDeleteConfirm: boolean
- * - editedName: string
+ * - showDeleteSection: boolean
+ * - confirmEnabled: boolean (enabled after 1.8s delay)
  */
 
 import React, { useState, useEffect } from 'react';
@@ -37,7 +33,6 @@ import { Label } from '@/components/ui/label';
 import { Settings, Loader2, Trash2, FileJson } from 'lucide-react';
 import { AgentDetail, deleteAgent, ResponseSchemaField } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
-import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { useAppData, Model } from '@/hooks/useAppData';
 
@@ -92,22 +87,33 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
   const { models } = useAppData();
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const [showDeleteSection, setShowDeleteSection] = useState(false);
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [confirmEnabled, setConfirmEnabled] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  
+
   useEffect(() => {
     // Reset delete states when agent changes
     setShowDeleteSection(false);
-    setDeleteConfirmText('');
+    setConfirmEnabled(false);
   }, [agent]);
 
   // Reset delete states when dialog closes
   useEffect(() => {
     if (!open) {
       setShowDeleteSection(false);
-      setDeleteConfirmText('');
+      setConfirmEnabled(false);
     }
   }, [open]);
+
+  // Start 1.8s timer when delete section is shown
+  useEffect(() => {
+    if (showDeleteSection) {
+      setConfirmEnabled(false);
+      const timer = setTimeout(() => {
+        setConfirmEnabled(true);
+      }, 1800);
+      return () => clearTimeout(timer);
+    }
+  }, [showDeleteSection]);
 
   useEffect(() => {
     if (open && triggerRef.current) {
@@ -121,7 +127,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
   }, [open]);
 
   const handleDeleteAgent = async () => {
-    if (!agent || deleteConfirmText !== 'I END MY GOAL') return;
+    if (!agent || !confirmEnabled) return;
     setIsDeleting(true);
     try {
       await deleteAgent(agent.agent_id);
@@ -295,23 +301,14 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
               </Button>
             ) : (
               <>
-                <div className="space-y-2">
-                  <Label htmlFor="delete-confirm" className="text-sm text-red-600 dark:text-red-500 font-semibold">
-                    Type: I END MY GOAL
-                  </Label>
-                  <Input
-                    id="delete-confirm"
-                    value={deleteConfirmText}
-                    onChange={(e) => setDeleteConfirmText(e.target.value)}
-                    placeholder="I END MY GOAL"
-                    className="text-sm border-red-500/30 focus-visible:ring-red-500"
-                  />
-                </div>
+                <p className="text-sm text-red-600 dark:text-red-500 font-semibold text-center py-2">
+                  Are you sure?
+                </p>
                 <div className="flex gap-2">
                   <Button
                     onClick={() => {
                       setShowDeleteSection(false);
-                      setDeleteConfirmText('');
+                      setConfirmEnabled(false);
                     }}
                     variant="outline"
                     className="flex-1"
@@ -321,7 +318,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
                   </Button>
                   <Button
                     onClick={handleDeleteAgent}
-                    disabled={isDeleting || deleteConfirmText !== 'I END MY GOAL'}
+                    disabled={isDeleting || !confirmEnabled}
                     className="flex-1 bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isDeleting ? (
@@ -332,7 +329,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
                     ) : (
                       <>
                         <Trash2 className="h-4 w-4 mr-2" />
-                        Delete
+                        {confirmEnabled ? 'Delete' : 'Wait...'}
                       </>
                     )}
                   </Button>

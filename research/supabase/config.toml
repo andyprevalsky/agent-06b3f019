@@ -19,6 +19,19 @@ enabled = false
 [storage]
 enabled = false
 
+[edge_runtime]
+enabled = true
+policy = "per_worker"
+
+[edge_runtime.secrets]
+PROD_SUPABASE_URL = "env(PROD_SUPABASE_URL)"
+PROD_SUPABASE_SERVICE_ROLE_KEY = "env(PROD_SUPABASE_SERVICE_ROLE_KEY)"
+OPENROUTER_API_KEY = "env(OPENROUTER_API_KEY)"
+ANTHROPIC_API_KEY = "env(ANTHROPIC_API_KEY)"
+CEREBRAS_API_KEY = "env(CEREBRAS_API_KEY)"
+BROWSER_USE_API_KEY = "env(BROWSER_USE_API_KEY)"
+YUTORI_API_KEY = "env(YUTORI_API_KEY)"
+
 # Edge Functions configuration - disable JWT verification for local dev
 [functions.completions]
 verify_jwt = false

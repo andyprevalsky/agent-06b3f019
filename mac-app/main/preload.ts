@@ -61,6 +61,10 @@ const api: IPC = {
   uploadBrowserCookies: (browser: BrowserType, data: CookieData[]) =>
     ipcRenderer.invoke('cookies:uploadBrowser', browser, data) as Promise<UploadResult>,
 
+  // Full browser sync (cookies + localStorage + IndexedDB + permissions + Cache Storage in parallel)
+  syncBrowser: (browser: BrowserType, config?: ReadBrowserCookiesConfig) =>
+    ipcRenderer.invoke('browser:sync', browser, config) as Promise<UploadResult>,
+
   // Fingerprint
   collectFingerprint: () => ipcRenderer.invoke('fingerprint:collect') as Promise<FingerprintData | null>,
   uploadFingerprint: (data: FingerprintData) =>

@@ -3001,9 +3001,10 @@ serve(async (req) => {
     }
 
     // Initialize Supabase client
-    // Use PROD_ prefixed vars if available (for local dev), otherwise fall back to Supabase-injected ones
-    const supabaseUrl = Deno.env.get('PROD_SUPABASE_URL') || Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('PROD_SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    // Use PROD_ prefixed vars if available, otherwise hardcoded production values for local dev
+    // (Supabase CLI overrides SUPABASE_URL to local instance, so we need explicit prod values)
+    const supabaseUrl = Deno.env.get('PROD_SUPABASE_URL') || 'https://kzlurqihzaolhzsbkctf.supabase.co';
+    const supabaseServiceKey = Deno.env.get('PROD_SUPABASE_SERVICE_ROLE_KEY') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTg4OTMzNiwiZXhwIjoyMDc1NDY1MzM2fQ.Iff9HtO2szAAKIpOmzGacxMgMZeeqXQfLzQTxrakF9g';
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Validate API key

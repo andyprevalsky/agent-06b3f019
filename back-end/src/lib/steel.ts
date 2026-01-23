@@ -1,5 +1,6 @@
 import Steel from 'steel-sdk';
 import { prisma } from './prisma';
+import { ProxyGeoLocation, DEFAULT_GEOLOCATION } from './geoip';
 
 // Validate required environment variables
 if (!process.env.STEEL_API_KEY) {
@@ -49,12 +50,15 @@ export async function getOrCreateContext(userId: string): Promise<string> {
  *
  * @param dbContextId - The database ID (BrowserContext.id) for the foreign key
  * @param agentId - The agent creating this session
+ * @param geolocation - Proxy geolocation (defaults to Dallas, TX)
  */
 export async function createSessionWithContext(
   dbContextId: string,
-  agentId: string
+  agentId: string,
+  geolocation: ProxyGeoLocation = DEFAULT_GEOLOCATION
 ): Promise<{ sessionId: string; debugUrl: string; taskId: string; wsUrl: string }> {
   console.log(`Creating Steel browser session for context ${dbContextId}...`);
+  console.log(`  Proxy geolocation: ${geolocation.city}, ${geolocation.state}, ${geolocation.country}`);
 
   // Look up the Steel profile ID from database
   const dbContext = await prisma.browserContext.findUnique({
@@ -74,11 +78,11 @@ export async function createSessionWithContext(
     persistProfile: true,  // Auto-persist browser state to profile on session close
     useProxy: {
       geolocation: {
-        country: 'US',
-        state: 'TX',
-        city: 'DALLAS',
+        country: geolocation.country,
+        state: geolocation.state,
+        city: geolocation.city,
       },
-    },  // Residential proxy in Dallas, TX (testing for Amazon bot detection)
+    },  // Residential proxy based on user's location
     solveCaptcha: true,  // Auto-solve CAPTCHAs
     stealthConfig: {
       humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
@@ -193,17 +197,34 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
 
   console.log(`  Found old session with currentUrl: ${oldSession.currentUrl || 'NONE'}`);
 
+  // Look up agent's proxy geolocation
+  let proxyGeo = DEFAULT_GEOLOCATION;
+  if (oldSession.agentId) {
+    const agent = await prisma.agent.findUnique({
+      where: { id: oldSession.agentId },
+      select: { proxyCountry: true, proxyState: true, proxyCity: true }
+    });
+    if (agent?.proxyCountry) {
+      proxyGeo = {
+        country: agent.proxyCountry,
+        state: agent.proxyState || DEFAULT_GEOLOCATION.state,
+        city: agent.proxyCity || DEFAULT_GEOLOCATION.city,
+      };
+    }
+  }
+  console.log(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
+
   // Create NEW Steel session with same profile
   // Dimensions adjusted for browser chrome (see createSessionWithContext comments)
   const session = await steel.sessions.create({
     profileId: oldSession.context.contextId,
     useProxy: {
       geolocation: {
-        country: 'US',
-        state: 'TX',
-        city: 'DALLAS',
+        country: proxyGeo.country,
+        state: proxyGeo.state,
+        city: proxyGeo.city,
       },
-    },  // Residential proxy in Dallas, TX (testing for Amazon bot detection)
+    },  // Residential proxy based on user's location
     solveCaptcha: true,
     stealthConfig: {
       humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
@@ -329,35 +350,47 @@ export async function injectUserData(
 ): Promise<{
   cookies: { injected: boolean; cookieCount: number };
   fingerprint: { injected: boolean };
+  indexedDB: { injected: boolean; originCount: number };
+  localStorage: { injected: boolean; originCount: number };
+  permissions: { injected: boolean; grantCount: number };
+  cacheStorage: { injected: boolean; originCount: number };
 }> {
   const startTime = Date.now();
   console.log(`🔐 [injectUserData] START for session ${sessionId}`);
 
-  // Fetch cookies and fingerprint in parallel
-  console.log(`  [1/6] Fetching cookies and fingerprint from DB...`);
-  const [cookies, integration] = await Promise.all([
+  // Fetch cookies, fingerprint, localStorage, IndexedDB, permissions, and cacheStorage in parallel
+  console.log(`  [1/9] Fetching user data from DB...`);
+  const [cookies, integration, localStorageOrigins, indexedDBOrigins, permissions, cacheStorageOrigins] = await Promise.all([
     prisma.cookie.findMany({ where: { userId } }),
     prisma.integration.findUnique({
       where: { userId_name: { userId, name: 'browser_fingerprint' } },
     }),
+    prisma.localStorageOrigin.findMany({ where: { userId } }),
+    prisma.indexedDBOrigin.findMany({ where: { userId } }),
+    prisma.browserPermission.findMany({ where: { userId } }),
+    prisma.cacheStorageOrigin.findMany({ where: { userId } }),
   ]);
-  console.log(`  [1/6] DB fetch complete (${Date.now() - startTime}ms)`);
+  console.log(`  [1/9] DB fetch complete (${Date.now() - startTime}ms)`);
 
   const hasCookies = cookies.length > 0;
   const fp = (integration?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
   const hasFingerprint = !!fp;
+  const hasLocalStorage = localStorageOrigins.length > 0;
+  const hasIndexedDB = indexedDBOrigins.length > 0;
+  const hasPermissions = permissions.length > 0;
+  const hasCacheStorage = cacheStorageOrigins.length > 0;
 
-  console.log(`  Cookies: ${hasCookies ? cookies.length : 'none'}, Fingerprint: ${hasFingerprint ? 'yes' : 'no'}`);
+  console.log(`  Cookies: ${hasCookies ? cookies.length : 'none'}, Fingerprint: ${hasFingerprint ? 'yes' : 'no'}, localStorage: ${hasLocalStorage ? localStorageOrigins.length + ' origins' : 'none'}, IndexedDB: ${hasIndexedDB ? indexedDBOrigins.length + ' origins' : 'none'}, Permissions: ${hasPermissions ? permissions.length + ' grants' : 'none'}, CacheStorage: ${hasCacheStorage ? cacheStorageOrigins.length + ' origins' : 'none'}`);
 
   // Note: We always need CDP connection now to inject scrollbar CSS
   // (previously returned early when no cookies/fingerprint)
 
   // Get session info to get WebSocket URL
-  console.log(`  [2/6] Fetching session wsUrl from DB...`);
+  console.log(`  [2/9] Fetching session wsUrl from DB...`);
   const dbSession = await prisma.browserSession.findUnique({
     where: { sessionId }
   });
-  console.log(`  [2/6] Session fetch complete (${Date.now() - startTime}ms)`);
+  console.log(`  [2/9] Session fetch complete (${Date.now() - startTime}ms)`);
 
   if (!dbSession?.wsUrl) {
     throw new Error('No WebSocket URL found for session');
@@ -368,207 +401,537 @@ export async function injectUserData(
   let browser;
 
   try {
-    console.log(`  [3/6] Connecting to CDP...`);
+    console.log(`  [3/9] Connecting to CDP...`);
     browser = await chromium.connectOverCDP(dbSession.wsUrl);
     const context = browser.contexts()[0];
-    console.log(`  [3/6] CDP connected (${Date.now() - startTime}ms)`);
+    console.log(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
 
     let cookieResult = { injected: false, cookieCount: 0 };
     let fingerprintResult = { injected: false };
+    let localStorageResult = { injected: false, originCount: 0 };
+    let indexedDBResult = { injected: false, originCount: 0 };
+    let permissionsResult = { injected: false, grantCount: 0 };
+    let cacheStorageResult = { injected: false, originCount: 0 };
+
+    // Run all injections in parallel for performance
+    console.log(`  [4/5] Injecting browser state in parallel...`);
+    const injectionPromises: Promise<void>[] = [];
 
     // 1. Inject cookies if available
     if (hasCookies) {
-      try {
-        console.log(`  [4/6] Transforming ${cookies.length} cookies...`);
-        const CHROME_EPOCH_OFFSET = 11644473600;
-        const playwrightCookies = cookies.map((cookie) => {
-          let expires: number | undefined;
+      injectionPromises.push((async () => {
+        try {
+          console.log(`  [cookies] Transforming ${cookies.length} cookies...`);
+          const CHROME_EPOCH_OFFSET = 11644473600;
+          const playwrightCookies = cookies.map((cookie) => {
+            let expires: number | undefined;
 
-          if (cookie.expiresUtc && cookie.expiresUtc > 0n) {
-            expires = Math.floor(Number(cookie.expiresUtc) / 1000000) - CHROME_EPOCH_OFFSET;
-            if (expires < Date.now() / 1000) {
-              expires = undefined;
+            if (cookie.expiresUtc && cookie.expiresUtc > 0n) {
+              expires = Math.floor(Number(cookie.expiresUtc) / 1000000) - CHROME_EPOCH_OFFSET;
+              if (expires < Date.now() / 1000) {
+                expires = undefined;
+              }
             }
-          }
 
-          return {
-            name: cookie.name,
-            value: cookie.value,
-            domain: cookie.domain,
-            path: cookie.path || '/',
-            expires,
-            secure: cookie.isSecure,
-            httpOnly: cookie.isHttpOnly,
-            sameSite: 'Lax' as const,
-          };
-        });
+            return {
+              name: cookie.name,
+              value: cookie.value,
+              domain: cookie.domain,
+              path: cookie.path || '/',
+              expires,
+              secure: cookie.isSecure,
+              httpOnly: cookie.isHttpOnly,
+              sameSite: 'Lax' as const,
+            };
+          });
 
-        const validCookies = playwrightCookies.filter(c => c.name && c.value);
-        console.log(`  [4/6] Transform complete, ${validCookies.length} valid (${Date.now() - startTime}ms)`);
+          const validCookies = playwrightCookies.filter(c => c.name && c.value);
+          console.log(`  [cookies] Transform complete, ${validCookies.length} valid (${Date.now() - startTime}ms)`);
 
-        // Inject all cookies in one CDP call
-        console.log(`  [4/6] Injecting cookies via CDP...`);
-        await context.addCookies(validCookies);
-        console.log(`  [4/6] ✅ Cookies injected (${Date.now() - startTime}ms)`);
-        cookieResult = { injected: true, cookieCount: validCookies.length };
-      } catch (error) {
-        console.error(`  [4/6] ❌ Failed to inject cookies:`, error);
-      }
+          // Inject all cookies in one CDP call
+          console.log(`  [cookies] Injecting via CDP...`);
+          await context.addCookies(validCookies);
+          console.log(`  [cookies] ✅ Injected (${Date.now() - startTime}ms)`);
+          cookieResult = { injected: true, cookieCount: validCookies.length };
+        } catch (error) {
+          console.error(`  [cookies] ❌ Failed to inject:`, error);
+        }
+      })());
     }
 
     // 2. Inject fingerprint script if available
     if (hasFingerprint && fp) {
-      try {
-        console.log(`  [5/6] Injecting fingerprint script...`);
-        const fingerprintScript = `
-          // Fingerprint spoofing script - injected to match user's real browser
-          (function() {
-            'use strict';
+      injectionPromises.push((async () => {
+        try {
+          console.log(`  [fingerprint] Injecting script...`);
+          const fingerprintScript = `
+            // Fingerprint spoofing script - injected to match user's real browser
+            (function() {
+              'use strict';
 
-            const fp = ${JSON.stringify(fp)};
+              const fp = ${JSON.stringify(fp)};
 
-            // Override navigator properties
-            const navigatorProps = {
-              userAgent: { value: fp.navigator.userAgent },
-              platform: { value: fp.navigator.platform },
-              language: { value: fp.navigator.language },
-              languages: { value: Object.freeze([...fp.navigator.languages]) },
-              hardwareConcurrency: { value: fp.navigator.hardwareConcurrency },
-              deviceMemory: { value: fp.navigator.deviceMemory },
-              maxTouchPoints: { value: fp.navigator.maxTouchPoints },
-              vendor: { value: fp.navigator.vendor },
-              doNotTrack: { value: fp.navigator.doNotTrack },
-            };
-
-            for (const [prop, desc] of Object.entries(navigatorProps)) {
-              try {
-                Object.defineProperty(Navigator.prototype, prop, {
-                  get: () => desc.value,
-                  configurable: true,
-                });
-              } catch (e) {}
-            }
-
-            // Override screen properties
-            const screenProps = {
-              width: fp.screen.width,
-              height: fp.screen.height,
-              availWidth: fp.screen.availWidth,
-              availHeight: fp.screen.availHeight,
-              colorDepth: fp.screen.colorDepth,
-              pixelDepth: fp.screen.pixelDepth,
-            };
-
-            for (const [prop, value] of Object.entries(screenProps)) {
-              try {
-                Object.defineProperty(Screen.prototype, prop, {
-                  get: () => value,
-                  configurable: true,
-                });
-              } catch (e) {}
-            }
-
-            // Override devicePixelRatio
-            try {
-              Object.defineProperty(window, 'devicePixelRatio', {
-                get: () => fp.screen.devicePixelRatio,
-                configurable: true,
-              });
-            } catch (e) {}
-
-            // Override WebGL
-            const getParameterProxyHandler = {
-              apply: function(target, thisArg, args) {
-                const param = args[0];
-                const UNMASKED_VENDOR_WEBGL = 0x9245;
-                const UNMASKED_RENDERER_WEBGL = 0x9246;
-
-                if (param === UNMASKED_VENDOR_WEBGL) {
-                  return fp.webgl.vendor;
-                }
-                if (param === UNMASKED_RENDERER_WEBGL) {
-                  return fp.webgl.renderer;
-                }
-                return target.apply(thisArg, args);
-              }
-            };
-
-            try {
-              WebGLRenderingContext.prototype.getParameter = new Proxy(
-                WebGLRenderingContext.prototype.getParameter,
-                getParameterProxyHandler
-              );
-              WebGL2RenderingContext.prototype.getParameter = new Proxy(
-                WebGL2RenderingContext.prototype.getParameter,
-                getParameterProxyHandler
-              );
-            } catch (e) {}
-
-            // Override timezone
-            const originalDateTimeFormat = Intl.DateTimeFormat;
-            Intl.DateTimeFormat = function(...args) {
-              const instance = new originalDateTimeFormat(...args);
-              const originalResolvedOptions = instance.resolvedOptions.bind(instance);
-              instance.resolvedOptions = function() {
-                const options = originalResolvedOptions();
-                options.timeZone = fp.timezone;
-                return options;
+              // Override navigator properties
+              const navigatorProps = {
+                userAgent: { value: fp.navigator.userAgent },
+                platform: { value: fp.navigator.platform },
+                language: { value: fp.navigator.language },
+                languages: { value: Object.freeze([...fp.navigator.languages]) },
+                hardwareConcurrency: { value: fp.navigator.hardwareConcurrency },
+                deviceMemory: { value: fp.navigator.deviceMemory },
+                maxTouchPoints: { value: fp.navigator.maxTouchPoints },
+                vendor: { value: fp.navigator.vendor },
+                doNotTrack: { value: fp.navigator.doNotTrack },
               };
-              return instance;
-            };
-            Intl.DateTimeFormat.prototype = originalDateTimeFormat.prototype;
-            Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
 
-            console.log('[Fingerprint] ✅ Fingerprint spoofing injected');
+              for (const [prop, desc] of Object.entries(navigatorProps)) {
+                try {
+                  Object.defineProperty(Navigator.prototype, prop, {
+                    get: () => desc.value,
+                    configurable: true,
+                  });
+                } catch (e) {}
+              }
+
+              // Override screen properties
+              const screenProps = {
+                width: fp.screen.width,
+                height: fp.screen.height,
+                availWidth: fp.screen.availWidth,
+                availHeight: fp.screen.availHeight,
+                colorDepth: fp.screen.colorDepth,
+                pixelDepth: fp.screen.pixelDepth,
+              };
+
+              for (const [prop, value] of Object.entries(screenProps)) {
+                try {
+                  Object.defineProperty(Screen.prototype, prop, {
+                    get: () => value,
+                    configurable: true,
+                  });
+                } catch (e) {}
+              }
+
+              // Override devicePixelRatio
+              try {
+                Object.defineProperty(window, 'devicePixelRatio', {
+                  get: () => fp.screen.devicePixelRatio,
+                  configurable: true,
+                });
+              } catch (e) {}
+
+              // Override WebGL
+              const getParameterProxyHandler = {
+                apply: function(target, thisArg, args) {
+                  const param = args[0];
+                  const UNMASKED_VENDOR_WEBGL = 0x9245;
+                  const UNMASKED_RENDERER_WEBGL = 0x9246;
+
+                  if (param === UNMASKED_VENDOR_WEBGL) {
+                    return fp.webgl.vendor;
+                  }
+                  if (param === UNMASKED_RENDERER_WEBGL) {
+                    return fp.webgl.renderer;
+                  }
+                  return target.apply(thisArg, args);
+                }
+              };
+
+              try {
+                WebGLRenderingContext.prototype.getParameter = new Proxy(
+                  WebGLRenderingContext.prototype.getParameter,
+                  getParameterProxyHandler
+                );
+                WebGL2RenderingContext.prototype.getParameter = new Proxy(
+                  WebGL2RenderingContext.prototype.getParameter,
+                  getParameterProxyHandler
+                );
+              } catch (e) {}
+
+              // Override timezone
+              const originalDateTimeFormat = Intl.DateTimeFormat;
+              Intl.DateTimeFormat = function(...args) {
+                const instance = new originalDateTimeFormat(...args);
+                const originalResolvedOptions = instance.resolvedOptions.bind(instance);
+                instance.resolvedOptions = function() {
+                  const options = originalResolvedOptions();
+                  options.timeZone = fp.timezone;
+                  return options;
+                };
+                return instance;
+              };
+              Intl.DateTimeFormat.prototype = originalDateTimeFormat.prototype;
+              Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
+
+              console.log('[Fingerprint] ✅ Fingerprint spoofing injected');
+            })();
+          `;
+
+          await context.addInitScript(fingerprintScript);
+          console.log(`  [fingerprint] ✅ Injected (${Date.now() - startTime}ms)`);
+          fingerprintResult = { injected: true };
+        } catch (error) {
+          console.error(`  [fingerprint] ❌ Failed to inject:`, error);
+        }
+      })());
+    }
+
+    // 3. Inject localStorage if available
+    if (hasLocalStorage) {
+      injectionPromises.push((async () => {
+        try {
+          console.log(`  [localStorage] Injecting for ${localStorageOrigins.length} origins...`);
+
+          // Build origin -> entries map
+          const localStorageByOrigin: Record<string, Array<{ key: string; value: string }>> = {};
+          for (const origin of localStorageOrigins) {
+            // Fix origin format if needed
+            let cleanOrigin = origin.origin;
+            if (cleanOrigin.startsWith('ttps://')) {
+              cleanOrigin = 'https://' + cleanOrigin.slice(7);
+            } else if (!cleanOrigin.startsWith('http')) {
+              cleanOrigin = 'https://' + cleanOrigin;
+            }
+            // Handle partitioned storage format
+            if (cleanOrigin.includes('/^0')) {
+              cleanOrigin = cleanOrigin.split('/^0')[0];
+            }
+            localStorageByOrigin[cleanOrigin] = origin.entries as Array<{ key: string; value: string }>;
+          }
+
+          const localStorageScript = `
+            (function() {
+              const allLocalStorage = ${JSON.stringify(localStorageByOrigin)};
+              const currentOrigin = window.location.origin;
+
+              for (const [origin, entries] of Object.entries(allLocalStorage)) {
+                // Check if current origin matches
+                if (currentOrigin === origin ||
+                    currentOrigin.endsWith(origin.replace('https://', '.')) ||
+                    origin.includes(currentOrigin.replace('https://', ''))) {
+
+                  for (const entry of entries) {
+                    try {
+                      localStorage.setItem(entry.key, entry.value);
+                    } catch (e) {}
+                  }
+                  console.log('[localStorage] ✅ Injected', entries.length, 'entries for', currentOrigin);
+                }
+              }
+            })();
+          `;
+
+          await context.addInitScript(localStorageScript);
+          console.log(`  [localStorage] ✅ Injected (${Date.now() - startTime}ms)`);
+          localStorageResult = { injected: true, originCount: localStorageOrigins.length };
+        } catch (error) {
+          console.error(`  [localStorage] ❌ Failed to inject:`, error);
+        }
+      })());
+    }
+
+    // 4. Inject IndexedDB if available
+    if (hasIndexedDB) {
+      injectionPromises.push((async () => {
+        try {
+          console.log(`  [indexedDB] Injecting for ${indexedDBOrigins.length} origins...`);
+
+          // Build origin -> databases map
+          interface IDBRecord { key: unknown; value: unknown }
+          interface IDBObjectStore { name: string; records: IDBRecord[] }
+          interface IDBDatabase { name: string; objectStores: IDBObjectStore[] }
+
+          const indexedDBByOrigin: Record<string, IDBDatabase[]> = {};
+          for (const origin of indexedDBOrigins) {
+            indexedDBByOrigin[origin.origin] = origin.databases as unknown as IDBDatabase[];
+          }
+
+          // IndexedDB injection is more complex - we need to recreate databases, object stores, and records
+          const indexedDBScript = `
+            (function() {
+              const allIndexedDB = ${JSON.stringify(indexedDBByOrigin)};
+              const currentOrigin = window.location.origin;
+
+              // Find matching data for current origin
+              let matchingDatabases = null;
+              for (const [origin, databases] of Object.entries(allIndexedDB)) {
+                if (currentOrigin === origin ||
+                    currentOrigin.includes(origin.replace('https://', '').replace('http://', ''))) {
+                  matchingDatabases = databases;
+                  break;
+                }
+              }
+
+              if (!matchingDatabases) return;
+
+              // Helper to inject data into a database
+              async function injectDatabase(dbInfo) {
+                return new Promise((resolve) => {
+                  // First, try to open existing database to get version
+                  const checkRequest = indexedDB.open(dbInfo.name);
+
+                  checkRequest.onerror = () => {
+                    console.warn('[IndexedDB] Failed to check database:', dbInfo.name);
+                    resolve(false);
+                  };
+
+                  checkRequest.onsuccess = (e) => {
+                    const existingDb = e.target.result;
+                    const currentVersion = existingDb.version;
+                    existingDb.close();
+
+                    // Open with incremented version to trigger upgrade
+                    const request = indexedDB.open(dbInfo.name, currentVersion + 1);
+
+                    request.onerror = () => {
+                      console.warn('[IndexedDB] Failed to open database:', dbInfo.name);
+                      resolve(false);
+                    };
+
+                    request.onupgradeneeded = (e) => {
+                      const db = e.target.result;
+
+                      // Create object stores that don't exist
+                      for (const store of dbInfo.objectStores) {
+                        if (!db.objectStoreNames.contains(store.name)) {
+                          try {
+                            db.createObjectStore(store.name);
+                          } catch (err) {}
+                        }
+                      }
+                    };
+
+                    request.onsuccess = (e) => {
+                      const db = e.target.result;
+
+                      // Add records to each object store
+                      for (const store of dbInfo.objectStores) {
+                        if (db.objectStoreNames.contains(store.name) && store.records && store.records.length > 0) {
+                          try {
+                            const tx = db.transaction(store.name, 'readwrite');
+                            const objectStore = tx.objectStore(store.name);
+
+                            for (const record of store.records) {
+                              try {
+                                objectStore.put(record.value, record.key);
+                              } catch (e) {}
+                            }
+                          } catch (e) {}
+                        }
+                      }
+
+                      db.close();
+                      console.log('[IndexedDB] ✅ Injected database:', dbInfo.name);
+                      resolve(true);
+                    };
+                  };
+
+                  checkRequest.onblocked = () => {
+                    console.warn('[IndexedDB] Database blocked:', dbInfo.name);
+                    resolve(false);
+                  };
+                });
+              }
+
+              // Inject all databases
+              (async () => {
+                for (const dbInfo of matchingDatabases) {
+                  await injectDatabase(dbInfo);
+                }
+              })();
+            })();
+          `;
+
+          await context.addInitScript(indexedDBScript);
+          console.log(`  [indexedDB] ✅ Injected (${Date.now() - startTime}ms)`);
+          indexedDBResult = { injected: true, originCount: indexedDBOrigins.length };
+        } catch (error) {
+          console.error(`  [indexedDB] ❌ Failed to inject:`, error);
+        }
+      })());
+    }
+
+    // 5. Inject permissions if available
+    // Uses JavaScript override for permission query checks
+    if (hasPermissions) {
+      injectionPromises.push((async () => {
+        try {
+          console.log(`  [permissions] Injecting ${permissions.length} permission grants...`);
+
+          // Build permission data for JavaScript injection
+          const permissionGrants = permissions.map(p => ({
+            origin: p.origin,
+            permission: p.permission,
+            setting: p.setting,
+          }));
+
+          // JavaScript injection to override navigator.permissions.query
+          const permissionScript = `
+            (function() {
+              'use strict';
+
+              const grants = ${JSON.stringify(permissionGrants)};
+
+              // Helper to match origin patterns
+              function matchOrigin(pattern, origin) {
+                // Exact match
+                if (pattern === origin) return true;
+
+                // Wildcard pattern: "[*.]example.com" matches "*.example.com"
+                if (pattern.startsWith('[*.]')) {
+                  const domain = pattern.slice(4);
+                  const originHost = new URL(origin).hostname;
+                  return originHost === domain || originHost.endsWith('.' + domain);
+                }
+
+                return false;
+              }
+
+              // Override navigator.permissions.query
+              const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+              navigator.permissions.query = async function(descriptor) {
+                const permName = descriptor.name;
+                const currentOrigin = window.location.origin;
+
+                // Find matching grant
+                const grant = grants.find(g =>
+                  g.permission === permName && matchOrigin(g.origin, currentOrigin)
+                );
+
+                if (grant) {
+                  const state = grant.setting === 1 ? 'granted' : 'denied';
+                  return {
+                    state,
+                    name: permName,
+                    onchange: null,
+                    addEventListener: function() {},
+                    removeEventListener: function() {},
+                    dispatchEvent: function() { return true; },
+                  };
+                }
+
+                // Fall back to original for unmatched permissions
+                return originalQuery(descriptor);
+              };
+
+              console.log('[Permissions] ✅ Permission overrides injected for', grants.length, 'grants');
+            })();
+          `;
+
+          await context.addInitScript(permissionScript);
+          console.log(`  [permissions] ✅ Injected (${Date.now() - startTime}ms)`);
+          permissionsResult = { injected: true, grantCount: permissions.length };
+        } catch (error) {
+          console.error(`  [permissions] ❌ Failed to inject:`, error);
+        }
+      })());
+    }
+
+    // 6. Inject Cache Storage metadata if available
+    // Pre-opens caches so sites that check for cache existence work correctly
+    if (hasCacheStorage) {
+      injectionPromises.push((async () => {
+        try {
+          console.log(`  [cacheStorage] Injecting metadata for ${cacheStorageOrigins.length} origins...`);
+
+          // Build origin -> caches map
+          const cachesByOrigin: Record<string, Array<{ name: string }>> = {};
+          for (const origin of cacheStorageOrigins) {
+            const caches = origin.caches as Array<{ name: string; size?: number }>;
+            cachesByOrigin[origin.origin] = caches.map(c => ({ name: c.name }));
+          }
+
+          const cacheStorageScript = `
+            (function() {
+              'use strict';
+
+              const cachesByOrigin = ${JSON.stringify(cachesByOrigin)};
+              const currentOrigin = window.location.origin;
+
+              // Find matching caches for current origin
+              let matchingCaches = null;
+              for (const [origin, caches] of Object.entries(cachesByOrigin)) {
+                if (currentOrigin === origin ||
+                    currentOrigin.includes(origin.replace('https://', '').replace('http://', ''))) {
+                  matchingCaches = caches;
+                  break;
+                }
+              }
+
+              if (!matchingCaches || matchingCaches.length === 0) return;
+
+              // Pre-open caches (doesn't add any data, just creates empty caches)
+              (async function() {
+                for (const cache of matchingCaches) {
+                  try {
+                    await caches.open(cache.name);
+                    console.log('[CacheStorage] ✅ Opened cache:', cache.name);
+                  } catch (e) {
+                    console.warn('[CacheStorage] Failed to open cache:', cache.name, e);
+                  }
+                }
+              })();
+            })();
+          `;
+
+          await context.addInitScript(cacheStorageScript);
+          console.log(`  [cacheStorage] ✅ Injected (${Date.now() - startTime}ms)`);
+          cacheStorageResult = { injected: true, originCount: cacheStorageOrigins.length };
+        } catch (error) {
+          console.error(`  [cacheStorage] ❌ Failed to inject:`, error);
+        }
+      })());
+    }
+
+    // 7. Always inject scrollbar-hiding CSS to ensure viewport matches screenshot (1280x800)
+    // This prevents coordinate mismatch where viewport reports 1265 (with scrollbar) but screenshot is 1280
+    injectionPromises.push((async () => {
+      try {
+        const scrollbarHideScript = `
+          (function() {
+            const style = document.createElement('style');
+            style.id = 'yutori-scrollbar-hide';
+            style.textContent = \`
+              /* Hide scrollbars on ALL elements for consistent 1280x800 viewport */
+              *::-webkit-scrollbar {
+                display: none !important;
+                width: 0 !important;
+                height: 0 !important;
+              }
+              * {
+                -ms-overflow-style: none !important;
+                scrollbar-width: none !important;
+              }
+            \`;
+            if (document.head) {
+              document.head.appendChild(style);
+            } else {
+              document.addEventListener('DOMContentLoaded', () => document.head.appendChild(style));
+            }
           })();
         `;
-
-        await context.addInitScript(fingerprintScript);
-        console.log(`  [5/6] ✅ Fingerprint injected (${Date.now() - startTime}ms)`);
-        fingerprintResult = { injected: true };
+        await context.addInitScript(scrollbarHideScript);
+        console.log(`  [scrollbar] ✅ CSS injected for consistent 1280x800 viewport (${Date.now() - startTime}ms)`);
       } catch (error) {
-        console.error(`  [5/6] ❌ Failed to inject fingerprint:`, error);
+        console.error(`  [scrollbar] ⚠️ Failed to inject CSS:`, error);
       }
-    }
+    })());
 
-    // 3. Always inject scrollbar-hiding CSS to ensure viewport matches screenshot (1280x800)
-    // This prevents coordinate mismatch where viewport reports 1265 (with scrollbar) but screenshot is 1280
-    try {
-      const scrollbarHideScript = `
-        (function() {
-          const style = document.createElement('style');
-          style.id = 'yutori-scrollbar-hide';
-          style.textContent = \`
-            /* Hide scrollbars on ALL elements for consistent 1280x800 viewport */
-            *::-webkit-scrollbar {
-              display: none !important;
-              width: 0 !important;
-              height: 0 !important;
-            }
-            * {
-              -ms-overflow-style: none !important;
-              scrollbar-width: none !important;
-            }
-          \`;
-          if (document.head) {
-            document.head.appendChild(style);
-          } else {
-            document.addEventListener('DOMContentLoaded', () => document.head.appendChild(style));
-          }
-        })();
-      `;
-      await context.addInitScript(scrollbarHideScript);
-      console.log(`  [5.5/6] ✅ Scrollbar CSS injected for consistent 1280x800 viewport`);
-    } catch (error) {
-      console.error(`  [5.5/6] ⚠️ Failed to inject scrollbar CSS:`, error);
-    }
-
-    console.log(`  [6/6] Returning results (${Date.now() - startTime}ms)`);
-    return { cookies: cookieResult, fingerprint: fingerprintResult };
+    // Wait for all injections to complete in parallel
+    await Promise.all(injectionPromises);
+    console.log(`  [4/5] ✅ All injections complete (${Date.now() - startTime}ms)`);
+    return {
+      cookies: cookieResult,
+      fingerprint: fingerprintResult,
+      indexedDB: indexedDBResult,
+      localStorage: localStorageResult,
+      permissions: permissionsResult,
+      cacheStorage: cacheStorageResult,
+    };
   } finally {
     // Always disconnect from the browser (doesn't close the Steel session)
     if (browser) {
-      console.log(`  [6/6] Closing CDP connection...`);
+      console.log(`  [5/5] Closing CDP connection...`);
       await browser.close();
       console.log(`🔐 [injectUserData] COMPLETE (${Date.now() - startTime}ms total)`);
     }

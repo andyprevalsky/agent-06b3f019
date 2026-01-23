@@ -63,8 +63,9 @@ export class FingerprintReader {
           '--disable-extensions',
           '--disable-background-networking',
           '--disable-sync',
-          '--window-position=-8000,-8000', // Position off-screen
-          '--window-size=100,100', // Small window
+          '--window-position=-10000,-10000', // Position far off-screen
+          '--window-size=1,1', // Minimal window
+          '--start-minimized', // Start minimized
         ],
       });
 

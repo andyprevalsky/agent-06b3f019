@@ -1121,7 +1121,9 @@ router.post('/cookies/upload', authenticate, upload.none() as any, async (req: A
       });
     }
 
-    const integrationName = `${browser}_cookies`;
+    // Integration name is just the browser name (e.g., 'chrome', 'edge')
+    // All browser state (cookies, localStorage, IndexedDB, etc.) syncs based on this integration
+    const integrationName = browser;
 
     if (!data || !iv || !key) {
       return res.status(400).json({
@@ -1500,6 +1502,145 @@ router.post('/localStorage/upload', authenticate, upload.none() as any, async (r
 });
 
 /**
+ * POST /api/integrations/indexedDB/upload
+ *
+ * Upload encrypted Chrome IndexedDB batch from the Mac app.
+ * Directly bulk-upserts all origins in the batch to IndexedDBOrigin table.
+ *
+ * Payload: { origins: IndexedDBOriginData[], hashes, batchIndex, totalBatches }
+ */
+router.post('/indexedDB/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { data, iv, key, compressed } = req.body;
+
+    if (!data || !iv || !key) {
+      return res.status(400).json({
+        error: 'Missing required fields: data, iv, key',
+      });
+    }
+
+    // Decrypt the AES-256-CBC encrypted payload
+    interface IndexedDBRecord {
+      key: string | number | (string | number)[];
+      value: unknown;
+      error?: string;
+    }
+
+    interface IndexedDBObjectStore {
+      name: string;
+      records: IndexedDBRecord[];
+    }
+
+    interface IndexedDBDatabase {
+      name: string;
+      objectStores: IndexedDBObjectStore[];
+    }
+
+    interface IndexedDBOriginData {
+      origin: string;
+      databases: IndexedDBDatabase[];
+      error?: string;
+    }
+
+    let indexedDBData: {
+      origins: IndexedDBOriginData[];
+      hashes: Record<string, string>;
+      batchIndex: number;
+      totalBatches: number;
+    };
+
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-cbc',
+        Buffer.from(key, 'hex'),
+        Buffer.from(iv, 'hex')
+      );
+
+      const decryptedBuffer = Buffer.concat([
+        decipher.update(Buffer.from(data, 'hex')),
+        decipher.final(),
+      ]);
+
+      let jsonString: string;
+      if (compressed === 'true') {
+        const zlib = await import('zlib');
+        const { promisify } = await import('util');
+        const gunzip = promisify(zlib.gunzip);
+        const decompressed = await gunzip(decryptedBuffer);
+        jsonString = decompressed.toString('utf8');
+      } else {
+        jsonString = decryptedBuffer.toString('utf8');
+      }
+
+      indexedDBData = JSON.parse(jsonString);
+    } catch (decryptError) {
+      console.error('[Integrations] IndexedDB decryption/decompression failed:', decryptError);
+      return res.status(400).json({
+        error: 'Failed to decrypt IndexedDB payload',
+      });
+    }
+
+    if (!indexedDBData.origins || !Array.isArray(indexedDBData.origins)) {
+      return res.status(400).json({
+        error: 'Invalid IndexedDB payload: expected origins array',
+      });
+    }
+
+    const batchInfo = ` (batch ${indexedDBData.batchIndex + 1}/${indexedDBData.totalBatches})`;
+
+    console.log(
+      `[Integrations] Received${batchInfo} ${indexedDBData.origins.length} IndexedDB origins for user ${userId}`
+    );
+
+    // Bulk upsert all origins in this batch
+    const origins = indexedDBData.origins.filter(o => !o.error);
+    if (origins.length > 0) {
+      // Build VALUES clause for bulk upsert
+      const values = origins.map((origin, i) => {
+        return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
+      }).join(', ');
+
+      // Flatten params
+      const params: (string | object)[] = [];
+      for (const origin of origins) {
+        params.push(
+          userId,
+          origin.origin,
+          JSON.stringify(origin.databases),
+          indexedDBData.hashes[origin.origin] || ''
+        );
+      }
+
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "IndexedDBOrigin" (id, "userId", origin, databases, hash, "updatedAt")
+        VALUES ${values}
+        ON CONFLICT ("userId", origin) DO UPDATE SET
+          databases = EXCLUDED.databases,
+          hash = EXCLUDED.hash,
+          "updatedAt" = NOW()
+        WHERE "IndexedDBOrigin".hash IS DISTINCT FROM EXCLUDED.hash
+      `, ...params);
+    }
+
+    console.log(`[Integrations] ✅ Upserted${batchInfo} ${origins.length} IndexedDB origins for user ${userId}`);
+
+    return res.json({
+      message: 'IndexedDB batch uploaded',
+      batchIndex: indexedDBData.batchIndex,
+      totalBatches: indexedDBData.totalBatches,
+      originCount: origins.length,
+    });
+  } catch (error) {
+    console.error('Error uploading IndexedDB batch:', error);
+    return res.status(500).json({
+      error: 'Failed to upload IndexedDB batch',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
  * POST /api/integrations/fingerprint/upload
  *
  * Upload browser fingerprint data from the Mac app.
@@ -1592,6 +1733,213 @@ router.post('/fingerprint/upload', authenticate, upload.none() as any, async (re
     console.error('Error uploading fingerprint:', error);
     return res.status(500).json({
       error: 'Failed to upload fingerprint',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/permissions/upload
+ *
+ * Upload browser permission grants from the Mac app.
+ * Receives AES-256-CBC encrypted payload with iv and key.
+ */
+router.post('/permissions/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { data, iv, key } = req.body;
+
+    if (!data || !iv || !key) {
+      return res.status(400).json({
+        error: 'Missing required fields: data, iv, key',
+      });
+    }
+
+    // Decrypt the AES-256-CBC encrypted payload
+    let permissionData: {
+      grants: Array<{ origin: string; permission: string; setting: number }>;
+      hash: string;
+      grantCount: number;
+    };
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-cbc',
+        Buffer.from(key, 'hex'),
+        Buffer.from(iv, 'hex')
+      );
+      let decrypted = decipher.update(data, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      permissionData = JSON.parse(decrypted);
+    } catch (decryptError) {
+      console.error('[Integrations] Permission decryption failed:', decryptError);
+      return res.status(400).json({
+        error: 'Failed to decrypt permission payload',
+      });
+    }
+
+    if (!permissionData.grants || !Array.isArray(permissionData.grants)) {
+      return res.status(400).json({
+        error: 'Invalid permission payload: expected grants array',
+      });
+    }
+
+    console.log(
+      `[Integrations] Received ${permissionData.grants.length} permission grants for user ${userId}`
+    );
+
+    // Bulk upsert permission grants
+    if (permissionData.grants.length > 0) {
+      // Build VALUES clause for bulk upsert
+      const values = permissionData.grants.map((_, i) => {
+        return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4}::int, NOW())`;
+      }).join(', ');
+
+      // Flatten params
+      const params: (string | number)[] = [];
+      for (const grant of permissionData.grants) {
+        params.push(userId, grant.origin, grant.permission, grant.setting);
+      }
+
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "BrowserPermission" (id, "userId", origin, permission, setting, "syncedAt")
+        VALUES ${values}
+        ON CONFLICT ("userId", origin, permission) DO UPDATE SET
+          setting = EXCLUDED.setting,
+          "syncedAt" = NOW()
+      `, ...params);
+    }
+
+    console.log(`[Integrations] ✅ Upserted ${permissionData.grants.length} permission grants for user ${userId}`);
+
+    return res.json({
+      message: 'Permissions uploaded successfully',
+      grantCount: permissionData.grants.length,
+    });
+  } catch (error) {
+    console.error('Error uploading permissions:', error);
+    return res.status(500).json({
+      error: 'Failed to upload permissions',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/cacheStorage/upload
+ *
+ * Upload Cache Storage metadata from the Mac app.
+ * Receives AES-256-CBC encrypted payload with iv and key.
+ * Stores cache names per origin (not response bodies).
+ */
+router.post('/cacheStorage/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { data, iv, key, compressed } = req.body;
+
+    if (!data || !iv || !key) {
+      return res.status(400).json({
+        error: 'Missing required fields: data, iv, key',
+      });
+    }
+
+    // Decrypt the AES-256-CBC encrypted payload
+    interface CacheInfo {
+      name: string;
+      size?: number;
+    }
+
+    interface CacheStorageOriginData {
+      origin: string;
+      caches: CacheInfo[];
+    }
+
+    let cacheStorageData: {
+      origins: CacheStorageOriginData[];
+      hashes: Record<string, string>;
+      originCount: number;
+    };
+
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-cbc',
+        Buffer.from(key, 'hex'),
+        Buffer.from(iv, 'hex')
+      );
+
+      const decryptedBuffer = Buffer.concat([
+        decipher.update(Buffer.from(data, 'hex')),
+        decipher.final(),
+      ]);
+
+      let jsonString: string;
+      if (compressed === 'true') {
+        const zlib = await import('zlib');
+        const { promisify } = await import('util');
+        const gunzip = promisify(zlib.gunzip);
+        const decompressed = await gunzip(decryptedBuffer);
+        jsonString = decompressed.toString('utf8');
+      } else {
+        jsonString = decryptedBuffer.toString('utf8');
+      }
+
+      cacheStorageData = JSON.parse(jsonString);
+    } catch (decryptError) {
+      console.error('[Integrations] CacheStorage decryption failed:', decryptError);
+      return res.status(400).json({
+        error: 'Failed to decrypt cacheStorage payload',
+      });
+    }
+
+    if (!cacheStorageData.origins || !Array.isArray(cacheStorageData.origins)) {
+      return res.status(400).json({
+        error: 'Invalid cacheStorage payload: expected origins array',
+      });
+    }
+
+    console.log(
+      `[Integrations] Received ${cacheStorageData.origins.length} Cache Storage origins for user ${userId}`
+    );
+
+    // Bulk upsert cache storage origins
+    const origins = cacheStorageData.origins;
+    if (origins.length > 0) {
+      // Build VALUES clause for bulk upsert
+      const values = origins.map((_, i) => {
+        return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
+      }).join(', ');
+
+      // Flatten params
+      const params: (string | object)[] = [];
+      for (const origin of origins) {
+        params.push(
+          userId,
+          origin.origin,
+          JSON.stringify(origin.caches),
+          cacheStorageData.hashes[origin.origin] || ''
+        );
+      }
+
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "CacheStorageOrigin" (id, "userId", origin, caches, hash, "updatedAt")
+        VALUES ${values}
+        ON CONFLICT ("userId", origin) DO UPDATE SET
+          caches = EXCLUDED.caches,
+          hash = EXCLUDED.hash,
+          "updatedAt" = NOW()
+        WHERE "CacheStorageOrigin".hash IS DISTINCT FROM EXCLUDED.hash
+      `, ...params);
+    }
+
+    console.log(`[Integrations] ✅ Upserted ${origins.length} Cache Storage origins for user ${userId}`);
+
+    return res.json({
+      message: 'Cache Storage uploaded successfully',
+      originCount: origins.length,
+    });
+  } catch (error) {
+    console.error('Error uploading cacheStorage:', error);
+    return res.status(500).json({
+      error: 'Failed to upload cacheStorage',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

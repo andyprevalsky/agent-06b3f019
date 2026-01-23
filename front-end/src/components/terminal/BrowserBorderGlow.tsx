@@ -18,10 +18,13 @@ interface BrowserBorderGlowProps {
 const CONFIG = {
   gridSpacing: 4,
   dotRadius: 1,
-  // How far corners extend toward center
-  cornerRadius: 525,
+  // How far corners extend toward center (reduced 10% from 525)
+  cornerRadius: 473,
+  // How far edge glow extends inward
+  edgeRadius: 80,
   // Persistent glow underneath
   glowOpacity: 0.45,
+  edgeGlowOpacity: 0.2, // Edge glow is dimmer than corners
   glowColor: { r: 186, g: 230, b: 253 }, // sky-200 (light, close to white)
   numWaves: 3,
   waveWidth: 0.22,
@@ -39,6 +42,7 @@ interface Dot {
   // Which corner (0-3) and normalized distance from it
   cornerIndex: number;
   cornerDist: number; // 0 = at corner, 1 = at edge of corner region
+  edgeDist: number; // 0 = at edge, 1 = at edge of edge region
   flickerPhase: number;
 }
 
@@ -73,8 +77,9 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
     const generateGlow = (width: number, height: number, dpr: number) => {
       if (width === 0 || height === 0) return;
 
-      const { glowOpacity, cornerRadius, glowColor } = CONFIG;
-      const scaledRadius = cornerRadius * dpr;
+      const { glowOpacity, edgeGlowOpacity, cornerRadius, edgeRadius, glowColor } = CONFIG;
+      const scaledCornerRadius = cornerRadius * dpr;
+      const scaledEdgeRadius = edgeRadius * dpr;
       const glowData = new Uint8ClampedArray(width * height * 4);
 
       const corners = [
@@ -86,19 +91,31 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
 
       for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
-          let glowIntensity = 0;
+          // Corner glow
+          let cornerIntensity = 0;
           for (const corner of corners) {
             const dist = Math.sqrt((x - corner.x) ** 2 + (y - corner.y) ** 2);
-            const intensity = Math.max(0, 1 - dist / scaledRadius);
+            const intensity = Math.max(0, 1 - dist / scaledCornerRadius);
             // Use squared falloff for softer edges
-            glowIntensity = Math.max(glowIntensity, intensity * intensity);
+            cornerIntensity = Math.max(cornerIntensity, intensity * intensity);
           }
-          if (glowIntensity > 0) {
+
+          // Edge glow - distance to nearest edge
+          const edgeDist = Math.min(x, y, width - 1 - x, height - 1 - y);
+          const edgeIntensity = Math.max(0, 1 - edgeDist / scaledEdgeRadius);
+          const edgeGlow = edgeIntensity * edgeIntensity; // squared falloff
+
+          // Combine: corners use full glowOpacity, edges use edgeGlowOpacity
+          const cornerAlpha = cornerIntensity * glowOpacity;
+          const edgeAlpha = edgeGlow * edgeGlowOpacity;
+          const finalAlpha = Math.max(cornerAlpha, edgeAlpha);
+
+          if (finalAlpha > 0) {
             const idx = (y * width + x) * 4;
             glowData[idx] = glowColor.r;
             glowData[idx + 1] = glowColor.g;
             glowData[idx + 2] = glowColor.b;
-            glowData[idx + 3] = glowIntensity * glowOpacity * 255;
+            glowData[idx + 3] = finalAlpha * 255;
           }
         }
       }
@@ -108,9 +125,10 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
 
     const generateDots = (width: number, height: number, dpr: number) => {
       const dots: Dot[] = [];
-      const { gridSpacing, cornerRadius } = CONFIG;
+      const { gridSpacing, cornerRadius, edgeRadius } = CONFIG;
       const scaledSpacing = Math.max(2, gridSpacing * dpr);
-      const scaledRadius = cornerRadius * dpr;
+      const scaledCornerRadius = cornerRadius * dpr;
+      const scaledEdgeRadius = edgeRadius * dpr;
 
       const corners = [
         { x: 0, y: 0 },
@@ -122,26 +140,34 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
       for (let x = 0; x < width; x += scaledSpacing) {
         for (let y = 0; y < height; y += scaledSpacing) {
           // Find closest corner and distance
-          let minDist = Infinity;
+          let minCornerDist = Infinity;
           let closestCorner = 0;
 
           for (let i = 0; i < corners.length; i++) {
             const corner = corners[i];
             const dist = Math.sqrt((x - corner.x) ** 2 + (y - corner.y) ** 2);
-            if (dist < minDist) {
-              minDist = dist;
+            if (dist < minCornerDist) {
+              minCornerDist = dist;
               closestCorner = i;
             }
           }
 
-          // Only add dots within corner radius
-          if (minDist < scaledRadius) {
-            const normalizedDist = minDist / scaledRadius;
+          // Distance to nearest edge
+          const edgeDist = Math.min(x, y, width - x, height - y);
+
+          // Add dots if within corner radius OR within edge radius
+          const inCornerRegion = minCornerDist < scaledCornerRadius;
+          const inEdgeRegion = edgeDist < scaledEdgeRadius;
+
+          if (inCornerRegion || inEdgeRegion) {
+            const normalizedCornerDist = minCornerDist / scaledCornerRadius;
+            const normalizedEdgeDist = edgeDist / scaledEdgeRadius;
             dots.push({
               x: Math.floor(x),
               y: Math.floor(y),
               cornerIndex: closestCorner,
-              cornerDist: normalizedDist,
+              cornerDist: normalizedCornerDist,
+              edgeDist: normalizedEdgeDist,
               flickerPhase: Math.random() * Math.PI * 2,
             });
           }
@@ -196,10 +222,13 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
           ? 0.5 + 0.5 * Math.sin(timestamp * flickerSpeed + dot.flickerPhase)
           : 0;
 
-        // Fade out towards edge of corner region
-        const edgeFade = 1 - dot.cornerDist;
-        const baseOpacity = minOpacity * edgeFade * edgeFade;
-        const activeOpacity = waveInfluence * flicker * (maxOpacity - minOpacity) * edgeFade;
+        // Fade out towards edge of region (corner or edge)
+        // Corner fade is full intensity, edge fade is 50% intensity
+        const cornerFade = dot.cornerDist < 1 ? (1 - dot.cornerDist) : 0;
+        const edgeFadeRaw = dot.edgeDist < 1 ? (1 - dot.edgeDist) : 0;
+        const regionFade = Math.max(cornerFade, edgeFadeRaw * 0.5);
+        const baseOpacity = minOpacity * regionFade * regionFade;
+        const activeOpacity = waveInfluence * flicker * (maxOpacity - minOpacity) * regionFade;
         const opacity = baseOpacity + activeOpacity;
 
         if (opacity > 0.01) {

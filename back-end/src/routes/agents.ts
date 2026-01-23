@@ -11,6 +11,7 @@ import { getX402Endpoints } from '../lib/x402Endpoints';
 import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSchema';
 import { handleChatMessage, broadcastAgentModeStarted } from '../lib/chat';
 import { createMessage } from '../lib/messages';
+import { getClientIP, getGeoFromIP, DEFAULT_GEOLOCATION } from '../lib/geoip';
 import {
   processUploadedFile,
   validateTotalSize,
@@ -263,6 +264,17 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       console.warn(`⚠️  Could not fetch pricing for ${body.model}, agent will have no pricing data`);
     }
 
+    // Look up geolocation from client IP for proxy location
+    const clientIP = getClientIP(req);
+    let proxyGeo = DEFAULT_GEOLOCATION;
+    if (clientIP) {
+      const geo = await getGeoFromIP(clientIP);
+      if (geo) {
+        proxyGeo = geo;
+      }
+    }
+    console.log(`🌍 Proxy geolocation: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country} (IP: ${clientIP || 'unknown'})`);
+
     // Create agent with verifier and tool associations in a transaction
     const agent = await prisma.$transaction(async (tx) => {
       const newAgent = await tx.agent.create({
@@ -282,6 +294,10 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           status: body.pause_state ? 'PAUSED' : 'STARTING_UP',
           // Store response schema directly if provided (for sub-agents)
           responseSchema: body.response_schema || undefined,
+          // Proxy geolocation from client IP
+          proxyCountry: proxyGeo.country,
+          proxyState: proxyGeo.state,
+          proxyCity: proxyGeo.city,
         },
       });
 

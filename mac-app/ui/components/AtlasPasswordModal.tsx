@@ -73,7 +73,7 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync }: AtlasPasswordModalProps
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div className="flex items-center gap-2">
             <Key className="w-4 h-4 text-muted-foreground" />
-            <h2 className="text-base font-semibold text-foreground">Sync Atlas Cookies</h2>
+            <h2 className="text-base font-semibold text-foreground">Sync Atlas</h2>
           </div>
           <button
             onClick={handleClose}
@@ -206,7 +206,7 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync }: AtlasPasswordModalProps
                 Syncing...
               </>
             ) : (
-              'Sync Cookies'
+              'Sync'
             )}
           </button>
         </div>

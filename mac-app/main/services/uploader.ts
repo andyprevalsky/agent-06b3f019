@@ -109,17 +109,16 @@ export class Uploader {
           },
           body: JSON.stringify(body),
         });
-      } else if (integrationType.endsWith('_cookies')) {
+      } else if (['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas', 'safari', 'firefox'].includes(integrationType)) {
         // Browser cookies go to the dedicated cookie endpoint
-        // Extract browser type from integration name (e.g., 'chrome_cookies' -> 'chrome')
-        const browser = integrationType.replace('_cookies', '');
+        // Integration type is the browser name (e.g., 'chrome', 'edge', 'atlas')
         const { encrypted, iv, key } = Crypto.encrypt(data);
 
         const formData = new FormData();
         formData.append('data', encrypted);
         formData.append('iv', iv);
         formData.append('key', key);
-        formData.append('browser', browser);
+        formData.append('browser', integrationType);
 
         response = await fetch(`${config.apiUrl}/api/integrations/cookies/upload`, {
           method: 'POST',

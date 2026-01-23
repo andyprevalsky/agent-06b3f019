@@ -14,6 +14,7 @@ import {
   listSessionFiles,
   SteelFileInfo
 } from '../lib/steel';
+import { DEFAULT_GEOLOCATION, ProxyGeoLocation } from '../lib/geoip';
 
 // Configure multer for file uploads (store in memory)
 const upload = multer({
@@ -54,14 +55,30 @@ const injectLocalStorageSchema = z.object({
 router.post('/init', authenticate, async (req: AuthRequest, res) => {
   try {
     const { user_id, agent_id } = initSessionSchema.parse(req.body);
-    
+
     console.log(`🌐 Initializing browser session for user ${user_id}, agent ${agent_id}`);
-    
+
+    // Look up agent's proxy geolocation
+    const agent = await prisma.agent.findUnique({
+      where: { id: agent_id },
+      select: { proxyCountry: true, proxyState: true, proxyCity: true }
+    });
+
+    const proxyGeo: ProxyGeoLocation = agent?.proxyCountry
+      ? {
+          country: agent.proxyCountry,
+          state: agent.proxyState || DEFAULT_GEOLOCATION.state,
+          city: agent.proxyCity || DEFAULT_GEOLOCATION.city,
+        }
+      : DEFAULT_GEOLOCATION;
+
+    console.log(`🌍 Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
+
     // 1. Get or create persistent context for user
     const contextId = await getOrCreateContext(user_id);
-    
+
     // 2. Create temporary session for this task
-    const session = await createSessionWithContext(contextId, agent_id);
+    const session = await createSessionWithContext(contextId, agent_id, proxyGeo);
 
     // 3. Inject user's cookies and fingerprint in a single CDP connection
     const injectionResult = await injectUserData(session.sessionId, user_id);

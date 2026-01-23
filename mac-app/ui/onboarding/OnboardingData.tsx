@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Check, Loader2, ArrowRight, X, RefreshCw, Fingerprint } from 'lucide-react';
+import { Check, Loader2, ArrowRight, X, RefreshCw } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import AtlasPasswordModal from '../components/AtlasPasswordModal';
 import type { BrowserInfo, BrowserType } from '../../shared/types/ipc';
@@ -175,17 +175,13 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const [gmailLoading, setGmailLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
 
-  // Browser cookies state
+  // Browser sync state
   const [installedBrowsers, setInstalledBrowsers] = useState<BrowserInfo[]>([]);
   const [connectedBrowsers, setConnectedBrowsers] = useState<Set<BrowserType>>(new Set());
   const [browserSyncLoading, setBrowserSyncLoading] = useState<BrowserType | null>(null);
   const [browsersExpanded, setBrowsersExpanded] = useState(false);
   const [atlasModalOpen, setAtlasModalOpen] = useState(false);
   const [pendingAtlasBrowser, setPendingAtlasBrowser] = useState<BrowserType | null>(null);
-
-  // Fingerprint state
-  const [fingerprintCollected, setFingerprintCollected] = useState(false);
-  const [fingerprintLoading, setFingerprintLoading] = useState(false);
 
   // Fetch installed browsers and existing integrations on mount
   useEffect(() => {
@@ -220,21 +216,15 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           const data = await response.json();
           const integrations: Integration[] = data.integrations || [];
 
-          // Check for browser cookie integrations (chrome_cookies, atlas_cookies, etc.)
+          // Check for browser integrations (chrome, edge, atlas, etc.)
+          const validBrowserTypes = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas', 'safari', 'firefox'];
           const newConnectedBrowsers = new Set<BrowserType>();
           for (const integration of integrations) {
-            if (integration.name.endsWith('_cookies') && integration.status === 'CONNECTED') {
-              const browserType = integration.name.replace('_cookies', '') as BrowserType;
-              newConnectedBrowsers.add(browserType);
+            if (validBrowserTypes.includes(integration.name) && integration.status === 'CONNECTED') {
+              newConnectedBrowsers.add(integration.name as BrowserType);
             }
           }
           setConnectedBrowsers(newConnectedBrowsers);
-
-          // Check for fingerprint integration
-          const fingerprintIntegration = integrations.find(i => i.name === 'browser_fingerprint');
-          if (fingerprintIntegration?.status === 'CONNECTED') {
-            setFingerprintCollected(true);
-          }
 
           // Check for gmail integration(s) - use connectedEmails array if available, fallback to connectedEmail
           // Treat CONNECTED or SYNCING as connected (SYNCING means OAuth succeeded, just processing emails)
@@ -261,7 +251,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   // Continue is only available when at least one browser is connected and at least one email
   const canContinue = connectedBrowsers.size > 0 && connectedEmails.length > 0;
 
-  // Handle browser sync click
+  // Handle browser sync click - syncs all browser data in parallel
   const handleBrowserSync = async (browserType: BrowserType) => {
     const browser = installedBrowsers.find(b => b.type === browserType);
     if (!browser) return;
@@ -273,16 +263,17 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       return;
     }
 
-    // For Chrome (automatic keychain access)
+    // Full browser sync (all browser data)
     setBrowserSyncLoading(browserType);
     try {
-      const cookies = await window.api.readBrowserCookies(browserType);
-      if (cookies.length > 0) {
-        await window.api.uploadBrowserCookies(browserType, cookies);
+      const result = await window.api.syncBrowser(browserType);
+      if (result.success) {
         setConnectedBrowsers(prev => new Set([...prev, browserType]));
+      } else {
+        console.error(`Failed to sync ${browserType}:`, result.message);
       }
     } catch (err) {
-      console.error(`Failed to sync ${browserType} cookies:`, err);
+      console.error(`Failed to sync ${browserType}:`, err);
     } finally {
       setBrowserSyncLoading(null);
     }
@@ -294,47 +285,25 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
     setBrowserSyncLoading(pendingAtlasBrowser);
     try {
-      const cookies = await window.api.readBrowserCookies(pendingAtlasBrowser, { keychainPassword: password });
-      if (cookies.length > 0) {
-        await window.api.uploadBrowserCookies(pendingAtlasBrowser, cookies);
+      const result = await window.api.syncBrowser(pendingAtlasBrowser, { keychainPassword: password });
+      if (result.success) {
         setConnectedBrowsers(prev => new Set([...prev, pendingAtlasBrowser]));
 
         // Store the password securely for background sync
         if (window.api.atlas?.storePassword) {
-          const result = await window.api.atlas.storePassword(password);
-          if (!result.success) {
-            console.warn('[OnboardingData] Failed to store Atlas password:', result.error);
+          const storeResult = await window.api.atlas.storePassword(password);
+          if (!storeResult.success) {
+            console.warn('[OnboardingData] Failed to store Atlas password:', storeResult.error);
           }
         }
       }
       setAtlasModalOpen(false);
       setPendingAtlasBrowser(null);
     } catch (err) {
-      console.error(`Failed to sync ${pendingAtlasBrowser} cookies:`, err);
+      console.error(`Failed to sync ${pendingAtlasBrowser}:`, err);
       throw err; // Let the modal handle the error display
     } finally {
       setBrowserSyncLoading(null);
-    }
-  };
-
-  // Handle fingerprint collection
-  const handleFingerprintConnect = async () => {
-    setFingerprintLoading(true);
-    try {
-      if (!window.api?.collectFingerprint) {
-        console.error('[OnboardingData] collectFingerprint API not available');
-        return;
-      }
-
-      const fingerprint = await window.api.collectFingerprint();
-      if (fingerprint) {
-        await window.api.uploadFingerprint(fingerprint);
-        setFingerprintCollected(true);
-      }
-    } catch (err) {
-      console.error('Failed to collect fingerprint:', err);
-    } finally {
-      setFingerprintLoading(false);
     }
   };
 
@@ -465,7 +434,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
         {/* Integrations */}
         <div className="space-y-3 mb-8">
-          {/* Browser Cookies - Expandable */}
+          {/* Browser Sync - Expandable */}
           <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
             {/* Main row */}
             <div className="p-4 flex items-center justify-between">
@@ -483,8 +452,8 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                   </svg>
                 </div>
                 <div>
-                  <div className="font-medium text-sm text-foreground">Browser Cookies</div>
-                  <div className="text-xs text-muted-foreground">Enable web automation and browsing</div>
+                  <div className="font-medium text-sm text-foreground">Browser Sync</div>
+                  <div className="text-xs text-muted-foreground">Sync browsing data for web automation</div>
                 </div>
               </div>
 
@@ -550,16 +519,6 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
               </div>
             )}
           </div>
-
-          {/* Browser Fingerprint */}
-          <IntegrationItem
-            icon={<Fingerprint className="w-5 h-5 text-purple-500" />}
-            name="Browser Fingerprint"
-            description="Match your browser identity for seamless auth"
-            connected={fingerprintCollected}
-            loading={fingerprintLoading}
-            onConnect={handleFingerprintConnect}
-          />
 
           <IntegrationItem
             icon={

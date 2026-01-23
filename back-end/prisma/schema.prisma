@@ -36,6 +36,9 @@ model Agent {
   structuredResponse        Json?
   busId                     String?
   toolsInUse                String[]    @default([])
+  proxyCountry              String?     // Proxy geolocation from client IP (e.g., "US")
+  proxyState                String?     // State abbreviation (e.g., "TX")
+  proxyCity                 String?     // City name uppercase (e.g., "DALLAS")
   parent                    Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
   children                  Agent[]     @relation("AgentHierarchy")
   tools                     AgentTool[]
@@ -596,6 +599,47 @@ model LocalStorageOrigin {
   userId    String
   origin    String   // "https://google.com"
   entries   Json     // [{ key: "token", value: "..." }, ...]
+  hash      String   // For cache invalidation
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, origin])
+  @@index([userId])
+}
+
+// Per-origin IndexedDB storage
+// Stores all databases + object stores + records for an origin
+model IndexedDBOrigin {
+  id        String   @id @default(uuid())
+  userId    String
+  origin    String   // "https://www.amazon.com"
+  databases Json     // [{ name: "dbName", objectStores: [{ name: "storeName", records: [...] }] }]
+  hash      String   // For cache invalidation
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, origin])
+  @@index([userId])
+}
+
+// Per-origin permission grants from user's browser
+// Used to make Steel sessions appear to have the same permissions
+model BrowserPermission {
+  id         String   @id @default(uuid())
+  userId     String
+  origin     String   // "https://www.amazon.com" or pattern "[*.]amazon.com"
+  permission String   // "geolocation", "notifications", "camera", "microphone", etc.
+  setting    Int      // 1=allow, 2=block (Chrome's content_settings values)
+  syncedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([userId, origin, permission])
+  @@index([userId])
+}
+
+// Per-origin Cache Storage metadata (cache names and URL indexes, not response bodies)
+model CacheStorageOrigin {
+  id        String   @id @default(uuid())
+  userId    String
+  origin    String   // "https://www.amazon.com"
+  caches    Json     // [{ name: "cache-v1", urls: ["url1", "url2", ...] }, ...]
   hash      String   // For cache invalidation
   updatedAt DateTime @updatedAt
 

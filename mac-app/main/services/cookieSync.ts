@@ -21,7 +21,7 @@ export class CookieSync {
     }
 
     try {
-      // Check if chrome_cookies integration is already connected
+      // Check if chrome integration is already connected
       const response = await fetch(`${config.apiUrl}/api/integrations`, {
         headers: {
           'Authorization': `Bearer ${session.access_token}`,
@@ -35,7 +35,7 @@ export class CookieSync {
 
       const data = await response.json() as { integrations?: Integration[] };
       const integrations = data.integrations;
-      const cookieIntegration = integrations?.find(i => i.name === 'chrome_cookies');
+      const cookieIntegration = integrations?.find(i => i.name === 'chrome');
 
       // Only sync if already connected (user has previously synced)
       if (!cookieIntegration || cookieIntegration.status !== 'CONNECTED') {
@@ -54,7 +54,7 @@ export class CookieSync {
 
       console.log(`[CookieSync] Found ${cookies.length} cookies, uploading...`);
       const result = await BatchUploader.uploadInBatches(
-        'chrome_cookies',
+        'chrome',
         cookies,
         session.access_token,
         null // No window for background sync
