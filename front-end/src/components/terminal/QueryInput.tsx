@@ -34,11 +34,28 @@
  * - isFocused: boolean (styling)
  * - selectedModel: Model | null (controlled by parent)
  *
+ * COST INDICATOR (left of context chip, always visible):
+ * - No agent: shows "0.00 / 0.25" (default limit, not editable)
+ * - Root agent: shows "cost / limit", CLICKABLE to edit limit
+ * - Child agent: shows "cost" only (not editable)
+ * - Gray when < 80% of limit
+ * - Amber when >= 80% of limit
+ * - Red when at/exceeding limit
+ *
+ * PRICE LIMIT EDITING (root agents only):
+ * [DISPLAY] <-- isEditingPriceLimit: false
+ *     |
+ *     v (click)
+ * [EDITING] <-- isEditingPriceLimit: true
+ *     |
+ *     +--> (Enter/Save) --> [SAVING] --> [DISPLAY]
+ *     +--> (Escape) --> [DISPLAY]
+ *
  * Supports stopping agent via onStop prop.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ChevronDown, ArrowUp, Square, Loader2, Paperclip, X, FileIcon, ImageIcon, FileText } from 'lucide-react';
+import { ChevronDown, ArrowUp, Square, Loader2, Paperclip, X, FileIcon, ImageIcon, FileText, DollarSign } from 'lucide-react';
 import * as amplitude from '@amplitude/analytics-browser';
 import { cn } from '@/lib/utils';
 import {
@@ -51,6 +68,7 @@ import {
 } from '@/components/ui/command';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import {
   Tooltip,
   TooltipContent,
@@ -62,6 +80,7 @@ import {
   AgentDetail,
   FilePointer,
   uploadAttachment,
+  updateAgent,
   MAX_FILE_SIZE,
   MAX_TOTAL_ATTACHMENTS_SIZE,
 } from '@/lib/api';
@@ -124,6 +143,9 @@ interface QueryInputProps {
   isPausing?: boolean; // loading state for pause action
   // Agent ID for file uploads (required for large file uploads)
   agentId?: string;
+  // Price limit for new agents (when no agent selected)
+  pendingPriceLimitCents?: number;
+  onPendingPriceLimitChange?: (cents: number) => void;
 }
 
 export default function QueryInput({
@@ -161,6 +183,8 @@ export default function QueryInput({
   onPause,
   isPausing = false,
   agentId,
+  pendingPriceLimitCents = 100,
+  onPendingPriceLimitChange,
 }: QueryInputProps) {
   // Tool picker removed - LLM automatically selects tools based on goal
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -175,6 +199,11 @@ export default function QueryInput({
   // Attachment state
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+
+  // Price limit editing state
+  const [isEditingPriceLimit, setIsEditingPriceLimit] = useState(false);
+  const [priceLimitInput, setPriceLimitInput] = useState('');
+  const [isSavingPriceLimit, setIsSavingPriceLimit] = useState(false);
 
   // Check if any attachments are still uploading
   const hasUploadingAttachments = attachments.some(a => a.status === 'uploading');
@@ -439,6 +468,80 @@ export default function QueryInput({
     }
   };
 
+  // Handle price limit edit - works for both existing agents and pending (pre-spawn) limit
+  const handleStartEditPriceLimit = () => {
+    // For existing root agents OR when no agent is selected (setting pending limit)
+    if (agentDetail && agentDetail.parent_agent_id) return; // Child agents can't edit
+
+    if (agentDetail) {
+      // Editing existing agent's limit
+      setPriceLimitInput(((agentDetail.price_limit_cents || 100) / 100).toFixed(2));
+    } else {
+      // Setting pending limit for new agent
+      setPriceLimitInput((pendingPriceLimitCents / 100).toFixed(2));
+    }
+    setIsEditingPriceLimit(true);
+  };
+
+  const handleSavePriceLimit = async () => {
+    const newLimitCents = Math.round(parseFloat(priceLimitInput) * 100);
+    if (isNaN(newLimitCents) || newLimitCents < 1) {
+      toast({
+        title: 'Invalid amount',
+        description: 'Please enter a valid dollar amount (minimum $0.01)',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (agentDetail) {
+      // Updating existing agent's limit
+      if (newLimitCents < (agentDetail.tree_cost_cents || 0)) {
+        toast({
+          title: 'Limit too low',
+          description: `New limit must be at least $${((agentDetail.tree_cost_cents || 0) / 100).toFixed(2)} (current cost)`,
+          variant: 'destructive',
+        });
+        return;
+      }
+      setIsSavingPriceLimit(true);
+      try {
+        await updateAgent(agentDetail.agent_id, { price_limit_cents: newLimitCents });
+        toast({
+          title: 'Price limit updated',
+          description: `New limit: $${(newLimitCents / 100).toFixed(2)}`,
+        });
+        setIsEditingPriceLimit(false);
+        onAgentUpdate?.();
+      } catch (error) {
+        toast({
+          title: 'Error',
+          description: error instanceof Error ? error.message : 'Failed to update price limit',
+          variant: 'destructive',
+        });
+      } finally {
+        setIsSavingPriceLimit(false);
+      }
+    } else {
+      // Setting pending limit for new agent (no API call needed)
+      onPendingPriceLimitChange?.(newLimitCents);
+      toast({
+        title: 'Price limit set',
+        description: `New agents will use $${(newLimitCents / 100).toFixed(2)} limit`,
+      });
+      setIsEditingPriceLimit(false);
+    }
+  };
+
+  const handleCancelEditPriceLimit = () => {
+    setIsEditingPriceLimit(false);
+    if (agentDetail) {
+      setPriceLimitInput(((agentDetail.price_limit_cents || 100) / 100).toFixed(2));
+    } else {
+      setPriceLimitInput((pendingPriceLimitCents / 100).toFixed(2));
+    }
+  };
+
   // Tool picker removed - LLM automatically selects tools based on goal
 
   // Separate featured (first 6) from rest
@@ -515,8 +618,89 @@ export default function QueryInput({
               )}
             </div>
 
-            {/* Context Meter and Settings */}
+            {/* Cost Limit, Context Meter and Settings */}
             <div className="flex items-center gap-2">
+              {/* Cost Limit Indicator (left of context) - editable for root agents */}
+              {isEditingPriceLimit ? (
+                <div className="flex items-center gap-1 text-muted-foreground text-xs font-mono px-2 py-1 border rounded-md">
+                  <DollarSign className="h-3 w-3" />
+                  <span>
+                    {((agentDetail?.tree_cost_cents || 0) / 100).toFixed(2)} /
+                  </span>
+                  <Input
+                    value={priceLimitInput}
+                    onChange={(e) => {
+                      // Only allow numbers and decimal point
+                      const filtered = e.target.value.replace(/[^0-9.]/g, '');
+                      // Only allow one decimal point
+                      const parts = filtered.split('.');
+                      const sanitized = parts.length > 2 ? parts[0] + '.' + parts.slice(1).join('') : filtered;
+                      setPriceLimitInput(sanitized);
+                    }}
+                    className="w-14 h-5 text-xs font-mono px-1 py-0 border border-foreground rounded"
+                    placeholder="1.00"
+                    disabled={isSavingPriceLimit}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSavePriceLimit();
+                      if (e.key === 'Escape') handleSavePriceLimit();
+                    }}
+                    onBlur={handleSavePriceLimit}
+                    autoFocus
+                  />
+                </div>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        // Allow editing for: no agent (pending) OR root agent (no parent)
+                        if (!agentDetail || !agentDetail.parent_agent_id) {
+                          handleStartEditPriceLimit();
+                        }
+                      }}
+                      disabled={agentDetail && !!agentDetail.parent_agent_id}
+                      className={cn(
+                        "flex items-center gap-1 text-xs font-mono px-2 py-1 rounded-md border text-muted-foreground",
+                        // Warning colors for root agents approaching/at limit
+                        agentDetail && !agentDetail.parent_agent_id && (agentDetail.tree_cost_cents || 0) >= (agentDetail.price_limit_cents || 100)
+                          ? "text-red-500 border-red-300 dark:border-red-700"
+                          : agentDetail && !agentDetail.parent_agent_id && (agentDetail.tree_cost_cents || 0) >= (agentDetail.price_limit_cents || 100) * 0.8
+                          ? "text-amber-500 border-amber-300 dark:border-amber-700"
+                          : "",
+                        // Hover styling for editable states (no agent or root agent) - light gray bg
+                        (!agentDetail || !agentDetail.parent_agent_id) && "hover:bg-muted cursor-pointer",
+                        // Disabled styling for child agents
+                        agentDetail && agentDetail.parent_agent_id && "cursor-default opacity-70"
+                      )}
+                    >
+                      <DollarSign className="h-3 w-3" />
+                      <span>
+                        {agentDetail
+                          ? (!agentDetail.parent_agent_id
+                              ? `${((agentDetail.tree_cost_cents || 0) / 100).toFixed(2)} / ${((agentDetail.price_limit_cents || 100) / 100).toFixed(2)}`
+                              : `${((agentDetail.tree_cost_cents || 0) / 100).toFixed(2)}`)
+                          : `0.00 / ${(pendingPriceLimitCents / 100).toFixed(2)}`
+                        }
+                      </span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="z-[100]">
+                    <p className="text-xs">
+                      {agentDetail
+                        ? (!agentDetail.parent_agent_id
+                            ? `$${((agentDetail.price_limit_cents || 100) / 100).toFixed(2)} price limit set for this task. This limit is used to avoid runaway costs. (click to edit)`
+                            : `Cost: $${((agentDetail.tree_cost_cents || 0) / 100).toFixed(2)}`)
+                        : `$${(pendingPriceLimitCents / 100).toFixed(2)} price limit set for this task. This limit is used to avoid runaway costs. (click to edit)`
+                      }
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              )}
+
+              {/* Context Meter */}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <div>
@@ -553,7 +737,7 @@ export default function QueryInput({
                   </p>
                 </TooltipContent>
               </Tooltip>
-              
+
               {/* Agent Settings Button */}
               <AgentSettingsDialog
                 agent={agentDetail}

@@ -9,7 +9,7 @@ import httpx
 import asyncio
 import time
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 
 # Config import is safe - no side effects at import time (load_dotenv is lazy)
 from config import load_config
@@ -231,19 +231,12 @@ class EnrichManager(ToolManager):
             }
             total_cost_cents = processor_costs_cents.get(processor.lower(), 2.5)
             
-            # 3. Report usage
-            yield ToolEvent(
-                type=EventType.USAGE,
-                tool_name=self.tool_name,
-                usage_items=[
-                    UsageItem(
-                        type=UsageType.SERVICE,
-                        cost_cents=total_cost_cents,
-                        provider=f"Parallel Task API ({processor})"
-                    )
-                ]
-            )
-            
+            # 3. Build standardized usage for workflow cost tracking
+            tool_usage = {
+                "llm": [],
+                "service": [{"cost_cents": int(total_cost_cents), "provider": f"Parallel Task API ({processor})"}],
+            }
+
             # 4. Format success message using standardized format
             result = {
                 "run_id": run_id,
@@ -259,12 +252,13 @@ class EnrichManager(ToolManager):
                 cost_cents=total_cost_cents
             )
             
-            # Post-execution success with verbose title (100%)
+            # Post-execution success with verbose title (100%) - include usage for tracking
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=f"Enrichment completed: {title_entity}",
                 message=message,
-                status=MessageStatus.FINISHED
+                status=MessageStatus.FINISHED,
+                data={"usage": tool_usage}
             )
             
         except Exception as e:
@@ -316,16 +310,19 @@ async def enrich(
 ):
     """
     Workflow helper for Enrich (new event-driven system).
-    
+
     Args:
         workflow_instance: The workflow instance
         tool_call: Tool call dict with 'input', 'output_schema', 'processor'
         tool_call_id: Unique ID for this tool call
     """
     manager = get_manager()
-    
+
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "enrich")
+        # Track usage from final event (included in data field)
+        if event.data and event.data.get("usage"):
+            await workflow_instance._track_usage(event.data["usage"], tool_name="enrich")
 
 
 # ========================================

@@ -18,7 +18,7 @@ import time
 import uuid as uuid_module
 from pydantic import BaseModel, Field
 
-from tools.base import ToolManager, ToolEvent, AssistantEvent, EventType, MessageStatus, UsageType, UsageItem
+from tools.base import ToolManager, ToolEvent, AssistantEvent, EventType, MessageStatus
 from config import load_config
 from helpers.terminal_filter import TerminalFilter
 from helpers.claude_code_ws_client import ClaudeCodeWsClient
@@ -443,7 +443,13 @@ async def spawn_claude_code_activity(
         activity.heartbeat("Connecting to Claude Code WebSocket")
 
         # Model pricing for usage tracking
+        # Parent model pricing (for verifier calls)
         model_pricing = await get_model_pricing_with_fallback(model)
+        # Claude Code uses Sonnet 4 - $3/MTok input, $15/MTok output = 0.3¢/1k input, 1.5¢/1k output
+        claude_code_pricing = {
+            "input_cents_per_1k": 0.3,
+            "output_cents_per_1k": 1.5,
+        }
 
         # Terminal filter (pyte) for processing ANSI codes like xterm.js
         terminal = TerminalFilter(cols=200, rows=500)
@@ -857,6 +863,7 @@ async def spawn_claude_code_activity(
             )
 
         output_files = []
+        claude_code_usage = None  # Usage extracted from JSONL logs
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 close_response = await client.post(
@@ -872,12 +879,14 @@ async def spawn_claude_code_activity(
                 if close_response.status_code == 200:
                     close_data = close_response.json()
                     output_files = close_data.get("output_files", [])
+                    claude_code_usage = close_data.get("usage")
                 logger.info(
                     "[ClaudeCode] Session closed",
                     agent_id=agent_id,
                     task_id=task_id,
                     response_status=close_response.status_code,
-                    output_files=len(output_files)
+                    output_files=len(output_files),
+                    claude_code_usage=claude_code_usage
                 )
                 if output_files:
                     action_summary.append(f"Extracted {len(output_files)} output files")
@@ -915,24 +924,62 @@ async def spawn_claude_code_activity(
 
         # Calculate usage
         execution_time_ms = (_safe_time() - start_time) * 1000
-        usage_items = [
-            {
+        usage_items = []
+
+        # 1. Claude Code LLM usage (from JSONL logs, using Sonnet 4 pricing)
+        if claude_code_usage:
+            cc_input = claude_code_usage.get("inputTokens", 0)
+            cc_output = claude_code_usage.get("outputTokens", 0)
+            cc_cache_read = claude_code_usage.get("cacheReadInputTokens", 0)
+            cc_cache_create = claude_code_usage.get("cacheCreationInputTokens", 0)
+            # Cache reads are 10% of input price, cache creation is 125% of input price
+            cc_cost = round(
+                (cc_input / 1000) * claude_code_pricing["input_cents_per_1k"] +
+                (cc_output / 1000) * claude_code_pricing["output_cents_per_1k"] +
+                (cc_cache_read / 1000) * claude_code_pricing["input_cents_per_1k"] * 0.1 +
+                (cc_cache_create / 1000) * claude_code_pricing["input_cents_per_1k"] * 1.25,
+                4
+            )
+            usage_items.append({
                 "type": "llm",
-                "cost_cents": round(
-                    (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"] +
-                    (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"],
-                    4
-                ),
-                "provider": "Claude Code (Anthropic)",
+                "cost_cents": cc_cost,
+                "provider": "Claude Code (Sonnet 4)",
+                "model": "claude-sonnet-4",
+                "input_tokens": cc_input + cc_cache_read + cc_cache_create,
+                "output_tokens": cc_output,
+            })
+            logger.info(
+                "[ClaudeCode] Claude Code LLM usage",
+                input_tokens=cc_input,
+                output_tokens=cc_output,
+                cache_read=cc_cache_read,
+                cache_create=cc_cache_create,
+                cost_cents=cc_cost,
+            )
+
+        # 2. Verifier/parent LLM usage (using parent model pricing)
+        if total_input_tokens > 0 or total_output_tokens > 0:
+            verifier_cost = round(
+                (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"] +
+                (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"],
+                4
+            )
+            usage_items.append({
+                "type": "llm",
+                "cost_cents": verifier_cost,
+                "provider": f"Verifier ({model})",
+                "model": model,
                 "input_tokens": total_input_tokens,
-                "output_tokens": total_output_tokens
-            },
-            {
-                "type": "service",
-                "cost_cents": max(1, int(execution_time_ms / 60000)),  # $0.01 per minute
-                "provider": "E2B Desktop Sandbox"
-            }
-        ]
+                "output_tokens": total_output_tokens,
+            })
+
+        # 3. E2B service cost: $0.000028/second = 0.0028 cents/second
+        e2b_cost_cents = round((execution_time_ms / 1000) * 0.0028, 4)
+        usage_items.append({
+            "type": "service",
+            "cost_cents": e2b_cost_cents,
+            "provider": "E2B Desktop Sandbox"
+        })
 
         # Stop log collector before returning
         if log_collector:
@@ -1161,23 +1208,22 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 )
                 return
 
-            # Report usage
+            # Build standardized usage for workflow cost tracking
+            tool_usage = {"llm": [], "service": []}
             if result.get("usage_items"):
-                usage_items = []
                 for item in result["usage_items"]:
-                    item_type = UsageType.LLM if item.get("type") == "llm" else UsageType.SERVICE
-                    usage_items.append(UsageItem(
-                        type=item_type,
-                        cost_cents=item.get("cost_cents", 0),
-                        provider=item.get("provider", ""),
-                        tokens_in=item.get("input_tokens"),
-                        tokens_out=item.get("output_tokens"),
-                    ))
-                yield ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name="spawn_claude_code_agent",
-                    usage_items=usage_items
-                )
+                    if item.get("type") == "llm":
+                        tool_usage["llm"].append({
+                            "tokens_in": item.get("input_tokens", 0),
+                            "tokens_out": item.get("output_tokens", 0),
+                            "model": item.get("model"),
+                            "provider": item.get("provider", ""),
+                        })
+                    else:
+                        tool_usage["service"].append({
+                            "cost_cents": item.get("cost_cents", 0),
+                            "provider": item.get("provider", ""),
+                        })
 
             # Post output files as separate ASSISTANT messages (OAI-style)
             output_files = result.get("output_files", [])
@@ -1193,7 +1239,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         file_pointer=fp,
                     )
 
-            # Yield final result with task_id and structured_response for FE ClaudeCodeChip
+            # Yield final result with task_id, structured_response, and usage for tracking
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="✓ Task Completed" if result.get("success") else "Task Incomplete",
@@ -1203,7 +1249,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     "task_id": result.get("task_id"),
                     "action_type": "task_complete",
                     "structured_response": result.get("structured_response"),
-                }
+                },
+                data={"usage": tool_usage}
             )
 
         except Exception as e:
@@ -1265,3 +1312,6 @@ async def spawn_claude_code_agent(
 
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_claude_code_agent")
+        # Track usage from final event (included in data field)
+        if event.data and event.data.get("usage"):
+            await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_claude_code_agent")

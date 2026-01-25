@@ -9,7 +9,7 @@ from datetime import timedelta
 import structlog
 
 from config import load_config
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 from helpers.handle_tool_event import handle_tool_event
 
 # Type alias for execute_activity callable
@@ -109,79 +109,37 @@ class DeepResearchManager(ToolManager):
             )
             return {"error": str(e)}
         
-        # 3. Report usage (Perplexity's complex pricing)
+        # 3. Build standardized usage for workflow cost tracking (Perplexity's complex pricing)
+        service_usage = []
+
         if result.get('usage'):
             usage = result['usage']
-            usage_items = []
-            
+
             # Input tokens: $2 per million = 200 cents per million
             if usage.get('input_tokens'):
                 cost = (usage['input_tokens'] * 200) // 1_000_000
-                usage_items.append(UsageItem(
-                    type=UsageType.LLM,
-                    cost_cents=cost,
-                    provider="Perplexity Input Tokens",
-                    number_of_tokens=usage['input_tokens'],
-                    token_price_per_million_cents=200
-                ))
-            
+                service_usage.append({"cost_cents": cost, "provider": "Perplexity Input Tokens"})
+
             # Output tokens: $8 per million = 800 cents per million
             if usage.get('output_tokens'):
                 cost = (usage['output_tokens'] * 800) // 1_000_000
-                usage_items.append(UsageItem(
-                    type=UsageType.LLM,
-                    cost_cents=cost,
-                    provider="Perplexity Output Tokens",
-                    number_of_tokens=usage['output_tokens'],
-                    token_price_per_million_cents=800
-                ))
-            
+                service_usage.append({"cost_cents": cost, "provider": "Perplexity Output Tokens"})
+
             # Citation tokens: $2 per million = 200 cents per million
             if usage.get('citation_tokens'):
                 cost = (usage['citation_tokens'] * 200) // 1_000_000
-                usage_items.append(UsageItem(
-                    type=UsageType.LLM,
-                    cost_cents=cost,
-                    provider="Perplexity Citation Tokens",
-                    number_of_tokens=usage['citation_tokens'],
-                    token_price_per_million_cents=200
-                ))
-            
+                service_usage.append({"cost_cents": cost, "provider": "Perplexity Citation Tokens"})
+
             # Reasoning tokens: $3 per million = 300 cents per million
             if usage.get('reasoning_tokens'):
                 cost = (usage['reasoning_tokens'] * 300) // 1_000_000
-                usage_items.append(UsageItem(
-                    type=UsageType.LLM,
-                    cost_cents=cost,
-                    provider="Perplexity Reasoning Tokens",
-                    number_of_tokens=usage['reasoning_tokens'],
-                    token_price_per_million_cents=300
-                ))
-            
+                service_usage.append({"cost_cents": cost, "provider": "Perplexity Reasoning Tokens"})
+
             # Search queries: $5 per 1,000 = 0.5 cents per search
             if usage.get('search_count'):
                 cost = (usage['search_count'] * 5) // 10  # 0.5 cents per search
-                usage_items.append(UsageItem(
-                    type=UsageType.SERVICE,
-                    cost_cents=cost,
-                    provider="Perplexity Search Queries"
-                ))
-            
-            # Emit usage event
-            if usage_items:
-                await handle_tool_event(
-                    event=ToolEvent(
-                        type=EventType.USAGE,
-                        tool_name=self.tool_name,
-                        usage_items=usage_items
-                    ),
-                    agent_id=agent_id,
-                    tool_call_id=tool_call_id,
-                    tool_name="deep_research",
-                    execute_activity=execute_activity,
-                    user_id=user_id,
-                )
-        
+                service_usage.append({"cost_cents": cost, "provider": "Perplexity Search Queries"})
+
         # 4. Success status with report
         report = result.get("report", "")
         citations = result.get("citations", [])
@@ -205,8 +163,15 @@ class DeepResearchManager(ToolManager):
             execute_activity=execute_activity,
             user_id=user_id,
         )
-        
-        return result
+
+        # Return with standardized usage for workflow cost tracking
+        return {
+            "result": result,
+            "usage": {
+                "llm": [],  # Perplexity has fixed pricing, treated as service
+                "service": service_usage,
+            }
+        }
 
 
 # ========================================

@@ -129,7 +129,7 @@ def get_auth_headers() -> dict:
 
 async def spawn_agent(
     goal: str,
-    model: str = "rose-1-lite",
+    model: str = "rose-labs/rose-1-lite",
     timeout: int = DEFAULT_TIMEOUT,
     task_queue: str = "navi-agent-tasks-test",
 ) -> str:

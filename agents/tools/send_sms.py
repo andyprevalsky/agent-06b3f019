@@ -7,7 +7,7 @@ from datetime import timedelta
 import structlog
 import httpx
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 from helpers.handle_tool_event import handle_tool_event
 
 # Config import is safe - no side effects at import time (load_dotenv is lazy)
@@ -95,34 +95,16 @@ class SendSmsManager(ToolManager):
                 )
             )
             
-            # 3. Report usage (estimated cost: $0.015 per SMS)
+            # 3. Cost calculation (estimated cost: $0.015 per SMS)
             cost_cents = 2  # $0.015 = 1.5 cents, round to 2 cents
-            await handle_tool_event(
-                event=ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name="send_sms",
-                    usage_items=[
-                        UsageItem(
-                            type=UsageType.SERVICE,
-                            cost_cents=cost_cents,
-                            provider="MessageBird SMS"
-                        )
-                    ]
-                ),
-                agent_id=agent_id,
-                tool_call_id=tool_call_id,
-                tool_name="send_sms",
-                execute_activity=execute_activity,
-                user_id=user_id,
-            )
-            
+
             # 4. Post-execution success
             await handle_tool_event(
                 event=ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="✅ SMS sent successfully",
                     message=f"""**To:** {formatted_phone_number}
-**Message:**  
+**Message:**
 {display_message}""",
                     status=MessageStatus.FINISHED
                 ),
@@ -132,8 +114,15 @@ class SendSmsManager(ToolManager):
                 execute_activity=execute_activity,
                 user_id=user_id,
             )
-            
-            return result
+
+            # Return with standardized usage for workflow cost tracking
+            return {
+                "result": result,
+                "usage": {
+                    "llm": [],
+                    "service": [{"cost_cents": cost_cents, "provider": "MessageBird SMS"}],
+                }
+            }
             
         except Exception as e:
             # Error status
@@ -152,7 +141,10 @@ class SendSmsManager(ToolManager):
                 user_id=user_id,
             )
             
-            return {"error": error_msg, "phone_number": phone_number}
+            return {
+                "result": {"error": error_msg, "phone_number": phone_number},
+                "usage": {"llm": [], "service": []},
+            }
 
 
 # ========================================

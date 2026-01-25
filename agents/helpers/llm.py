@@ -1995,16 +1995,31 @@ async def call_planner_llm_activity(
         llm_elapsed = time.perf_counter() - llm_start
         activity_elapsed = time.perf_counter() - activity_start
 
+        tokens_in = usage.get("prompt_tokens", 0)
+        tokens_out = usage.get("completion_tokens", 0)
         logger.info(
             "Planner LLM completed",
             title=result.title,
             task_count=len(result.tasks),
             join=result.join,
-            tokens=usage.get("total_tokens", 0)
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
         )
         logger.info(f"[TIMING] Planner LLM API call: {llm_elapsed*1000:.1f}ms ({llm_elapsed:.2f}s), total activity: {activity_elapsed*1000:.1f}ms")
 
-        return result.model_dump()
+        # Return plan with usage for cost tracking
+        return {
+            "result": result.model_dump(),
+            "usage": {
+                "llm": [{
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "model": model,
+                    "provider": "Rose Planner",
+                }],
+                "service": [],
+            }
+        }
 
     except Exception as e:
         logger.error("Planner LLM failed", error=extract_error_message(e))

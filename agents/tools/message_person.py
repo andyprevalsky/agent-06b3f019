@@ -285,31 +285,40 @@ Reply to approve, or say "no" to cancel."""
                     )
                 )
 
-            # 3. Calculate elapsed time
+            # 3. Calculate elapsed time and cost
             elapsed_time = _safe_time() - start_time
+            cost_cents = 2 if channel == "sms" else 0  # SMS: ~$0.02, Email: free
+
+            # Build standardized usage for workflow cost tracking
+            tool_usage = {
+                "llm": [],
+                "service": [{"cost_cents": cost_cents, "provider": f"MessageBird {channel.upper()}"}] if cost_cents > 0 else [],
+            }
 
             # Format success message
             formatted_message = format_tool_message(
                 params=tool_call,
                 result=result,
                 time_elapsed=elapsed_time,
-                cost_cents=2 if channel == "sms" else 0  # SMS has a small cost
+                cost_cents=cost_cents
             )
 
-            # Post-execution success
+            # Post-execution success with usage data for tracking
             if channel == "sms":
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="✅ SMS sent successfully",
                     message=formatted_message,
-                    status=MessageStatus.FINISHED
+                    status=MessageStatus.FINISHED,
+                    data={"usage": tool_usage}
                 )
             else:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="✅ Email sent successfully",
                     message=formatted_message,
-                    status=MessageStatus.FINISHED
+                    status=MessageStatus.FINISHED,
+                    data={"usage": tool_usage}
                 )
 
         except Exception as e:
@@ -370,6 +379,9 @@ async def message_person(
 
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "message_person")
+        # Track usage from final event (included in data field)
+        if event.data and event.data.get("usage"):
+            await workflow_instance._track_usage(event.data["usage"], tool_name="message_person")
 
 
 

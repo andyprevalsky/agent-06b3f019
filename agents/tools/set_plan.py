@@ -259,9 +259,10 @@ class SetPlanManager(ToolManager):
                 if attempt == 0 and response_schema is None:
                     workflow.logger.info(f"[TIMING] Starting PARALLEL planner + schema generation (attempt {attempt + 1})")
                     # Run both activities in parallel
+                    # Planner always uses rose-ultra for best DAG generation quality
                     planner_task = workflow.execute_activity(
                         call_planner_llm_activity,
-                        args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
+                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema],
                         start_to_close_timeout=timedelta(seconds=120),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
@@ -274,9 +275,13 @@ class SetPlanManager(ToolManager):
 
                     # Wait for both to complete
                     parallel_start = workflow.now()
-                    planner_result, generated_schema = await asyncio.gather(planner_task, schema_task)
+                    planner_result_raw, generated_schema = await asyncio.gather(planner_task, schema_task)
                     parallel_elapsed = (workflow.now() - parallel_start).total_seconds()
                     workflow.logger.info(f"[TIMING] Parallel activities completed: {parallel_elapsed*1000:.1f}ms")
+
+                    # Track planner usage (uses rose-ultra pricing, writes to ToolUsage)
+                    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
+                    planner_result = planner_result_raw.get("result", planner_result_raw)
 
                     # Update workflow instance with generated schema
                     if generated_schema:
@@ -286,14 +291,19 @@ class SetPlanManager(ToolManager):
                     # Retry or schema already exists - just call planner
                     workflow.logger.info(f"[TIMING] Starting planner LLM only (attempt {attempt + 1}, schema_exists={response_schema is not None})")
                     planner_only_start = workflow.now()
-                    planner_result = await workflow.execute_activity(
+                    # Planner always uses rose-ultra for best DAG generation quality
+                    planner_result_raw = await workflow.execute_activity(
                         call_planner_llm_activity,
-                        args=[messages_for_planner, workflow_instance.model, tools_description, user_context, response_schema],
+                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema],
                         start_to_close_timeout=timedelta(seconds=120),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     planner_only_elapsed = (workflow.now() - planner_only_start).total_seconds()
                     workflow.logger.info(f"[TIMING] Planner LLM only completed: {planner_only_elapsed*1000:.1f}ms")
+
+                    # Track planner usage (uses rose-ultra pricing, writes to ToolUsage)
+                    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
+                    planner_result = planner_result_raw.get("result", planner_result_raw)
             except Exception as e:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,

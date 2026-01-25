@@ -59,6 +59,7 @@ export async function startAgentWorkflow(params: {
   busId?: string; // Optional: shared bus channel ID for sub-agent tree updates
   startPhase?: 'plan' | 'execute'; // Optional: 'plan' (default) runs PLAN→EXECUTE, 'execute' skips PLAN
   maxIterations?: number; // Optional: step limit for execute phase (sub-agents use 25)
+  priceLimitCents?: number; // Optional: price limit in cents (default 100)
 }): Promise<string> {
   const client = await getTemporalClient();
   // Use provided task queue or default to environment-specific queue
@@ -90,6 +91,7 @@ export async function startAgentWorkflow(params: {
       params.busId || null, // Shared bus channel ID for tree updates
       params.startPhase || 'plan', // Starting phase: 'plan' runs PLAN→EXECUTE, 'execute' skips PLAN
       params.maxIterations || null, // Step limit for execute phase (sub-agents use 25)
+      params.priceLimitCents || 100, // Price limit in cents (default $1.00)
     ],
   });
 

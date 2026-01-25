@@ -604,7 +604,9 @@ function TreeNodeRow({
         className={cn(
           'flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 rounded',
           node.status === 'COMPLETED' && 'text-gray-500',
-          node.status === 'FAILED' && 'text-red-500'
+          node.status === 'FAILED' && 'text-red-500',
+          node.status === 'COST_LIMIT_REACHED' && 'text-amber-500',
+          node.status === 'OUT_OF_CREDITS' && 'text-red-500'
         )}
         onClick={handleClick}
         onMouseEnter={() => setIsHovered(true)}
@@ -801,7 +803,9 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
         className={cn(
           'flex items-center gap-1 py-0.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 rounded',
           node.status === 'COMPLETED' && 'text-gray-500',
-          node.status === 'FAILED' && 'text-red-500'
+          node.status === 'FAILED' && 'text-red-500',
+          node.status === 'COST_LIMIT_REACHED' && 'text-amber-500',
+          node.status === 'OUT_OF_CREDITS' && 'text-red-500'
         )}
         onClick={handleClick}
         onMouseEnter={() => setIsHovered(true)}

@@ -7,13 +7,13 @@
  * Props-driven states:
  * - isSelected: boolean (highlight styling)
  * - isResuming: boolean (shows loading spinner on play button)
- * - agent.status: 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED' | etc
+ * - agent.status: 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'OUT_OF_CREDITS' | 'COST_LIMIT_REACHED' | etc
  * - agent.progress: number (0-1 for progress wheel)
  */
 
 import { Agent } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Play, Loader2, CreditCard, Bot } from 'lucide-react';
+import { Play, Loader2, CreditCard, Bot, DollarSign } from 'lucide-react';
 
 interface AgentListItemProps {
   agent: Agent;
@@ -72,13 +72,20 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
           <div className="flex items-center justify-between gap-2">
             <h3 className="font-medium text-sm line-clamp-2 flex-1">{agent.goal}</h3>
             
-            {/* Show play button if paused, credit icon if out of credits, otherwise show progress */}
+            {/* Show play button if paused, credit icon if out of credits, dollar icon if cost limit, otherwise show progress */}
             {agent.status === 'OUT_OF_CREDITS' ? (
-              <div 
+              <div
                 className="flex-shrink-0 p-1.5 rounded-full border-2 border-red-400 dark:border-red-500"
                 title="Agent ran out of credits - add more to continue"
               >
                 <CreditCard className="w-3.5 h-3.5 text-red-500" />
+              </div>
+            ) : agent.status === 'COST_LIMIT_REACHED' ? (
+              <div
+                className="flex-shrink-0 p-1.5 rounded-full border-2 border-amber-400 dark:border-amber-500"
+                title="Agent cost limit reached - increase limit to continue"
+              >
+                <DollarSign className="w-3.5 h-3.5 text-amber-500" />
               </div>
             ) : agent.status === 'PAUSED' ? (
               <button

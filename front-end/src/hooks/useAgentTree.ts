@@ -250,6 +250,8 @@ export function filterTreeBySpawn(
 export function getCircleState(node: TreeNode): string {
   if (node.status === 'COMPLETED') return '●';
   if (node.status === 'FAILED') return '✗';
+  if (node.status === 'OUT_OF_CREDITS') return '⊘';
+  if (node.status === 'COST_LIMIT_REACHED') return '◎';
   if (node.progress >= 0.7) return '◕';
   if (node.progress > 0 && node.progress < 0.3) return '◔';
   if (node.messageCount > 0 && node.progress === 0) return '◑';
@@ -263,6 +265,8 @@ export function getStatusText(node: TreeNode): string {
   if (node.status === 'COMPLETED') return '';
   if (node.status === 'FAILED') return 'failed';
   if (node.status === 'PAUSED') return 'paused';
+  if (node.status === 'OUT_OF_CREDITS') return 'out of credits';
+  if (node.status === 'COST_LIMIT_REACHED') return 'cost limit reached';
   if (node.status === 'STARTING_UP') return 'spinning up...';
   if (node.messageCount === 0) return 'spinning up...';
   if (node.toolsInUse.length === 0) return 'thinking...';

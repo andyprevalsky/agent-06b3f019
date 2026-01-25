@@ -9,7 +9,7 @@ import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
 import { getX402Endpoints } from '../lib/x402Endpoints';
 import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSchema';
-import { handleChatMessage, broadcastAgentModeStarted } from '../lib/chat';
+import { handleChatMessage, broadcastAgentModeStarted, broadcastAgentUpdate } from '../lib/chat';
 import { createMessage } from '../lib/messages';
 import { getClientIP, getGeoFromIP, DEFAULT_GEOLOCATION } from '../lib/geoip';
 import {
@@ -84,6 +84,7 @@ const createAgentSchema = z.object({
   response_schema: ResponseSchemaSchema.optional(),
   bus_id: z.string().uuid().optional(), // Optional: shared bus channel for sub-agent tree updates
   max_iterations: z.number().int().min(1).optional(), // Optional: step limit for execute phase (sub-agents use 25)
+  price_limit_cents: z.number().int().min(1).optional(), // Price limit in cents (default 100 = $1.00)
   // Verifier is now optional - auto-generated from goal if not provided
   verifier: z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
@@ -102,7 +103,7 @@ const postMessageSchema = z.object({
 });
 
 const updateStatusSchema = z.object({
-  status: z.enum(['STARTING_UP', 'ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED']),
+  status: z.enum(['STARTING_UP', 'ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']),
   statusMessage: z.string().optional(),
   progress: z.number().min(0).max(1),
   tokenCount: z.number().int().min(0),
@@ -298,6 +299,8 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           proxyCountry: proxyGeo.country,
           proxyState: proxyGeo.state,
           proxyCity: proxyGeo.city,
+          // Price limit (uses DB default of 100 if not provided)
+          ...(body.price_limit_cents && { priceLimitCents: body.price_limit_cents }),
         },
       });
 
@@ -364,6 +367,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           ...(body.depth !== undefined ? { depth: body.depth } : {}),
           ...(body.bus_id ? { busId: body.bus_id } : {}),
           ...(body.max_iterations ? { maxIterations: body.max_iterations } : {}),
+          priceLimitCents: agent.agent.priceLimitCents,
         });
 
         // Update agent with workflow ID
@@ -571,6 +575,10 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
         tool_cost_cents: toolUsageTotalCostCents,
         context_size: agent.contextSize,
         message_count: agent.messageCount,
+        price_limit_cents: agent.priceLimitCents,
+        tree_cost_cents: agent.treeCostCents,
+        token_in_price_microdollars: agent.tokenInPriceMicrodollars,
+        token_out_price_microdollars: agent.tokenOutPriceMicrodollars,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
         verifier: agent.verifier
@@ -915,6 +923,7 @@ router.post('/:id/start-agent', hybridAuth, async (req: HybridAuthRequest, res) 
         type: agent.verifier.type,
         llmJudgePrompt: agent.verifier.llmJudgePrompt,
       },
+      priceLimitCents: agent.priceLimitCents,
     });
 
     // Update agent with workflow ID
@@ -978,6 +987,18 @@ router.patch('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
         }),
         updatedAt: new Date(),
       },
+    });
+
+    // Broadcast realtime update for frontend
+    await broadcastAgentUpdate(agentId, {
+      progress: updated.progress,
+      status: updated.status,
+      statusMessage: updated.statusMessage ?? undefined,
+      tokenCount: updated.tokenCount,
+      tokensIn: updated.tokensIn,
+      tokensOut: updated.tokensOut,
+      contextSize: updated.contextSize,
+      messageCount: updated.messageCount,
     });
 
     res.json({
@@ -1249,6 +1270,8 @@ const updateAgentSchema = z.object({
   progress: z.number().min(0).max(1).optional(), // For tree state updates
   message_count: z.number().int().min(0).optional(), // For tree state updates
   response_schema: ResponseSchemaSchema.optional(), // For storing generated schema during set_plan
+  price_limit_cents: z.number().int().min(1).optional(), // User sets this (min 1 cent)
+  tree_cost_cents: z.number().int().min(0).optional(), // Workflow updates this
 });
 
 router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
@@ -1294,11 +1317,51 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
     if (body.response_schema !== undefined) {
       agentUpdateData.responseSchema = body.response_schema;
     }
+    if (body.tree_cost_cents !== undefined) {
+      agentUpdateData.treeCostCents = body.tree_cost_cents;
+    }
+
+    // Handle price_limit_cents with validation and workflow signal
+    if (body.price_limit_cents !== undefined) {
+      // Validate: new limit must be >= current tree cost
+      if (body.price_limit_cents < agent.treeCostCents) {
+        res.status(400).json({
+          error: 'New limit must be >= current cost',
+          current_cost_cents: agent.treeCostCents,
+        });
+        return;
+      }
+
+      agentUpdateData.priceLimitCents = body.price_limit_cents;
+
+      // If agent was paused due to cost limit, signal workflow to resume
+      if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId) {
+        try {
+          const client = await getTemporalClient();
+          const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+          await handle.signal('price_limit_increased', {
+            new_limit_cents: body.price_limit_cents,
+          });
+          console.log(`💰 Signaled price_limit_increased to workflow ${agent.temporalWorkflowId}`);
+        } catch (error) {
+          console.error(`Failed to signal price_limit_increased to workflow ${agent.temporalWorkflowId}:`, error);
+          // Continue with update even if signal fails - workflow will poll DB
+        }
+      }
+    }
+
     if (Object.keys(agentUpdateData).length > 0) {
       await prisma.agent.update({
         where: { id: agentId },
         data: agentUpdateData,
       });
+
+      // Broadcast realtime update for cost/context changes
+      if (body.tree_cost_cents !== undefined) {
+        await broadcastAgentUpdate(agentId, {
+          treeCostCents: body.tree_cost_cents,
+        });
+      }
     }
 
     // Update tools if provided
@@ -1353,6 +1416,8 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
         tokens_out: updatedAgent!.tokensOut,
         context_size: updatedAgent!.contextSize,
         message_count: updatedAgent!.messageCount,
+        price_limit_cents: updatedAgent!.priceLimitCents,
+        tree_cost_cents: updatedAgent!.treeCostCents,
         created_at: updatedAgent!.createdAt,
         updated_at: updatedAgent!.updatedAt,
         verifier: updatedAgent!.verifier
@@ -1440,6 +1505,7 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
       },
       ...(agent.parentWorkflowId ? { parentWorkflowId: agent.parentWorkflowId } : {}),
       depth: agent.depth,
+      priceLimitCents: agent.priceLimitCents,
     });
 
     // 4. Update agent with new workflow ID (should be same as agentId, but just in case)

@@ -7,7 +7,7 @@ from datetime import timedelta
 import structlog
 import httpx
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 from helpers.handle_tool_event import handle_tool_event
 
 import time
@@ -124,27 +124,14 @@ class WebFetchManager(ToolManager):
                 user_id=user_id,
             )
 
-            # Track usage for billing
-            await handle_tool_event(
-                event=ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name="web_fetch",
-                    usage_items=[
-                        UsageItem(
-                            type=UsageType.SERVICE,
-                            cost_cents=total_cost_cents,
-                            provider="Parallel AI Extract"
-                        )
-                    ]
-                ),
-                agent_id=agent_id,
-                tool_call_id=tool_call_id,
-                tool_name="web_fetch",
-                execute_activity=execute_activity,
-                user_id=user_id,
-            )
-
-            return result
+            # Return with standardized usage for workflow cost tracking
+            return {
+                "result": result,
+                "usage": {
+                    "llm": [],
+                    "service": [{"cost_cents": int(total_cost_cents), "provider": "Parallel AI Extract"}],
+                }
+            }
 
         except Exception as e:
             # Calculate elapsed time even on error

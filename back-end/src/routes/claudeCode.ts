@@ -113,6 +113,7 @@ router.post('/close', authenticate, async (req: AuthRequest, res) => {
       success: true,
       status: 'CLOSED',
       output_files: result.outputFiles,
+      usage: result.usage,
     });
 
   } catch (error) {

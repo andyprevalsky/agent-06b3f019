@@ -7,7 +7,7 @@ Uses run_agent for the core loop. Workflow handles:
 """
 
 from datetime import timedelta, datetime
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any, Set, Tuple
 from datetime import timezone
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -30,10 +30,12 @@ with workflow.unsafe.imports_passed_through():
         get_user_context,
         check_user_usage,
         fetch_agent_config,
+        fetch_model_pricing,
     )
     from helpers.messages import broadcast_to_bus, update_agent_tree_state
     from helpers.prompts import build_system_prompt, build_verifier_prompt
     from helpers.handle_tool_event import handle_tool_event
+    from helpers.save_tool_usage import save_tool_usage
     from helpers.tool_schemas import PLAN_PHASE_TOOLS, EXECUTE_PHASE_TOOLS
     from tools.base import ToolEvent, AssistantEvent, EventType, MessageStatus
     # Tool executors (map tool name → workflow helper)
@@ -129,6 +131,7 @@ class AgentWorkflow:
         self.token_count: int = 0
         self.tokens_in: int = 0
         self.tokens_out: int = 0
+        self.context_size: int = 0  # Current context window usage (from last LLM call)
         self.is_paused: bool = False
         self._has_new_messages: bool = False
         self._has_credits: bool = True  # Cached credit status
@@ -157,6 +160,27 @@ class AgentWorkflow:
         self.message_count: int = 0  # Total message count for this agent
         self.output_schema: Optional[Dict] = None  # Structured output schema (for prompts, verifier, tree, completion)
         self.start_time: Optional[datetime] = None  # Workflow start time for duration tracking
+
+        # Cost limit tracking (hierarchical relay: child → parent → root)
+        self.own_cost_cents: int = 0  # This agent's direct cost (LLM + tools)
+        self.children_cost_cents: Dict[str, int] = {}  # child_agent_id -> subtree_cost
+        self.subtree_cost_cents: int = 0  # own + sum(children) - what we report to parent
+        self.price_limit_cents: int = 100  # Default price limit (100 cents = $1.00)
+        self._cost_limit_reached: bool = False  # Flag for cost limit status
+        self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
+
+        # Tree token tracking (hierarchical relay: child → parent → root)
+        # Own tokens are in self.tokens_in/out (used for cost calc)
+        # Children's tokens aggregated here for tree totals
+        self.children_tokens_in: Dict[str, int] = {}  # child_agent_id -> subtree_tokens_in
+        self.children_tokens_out: Dict[str, int] = {}  # child_agent_id -> subtree_tokens_out
+        self.tree_tokens_in: int = 0  # own + sum(children) - for display
+        self.tree_tokens_out: int = 0  # own + sum(children) - for display
+
+        # Model pricing (fetched at workflow start for cost calculation)
+        self.input_cents_per_1k: float = 0.0  # Price per 1k input tokens in cents
+        self.output_cents_per_1k: float = 0.0  # Price per 1k output tokens in cents
+        self.model_pricing_cache: Dict[str, Dict[str, float]] = {}  # model -> {input_cents_per_1k, output_cents_per_1k}
     
     # =========================================================================
     # SIGNALS
@@ -284,7 +308,58 @@ class AgentWorkflow:
         """Signal that user dismissed the signup prompt (continuing as anonymous)."""
         workflow.logger.info("⏭️ Received signup_dismissed signal")
         self._signup_dismissed = True
-        
+
+    @workflow.signal
+    async def child_cost_update(self, data: dict):
+        """Receive cost and token update from a child agent (hierarchical relay upward)."""
+        child_agent_id = data.get("child_agent_id", "")
+        subtree_cost = data.get("subtree_cost_cents", 0)
+        subtree_tokens_in = data.get("subtree_tokens_in", 0)
+        subtree_tokens_out = data.get("subtree_tokens_out", 0)
+
+        # Update this child's cost and tokens in our tracking
+        self.children_cost_cents[child_agent_id] = subtree_cost
+        self.children_tokens_in[child_agent_id] = subtree_tokens_in
+        self.children_tokens_out[child_agent_id] = subtree_tokens_out
+
+        # Recalculate our subtree and propagate upward
+        await self._update_cost_and_signal_parent()
+
+    @workflow.signal
+    async def cost_limit_reached(self):
+        """Cascades down from parent when cost limit exceeded."""
+        workflow.logger.warning("⚠️ Cost limit reached signal received - pausing")
+        self.is_paused = True
+        self._cost_limit_reached = True
+        await self._update_tree_state(status="COST_LIMIT_REACHED")
+
+        # Cascade to all children
+        for child_wf_id in self._get_pending_child_workflow_ids():
+            try:
+                handle = workflow.get_external_workflow_handle(child_wf_id)
+                await handle.signal("cost_limit_reached")
+            except Exception as e:
+                workflow.logger.warning(f"Failed to signal child cost_limit_reached: {e}")
+
+    @workflow.signal
+    async def price_limit_increased(self, data: dict):
+        """Cascades down from parent when price limit increased."""
+        new_limit = data.get("new_limit_cents", 25)
+        workflow.logger.info(f"💰 Price limit increased to {new_limit} cents")
+
+        self.price_limit_cents = new_limit
+        self._cost_limit_reached = False
+        self.is_paused = False
+        await self._update_tree_state(status="ACTIVE")
+
+        # Cascade to all children
+        for child_wf_id in self._get_pending_child_workflow_ids():
+            try:
+                handle = workflow.get_external_workflow_handle(child_wf_id)
+                await handle.signal("price_limit_increased", data)
+            except Exception as e:
+                workflow.logger.warning(f"Failed to signal child price_limit_increased: {e}")
+
     # =========================================================================
     # MAIN RUN
     # =========================================================================
@@ -305,6 +380,7 @@ class AgentWorkflow:
         bus_id: Optional[str] = None,
         start_phase: str = "plan",  # "plan" runs PLAN→EXECUTE, "execute" skips PLAN
         max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
+        price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         self.agent_id = agent_id
@@ -318,6 +394,7 @@ class AgentWorkflow:
         self.depth = depth
         self.bus_id = bus_id
         self.max_iterations = max_iterations
+        self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.start_time = workflow.now()  # Track start time for duration calculation
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
@@ -372,10 +449,42 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 
+        # Fetch model pricing for cost calculation
+        try:
+            pricing = await workflow.execute_activity(
+                fetch_model_pricing,
+                args=[model],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3)
+            )
+            self.input_cents_per_1k = pricing["input_cents_per_1k"]
+            self.output_cents_per_1k = pricing["output_cents_per_1k"]
+            workflow.logger.info(
+                f"💰 Fetched model pricing: input={self.input_cents_per_1k}c/1k, output={self.output_cents_per_1k}c/1k"
+            )
+        except Exception as e:
+            workflow.logger.error(f"Failed to fetch model pricing: {e}")
+            # Cost tracking will be disabled if pricing unavailable
+
         # Broadcast initial tree state with schema (only for sub-agents with bus_id)
         if self.bus_id:
             await self._update_tree_state(progress=0.0, status="ACTIVE")
-        
+
+        # If sub-agent, check parent's pause/cost-limit state before starting work
+        # (covers race condition where signal arrived after spawn but before we're ready)
+        if self.parent_workflow_id:
+            try:
+                parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                if await parent_handle.query("is_paused_query"):
+                    workflow.logger.info("Parent is paused - inheriting pause state")
+                    self.is_paused = True
+                if await parent_handle.query("is_cost_limit_reached_query"):
+                    workflow.logger.info("Parent hit cost limit - inheriting cost limit state")
+                    self._cost_limit_reached = True
+                    self.is_paused = True
+            except Exception as e:
+                workflow.logger.warning(f"Failed to query parent state: {e}")
+
         # =====================================================================
         # Tool lists from centralized source of truth
         # =====================================================================
@@ -407,6 +516,8 @@ class AgentWorkflow:
                 poll_messages=self._poll_messages,
                 execute_tool=self._execute_tool,
                 update_tree_state=self._update_tree_state,
+                get_children_tokens=self._get_children_tokens,
+                on_tokens=self._on_tokens,  # Real-time cost tracking and limit checking
                 max_context_tokens=self.max_context_tokens,
                 reasoning_max_tokens=reasoning_max_tokens,
                 is_plan_loop=True,  # PLAN phase: requires set_plan, posts "sit back" message
@@ -414,7 +525,7 @@ class AgentWorkflow:
                 get_response_schema=self._make_response_schema_getter(),
             )
 
-            self._track_tokens(plan_result)
+            await self._track_tokens_and_cost(plan_result)
 
             if plan_result["status"] != "completed":
                 return await self._handle_incomplete(plan_result, "PLAN")
@@ -488,6 +599,8 @@ class AgentWorkflow:
             poll_messages=self._poll_messages,
             execute_tool=self._execute_tool,
             update_tree_state=self._update_tree_state,
+            get_children_tokens=self._get_children_tokens,
+            on_tokens=self._on_tokens,  # Real-time cost tracking and limit checking
             max_context_tokens=self.max_context_tokens,
             reasoning_max_tokens=reasoning_max_tokens,
             skip_blueprint_query=not skip_plan,  # Only skip if we ran PLAN phase
@@ -496,7 +609,7 @@ class AgentWorkflow:
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
 
-        self._track_tokens(execute_result)
+        await self._track_tokens_and_cost(execute_result)
 
         if execute_result["status"] == "completed":
             await self._mark_complete(
@@ -681,6 +794,11 @@ class AgentWorkflow:
                     agent_id=self.agent_id,
                     user_id=self.user_id,
                 )
+                # Track usage if returned by tool (standardized format)
+                if isinstance(result, dict) and "usage" in result:
+                    await self._track_usage(result.get("usage"), tool_name=tool_name)
+                    # Extract actual result for caller
+                    result = result.get("result", result)
                 return {"success": True, "message": f"{tool_name} completed", "result": result}
             else:
                 # Legacy signature: (workflow_instance, tool_call, tool_call_id)
@@ -716,9 +834,12 @@ class AgentWorkflow:
     async def _handle_tool_event(self, event: ToolEvent, tool_call_id: str, tool_name: str) -> None:
         """
         Handle ToolEvent emitted by tool managers.
-        
+
         Delegates to standalone handle_tool_event function which routes events
         to appropriate FE/DB updates. Works in both workflow and activity contexts.
+
+        Note: Cost tracking is handled separately via _track_usage() for tools that
+        return standardized usage dicts, not through events.
         """
         # handle_tool_event imported at module level within imports_passed_through
         await handle_tool_event(
@@ -735,11 +856,290 @@ class AgentWorkflow:
     # HELPERS
     # =========================================================================
     
-    def _track_tokens(self, result: Dict) -> None:
-        """Track tokens from run_agent result."""
-        self.tokens_in += result.get("tokens_in", 0)
-        self.tokens_out += result.get("tokens_out", 0)
+    async def _track_tokens_and_cost(self, result: Dict) -> None:
+        """Track context size and token_count from run_agent result.
+
+        NOTE: tokens_in/out and cost are now tracked in real-time via _on_tokens callback
+        during run_agent execution. This method only handles:
+        1. context_size update (current context window)
+        2. token_count update (total tokens for display)
+
+        For non-run_agent LLM calls (e.g., completion summary), use _track_llm_cost directly.
+        """
+        # Update token_count (for display purposes)
         self.token_count += result.get("token_count", 0)
+
+        # Update context_size to latest value (not cumulative - represents current context window)
+        if "context_size" in result:
+            self.context_size = result["context_size"]
+
+        # NOTE: tokens_in/out and cost tracking moved to _on_tokens callback
+        # which is called after each LLM call in run_agent for real-time limit checking
+
+    async def _track_llm_cost(self, tokens_in: int, tokens_out: int) -> None:
+        """Track cost for LLM calls outside run_agent (e.g., completion summary).
+
+        Use this for LLM calls that don't go through run_agent and thus don't trigger _on_tokens.
+        """
+        # Update workflow token state
+        self.tokens_in += tokens_in
+        self.tokens_out += tokens_out
+
+        # Calculate cost from tokens using stored pricing
+        if self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0:
+            cost_cents = int(
+                (tokens_in * self.input_cents_per_1k / 1000) +
+                (tokens_out * self.output_cents_per_1k / 1000)
+            )
+            if cost_cents > 0:
+                self.own_cost_cents += cost_cents
+                workflow.logger.info(
+                    f"💰 LLM cost (non-run_agent): +{cost_cents}c (total: {self.own_cost_cents}c, "
+                    f"in={tokens_in}, out={tokens_out})"
+                )
+
+                # Recalculate subtree cost and check limit
+                await self._update_cost_and_signal_parent()
+
+    async def _track_usage(self, usage: Optional[Dict] = None, tool_name: Optional[str] = None) -> None:
+        """
+        Track usage from any activity result.
+
+        This is THE SINGLE POINT where all costs are:
+        1. Calculated (LLM tokens → cost via pricing)
+        2. Added to own_cost_cents
+        3. Written to ToolUsage table (if tool_name provided)
+        4. Signaled to parent for hierarchical relay
+
+        Args:
+            usage: Dict with "llm" and/or "service" lists
+            tool_name: Tool name for ToolUsage table (optional for internal LLM calls)
+        """
+        if not usage:
+            return
+
+        total_cost_cents = 0
+        usage_items_for_db = []
+
+        # Process LLM usage items
+        for llm in usage.get("llm", []):
+            tokens_in = llm.get("tokens_in", 0)
+            tokens_out = llm.get("tokens_out", 0)
+            model = llm.get("model") or self.model
+            provider = llm.get("provider") or model
+
+            # Get pricing for this model (fetch if not cached)
+            pricing = await self._get_model_pricing(model)
+            if not pricing:
+                workflow.logger.warning(f"⚠️ No pricing for model {model}, skipping cost for {tokens_in}/{tokens_out} tokens")
+                continue
+
+            cost_cents = int(
+                (tokens_in * pricing["input_cents_per_1k"] / 1000) +
+                (tokens_out * pricing["output_cents_per_1k"] / 1000)
+            )
+            if cost_cents > 0:
+                total_cost_cents += cost_cents
+                workflow.logger.info(
+                    f"💰 LLM cost: +{cost_cents}c ({provider}, in={tokens_in}, out={tokens_out})"
+                )
+                usage_items_for_db.append({
+                    "type": "llm",
+                    "cost_cents": cost_cents,
+                    "provider": provider,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "model": model,
+                })
+
+        # Process service usage items (pre-calculated costs)
+        for svc in usage.get("service", []):
+            cost_cents = svc.get("cost_cents", 0)
+            provider = svc.get("provider", "Service")
+            if cost_cents > 0:
+                total_cost_cents += cost_cents
+                workflow.logger.info(f"💰 Service cost: +{cost_cents}c ({provider})")
+                usage_items_for_db.append({
+                    "type": "service",
+                    "cost_cents": cost_cents,
+                    "provider": provider,
+                })
+
+        if total_cost_cents > 0:
+            # Update workflow cost state
+            self.own_cost_cents += total_cost_cents
+            workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
+
+            # Write to ToolUsage table (if tool_name provided)
+            if tool_name and usage_items_for_db:
+                try:
+                    await workflow.execute_activity(
+                        save_tool_usage,
+                        args=[self.agent_id, self.user_id, tool_name, usage_items_for_db],
+                        start_to_close_timeout=timedelta(seconds=15),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                except Exception as e:
+                    workflow.logger.warning(f"Failed to save tool usage to DB: {e}")
+
+            # Signal parent for hierarchical cost relay
+            await self._update_cost_and_signal_parent()
+
+    async def _get_model_pricing(self, model: str) -> Optional[Dict[str, float]]:
+        """Get pricing for a model, using cache or fetching if needed."""
+        # Check if it's the workflow's primary model
+        if model == self.model and (self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0):
+            return {
+                "input_cents_per_1k": self.input_cents_per_1k,
+                "output_cents_per_1k": self.output_cents_per_1k,
+            }
+
+        # Check cache
+        if model in self.model_pricing_cache:
+            return self.model_pricing_cache[model]
+
+        # Fetch pricing for this model
+        try:
+            pricing = await workflow.execute_activity(
+                fetch_model_pricing,
+                args=[model],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+            self.model_pricing_cache[model] = pricing
+            workflow.logger.info(f"💰 Fetched pricing for {model}: {pricing}")
+            return pricing
+        except Exception as e:
+            workflow.logger.error(f"Failed to fetch pricing for {model}: {e}")
+            return None
+
+    # =========================================================================
+    # COST LIMIT HELPERS
+    # =========================================================================
+
+    def _get_pending_child_workflow_ids(self) -> List[str]:
+        """Get workflow IDs of pending children for signaling."""
+        return [self.child_workflow_ids[cid] for cid in self.pending_children
+                if cid in self.child_workflow_ids]
+
+    def _get_children_tokens(self) -> Tuple[int, int]:
+        """Get current sum of children's tokens for tree aggregation."""
+        return (
+            sum(self.children_tokens_in.values()),
+            sum(self.children_tokens_out.values()),
+        )
+
+    async def _on_tokens(self, tokens_in_delta: int, tokens_out_delta: int) -> None:
+        """Callback for run_agent to report token usage after each LLM call.
+
+        This enables real-time cost tracking and limit checking, not just at phase boundaries.
+        """
+        # Update workflow token state
+        self.tokens_in += tokens_in_delta
+        self.tokens_out += tokens_out_delta
+
+        # Calculate cost from tokens using stored pricing
+        if self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0:
+            cost_cents = int(
+                (tokens_in_delta * self.input_cents_per_1k / 1000) +
+                (tokens_out_delta * self.output_cents_per_1k / 1000)
+            )
+            if cost_cents > 0:
+                self.own_cost_cents += cost_cents
+                workflow.logger.info(
+                    f"💰 LLM cost: +{cost_cents}c (total own: {self.own_cost_cents}c, "
+                    f"in={tokens_in_delta}, out={tokens_out_delta})"
+                )
+
+                # Recalculate subtree cost and check limit (for root) or signal parent
+                await self._update_cost_and_signal_parent()
+
+    async def _update_cost_and_signal_parent(self) -> None:
+        """Recalculate subtree cost/tokens and signal parent (or check limit if root)."""
+        # Recalculate subtree cost
+        self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
+
+        # Recalculate tree tokens (own + all children's subtrees)
+        self.tree_tokens_in = self.tokens_in + sum(self.children_tokens_in.values())
+        self.tree_tokens_out = self.tokens_out + sum(self.children_tokens_out.values())
+
+        # Signal parent (if we have one)
+        if self.parent_workflow_id:
+            try:
+                parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                await parent.signal("child_cost_update", {
+                    "child_agent_id": self.agent_id,
+                    "subtree_cost_cents": self.subtree_cost_cents,
+                    "subtree_tokens_in": self.tree_tokens_in,
+                    "subtree_tokens_out": self.tree_tokens_out,
+                })
+            except Exception as e:
+                workflow.logger.warning(f"Failed to signal parent cost update: {e}")
+        else:
+            # We are root - persist cost to DB and check limit
+            await self._persist_tree_cost()
+            await self._check_cost_limit()
+
+        # Broadcast updated tree tokens to this agent's channel (for frontend display)
+        # This applies to all agents (root and non-root) when receiving child updates
+        # Skip if cost limit was just reached (we already broadcast COST_LIMIT_REACHED status)
+        if not self._cost_limit_reached:
+            try:
+                await workflow.execute_activity(
+                    update_agent_status,
+                    args=[self.agent_id, "ACTIVE", 0.5, "Processing",
+                          self.token_count, self.context_size, self.message_count,
+                          self.tree_tokens_in, self.tree_tokens_out],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to broadcast tree tokens: {e}")
+
+    async def _check_cost_limit(self) -> None:
+        """Check if subtree cost exceeds limit. Only root calls this."""
+        if self.parent_workflow_id is not None:
+            return  # Only root checks limit
+
+        if self.subtree_cost_cents >= self.price_limit_cents and not self._cost_limit_reached:
+            workflow.logger.warning(
+                f"💰 Cost limit exceeded: {self.subtree_cost_cents}c >= {self.price_limit_cents}c"
+            )
+            self._cost_limit_reached = True
+            self.is_paused = True
+
+            # Update status to COST_LIMIT_REACHED
+            try:
+                await workflow.execute_activity(
+                    update_agent_status,
+                    args=[self.agent_id, "COST_LIMIT_REACHED", 0.0, "Cost limit reached",
+                          self.token_count, self.context_size, self.message_count, self.tokens_in, self.tokens_out],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=3)
+                )
+            except Exception as e:
+                workflow.logger.error(f"Failed to update status to COST_LIMIT_REACHED: {e}")
+
+            # Signal all children to pause
+            for child_wf_id in self._get_pending_child_workflow_ids():
+                try:
+                    handle = workflow.get_external_workflow_handle(child_wf_id)
+                    await handle.signal("cost_limit_reached")
+                except Exception:
+                    pass
+
+    async def _persist_tree_cost(self) -> None:
+        """Persist subtree cost to DB (root only, for frontend display)."""
+        from helpers.update_tokens import update_agent_tree_cost_activity
+        try:
+            await workflow.execute_activity(
+                update_agent_tree_cost_activity,
+                args=[self.agent_id, self.subtree_cost_cents],
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to persist tree cost: {e}")
 
     async def _update_tree_state(
         self,
@@ -994,7 +1394,7 @@ class AgentWorkflow:
             # 3. Update DB status to FAILED
             await workflow.execute_activity(
                 update_agent_status,
-                args=[self.agent_id, "FAILED", 1.0, message, self.token_count, 0, len(context), self.tokens_in, self.tokens_out],
+                args=[self.agent_id, "FAILED", 1.0, message, self.token_count, self.context_size, len(context), self.tokens_in, self.tokens_out],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
@@ -1099,9 +1499,12 @@ class AgentWorkflow:
             )
             summary = summary_result.get("summary", "")
             tool_counts = summary_result.get("tool_counts", {})
-            self._track_tokens({"tokens_in": summary_result.get("usage", {}).get("prompt_tokens", 0),
-                               "tokens_out": summary_result.get("usage", {}).get("completion_tokens", 0),
-                               "token_count": summary_result.get("usage", {}).get("total_tokens", 0)})
+            # Track completion summary LLM cost (doesn't go through run_agent)
+            await self._track_llm_cost(
+                summary_result.get("usage", {}).get("prompt_tokens", 0),
+                summary_result.get("usage", {}).get("completion_tokens", 0)
+            )
+            self.token_count += summary_result.get("usage", {}).get("total_tokens", 0)
 
             # Build tool usage array for frontend
             tool_usage = [{"name": k, "count": v} for k, v in tool_counts.items()] if tool_counts else []
@@ -1139,7 +1542,7 @@ class AgentWorkflow:
             # Mark finished (includes structured_response for persistence)
             await workflow.execute_activity(
                 mark_finished,
-                args=[self.agent_id, context, self.token_count, 0, len(context), self.tokens_in, self.tokens_out,
+                args=[self.agent_id, context, self.token_count, self.context_size, len(context), self.tokens_in, self.tokens_out,
                       summary if self.parent_workflow_id else "", structured_response],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3)
@@ -1208,3 +1611,13 @@ class AgentWorkflow:
     def get_status(self) -> Dict:
         """Query current status."""
         return {"agent_id": self.agent_id, "goal": self.goal, "tokens": self.token_count}
+
+    @workflow.query
+    def is_paused_query(self) -> bool:
+        """Query if workflow is paused."""
+        return self.is_paused
+
+    @workflow.query
+    def is_cost_limit_reached_query(self) -> bool:
+        """Query if cost limit has been reached."""
+        return self._cost_limit_reached

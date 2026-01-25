@@ -19,7 +19,7 @@ import json
 import uuid as uuid_module
 import base64
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageType, UsageItem, AssistantEvent
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, AssistantEvent
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
 from browser_tools.schemas import BROWSER_TOOL_MODELS, AVAILABLE_ACTIONS
 from browser_tools.dom_service import DOMService, ActionHistory
@@ -1579,10 +1579,11 @@ BROWSER CONTEXT:
                     action_history=action_entries,
                     config=config,
                 )
-                
-                # Track usage (estimated - Rose API may return actual in future)
-                total_input_tokens += 1000  # Estimate
-                total_output_tokens += 100   # Estimate
+
+                # Track usage from Rose API response
+                usage = llm_result.get("usage", {})
+                total_input_tokens += usage.get("prompt_tokens", 0)
+                total_output_tokens += usage.get("completion_tokens", 0)
                 
             except Exception as e:
                 logger.error(f"Rose API call failed: {e}")
@@ -1649,11 +1650,12 @@ BROWSER CONTEXT:
                     },
                     {
                         "type": "service",
-                        "cost_cents": max(1, int(execution_time_ms / 60000)),
-                        "provider": "Browserbase Session"
+                        # Steel.dev: $1/hour = 100 cents / 3,600,000 ms
+                        "cost_cents": round(execution_time_ms / 36000, 4),
+                        "provider": "Steel.dev Browser"
                     }
                 ]
-                
+
                 return {
                     "status": "needs_user_help",
                     "message": message,
@@ -1840,8 +1842,9 @@ BROWSER CONTEXT:
                             },
                             {
                                 "type": "service",
-                                "cost_cents": max(1, int(execution_time_ms / 60000)),
-                                "provider": "Browserbase Session"
+                                # Steel.dev: $1/hour = 100 cents / 3,600,000 ms
+                                "cost_cents": round(execution_time_ms / 36000, 4),
+                                "provider": "Steel.dev Browser"
                             }
                         ]
 
@@ -2082,11 +2085,12 @@ Based on this feedback, I need to continue working on the task and address the i
             },
             {
                 "type": "service",
-                "cost_cents": max(1, int(execution_time_ms / 60000)),
-                "provider": "Browserbase Session"
+                # Steel.dev: $1/hour = 100 cents / 3,600,000 ms
+                "cost_cents": round(execution_time_ms / 36000, 4),
+                "provider": "Steel.dev Browser"
             }
         ]
-        
+
         return {
             "status": "max_iterations",
             "success": False,
@@ -2290,23 +2294,22 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 )
                 return
 
-            # Report usage
+            # Build standardized usage for workflow cost tracking
+            tool_usage = {"llm": [], "service": []}
             if result.get("usage_items"):
-                usage_items = []
                 for item in result["usage_items"]:
-                    item_type = UsageType.LLM if item.get("type") == "llm" else UsageType.SERVICE
-                    usage_items.append(UsageItem(
-                        type=item_type,
-                        cost_cents=item.get("cost_cents", 0),
-                        provider=item.get("provider", ""),
-                        tokens_in=item.get("input_tokens"),
-                        tokens_out=item.get("output_tokens"),
-                    ))
-                yield ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name="spawn_browser_agent",
-                    usage_items=usage_items
-                )
+                    if item.get("type") == "llm":
+                        tool_usage["llm"].append({
+                            "tokens_in": item.get("input_tokens", 0),
+                            "tokens_out": item.get("output_tokens", 0),
+                            "model": item.get("model"),
+                            "provider": item.get("provider", ""),
+                        })
+                    else:
+                        tool_usage["service"].append({
+                            "cost_cents": item.get("cost_cents", 0),
+                            "provider": item.get("provider", ""),
+                        })
 
             # Post output files as separate ASSISTANT messages (like spawn_claude_code)
             output_files = result.get("output_files", [])
@@ -2322,12 +2325,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         file_pointer=fp,
                     )
 
-            # Yield final result
+            # Yield final result with usage for tracking
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",
                 message=result.get("message", ""),
-                status=MessageStatus.FINISHED
+                status=MessageStatus.FINISHED,
+                data={"usage": tool_usage}
             )
 
         except Exception as e:
@@ -2370,16 +2374,19 @@ async def spawn_browser_agent(
 ):
     """
     Workflow helper for spawn_browser_agent.
-    
+
     Spawns an autonomous browser agent with a high-level goal.
-    
+
     Args:
         workflow_instance: The workflow instance
         tool_call: Tool call dict with 'goal'
         tool_call_id: Unique ID for this tool call
     """
     manager = get_manager()
-    
+
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_browser_agent")
+        # Track usage from final event (included in data field)
+        if event.data and event.data.get("usage"):
+            await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_browser_agent")
 

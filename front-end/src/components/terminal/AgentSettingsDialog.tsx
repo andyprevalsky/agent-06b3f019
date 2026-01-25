@@ -30,8 +30,9 @@ import React, { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
-import { Settings, Loader2, Trash2, FileJson } from 'lucide-react';
-import { AgentDetail, deleteAgent, ResponseSchemaField } from '@/lib/api';
+import { Input } from '@/components/ui/input';
+import { Settings, Loader2, Trash2, FileJson, DollarSign } from 'lucide-react';
+import { AgentDetail, deleteAgent, updateAgent, ResponseSchemaField } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Progress } from '@/components/ui/progress';
 import { useAppData, Model } from '@/hooks/useAppData';
@@ -53,17 +54,11 @@ function getModelContextWindow(model: string, models: Model[]): number {
   return 100000;
 }
 
-function calculateCost(tokensIn: number, tokensOut: number, toolCostCents: number, promptPrice?: string, completionPrice?: string): string {
-  const promptPricePerToken = promptPrice ? parseFloat(promptPrice) : 0;
-  const completionPricePerToken = completionPrice ? parseFloat(completionPrice) : 0;
-
-  const llmCost = (tokensIn * promptPricePerToken) + (tokensOut * completionPricePerToken);
-  const toolCost = toolCostCents / 100; // Convert cents to dollars
-  const totalCost = llmCost + toolCost;
-
-  if (totalCost === 0) return '$0.00';
-  if (totalCost < 0.01) return `$${totalCost.toFixed(4)}`;
-  return `$${totalCost.toFixed(2)}`;
+function formatCentsAsDollars(cents: number): string {
+  const dollars = cents / 100;
+  if (dollars === 0) return '$0.00';
+  if (dollars < 0.01) return `$${dollars.toFixed(4)}`;
+  return `$${dollars.toFixed(2)}`;
 }
 
 function formatFieldType(type: ResponseSchemaField['type']): string {
@@ -90,10 +85,20 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
   const [confirmEnabled, setConfirmEnabled] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Price limit editing state (only for root agents)
+  const [priceLimitInput, setPriceLimitInput] = useState('');
+  const [isEditingPriceLimit, setIsEditingPriceLimit] = useState(false);
+  const [isSavingPriceLimit, setIsSavingPriceLimit] = useState(false);
+
   useEffect(() => {
     // Reset delete states when agent changes
     setShowDeleteSection(false);
     setConfirmEnabled(false);
+    // Reset price limit editing
+    setIsEditingPriceLimit(false);
+    if (agent?.price_limit_cents !== undefined) {
+      setPriceLimitInput((agent.price_limit_cents / 100).toFixed(2));
+    }
   }, [agent]);
 
   // Reset delete states when dialog closes
@@ -149,6 +154,45 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
     }
   };
 
+  const handleSavePriceLimit = async () => {
+    if (!agent) return;
+    const newLimitCents = Math.round(parseFloat(priceLimitInput) * 100);
+    if (isNaN(newLimitCents) || newLimitCents < 1) {
+      toast({
+        title: 'Invalid amount',
+        description: 'Please enter a valid dollar amount (minimum $0.01)',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (newLimitCents < (agent.tree_cost_cents || 0)) {
+      toast({
+        title: 'Limit too low',
+        description: `New limit must be at least $${((agent.tree_cost_cents || 0) / 100).toFixed(2)} (current cost)`,
+        variant: 'destructive',
+      });
+      return;
+    }
+    setIsSavingPriceLimit(true);
+    try {
+      await updateAgent(agent.agent_id, { price_limit_cents: newLimitCents });
+      toast({
+        title: 'Price limit updated',
+        description: `New limit: $${(newLimitCents / 100).toFixed(2)}`,
+      });
+      setIsEditingPriceLimit(false);
+      onUpdate?.();
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to update price limit',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSavingPriceLimit(false);
+    }
+  };
+
   // Ensure arrays are always defined
   const modelsList = Array.isArray(models) ? models : [];
   
@@ -156,15 +200,8 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
   const restartThreshold = Math.round(maxWindow * 0.8);
   const contextPercentage = agent ? Math.min(100, (agent.context_size / restartThreshold) * 100) : 0;
   
-  // Calculate cost based on current model pricing + tool costs
-  const currentModelData = agent ? modelsList.find(m => m?.id === agent.model) : null;
-  const estimatedCost = agent ? calculateCost(
-    agent.tokens_in,
-    agent.tokens_out,
-    agent.tool_cost_cents || 0,
-    currentModelData?.pricing?.prompt,
-    currentModelData?.pricing?.completion
-  ) : '$0.00';
+  // Format tree cost for display
+  const treeCostDisplay = agent ? formatCentsAsDollars(agent.tree_cost_cents || 0) : '$0.00';
   
   // Calculate combined tokens (primary LLM + tools)
   const totalTokensIn = agent ? (agent.tokens_in || 0) + (agent.tool_tokens_in || 0) : 0;
@@ -225,9 +262,62 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
               
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Cost</span>
-                <span className="font-mono">{estimatedCost}</span>
+                <span className="font-mono">{treeCostDisplay}</span>
               </div>
-              
+
+              {/* Price Limit (only for root agents) */}
+              {!agent.parent_agent_id && (
+                <div className="space-y-1 pt-2 border-t border-dashed">
+                  <div className="flex justify-between items-center text-sm">
+                    <span className="text-muted-foreground">Price Limit</span>
+                    {!isEditingPriceLimit ? (
+                      <button
+                        onClick={() => setIsEditingPriceLimit(true)}
+                        className="font-mono hover:underline text-primary"
+                      >
+                        ${((agent.price_limit_cents || 100) / 100).toFixed(2)}
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1">
+                        <DollarSign className="h-3 w-3 text-muted-foreground" />
+                        <Input
+                          value={priceLimitInput}
+                          onChange={(e) => setPriceLimitInput(e.target.value)}
+                          className="w-20 h-6 text-xs font-mono px-1"
+                          placeholder="1.00"
+                          disabled={isSavingPriceLimit}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleSavePriceLimit();
+                            if (e.key === 'Escape') {
+                              setIsEditingPriceLimit(false);
+                              setPriceLimitInput(((agent.price_limit_cents || 100) / 100).toFixed(2));
+                            }
+                          }}
+                          autoFocus
+                        />
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-2 text-xs"
+                          onClick={handleSavePriceLimit}
+                          disabled={isSavingPriceLimit}
+                        >
+                          {isSavingPriceLimit ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Save'}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  {agent.tree_cost_cents !== undefined && agent.tree_cost_cents > 0 && (
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">Tree Cost</span>
+                      <span className="font-mono text-muted-foreground">
+                        ${(agent.tree_cost_cents / 100).toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-1">
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">Context Usage</span>

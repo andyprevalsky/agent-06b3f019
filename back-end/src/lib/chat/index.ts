@@ -10,6 +10,7 @@ export {
   broadcastAssistantStream,
   broadcastToolEvent,
   broadcastAgentModeStarted,
+  broadcastAgentUpdate,
   broadcastMessageInsert,
   generateStreamId,
 } from './supabaseBroadcast';

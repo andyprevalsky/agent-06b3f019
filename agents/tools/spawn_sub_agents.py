@@ -209,6 +209,11 @@ class SpawnSubAgentManager(ToolManager):
             workflow_instance.child_tool_ids[child_agent_id] = child_tool_id
             workflow_instance.pending_children.add(child_agent_id)
 
+            # Store mapping: agent_id -> temporal_workflow_id (for cost limit signaling)
+            child_temporal_workflow_id = child_info.get("temporal_workflow_id")
+            if child_temporal_workflow_id:
+                workflow_instance.child_workflow_ids[child_agent_id] = child_temporal_workflow_id
+
             # Post initial IN_PROGRESS message with subAgentId
             # This creates the message that signals will update
             await workflow_instance._post_message(

@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 import structlog
 import httpx
+from temporalio import activity
 
 from config import load_config
 
@@ -20,10 +21,10 @@ CACHE_DURATION_SECONDS = 3600
 async def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
     """
     Fetch model pricing from Supabase cost endpoint.
-    
+
     Args:
         model: Model identifier (e.g., "rose-1-ultra", "rose-labs/rose-1-ultra")
-        
+
     Returns:
         Dict with 'input_cents_per_1k' and 'output_cents_per_1k', or None if fetch fails
     """
@@ -31,7 +32,18 @@ async def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
     normalized_model = model.lower()
     if normalized_model.startswith('rose-labs/'):
         normalized_model = normalized_model.replace('rose-labs/', '')
-    
+
+    # Check for Anthropic models first (they have hardcoded pricing, not in Rose cost endpoint)
+    anthropic_pricing = get_anthropic_pricing(normalized_model)
+    if anthropic_pricing:
+        logger.info(
+            "💰 Using Anthropic model pricing",
+            model=model,
+            input_cents_per_1k=anthropic_pricing["input_cents_per_1k"],
+            output_cents_per_1k=anthropic_pricing["output_cents_per_1k"]
+        )
+        return anthropic_pricing
+
     # Check cache first
     now = datetime.now()
     if normalized_model in _model_pricing_cache:
@@ -119,12 +131,12 @@ async def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
 def get_default_pricing(model: str) -> Dict[str, float]:
     """
     Get default/fallback pricing for a model if dynamic fetch fails.
-    
+
     These are rough estimates - actual pricing should be fetched dynamically.
-    
+
     Args:
         model: Model identifier
-        
+
     Returns:
         Dict with 'input_cents_per_1k' and 'output_cents_per_1k'
     """
@@ -148,6 +160,50 @@ def get_default_pricing(model: str) -> Dict[str, float]:
             "input_cents_per_1k": 0.1,
             "output_cents_per_1k": 0.3
         }
+
+
+# Anthropic model pricing (direct API, not through Rose)
+# Source: https://platform.claude.com/docs/en/about-claude/pricing
+# Prices in $ per million tokens -> convert to cents per 1k tokens
+ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
+    # Sonnet 4 / 4.5 - $3/MTok input, $15/MTok output
+    "claude-sonnet-4": {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+    "claude-sonnet-4.5": {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+    "claude-4-sonnet": {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+    # Opus 4 - $15/MTok input, $75/MTok output
+    "claude-opus-4": {"input_cents_per_1k": 1.5, "output_cents_per_1k": 7.5},
+    "claude-4-opus": {"input_cents_per_1k": 1.5, "output_cents_per_1k": 7.5},
+    # Opus 4.5 - $5/MTok input, $25/MTok output
+    "claude-opus-4.5": {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
+    "claude-opus-4-5": {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
+    # Haiku 4.5 - $1/MTok input, $5/MTok output
+    "claude-haiku-4.5": {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
+    "claude-haiku-4-5": {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
+}
+
+
+def get_anthropic_pricing(model: str) -> Optional[Dict[str, float]]:
+    """
+    Get pricing for Anthropic models (direct API, not through Rose cost endpoint).
+
+    Args:
+        model: Model identifier (e.g., "claude-sonnet-4", "claude-opus-4.5")
+
+    Returns:
+        Dict with 'input_cents_per_1k' and 'output_cents_per_1k', or None if not an Anthropic model
+    """
+    normalized = model.lower().strip()
+
+    # Direct match
+    if normalized in ANTHROPIC_MODEL_PRICING:
+        return ANTHROPIC_MODEL_PRICING[normalized]
+
+    # Fuzzy match for common variations
+    for key, pricing in ANTHROPIC_MODEL_PRICING.items():
+        if key in normalized or normalized in key:
+            return pricing
+
+    return None
 
 
 async def get_model_pricing_with_fallback(model: str) -> Dict[str, float]:
@@ -176,5 +232,20 @@ async def get_model_pricing_with_fallback(model: str) -> Dict[str, float]:
         )
 
     return pricing
+
+
+@activity.defn
+async def fetch_model_pricing(model: str) -> Dict[str, float]:
+    """
+    Activity: Fetch model pricing for cost calculation.
+
+    Returns:
+        Dict with 'input_cents_per_1k' and 'output_cents_per_1k'
+
+    Raises:
+        RuntimeError: If pricing cannot be fetched
+    """
+    activity.heartbeat(f"Fetching pricing for {model}")
+    return await get_model_pricing_with_fallback(model)
 
 

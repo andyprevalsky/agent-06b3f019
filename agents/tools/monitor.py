@@ -8,7 +8,7 @@ import structlog
 import httpx
 import time
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 from helpers.handle_tool_event import handle_tool_event
 
 # Config import is safe - no side effects at import time (load_dotenv is lazy)
@@ -106,27 +106,7 @@ class MonitorManager(ToolManager):
             # Monitor API pricing: $3 per 1,000 requests = $0.003 per request
             # Source: https://parallel.ai/pricing
             total_cost_cents = 0.3  # $0.003 per request
-            
-            # Report usage
-            await handle_tool_event(
-                event=ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name=self.tool_name,
-                    usage_items=[
-                        UsageItem(
-                            type=UsageType.SERVICE,
-                            cost_cents=total_cost_cents,
-                            provider="Parallel Monitor API"
-                        )
-                    ]
-                ),
-                agent_id=agent_id,
-                tool_call_id=tool_call_id,
-                tool_name="monitor",
-                execute_activity=execute_activity,
-                user_id=user_id,
-            )
-            
+
             # Format success message using standardized format
             message = format_tool_message(
                 params=tool_call,
@@ -149,8 +129,15 @@ class MonitorManager(ToolManager):
                 execute_activity=execute_activity,
                 user_id=user_id,
             )
-            
-            return result
+
+            # Return with standardized usage for workflow cost tracking
+            return {
+                "result": result,
+                "usage": {
+                    "llm": [],
+                    "service": [{"cost_cents": int(total_cost_cents), "provider": "Parallel Monitor API"}],
+                }
+            }
             
         except Exception as e:
             # Calculate elapsed time even on error
@@ -179,7 +166,10 @@ class MonitorManager(ToolManager):
                 user_id=user_id,
             )
             
-            return {"error": str(e)}
+            return {
+                "result": {"error": str(e)},
+                "usage": {"llm": [], "service": []},
+            }
 
 
 # ========================================

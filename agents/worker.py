@@ -67,11 +67,12 @@ from helpers import (
     fetch_agent_config,
     check_user_usage,
     get_user_context,
+    fetch_model_pricing,
 )
 from helpers.llm import call_planner_llm_activity, set_response_schema_activity
 from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
-from helpers.update_tokens import update_agent_tokens_activity
+from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
 from helpers.sms_activities import (
     get_agent_source,
     enqueue_sms_question_activity,
@@ -226,9 +227,11 @@ async def main():
             save_blueprint_activity,
             mark_finished,
             fetch_agent_config,
+            fetch_model_pricing,
             check_user_usage,
             get_user_context,
             update_agent_tokens_activity,
+            update_agent_tree_cost_activity,
             update_agent_tree_state,
             # SMS activities
             get_agent_source,

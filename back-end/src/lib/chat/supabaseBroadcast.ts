@@ -98,6 +98,38 @@ export async function broadcastAgentModeStarted(agentId: string): Promise<void> 
 }
 
 /**
+ * Broadcast agent UPDATE event - notifies frontend of agent state changes
+ * Use this for tree_cost_cents, context_size, and other agent-level updates
+ *
+ * @param agentId - The agent ID
+ * @param updates - Partial agent update data
+ */
+export async function broadcastAgentUpdate(
+  agentId: string,
+  updates: {
+    treeCostCents?: number;
+    contextSize?: number;
+    progress?: number;
+    status?: string;
+    statusMessage?: string;
+    tokenCount?: number;
+    tokensIn?: number;
+    tokensOut?: number;
+    messageCount?: number;
+  }
+): Promise<void> {
+  console.log('[Broadcast] UPDATE', { agentId, ...updates });
+  await broadcast({
+    topic: `agent:${agentId}`,
+    event: 'UPDATE',
+    payload: {
+      agentId,
+      ...updates,
+    },
+  });
+}
+
+/**
  * Broadcast message INSERT event - notifies frontend of new message
  * This is the "true message" that shows in the chat (clears thinking bubble)
  *

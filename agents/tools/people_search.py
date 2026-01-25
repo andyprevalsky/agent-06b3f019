@@ -8,7 +8,7 @@ import structlog
 import httpx
 import time
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 from helpers.handle_tool_event import handle_tool_event
 from config import load_config
 
@@ -122,27 +122,14 @@ class ExaPeopleSearchManager(ToolManager):
                 user_id=user_id,
             )
 
-            # Track usage for billing
-            await handle_tool_event(
-                event=ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name="people_search",
-                    usage_items=[
-                        UsageItem(
-                            type=UsageType.SERVICE,
-                            cost_cents=total_cost_cents,
-                            provider="Exa People Search"
-                        )
-                    ]
-                ),
-                agent_id=agent_id,
-                tool_call_id=tool_call_id,
-                tool_name="people_search",
-                execute_activity=execute_activity,
-                user_id=user_id,
-            )
-
-            return result
+            # Return with standardized usage for workflow cost tracking
+            return {
+                "result": result,
+                "usage": {
+                    "llm": [],
+                    "service": [{"cost_cents": int(total_cost_cents), "provider": "Exa People Search"}],
+                }
+            }
 
         except Exception as e:
             # Calculate elapsed time even on error

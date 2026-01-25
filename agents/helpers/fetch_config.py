@@ -64,6 +64,8 @@ async def fetch_agent_config(agent_id: str) -> Dict:
             "verifier_prompt": agent["verifier"]["llm_judge_prompt"] if agent.get("verifier") else None,
             "parent_agent_id": agent.get("parentAgentId"),  # None if top-level agent
             "response_schema": agent.get("response_schema"),  # Structured output schema
+            "token_in_price_microdollars": agent.get("token_in_price_microdollars"),  # For cost calculation
+            "token_out_price_microdollars": agent.get("token_out_price_microdollars"),  # For cost calculation
         }
         
         logger.info(

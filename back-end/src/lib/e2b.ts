@@ -168,12 +168,52 @@ export async function createClaudeCodeSession(
  * @param agentId - Agent ID for storing output files
  * @returns Output files created by the agent
  */
+// Type for Claude Code usage extracted from JSONL logs
+export interface ClaudeCodeUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}
+
+/**
+ * Parse Claude Code JSONL logs to extract token usage.
+ * Claude Code logs each message with usage data in ~/.claude/projects/
+ */
+function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
+  const usage: ClaudeCodeUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+  };
+
+  const lines = jsonlContent.split('\n').filter(line => line.trim());
+
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      // Claude Code JSONL format has usage in message entries
+      if (entry.usage) {
+        usage.inputTokens += entry.usage.input_tokens || 0;
+        usage.outputTokens += entry.usage.output_tokens || 0;
+        usage.cacheReadInputTokens += entry.usage.cache_read_input_tokens || 0;
+        usage.cacheCreationInputTokens += entry.usage.cache_creation_input_tokens || 0;
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+
+  return usage;
+}
+
 export async function closeClaudeCodeSession(
   taskId: string,
   userId?: string,
   agentId?: string,
   additionalPaths?: string[]
-): Promise<{ outputFiles: FilePointer[] }> {
+): Promise<{ outputFiles: FilePointer[]; usage?: ClaudeCodeUsage }> {
   console.log(`[E2B] Closing Claude Code session ${taskId}...`);
 
   const session = await prisma.claudeCodeSession.findUnique({
@@ -185,12 +225,58 @@ export async function closeClaudeCodeSession(
   }
 
   const outputFiles: FilePointer[] = [];
+  let usage: ClaudeCodeUsage | undefined;
 
   try {
     // Connect to sandbox
     const sandbox = await Sandbox.connect(session.sandboxId, {
       apiKey: process.env.E2B_API_KEY,
     });
+
+    // Extract Claude Code usage from JSONL logs before killing sandbox
+    try {
+      // Find the most recent JSONL file in ~/.claude/projects/
+      // Claude Code creates project-specific dirs with conversation logs
+      const findJsonlResult = await sandbox.commands.run(
+        `find /home/user/.claude/projects -name "*.jsonl" -type f 2>/dev/null | head -5`,
+        { timeoutMs: 5000 }
+      );
+
+      if (findJsonlResult.stdout && findJsonlResult.stdout.trim()) {
+        const jsonlFiles = findJsonlResult.stdout.split('\n').filter(f => f.trim());
+        console.log(`[E2B] Found ${jsonlFiles.length} JSONL files for usage extraction`);
+
+        let totalUsage: ClaudeCodeUsage = {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+        };
+
+        for (const jsonlFile of jsonlFiles) {
+          try {
+            const content = await sandbox.files.read(jsonlFile.trim(), { format: 'text' });
+            const fileUsage = parseClaudeCodeUsage(content as string);
+            totalUsage.inputTokens += fileUsage.inputTokens;
+            totalUsage.outputTokens += fileUsage.outputTokens;
+            totalUsage.cacheReadInputTokens += fileUsage.cacheReadInputTokens;
+            totalUsage.cacheCreationInputTokens += fileUsage.cacheCreationInputTokens;
+            console.log(`[E2B] Parsed usage from ${jsonlFile}: in=${fileUsage.inputTokens}, out=${fileUsage.outputTokens}`);
+          } catch (readErr) {
+            console.error(`[E2B] Failed to read JSONL file ${jsonlFile}:`, readErr);
+          }
+        }
+
+        if (totalUsage.inputTokens > 0 || totalUsage.outputTokens > 0) {
+          usage = totalUsage;
+          console.log(`[E2B] Total Claude Code usage: in=${usage.inputTokens}, out=${usage.outputTokens}, cache_read=${usage.cacheReadInputTokens}, cache_create=${usage.cacheCreationInputTokens}`);
+        }
+      } else {
+        console.log(`[E2B] No JSONL files found for usage extraction`);
+      }
+    } catch (usageErr) {
+      console.error(`[E2B] Failed to extract Claude Code usage:`, usageErr);
+    }
 
     // Extract output files if userId and agentId provided
     if (userId && agentId) {
@@ -312,7 +398,7 @@ export async function closeClaudeCodeSession(
 
   console.log(`[E2B] Session closed: ${taskId}`);
 
-  return { outputFiles };
+  return { outputFiles, usage };
 }
 
 /**

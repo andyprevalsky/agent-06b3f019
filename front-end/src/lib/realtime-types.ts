@@ -508,6 +508,7 @@ export interface UpdateAgentPayload {
   tokensOut?: number;
   contextSize?: number;
   messageCount?: number;
+  treeCostCents?: number;  // Real-time tree cost updates (for price limit feature)
   updatedAt?: string;
   temporalWorkflowId?: string | null;
 }

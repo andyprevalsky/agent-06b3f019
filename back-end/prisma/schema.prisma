@@ -39,6 +39,8 @@ model Agent {
   proxyCountry              String?     // Proxy geolocation from client IP (e.g., "US")
   proxyState                String?     // State abbreviation (e.g., "TX")
   proxyCity                 String?     // City name uppercase (e.g., "DALLAS")
+  priceLimitCents           Int         @default(100)  // Price limit in cents (100 = $1.00)
+  treeCostCents             Int         @default(0)   // Total subtree cost (own + all descendants)
   parent                    Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
   children                  Agent[]     @relation("AgentHierarchy")
   tools                     AgentTool[]
@@ -516,6 +518,7 @@ enum AgentStatus {
   COMPLETED
   FAILED
   OUT_OF_CREDITS
+  COST_LIMIT_REACHED
 }
 
 enum AgentSource {

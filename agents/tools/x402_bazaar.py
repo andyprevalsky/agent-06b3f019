@@ -12,7 +12,7 @@ import httpx
 import time
 import base64
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, UsageItem, UsageType, format_tool_message, format_error_message
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 from helpers.handle_tool_event import handle_tool_event
 
 # Config import is safe - no side effects at import time (load_dotenv is lazy)
@@ -135,7 +135,14 @@ class SearchX402BazaarManager(ToolManager):
                 user_id=user_id,
             )
 
-            return result
+            # Return with standardized usage for workflow cost tracking (search is free)
+            return {
+                "result": result,
+                "usage": {
+                    "llm": [],
+                    "service": [],
+                }
+            }
 
         except Exception as e:
             # Calculate elapsed time even on error
@@ -164,7 +171,10 @@ class SearchX402BazaarManager(ToolManager):
                 user_id=user_id,
             )
 
-            return {"error": str(e), "services": [], "service_count": 0}
+            return {
+                "result": {"error": str(e), "services": [], "service_count": 0},
+                "usage": {"llm": [], "service": []},
+            }
 
 
 # ========================================
@@ -265,28 +275,14 @@ class PayForX402BazaarServiceManager(ToolManager):
                 user_id=user_id,
             )
 
-            # 4. Report usage for billing (only if payment was made)
-            if cost_cents > 0:
-                await handle_tool_event(
-                    event=ToolEvent(
-                        type=EventType.USAGE,
-                        tool_name=self.tool_name,
-                        usage_items=[
-                            UsageItem(
-                                type=UsageType.SERVICE,
-                                cost_cents=cost_cents,
-                                provider=f"x402 Bazaar ({result.get('network', 'base')})"
-                            )
-                        ]
-                    ),
-                    agent_id=agent_id,
-                    tool_call_id=tool_call_id,
-                    tool_name="pay_for_x402_bazaar_service",
-                    execute_activity=execute_activity,
-                    user_id=user_id,
-                )
-
-            return result
+            # Return with standardized usage for workflow cost tracking
+            return {
+                "result": result,
+                "usage": {
+                    "llm": [],
+                    "service": [{"cost_cents": int(cost_cents), "provider": f"x402 Bazaar ({result.get('network', 'base')})"}] if cost_cents > 0 else [],
+                }
+            }
 
         except Exception as e:
             # Calculate elapsed time even on error
@@ -315,7 +311,10 @@ class PayForX402BazaarServiceManager(ToolManager):
                 user_id=user_id,
             )
 
-            return {"error": str(e)}
+            return {
+                "result": {"error": str(e)},
+                "usage": {"llm": [], "service": []},
+            }
 
 
 # ========================================

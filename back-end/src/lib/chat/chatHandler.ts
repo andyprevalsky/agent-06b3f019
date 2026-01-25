@@ -300,6 +300,7 @@ async function startTemporalWorkflowForChat(
       llmJudgePrompt: agent.verifier.llmJudgePrompt,
     },
     startPhase,  // 'plan' or 'execute' - determines whether to skip PLAN phase
+    priceLimitCents: agent.priceLimitCents,
   });
 
   // Update agent with workflow ID

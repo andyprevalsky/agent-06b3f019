@@ -180,6 +180,7 @@ router.post('/inbound', async (req: Request, res: Response) => {
             type: 'FLOAT_LLM_JUDGE',
             llmJudgePrompt: verifierPrompt,
           },
+          priceLimitCents: agent.priceLimitCents,
         });
 
         await prisma.agent.update({

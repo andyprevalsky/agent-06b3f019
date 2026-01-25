@@ -13,7 +13,7 @@ USAGE:
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Callable, Awaitable, Set, Type
+from typing import Dict, List, Optional, Any, Callable, Awaitable, Set, Type, Tuple
 import asyncio
 import structlog
 import uuid
@@ -26,7 +26,8 @@ from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_
 from helpers.tool_schemas import create_agent_action_model
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import compress_context
-from tools.base import ToolEvent, EventType, UsageType, UsageItem, MessageStatus
+from helpers.update_status import update_agent_status
+from tools.base import ToolEvent, EventType, MessageStatus
 from tools.knowledge_base import query_blueprints_activity, query_blueprints
 from loop.activity_helper import call_temporal_activity_from_activity
 
@@ -67,6 +68,13 @@ async def run_agent(
 
     # For tree state updates (sub-agent UI)
     update_tree_state: Optional[Callable[[], Awaitable[None]]] = None,
+
+    # For tree token aggregation - returns (children_tokens_in, children_tokens_out)
+    get_children_tokens: Optional[Callable[[], Tuple[int, int]]] = None,
+
+    # For cost tracking - called after each LLM call with token deltas
+    # Workflow uses this to calculate cost and check price limit in real-time
+    on_tokens: Optional[Callable[[int, int], Awaitable[None]]] = None,
     
     # Custom response model (for browser agent with different tool schemas)
     # If None, uses create_agent_action_model(tools)
@@ -116,6 +124,7 @@ async def run_agent(
     tokens_in = 0
     tokens_out = 0
     token_count = 0
+    context_size = 0  # Current context window usage (prompt_tokens from last LLM call)
     iteration = iteration_offset
     blueprint_queried = False
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
@@ -415,38 +424,52 @@ async def run_agent(
             llm_tokens_in = usage.get("prompt_tokens", 0)
             llm_tokens_out = usage.get("completion_tokens", 0)
             llm_total = usage.get("total_tokens", 0)
-            
+
             tokens_in += llm_tokens_in
             tokens_out += llm_tokens_out
             token_count += llm_total
-            
-            # Create USAGE event for LLM tokens - routes to atomic DB update
-            # This provides real-time token updates to FE (new behavior)
-            if llm_total > 0:
-                usage_event = ToolEvent(
-                    type=EventType.USAGE,
-                    tool_name="llm_call",
-                    usage_items=[
-                        UsageItem(
-                            type=UsageType.LLM,
-                            cost_cents=0,  # Cost calculated elsewhere based on model pricing
-                            provider=f"LLM: {model}",
-                            number_of_tokens=llm_total,
-                            tokens_in=llm_tokens_in,  # prompt_tokens
-                            tokens_out=llm_tokens_out,  # completion_tokens
-                        )
-                    ]
+            context_size = llm_tokens_in  # Current context = prompt tokens of last LLM call
+
+            # Notify workflow of token usage for cost tracking and limit checking
+            # This happens BEFORE tree token broadcast so cost limit can pause before more work
+            if on_tokens:
+                try:
+                    await on_tokens(llm_tokens_in, llm_tokens_out)
+                except Exception as e:
+                    logger.warning(f"on_tokens callback failed: {e}")
+
+            # Check if paused (cost limit may have been triggered by on_tokens)
+            if check_paused and await check_paused():
+                logger.info("Agent paused after cost check")
+                return {
+                    "status": "paused",
+                    "context": context,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "token_count": token_count,
+                    "context_size": context_size,
+                }
+
+            # Calculate tree tokens (own + children's accumulated tokens)
+            children_tokens_in, children_tokens_out = (0, 0)
+            if get_children_tokens:
+                children_tokens_in, children_tokens_out = get_children_tokens()
+            tree_tokens_in = tokens_in + children_tokens_in
+            tree_tokens_out = tokens_out + children_tokens_out
+
+            # Persist + broadcast tree tokens after each LLM call
+            try:
+                await execute_activity(
+                    update_agent_status,
+                    args=[agent_id, "ACTIVE", iteration / max_iterations, f"Processing",
+                          token_count, context_size, len(context), tree_tokens_in, tree_tokens_out],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                await handle_tool_event(
-                    event=usage_event,
-                    agent_id=agent_id,
-                    tool_call_id=stream_id,
-                    tool_name="llm_call",
-                    execute_activity=execute_activity,
-                    user_id=user_id,
-                    sub_agent_id=task_id,
-                )
-            
+            except Exception as e:
+                logger.warning(f"Failed to update agent status after LLM call: {e}")
+                # Non-fatal - continue execution
+
         except asyncio.CancelledError:
             logger.info("LLM call cancelled (paused)")
             return {
@@ -455,6 +478,7 @@ async def run_agent(
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
                 "token_count": token_count,
+                "context_size": context_size,
             }
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
@@ -575,6 +599,7 @@ async def run_agent(
                             "tokens_in": tokens_in,
                             "tokens_out": tokens_out,
                             "token_count": token_count,
+                            "context_size": context_size,
                             **result,
                         }
 
@@ -585,6 +610,7 @@ async def run_agent(
                             "tokens_in": tokens_in,
                             "tokens_out": tokens_out,
                             "token_count": token_count,
+                            "context_size": context_size,
                             **result,
                         }
 
@@ -683,6 +709,7 @@ async def run_agent(
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
                         "token_count": token_count,
+                        "context_size": context_size,
                         "message": "",
                     }
 
@@ -695,6 +722,7 @@ async def run_agent(
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
                         "token_count": token_count,
+                        "context_size": context_size,
                         "message": "",
                     }
 
@@ -745,6 +773,7 @@ async def run_agent(
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
                         "token_count": token_count,
+                        "context_size": context_size,
                         "message": v_reasoning,
                         "score": score,
                         "structured_response": structured_response,
@@ -801,6 +830,7 @@ async def run_agent(
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "token_count": token_count,
+        "context_size": context_size,
         "message": f"Reached max iterations ({max_iterations})",
         # Final verifier results for failure context
         "verifier_progress": final_verifier_progress,

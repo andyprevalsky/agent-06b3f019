@@ -12,7 +12,7 @@
  *
  * THINKING DISPLAY:
  * Show when ALL conditions met (with 500ms debounce):
- * ├─ agent.status is active (not PAUSED/COMPLETED/FAILED/OUT_OF_CREDITS)
+ * ├─ agent.status is active (not PAUSED/COMPLETED/FAILED/OUT_OF_CREDITS/COST_LIMIT_REACHED)
  * ├─ filteredStreamingBubbles.size > 0 (LLM streaming) OR no IN_PROGRESS tools
  * └─ NOT (last message is send_message_to_user with isQuestion == true)
  *     OR in chat mode: NOT (last message is send_message_to_user at all)
@@ -195,6 +195,8 @@ interface MessageListProps {
   compact?: boolean;
   /** Callback when user clicks "Add Credits" on out of credits banner */
   onAddCredits?: () => void;
+  /** Callback when user clicks "Increase Cost Limit" on cost limit reached banner */
+  onIncreaseCostLimit?: () => void;
   /** Callback when navigating to a sub-agent */
   onNavigateToAgent?: (agentId: string) => void;
   /** Callback when user submits feedback */
@@ -212,6 +214,7 @@ export function MessageList({
   showThinkingIndicator = true,
   compact = false,
   onAddCredits,
+  onIncreaseCostLimit,
   onNavigateToAgent,
   onSubmitFeedback,
 }: MessageListProps) {
@@ -432,7 +435,8 @@ export function MessageList({
       agent.status !== 'PAUSED' &&
       agent.status !== 'COMPLETED' &&
       agent.status !== 'FAILED' &&
-      agent.status !== 'OUT_OF_CREDITS';
+      agent.status !== 'OUT_OF_CREDITS' &&
+      agent.status !== 'COST_LIMIT_REACHED';
 
     if (!isAgentActive) return false;
 
@@ -670,8 +674,8 @@ export function MessageList({
                   agent ran out of credits
                 </p>
                 {onAddCredits && (
-                  <Button 
-                    size="sm" 
+                  <Button
+                    size="sm"
                     variant="default"
                     onClick={onAddCredits}
                     className="h-7 text-xs"
@@ -682,7 +686,28 @@ export function MessageList({
               </div>
             </div>
           )}
-          
+
+          {/* Cost limit reached */}
+          {agent?.status === 'COST_LIMIT_REACHED' && (
+            <div className="flex gap-3 items-center">
+              <div className="flex items-center gap-3">
+                <p className="text-sm text-amber-500 dark:text-amber-400 font-medium">
+                  agent cost limit reached
+                </p>
+                {onIncreaseCostLimit && (
+                  <Button
+                    size="sm"
+                    variant="default"
+                    onClick={onIncreaseCostLimit}
+                    className="h-7 text-xs"
+                  >
+                    Increase Cost Limit
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Completed - FeedbackBanner is now rendered below CompletionSummaryCard in MessageBubble */}
         </>
       )}
