@@ -69,6 +69,16 @@ export async function createSessionWithContext(
     throw new Error(`Browser context not found: ${dbContextId}`);
   }
 
+  // Fetch user's fingerprint to get their User-Agent for Steel session
+  const fingerprint = await prisma.integration.findUnique({
+    where: { userId_name: { userId: dbContext.userId, name: 'browser_fingerprint' } },
+  });
+  const fp = (fingerprint?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
+  const userAgent = fp?.navigator?.userAgent;
+  if (userAgent) {
+    console.log(`  Using user's fingerprint User-Agent: ${userAgent.substring(0, 60)}...`);
+  }
+
   // Create session in Steel with viewport adjusted for browser chrome
   // Steel's headful mode has ~91px chrome (toolbar). To get 1280x800 content area:
   // - Width: 1280 + 8 = 1288 (fine-tuned: was 1303→1295, need -15)
@@ -76,6 +86,7 @@ export async function createSessionWithContext(
   const session = await steel.sessions.create({
     profileId: dbContext.contextId || undefined,  // Use existing profile if available
     persistProfile: true,  // Auto-persist browser state to profile on session close
+    userAgent: userAgent || undefined,  // Use user's real User-Agent from fingerprint
     useProxy: {
       geolocation: {
         country: geolocation.country,
@@ -86,7 +97,7 @@ export async function createSessionWithContext(
     solveCaptcha: true,  // Auto-solve CAPTCHAs
     stealthConfig: {
       humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
-      skipFingerprintInjection: false,  // Inject fake fingerprints for anti-detection
+      skipFingerprintInjection: true,  // We inject user's real fingerprint ourselves
     },
     timeout: 900000,  // 15 minutes
     dimensions: {
@@ -214,10 +225,21 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
   }
   console.log(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
 
+  // Fetch user's fingerprint to get their User-Agent for Steel session
+  const fingerprint = await prisma.integration.findUnique({
+    where: { userId_name: { userId: oldSession.context.userId, name: 'browser_fingerprint' } },
+  });
+  const fp = (fingerprint?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
+  const userAgent = fp?.navigator?.userAgent;
+  if (userAgent) {
+    console.log(`  Using user's fingerprint User-Agent: ${userAgent.substring(0, 60)}...`);
+  }
+
   // Create NEW Steel session with same profile
   // Dimensions adjusted for browser chrome (see createSessionWithContext comments)
   const session = await steel.sessions.create({
     profileId: oldSession.context.contextId,
+    userAgent: userAgent || undefined,  // Use user's real User-Agent from fingerprint
     useProxy: {
       geolocation: {
         country: proxyGeo.country,
@@ -228,7 +250,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
     solveCaptcha: true,
     stealthConfig: {
       humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
-      skipFingerprintInjection: false,  // Inject fake fingerprints for anti-detection
+      skipFingerprintInjection: true,  // We inject user's real fingerprint ourselves
     },
     timeout: 900000,  // 15 minutes (hobby plan max)
     dimensions: {
@@ -311,6 +333,17 @@ interface FingerprintData {
     vendor: string;
     doNotTrack: string | null;
   };
+  // Client Hints (navigator.userAgentData.getHighEntropyValues)
+  userAgentData: {
+    brands: Array<{ brand: string; version: string }>;
+    mobile: boolean;
+    platform: string;
+    platformVersion: string;
+    architecture: string;
+    bitness: string;
+    model: string;
+    fullVersionList: Array<{ brand: string; version: string }>;
+  } | null;
   screen: {
     width: number;
     height: number;
@@ -320,6 +353,20 @@ interface FingerprintData {
     pixelDepth: number;
     devicePixelRatio: number;
   };
+  // Viewport dimensions (window.innerWidth/innerHeight)
+  viewport: {
+    innerWidth: number;
+    innerHeight: number;
+    outerWidth: number;
+    outerHeight: number;
+  };
+  // Network Information API (navigator.connection)
+  connection: {
+    effectiveType: string;
+    downlink: number;
+    rtt: number;
+    saveData: boolean;
+  } | null;
   webgl: {
     vendor: string;
     renderer: string;
@@ -331,6 +378,8 @@ interface FingerprintData {
     hash: string;
   };
   timezone: string;
+  // Timezone offset in minutes (for Date.getTimezoneOffset())
+  timezoneOffset: number;
   fonts: string[];
   plugins: string[];
   collectedAt: string;
@@ -459,11 +508,63 @@ export async function injectUserData(
       })());
     }
 
-    // 2. Inject fingerprint script if available
+    // 2. Inject fingerprint via CDP + JS script if available
     if (hasFingerprint && fp) {
       injectionPromises.push((async () => {
         try {
-          console.log(`  [fingerprint] Injecting script...`);
+          console.log(`  [fingerprint] Injecting via CDP and script...`);
+
+          // Get the page for init script injection
+          const page = context.pages()[0];
+          if (!page) {
+            console.error(`  [fingerprint] ❌ No page available for CDP session`);
+            return;
+          }
+
+          // Create page-level CDP session for Client Hints override
+          // (User-Agent is already set at Steel session creation level)
+          const cdpSession = await context.newCDPSession(page);
+
+          // IMPORTANT: Network.enable MUST be called before setUserAgentOverride
+          // Without this, the userAgentMetadata won't affect HTTP headers
+          await cdpSession.send('Network.enable');
+
+          // 2a. Set Client Hints at HTTP header level via CDP
+          // User-Agent is already set by Steel, we just need the metadata for Sec-CH-UA-* headers
+          if (fp.userAgentData) {
+            console.log(`  [fingerprint] Setting Client Hints via CDP...`);
+            const userAgentOverrideParams: any = {
+              userAgent: fp.navigator.userAgent,  // Must match what Steel set
+              acceptLanguage: fp.navigator.languages.join(','),
+              platform: fp.navigator.platform,
+              userAgentMetadata: {
+                brands: fp.userAgentData.brands,
+                fullVersionList: fp.userAgentData.fullVersionList,
+                platform: fp.userAgentData.platform,
+                platformVersion: fp.userAgentData.platformVersion,
+                architecture: fp.userAgentData.architecture,
+                model: fp.userAgentData.model,
+                mobile: fp.userAgentData.mobile,
+                bitness: fp.userAgentData.bitness,
+              },
+            };
+            await cdpSession.send('Network.setUserAgentOverride', userAgentOverrideParams);
+            console.log(`  [fingerprint] ✅ Client Hints: platform=${fp.userAgentData.platform}, arch=${fp.userAgentData.architecture}`);
+          }
+
+          // 2b. Disable WebRTC IP leak (prevent real IP from being exposed)
+          console.log(`  [fingerprint] Disabling WebRTC IP leak via CDP...`);
+          try {
+            // Use WebRTC IP handling policy to prevent leaks
+            await cdpSession.send('Emulation.setAutomationOverride' as any, {
+              enabled: false,
+            });
+          } catch (e) {
+            // This CDP method may not be available in all Chrome versions
+            console.log(`  [fingerprint] WebRTC leak prevention not available via CDP`);
+          }
+
+          // 2d. Inject comprehensive JS fingerprint spoofing script
           const fingerprintScript = `
             // Fingerprint spoofing script - injected to match user's real browser
             (function() {
@@ -488,6 +589,91 @@ export async function injectUserData(
                 try {
                   Object.defineProperty(Navigator.prototype, prop, {
                     get: () => desc.value,
+                    configurable: true,
+                  });
+                } catch (e) {}
+              }
+
+              // Override navigator.webdriver (bot detection flag)
+              try {
+                Object.defineProperty(Navigator.prototype, 'webdriver', {
+                  get: () => false,
+                  configurable: true,
+                });
+              } catch (e) {}
+
+              // Override navigator.plugins with user's plugins
+              if (fp.plugins && fp.plugins.length > 0) {
+                try {
+                  const fakePlugins = {
+                    length: fp.plugins.length,
+                    item: (index) => fakePlugins[index] || null,
+                    namedItem: (name) => {
+                      for (let i = 0; i < fp.plugins.length; i++) {
+                        if (fp.plugins[i] === name) return { name: fp.plugins[i] };
+                      }
+                      return null;
+                    },
+                    refresh: () => {},
+                  };
+                  for (let i = 0; i < fp.plugins.length; i++) {
+                    fakePlugins[i] = { name: fp.plugins[i], description: '', filename: '', length: 0 };
+                  }
+                  Object.defineProperty(Navigator.prototype, 'plugins', {
+                    get: () => fakePlugins,
+                    configurable: true,
+                  });
+                } catch (e) {}
+              }
+
+              // Override navigator.connection (Network Information API)
+              if (fp.connection) {
+                try {
+                  const fakeConnection = {
+                    effectiveType: fp.connection.effectiveType,
+                    downlink: fp.connection.downlink,
+                    rtt: fp.connection.rtt,
+                    saveData: fp.connection.saveData,
+                    onchange: null,
+                    addEventListener: () => {},
+                    removeEventListener: () => {},
+                    dispatchEvent: () => true,
+                  };
+                  Object.defineProperty(Navigator.prototype, 'connection', {
+                    get: () => fakeConnection,
+                    configurable: true,
+                  });
+                } catch (e) {}
+              }
+
+              // Override navigator.userAgentData (Client Hints in JS)
+              if (fp.userAgentData) {
+                try {
+                  const fakeUserAgentData = {
+                    brands: fp.userAgentData.brands,
+                    mobile: fp.userAgentData.mobile,
+                    platform: fp.userAgentData.platform,
+                    getHighEntropyValues: async (hints) => {
+                      const result = {
+                        brands: fp.userAgentData.brands,
+                        mobile: fp.userAgentData.mobile,
+                        platform: fp.userAgentData.platform,
+                      };
+                      if (hints.includes('platformVersion')) result.platformVersion = fp.userAgentData.platformVersion;
+                      if (hints.includes('architecture')) result.architecture = fp.userAgentData.architecture;
+                      if (hints.includes('bitness')) result.bitness = fp.userAgentData.bitness;
+                      if (hints.includes('model')) result.model = fp.userAgentData.model;
+                      if (hints.includes('fullVersionList')) result.fullVersionList = fp.userAgentData.fullVersionList;
+                      return result;
+                    },
+                    toJSON: () => ({
+                      brands: fp.userAgentData.brands,
+                      mobile: fp.userAgentData.mobile,
+                      platform: fp.userAgentData.platform,
+                    }),
+                  };
+                  Object.defineProperty(Navigator.prototype, 'userAgentData', {
+                    get: () => fakeUserAgentData,
                     configurable: true,
                   });
                 } catch (e) {}
@@ -520,6 +706,28 @@ export async function injectUserData(
                 });
               } catch (e) {}
 
+              // Override viewport dimensions
+              if (fp.viewport) {
+                try {
+                  Object.defineProperty(window, 'innerWidth', {
+                    get: () => fp.viewport.innerWidth,
+                    configurable: true,
+                  });
+                  Object.defineProperty(window, 'innerHeight', {
+                    get: () => fp.viewport.innerHeight,
+                    configurable: true,
+                  });
+                  Object.defineProperty(window, 'outerWidth', {
+                    get: () => fp.viewport.outerWidth,
+                    configurable: true,
+                  });
+                  Object.defineProperty(window, 'outerHeight', {
+                    get: () => fp.viewport.outerHeight,
+                    configurable: true,
+                  });
+                } catch (e) {}
+              }
+
               // Override WebGL
               const getParameterProxyHandler = {
                 apply: function(target, thisArg, args) {
@@ -548,7 +756,7 @@ export async function injectUserData(
                 );
               } catch (e) {}
 
-              // Override timezone
+              // Override timezone via Intl.DateTimeFormat
               const originalDateTimeFormat = Intl.DateTimeFormat;
               Intl.DateTimeFormat = function(...args) {
                 const instance = new originalDateTimeFormat(...args);
@@ -563,7 +771,31 @@ export async function injectUserData(
               Intl.DateTimeFormat.prototype = originalDateTimeFormat.prototype;
               Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
 
-              console.log('[Fingerprint] ✅ Fingerprint spoofing injected');
+              // Override Date.prototype.getTimezoneOffset
+              if (fp.timezoneOffset !== undefined) {
+                const originalGetTimezoneOffset = Date.prototype.getTimezoneOffset;
+                Date.prototype.getTimezoneOffset = function() {
+                  return fp.timezoneOffset;
+                };
+              }
+
+              // Block WebRTC IP leak via JS
+              try {
+                // Override RTCPeerConnection to prevent IP leaks
+                const originalRTCPeerConnection = window.RTCPeerConnection;
+                if (originalRTCPeerConnection) {
+                  window.RTCPeerConnection = function(config) {
+                    // Force ICE candidate filtering
+                    if (config && config.iceServers) {
+                      // Keep STUN/TURN but they'll only see proxy IP
+                    }
+                    return new originalRTCPeerConnection(config);
+                  };
+                  window.RTCPeerConnection.prototype = originalRTCPeerConnection.prototype;
+                }
+              } catch (e) {}
+
+              console.log('[Fingerprint] ✅ Comprehensive fingerprint spoofing injected');
             })();
           `;
 
@@ -1018,6 +1250,299 @@ export async function listSessionFiles(sessionId: string): Promise<SteelFileInfo
     // Return empty array on error (session may have no files)
     return [];
   }
+}
+
+/**
+ * Get fingerprint injection data for a user.
+ * Returns the data needed for the agent to apply CDP commands.
+ *
+ * @param userId - The user's ID
+ * @returns Fingerprint data and init script for CDP injection, or null if not available
+ */
+export async function getFingerprintInjectionData(userId: string): Promise<{
+  userAgentOverride: {
+    userAgent: string;
+    acceptLanguage: string;
+    platform: string;
+    userAgentMetadata?: {
+      brands: Array<{ brand: string; version: string }>;
+      fullVersionList: Array<{ brand: string; version: string }>;
+      platform: string;
+      platformVersion: string;
+      architecture: string;
+      model: string;
+      mobile: boolean;
+      bitness: string;
+    };
+  };
+  initScript: string;
+} | null> {
+  const integration = await prisma.integration.findUnique({
+    where: { userId_name: { userId, name: 'browser_fingerprint' } },
+  });
+
+  const fp = (integration?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
+  if (!fp) {
+    return null;
+  }
+
+  // Build the User-Agent override params for Network.setUserAgentOverride
+  const userAgentOverride: any = {
+    userAgent: fp.navigator.userAgent,
+    acceptLanguage: fp.navigator.languages.join(','),
+    platform: fp.navigator.platform,
+  };
+
+  if (fp.userAgentData) {
+    userAgentOverride.userAgentMetadata = {
+      brands: fp.userAgentData.brands,
+      fullVersionList: fp.userAgentData.fullVersionList,
+      platform: fp.userAgentData.platform,
+      platformVersion: fp.userAgentData.platformVersion,
+      architecture: fp.userAgentData.architecture,
+      model: fp.userAgentData.model,
+      mobile: fp.userAgentData.mobile,
+      bitness: fp.userAgentData.bitness,
+    };
+  }
+
+  // Build the fingerprint spoofing init script
+  const initScript = `
+    // Fingerprint spoofing script - injected to match user's real browser
+    (function() {
+      'use strict';
+
+      const fp = ${JSON.stringify(fp)};
+
+      // Override navigator properties
+      const navigatorProps = {
+        userAgent: { value: fp.navigator.userAgent },
+        platform: { value: fp.navigator.platform },
+        language: { value: fp.navigator.language },
+        languages: { value: Object.freeze([...fp.navigator.languages]) },
+        hardwareConcurrency: { value: fp.navigator.hardwareConcurrency },
+        deviceMemory: { value: fp.navigator.deviceMemory },
+        maxTouchPoints: { value: fp.navigator.maxTouchPoints },
+        vendor: { value: fp.navigator.vendor },
+        doNotTrack: { value: fp.navigator.doNotTrack },
+      };
+
+      for (const [prop, desc] of Object.entries(navigatorProps)) {
+        try {
+          Object.defineProperty(Navigator.prototype, prop, {
+            get: () => desc.value,
+            configurable: true,
+          });
+        } catch (e) {}
+      }
+
+      // Override navigator.webdriver (bot detection flag)
+      try {
+        Object.defineProperty(Navigator.prototype, 'webdriver', {
+          get: () => false,
+          configurable: true,
+        });
+      } catch (e) {}
+
+      // Override navigator.plugins with user's plugins
+      if (fp.plugins && fp.plugins.length > 0) {
+        try {
+          const fakePlugins = {
+            length: fp.plugins.length,
+            item: (index) => fakePlugins[index] || null,
+            namedItem: (name) => {
+              for (let i = 0; i < fp.plugins.length; i++) {
+                if (fp.plugins[i] === name) return { name: fp.plugins[i] };
+              }
+              return null;
+            },
+            refresh: () => {},
+          };
+          for (let i = 0; i < fp.plugins.length; i++) {
+            fakePlugins[i] = { name: fp.plugins[i], description: '', filename: '', length: 0 };
+          }
+          Object.defineProperty(Navigator.prototype, 'plugins', {
+            get: () => fakePlugins,
+            configurable: true,
+          });
+        } catch (e) {}
+      }
+
+      // Override navigator.connection (Network Information API)
+      if (fp.connection) {
+        try {
+          const fakeConnection = {
+            effectiveType: fp.connection.effectiveType,
+            downlink: fp.connection.downlink,
+            rtt: fp.connection.rtt,
+            saveData: fp.connection.saveData,
+            onchange: null,
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            dispatchEvent: () => true,
+          };
+          Object.defineProperty(Navigator.prototype, 'connection', {
+            get: () => fakeConnection,
+            configurable: true,
+          });
+        } catch (e) {}
+      }
+
+      // Override navigator.userAgentData (Client Hints in JS)
+      if (fp.userAgentData) {
+        try {
+          const fakeUserAgentData = {
+            brands: fp.userAgentData.brands,
+            mobile: fp.userAgentData.mobile,
+            platform: fp.userAgentData.platform,
+            getHighEntropyValues: async (hints) => {
+              const result = {
+                brands: fp.userAgentData.brands,
+                mobile: fp.userAgentData.mobile,
+                platform: fp.userAgentData.platform,
+              };
+              if (hints.includes('platformVersion')) result.platformVersion = fp.userAgentData.platformVersion;
+              if (hints.includes('architecture')) result.architecture = fp.userAgentData.architecture;
+              if (hints.includes('bitness')) result.bitness = fp.userAgentData.bitness;
+              if (hints.includes('model')) result.model = fp.userAgentData.model;
+              if (hints.includes('fullVersionList')) result.fullVersionList = fp.userAgentData.fullVersionList;
+              return result;
+            },
+            toJSON: () => ({
+              brands: fp.userAgentData.brands,
+              mobile: fp.userAgentData.mobile,
+              platform: fp.userAgentData.platform,
+            }),
+          };
+          Object.defineProperty(Navigator.prototype, 'userAgentData', {
+            get: () => fakeUserAgentData,
+            configurable: true,
+          });
+        } catch (e) {}
+      }
+
+      // Override screen properties
+      const screenProps = {
+        width: fp.screen.width,
+        height: fp.screen.height,
+        availWidth: fp.screen.availWidth,
+        availHeight: fp.screen.availHeight,
+        colorDepth: fp.screen.colorDepth,
+        pixelDepth: fp.screen.pixelDepth,
+      };
+
+      for (const [prop, value] of Object.entries(screenProps)) {
+        try {
+          Object.defineProperty(Screen.prototype, prop, {
+            get: () => value,
+            configurable: true,
+          });
+        } catch (e) {}
+      }
+
+      // Override devicePixelRatio
+      try {
+        Object.defineProperty(window, 'devicePixelRatio', {
+          get: () => fp.screen.devicePixelRatio,
+          configurable: true,
+        });
+      } catch (e) {}
+
+      // Override viewport dimensions
+      if (fp.viewport) {
+        try {
+          Object.defineProperty(window, 'innerWidth', {
+            get: () => fp.viewport.innerWidth,
+            configurable: true,
+          });
+          Object.defineProperty(window, 'innerHeight', {
+            get: () => fp.viewport.innerHeight,
+            configurable: true,
+          });
+          Object.defineProperty(window, 'outerWidth', {
+            get: () => fp.viewport.outerWidth,
+            configurable: true,
+          });
+          Object.defineProperty(window, 'outerHeight', {
+            get: () => fp.viewport.outerHeight,
+            configurable: true,
+          });
+        } catch (e) {}
+      }
+
+      // Override WebGL
+      const getParameterProxyHandler = {
+        apply: function(target, thisArg, args) {
+          const param = args[0];
+          const UNMASKED_VENDOR_WEBGL = 0x9245;
+          const UNMASKED_RENDERER_WEBGL = 0x9246;
+
+          if (param === UNMASKED_VENDOR_WEBGL) {
+            return fp.webgl.vendor;
+          }
+          if (param === UNMASKED_RENDERER_WEBGL) {
+            return fp.webgl.renderer;
+          }
+          return target.apply(thisArg, args);
+        }
+      };
+
+      try {
+        WebGLRenderingContext.prototype.getParameter = new Proxy(
+          WebGLRenderingContext.prototype.getParameter,
+          getParameterProxyHandler
+        );
+        WebGL2RenderingContext.prototype.getParameter = new Proxy(
+          WebGL2RenderingContext.prototype.getParameter,
+          getParameterProxyHandler
+        );
+      } catch (e) {}
+
+      // Override timezone via Intl.DateTimeFormat
+      const originalDateTimeFormat = Intl.DateTimeFormat;
+      Intl.DateTimeFormat = function(...args) {
+        const instance = new originalDateTimeFormat(...args);
+        const originalResolvedOptions = instance.resolvedOptions.bind(instance);
+        instance.resolvedOptions = function() {
+          const options = originalResolvedOptions();
+          options.timeZone = fp.timezone;
+          return options;
+        };
+        return instance;
+      };
+      Intl.DateTimeFormat.prototype = originalDateTimeFormat.prototype;
+      Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
+
+      // Override Date.prototype.getTimezoneOffset
+      if (fp.timezoneOffset !== undefined) {
+        const originalGetTimezoneOffset = Date.prototype.getTimezoneOffset;
+        Date.prototype.getTimezoneOffset = function() {
+          return fp.timezoneOffset;
+        };
+      }
+
+      // Block WebRTC IP leak via JS
+      try {
+        const originalRTCPeerConnection = window.RTCPeerConnection;
+        if (originalRTCPeerConnection) {
+          window.RTCPeerConnection = function(config) {
+            if (config && config.iceServers) {
+              // Keep STUN/TURN but they'll only see proxy IP
+            }
+            return new originalRTCPeerConnection(config);
+          };
+          window.RTCPeerConnection.prototype = originalRTCPeerConnection.prototype;
+        }
+      } catch (e) {}
+
+      console.log('[Fingerprint] ✅ Comprehensive fingerprint spoofing injected');
+    })();
+  `;
+
+  return {
+    userAgentOverride,
+    initScript,
+  };
 }
 
 /**

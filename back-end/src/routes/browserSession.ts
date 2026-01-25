@@ -12,6 +12,7 @@ import {
   injectUserData,
   uploadFileToSession,
   listSessionFiles,
+  getFingerprintInjectionData,
   SteelFileInfo
 } from '../lib/steel';
 import { DEFAULT_GEOLOCATION, ProxyGeoLocation } from '../lib/geoip';
@@ -81,7 +82,12 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     const session = await createSessionWithContext(contextId, agent_id, proxyGeo);
 
     // 3. Inject user's cookies and fingerprint in a single CDP connection
+    // Note: CDP settings don't persist across connections, so we also return
+    // the fingerprint data for the agent to re-apply when it connects
     const injectionResult = await injectUserData(session.sessionId, user_id);
+
+    // 4. Get fingerprint data for the agent to apply via its own CDP connection
+    const fingerprintInjection = await getFingerprintInjectionData(user_id);
 
     res.json({
       success: true,
@@ -94,6 +100,8 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       cookies_injected: injectionResult.cookies.injected,
       cookies_count: injectionResult.cookies.cookieCount,
       fingerprint_injected: injectionResult.fingerprint.injected,
+      // Fingerprint data for agent to apply via CDP (settings don't persist across connections)
+      fingerprint_injection: fingerprintInjection,
     });
     
   } catch (error) {
@@ -154,8 +162,11 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
     
     // Inject cookies and fingerprint into resumed session
     let injectionResult = { cookies: { injected: false, cookieCount: 0 }, fingerprint: { injected: false } };
+    let fingerprintInjection = null;
     if (session?.context?.userId) {
       injectionResult = await injectUserData(result.sessionId, session.context.userId);
+      // Get fingerprint data for agent to apply via CDP
+      fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
     }
 
     res.json({
@@ -169,6 +180,8 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
       cookies_injected: injectionResult.cookies.injected,
       cookies_count: injectionResult.cookies.cookieCount,
       fingerprint_injected: injectionResult.fingerprint.injected,
+      // Fingerprint data for agent to apply via CDP
+      fingerprint_injection: fingerprintInjection,
     });
     
   } catch (error) {
@@ -186,27 +199,36 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
 router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
   try {
     const { taskId } = req.params;
-    
+
     const session = await prisma.browserSession.findUnique({
-      where: { id: taskId }
+      where: { id: taskId },
+      include: { context: true }
     });
-    
+
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
-    
+
+    // Get fingerprint data for the agent to apply via CDP
+    let fingerprintInjection = null;
+    if (session.context?.userId) {
+      fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
+    }
+
     res.json({
       task_id: session.id,
       session_id: session.sessionId,
       debug_url: session.debugUrl,
       ws_url: session.wsUrl,  // CDP WebSocket URL for browser-use
-      status: session.status
+      status: session.status,
+      // Fingerprint data for agent to apply via CDP
+      fingerprint_injection: fingerprintInjection,
     });
-    
+
   } catch (error) {
     console.error('❌ Failed to get session info:', error);
-    res.status(500).json({ 
-      error: error instanceof Error ? error.message : 'Failed to get session info' 
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to get session info'
     });
   }
 });

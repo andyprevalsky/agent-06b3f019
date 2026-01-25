@@ -71,11 +71,12 @@ export class FingerprintReader {
 
       const page = await browser.newPage();
 
-      // Navigate to a blank page
-      await page.goto('about:blank');
+      // Navigate to a real page to ensure all browser APIs are available
+      // (userAgentData.getHighEntropyValues may not work on about:blank)
+      await page.goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 10000 });
 
       // Collect fingerprint data
-      const fingerprint = await page.evaluate(() => {
+      const fingerprint = await page.evaluate(async () => {
         // Navigator properties
         const nav = window.navigator;
 
@@ -199,6 +200,65 @@ export class FingerprintReader {
           plugins.push(nav.plugins[i].name);
         }
 
+        // Client Hints (navigator.userAgentData)
+        let userAgentData = null;
+        try {
+          const navUserAgentData = (nav as any).userAgentData;
+          console.log('[Fingerprint] userAgentData available:', !!navUserAgentData);
+          if (navUserAgentData) {
+            const uaData = await navUserAgentData.getHighEntropyValues([
+              'architecture',
+              'bitness',
+              'brands',
+              'mobile',
+              'model',
+              'platform',
+              'platformVersion',
+              'fullVersionList',
+            ]);
+            console.log('[Fingerprint] getHighEntropyValues result:', JSON.stringify(uaData).substring(0, 200));
+            userAgentData = {
+              brands: uaData.brands || [],
+              mobile: uaData.mobile || false,
+              platform: uaData.platform || '',
+              platformVersion: uaData.platformVersion || '',
+              architecture: uaData.architecture || '',
+              bitness: uaData.bitness || '',
+              model: uaData.model || '',
+              fullVersionList: uaData.fullVersionList || [],
+            };
+          }
+        } catch (e) {
+          console.error('[Fingerprint] Client hints error:', e);
+        }
+
+        // Network Information API (navigator.connection)
+        let connection = null;
+        try {
+          const conn = (nav as any).connection;
+          if (conn) {
+            connection = {
+              effectiveType: conn.effectiveType || '4g',
+              downlink: conn.downlink || 10,
+              rtt: conn.rtt || 50,
+              saveData: conn.saveData || false,
+            };
+          }
+        } catch (e) {
+          // Network Information API may not be available
+        }
+
+        // Viewport dimensions
+        const viewport = {
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight,
+          outerWidth: window.outerWidth,
+          outerHeight: window.outerHeight,
+        };
+
+        // Timezone offset (for Date.getTimezoneOffset())
+        const timezoneOffset = new Date().getTimezoneOffset();
+
         return {
           navigator: {
             userAgent: nav.userAgent,
@@ -211,6 +271,7 @@ export class FingerprintReader {
             vendor: nav.vendor,
             doNotTrack: nav.doNotTrack,
           },
+          userAgentData,
           screen: {
             width: scr.width,
             height: scr.height,
@@ -220,6 +281,8 @@ export class FingerprintReader {
             pixelDepth: scr.pixelDepth,
             devicePixelRatio: window.devicePixelRatio,
           },
+          viewport,
+          connection,
           webgl: {
             vendor: webglVendor,
             renderer: webglRenderer,
@@ -231,6 +294,7 @@ export class FingerprintReader {
             hash: audioHash,
           },
           timezone,
+          timezoneOffset,
           fonts: installedFonts,
           plugins,
           collectedAt: new Date().toISOString(),

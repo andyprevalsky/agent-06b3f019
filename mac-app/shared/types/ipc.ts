@@ -188,6 +188,17 @@ export interface FingerprintData {
     vendor: string;
     doNotTrack: string | null;
   };
+  // Client Hints (navigator.userAgentData.getHighEntropyValues)
+  userAgentData: {
+    brands: Array<{ brand: string; version: string }>;
+    mobile: boolean;
+    platform: string;
+    platformVersion: string;
+    architecture: string;
+    bitness: string;
+    model: string;
+    fullVersionList: Array<{ brand: string; version: string }>;
+  } | null;
   screen: {
     width: number;
     height: number;
@@ -197,6 +208,20 @@ export interface FingerprintData {
     pixelDepth: number;
     devicePixelRatio: number;
   };
+  // Viewport dimensions (window.innerWidth/innerHeight)
+  viewport: {
+    innerWidth: number;
+    innerHeight: number;
+    outerWidth: number;
+    outerHeight: number;
+  };
+  // Network Information API (navigator.connection)
+  connection: {
+    effectiveType: string;
+    downlink: number;
+    rtt: number;
+    saveData: boolean;
+  } | null;
   webgl: {
     vendor: string;
     renderer: string;
@@ -208,6 +233,8 @@ export interface FingerprintData {
     hash: string;
   };
   timezone: string;
+  // Timezone offset in minutes (for Date.getTimezoneOffset())
+  timezoneOffset: number;
   fonts: string[];
   plugins: string[];
   collectedAt: string;

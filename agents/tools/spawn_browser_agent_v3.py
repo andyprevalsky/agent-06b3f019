@@ -1294,6 +1294,7 @@ async def spawn_browser_agent_activity_v3(
     
     try:
         # ===== SESSION INITIALIZATION =====
+        fingerprint_injection = None  # Will be populated from backend response
         if is_resume and task_id:
             logger.info("🔍 Fetching session info for resumed task", task_id=task_id)
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1306,6 +1307,7 @@ async def spawn_browser_agent_activity_v3(
                     session_id = session_info.get("session_id")
                     browser_url = session_info.get("debug_url")
                     cdp_url = session_info.get("ws_url")  # CDP WebSocket URL
+                    fingerprint_injection = session_info.get("fingerprint_injection")  # For CDP re-injection
                 else:
                     raise RuntimeError(f"Failed to fetch session info: HTTP {response.status_code}")
             activity.heartbeat(f"Resuming task {task_id}")
@@ -1325,6 +1327,7 @@ async def spawn_browser_agent_activity_v3(
                 session_id = session_data["session_id"]
                 browser_url = session_data["debug_url"]
                 cdp_url = session_data.get("ws_url")  # CDP WebSocket URL from Browserbase
+                fingerprint_injection = session_data.get("fingerprint_injection")  # For CDP re-injection
             
             # Init message - include output_schema for FE display
             await save_browser_action_message(
@@ -1365,6 +1368,19 @@ async def spawn_browser_agent_activity_v3(
         playwright_browser = await playwright_instance.chromium.connect_over_cdp(cdp_url)
         playwright_context = playwright_browser.contexts[0]
         input_page = playwright_context.pages[0]
+
+        # ===== APPLY FINGERPRINT INJECTION VIA CDP =====
+        # CDP settings (Network.setUserAgentOverride, init scripts) don't persist across connections.
+        # The backend applied them and closed its connection, so we must re-apply them here.
+        if fingerprint_injection:
+            from helpers.fingerprint_injection import apply_fingerprint_injection
+            injection_success = await apply_fingerprint_injection(input_page, fingerprint_injection)
+            if injection_success:
+                logger.info("🔐 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)")
+            else:
+                logger.warning("⚠️ Failed to apply fingerprint injection - browser may leak real fingerprint")
+        else:
+            logger.info("🔐 No fingerprint injection data provided - using Steel defaults")
 
         # Create humanizer with both pages
         humanizer = BrowserHumanizer(
