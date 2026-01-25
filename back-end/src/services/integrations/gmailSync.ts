@@ -74,7 +74,7 @@ async function refreshGoogleAccessToken(
 /**
  * Get a valid access token, refreshing if necessary
  */
-async function getValidAccessToken(credential: {
+export async function getValidAccessToken(credential: {
   id: string;
   accessToken: string | null;
   refreshToken: string | null;

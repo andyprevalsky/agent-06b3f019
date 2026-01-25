@@ -11,6 +11,90 @@ const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
 });
 
+// Max retries when session validation fails
+const MAX_SESSION_RETRIES = 3;
+const SESSION_VALIDATION_TIMEOUT = 10000; // 10 seconds
+
+// WebSocket connection retry config
+const WS_CONNECTION_RETRIES = 3;
+const WS_BACKOFF_DELAYS = [100, 400, 800]; // ms
+
+/**
+ * Sleep helper for backoff delays
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Validate that a Steel session's WebSocket connection actually works.
+ * This catches cases where Steel.dev returns a session but the connection is broken.
+ * Retries with exponential backoff: 100ms, 400ms, 800ms
+ *
+ * @param wsUrl - The CDP WebSocket URL to test
+ * @returns true if connection works, false otherwise
+ */
+async function validateSessionConnection(wsUrl: string): Promise<boolean> {
+  const { chromium } = await import('playwright');
+
+  console.log(`  🔍 Validating session connection (up to ${WS_CONNECTION_RETRIES} attempts)...`);
+
+  for (let attempt = 1; attempt <= WS_CONNECTION_RETRIES; attempt++) {
+    let browser;
+
+    try {
+      console.log(`    [WS] Attempt ${attempt}/${WS_CONNECTION_RETRIES}: Connecting to CDP...`);
+
+      // Try to connect with a timeout
+      browser = await Promise.race([
+        chromium.connectOverCDP(wsUrl),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Connection timeout')), SESSION_VALIDATION_TIMEOUT)
+        ),
+      ]);
+
+      // Check that we can access the browser context
+      const contexts = browser.contexts();
+      if (!contexts || contexts.length === 0) {
+        console.log(`    [WS] Attempt ${attempt}/${WS_CONNECTION_RETRIES}: ❌ No browser contexts available`);
+        await browser.close().catch(() => {});
+
+        if (attempt < WS_CONNECTION_RETRIES) {
+          const delay = WS_BACKOFF_DELAYS[attempt - 1];
+          console.log(`    [WS] Retrying in ${delay}ms...`);
+          await sleep(delay);
+          continue;
+        }
+        return false;
+      }
+
+      // Try to get pages - this confirms the connection is working
+      const pages = contexts[0].pages();
+      console.log(`    [WS] Attempt ${attempt}/${WS_CONNECTION_RETRIES}: ✅ Connected (${contexts.length} context(s), ${pages.length} page(s))`);
+
+      await browser.close().catch(() => {});
+      return true;
+
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      console.log(`    [WS] Attempt ${attempt}/${WS_CONNECTION_RETRIES}: ❌ ${errorMsg}`);
+
+      if (browser) {
+        await browser.close().catch(() => {});
+      }
+
+      if (attempt < WS_CONNECTION_RETRIES) {
+        const delay = WS_BACKOFF_DELAYS[attempt - 1];
+        console.log(`    [WS] Retrying in ${delay}ms...`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  console.log(`  ❌ Session validation failed after ${WS_CONNECTION_RETRIES} attempts`);
+  return false;
+}
+
 /**
  * Get or create a persistent browser context for a user.
  * Steel uses "profiles" for persistent state (cookies, localStorage, etc.)
@@ -47,6 +131,8 @@ export async function getOrCreateContext(userId: string): Promise<string> {
 
 /**
  * Create a new browser session with persistent context.
+ * Validates the WebSocket connection works before returning.
+ * If validation fails, retries up to MAX_SESSION_RETRIES times.
  *
  * @param dbContextId - The database ID (BrowserContext.id) for the foreign key
  * @param agentId - The agent creating this session
@@ -69,7 +155,7 @@ export async function createSessionWithContext(
     throw new Error(`Browser context not found: ${dbContextId}`);
   }
 
-  // Fetch user's fingerprint to get their User-Agent for Steel session
+// Fetch user's fingerprint to get their User-Agent for Steel session
   const fingerprint = await prisma.integration.findUnique({
     where: { userId_name: { userId: dbContext.userId, name: 'browser_fingerprint' } },
   });
@@ -79,78 +165,107 @@ export async function createSessionWithContext(
     console.log(`  Using user's fingerprint User-Agent: ${userAgent.substring(0, 60)}...`);
   }
 
-  // Create session in Steel with viewport adjusted for browser chrome
-  // Steel's headful mode has ~91px chrome (toolbar). To get 1280x800 content area:
-  // - Width: 1280 + 8 = 1288 (fine-tuned: was 1303→1295, need -15)
-  // - Height: 800 + 91 = 891 (accounts for browser toolbar) ✓ working
-  const session = await steel.sessions.create({
-    profileId: dbContext.contextId || undefined,  // Use existing profile if available
-    persistProfile: true,  // Auto-persist browser state to profile on session close
-    userAgent: userAgent || undefined,  // Use user's real User-Agent from fingerprint
-    useProxy: {
-      geolocation: {
-        country: geolocation.country,
-        state: geolocation.state,
-        city: geolocation.city,
-      },
-    },  // Residential proxy based on user's location
-    solveCaptcha: true,  // Auto-solve CAPTCHAs
-    stealthConfig: {
-      humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
-      skipFingerprintInjection: true,  // We inject user's real fingerprint ourselves
-    },
-    timeout: 900000,  // 15 minutes
-    dimensions: {
-      width: 1288,  // 1280 + 8 for borders → 1280 viewport
-      height: 891,  // 800 + 91 for browser chrome → 800 viewport
-    },
-  });
+  let lastError: Error | null = null;
 
-  console.log('📺 Steel Session:', JSON.stringify(session, null, 2));
+  for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
+    console.log(`  📡 Session creation attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
 
-  // Steel provides debugUrl for unauthenticated live viewing (anyone with URL can view)
-  // sessionViewerUrl requires Steel dashboard login - don't use that
-  // Add ?interactive=true so users can interact with the browser
-  const debugUrl = `${session.debugUrl}?interactive=false`;
+    try {
+      // Create session in Steel with viewport adjusted for browser chrome
+      // Steel's headful mode has ~91px chrome (toolbar). To get 1280x800 content area:
+      // - Width: 1280 + 8 = 1288 (fine-tuned: was 1303→1295, need -15)
+      // - Height: 800 + 91 = 891 (accounts for browser toolbar) ✓ working
+      const session = await steel.sessions.create({
+        profileId: dbContext.contextId || undefined,  // Use existing profile if available
+        persistProfile: true,  // Auto-persist browser state to profile on session close
+        userAgent: userAgent || undefined,  // Use user's real User-Agent from fingerprint
+        useProxy: {
+          geolocation: {
+            country: geolocation.country,
+            state: geolocation.state,
+            city: geolocation.city,
+          },
+        },  // Residential proxy based on user's location
+        solveCaptcha: true,  // Auto-solve CAPTCHAs
+        stealthConfig: {
+          humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
+          skipFingerprintInjection: true,  // We inject user's real fingerprint ourselves
+        },
+        timeout: 900000,  // 15 minutes
+        dimensions: {
+          width: 1288,  // 1280 + 8 for borders → 1280 viewport
+          height: 891,  // 800 + 91 for browser chrome → 800 viewport
+        },
+      });
 
-  // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
-  // The session.websocketUrl does NOT include the apiKey, so we construct it manually
-  // Format: wss://connect.steel.dev?apiKey=${STEEL_API_KEY}&sessionId=${session.id}
-  const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
+      console.log('📺 Steel Session:', JSON.stringify(session, null, 2));
 
-  // If this was the first session (no profileId existed), Steel created one - save it
-  if (session.profileId && session.profileId !== dbContext.contextId) {
-    console.log(`  📝 Saving new Steel profileId: ${session.profileId}`);
-    await prisma.browserContext.update({
-      where: { id: dbContextId },
-      data: { contextId: session.profileId }
-    });
+      // Steel provides debugUrl for unauthenticated live viewing (anyone with URL can view)
+      // sessionViewerUrl requires Steel dashboard login - don't use that
+      // Add ?interactive=true so users can interact with the browser
+      const debugUrl = `${session.debugUrl}?interactive=false`;
+
+      // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
+      // The session.websocketUrl does NOT include the apiKey, so we construct it manually
+      // Format: wss://connect.steel.dev?apiKey=${STEEL_API_KEY}&sessionId=${session.id}
+      const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
+
+      // VALIDATE: Test that the WebSocket connection actually works before proceeding
+      const isValid = await validateSessionConnection(wsUrl);
+
+      if (!isValid) {
+        console.log(`  ⚠️ Session ${session.id} failed validation, releasing...`);
+        try {
+          await steel.sessions.release(session.id);
+        } catch (releaseErr) {
+          console.log(`  ⚠️ Failed to release invalid session: ${releaseErr}`);
+        }
+        lastError = new Error(`Session validation failed on attempt ${attempt}`);
+        continue; // Retry
+      }
+
+      // If this was the first session (no profileId existed), Steel created one - save it
+      if (session.profileId && session.profileId !== dbContext.contextId) {
+        console.log(`  📝 Saving new Steel profileId: ${session.profileId}`);
+        await prisma.browserContext.update({
+          where: { id: dbContextId },
+          data: { contextId: session.profileId }
+        });
+      }
+
+      // Save to DB
+      const dbSession = await prisma.browserSession.create({
+        data: {
+          contextId: dbContextId,
+          agentId,
+          sessionId: session.id,
+          debugUrl,
+          wsUrl,
+          status: 'ACTIVE',
+        }
+      });
+
+      console.log(`✓ Created Steel session: ${session.id}`);
+      console.log(`  Context (DB): ${dbContextId}`);
+      console.log(`  Profile (Steel): ${session.profileId || 'will be created on release'}`);
+      console.log(`  Live View URL: ${debugUrl}`);
+      console.log(`  CDP WebSocket URL: ${wsUrl}`);
+
+      return {
+        sessionId: session.id,
+        debugUrl,
+        wsUrl,
+        taskId: dbSession.id,
+      };
+
+    } catch (error) {
+      console.log(`  ❌ Attempt ${attempt} failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      lastError = error instanceof Error ? error : new Error('Unknown error');
+    }
   }
 
-  // Save to DB
-  const dbSession = await prisma.browserSession.create({
-    data: {
-      contextId: dbContextId,
-      agentId,
-      sessionId: session.id,
-      debugUrl,
-      wsUrl,
-      status: 'ACTIVE',
-    }
-  });
-
-  console.log(`✓ Created Steel session: ${session.id}`);
-  console.log(`  Context (DB): ${dbContextId}`);
-  console.log(`  Profile (Steel): ${session.profileId || 'will be created on release'}`);
-  console.log(`  Live View URL: ${debugUrl}`);
-  console.log(`  CDP WebSocket URL: ${wsUrl}`);
-
-  return {
-    sessionId: session.id,
-    debugUrl,
-    wsUrl,
-    taskId: dbSession.id,
-  };
+  // All retries exhausted
+  throw new Error(`Failed to create valid Steel session after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`);
 }
 
 /**
@@ -190,6 +305,9 @@ export async function closeSession(sessionId: string, pause: boolean = false, cu
 
 /**
  * Resume a paused browser session by creating a NEW session with the same profile.
+ * Validates the WebSocket connection works before returning.
+ * If validation fails, retries up to MAX_SESSION_RETRIES times.
+ *
  * @param taskId - The stable task ID (BrowserSession.id)
  * @returns Session info including saved URL to navigate back to
  */
@@ -225,7 +343,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
   }
   console.log(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
 
-  // Fetch user's fingerprint to get their User-Agent for Steel session
+// Fetch user's fingerprint to get their User-Agent for Steel session
   const fingerprint = await prisma.integration.findUnique({
     where: { userId_name: { userId: oldSession.context.userId, name: 'browser_fingerprint' } },
   });
@@ -235,77 +353,107 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
     console.log(`  Using user's fingerprint User-Agent: ${userAgent.substring(0, 60)}...`);
   }
 
-  // Create NEW Steel session with same profile
-  // Dimensions adjusted for browser chrome (see createSessionWithContext comments)
-  const session = await steel.sessions.create({
-    profileId: oldSession.context.contextId,
-    userAgent: userAgent || undefined,  // Use user's real User-Agent from fingerprint
-    useProxy: {
-      geolocation: {
-        country: proxyGeo.country,
-        state: proxyGeo.state,
-        city: proxyGeo.city,
-      },
-    },  // Residential proxy based on user's location
-    solveCaptcha: true,
-    stealthConfig: {
-      humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
-      skipFingerprintInjection: true,  // We inject user's real fingerprint ourselves
-    },
-    timeout: 900000,  // 15 minutes (hobby plan max)
-    dimensions: {
-      width: 1288,  // 1280 + 8 for borders → 1280 viewport
-      height: 891,  // 800 + 91 for browser chrome → 800 viewport
-    },
-  });
+  let lastError: Error | null = null;
 
-  console.log(`  ✓ Created new Steel session: ${session.id}`);
+  for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
+    console.log(`  📡 Resume session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
 
-  // Use debugUrl for unauthenticated live viewing (not sessionViewerUrl which requires login)
-  const debugUrl = `${session.debugUrl}?interactive=false`;
-  // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
-  const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
-
-  // Navigate to saved URL if available
-  if (oldSession.currentUrl) {
-    console.log(`  📍 Navigating session to saved URL: ${oldSession.currentUrl}`);
     try {
-      const { chromium } = await import('playwright');
-      const browser = await chromium.connectOverCDP(wsUrl);
-      const context = browser.contexts()[0];
-      const page = context.pages()[0];
-      await page.goto(oldSession.currentUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
-      console.log(`  ✅ Navigation complete`);
-    } catch (navError) {
-      console.error(`  ⚠️ Failed to navigate to saved URL:`, navError);
+      // Create NEW Steel session with same profile
+      // Dimensions adjusted for browser chrome (see createSessionWithContext comments)
+      const session = await steel.sessions.create({
+        profileId: oldSession.context.contextId,
+        userAgent: userAgent || undefined,  // Use user's real User-Agent from fingerprint
+        useProxy: {
+          geolocation: {
+            country: proxyGeo.country,
+            state: proxyGeo.state,
+            city: proxyGeo.city,
+          },
+        },  // Residential proxy based on user's location
+        solveCaptcha: true,
+        stealthConfig: {
+          humanizeInteractions: false,  // Disabled - we handle humanization with BrowserHumanizer
+          skipFingerprintInjection: true,  // We inject user's real fingerprint ourselves
+        },
+        timeout: 900000,  // 15 minutes (hobby plan max)
+        dimensions: {
+          width: 1288,  // 1280 + 8 for borders → 1280 viewport
+          height: 891,  // 800 + 91 for browser chrome → 800 viewport
+        },
+      });
+
+      console.log(`  ✓ Created new Steel session: ${session.id}`);
+
+      // Use debugUrl for unauthenticated live viewing (not sessionViewerUrl which requires login)
+      const debugUrl = `${session.debugUrl}?interactive=false`;
+      // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
+      const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
+
+      // VALIDATE: Test that the WebSocket connection actually works before proceeding
+      const isValid = await validateSessionConnection(wsUrl);
+
+      if (!isValid) {
+        console.log(`  ⚠️ Session ${session.id} failed validation, releasing...`);
+        try {
+          await steel.sessions.release(session.id);
+        } catch (releaseErr) {
+          console.log(`  ⚠️ Failed to release invalid session: ${releaseErr}`);
+        }
+        lastError = new Error(`Session validation failed on attempt ${attempt}`);
+        continue; // Retry
+      }
+
+      // Navigate to saved URL if available
+      if (oldSession.currentUrl) {
+        console.log(`  📍 Navigating session to saved URL: ${oldSession.currentUrl}`);
+        try {
+          const { chromium } = await import('playwright');
+          const browser = await chromium.connectOverCDP(wsUrl);
+          const context = browser.contexts()[0];
+          const page = context.pages()[0];
+          await page.goto(oldSession.currentUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+          console.log(`  ✅ Navigation complete`);
+          await browser.close();
+        } catch (navError) {
+          console.error(`  ⚠️ Failed to navigate to saved URL:`, navError);
+        }
+      }
+
+      // Update DB record with NEW sessionId, debugUrl, and wsUrl
+      await prisma.browserSession.update({
+        where: { id: taskId },
+        data: {
+          sessionId: session.id,
+          debugUrl,
+          wsUrl,
+          status: 'ACTIVE',
+          closedAt: null,
+        }
+      });
+
+      console.log(`✓ Task resumed with new session`);
+      console.log(`  Task ID (stable): ${taskId}`);
+      console.log(`  New session ID: ${session.id}`);
+      console.log(`  Profile ID: ${oldSession.context.contextId}`);
+      console.log(`  New debug URL: ${debugUrl}`);
+      console.log(`  CDP WebSocket URL: ${wsUrl}`);
+
+      return {
+        debugUrl,
+        sessionId: session.id,
+        wsUrl,
+        savedUrl: oldSession.currentUrl || undefined
+      };
+
+    } catch (error) {
+      console.log(`  ❌ Attempt ${attempt} failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      lastError = error instanceof Error ? error : new Error('Unknown error');
     }
   }
 
-  // Update DB record with NEW sessionId, debugUrl, and wsUrl
-  await prisma.browserSession.update({
-    where: { id: taskId },
-    data: {
-      sessionId: session.id,
-      debugUrl,
-      wsUrl,
-      status: 'ACTIVE',
-      closedAt: null,
-    }
-  });
-
-  console.log(`✓ Task resumed with new session`);
-  console.log(`  Task ID (stable): ${taskId}`);
-  console.log(`  New session ID: ${session.id}`);
-  console.log(`  Profile ID: ${oldSession.context.contextId}`);
-  console.log(`  New debug URL: ${debugUrl}`);
-  console.log(`  CDP WebSocket URL: ${wsUrl}`);
-
-  return {
-    debugUrl,
-    sessionId: session.id,
-    wsUrl,
-    savedUrl: oldSession.currentUrl || undefined
-  };
+  // All retries exhausted
+  throw new Error(`Failed to resume session after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`);
 }
 
 /**

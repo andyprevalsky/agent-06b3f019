@@ -86,8 +86,32 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     // the fingerprint data for the agent to re-apply when it connects
     const injectionResult = await injectUserData(session.sessionId, user_id);
 
-    // 4. Get fingerprint data for the agent to apply via its own CDP connection
+// 4. Get fingerprint data for the agent to apply via its own CDP connection
     const fingerprintInjection = await getFingerprintInjectionData(user_id);
+
+    // 5. Fetch user's saved passwords (RSA-encrypted)
+    const passwords = await prisma.browserPassword.findMany({
+      where: { userId: user_id },
+      select: {
+        origin: true,
+        username: true,
+        encryptedPassword: true,
+        dateLastUsed: true,
+      },
+      orderBy: {
+        dateLastUsed: 'desc',
+      },
+    });
+
+    // Convert BigInt to number for JSON serialization
+    const serializedPasswords = passwords.map(p => ({
+      origin: p.origin,
+      username: p.username,
+      encryptedPassword: p.encryptedPassword,
+      dateLastUsed: p.dateLastUsed ? Number(p.dateLastUsed) : null,
+    }));
+
+    console.log(`🔐 Including ${serializedPasswords.length} passwords in init response`);
 
     res.json({
       success: true,
@@ -96,12 +120,12 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       session_id: session.sessionId,
       debug_url: session.debugUrl,
       ws_url: session.wsUrl,  // CDP WebSocket URL for browser-use
-      // project_id no longer needed for Steel
       cookies_injected: injectionResult.cookies.injected,
       cookies_count: injectionResult.cookies.cookieCount,
       fingerprint_injected: injectionResult.fingerprint.injected,
       // Fingerprint data for agent to apply via CDP (settings don't persist across connections)
       fingerprint_injection: fingerprintInjection,
+      passwords: serializedPasswords,  // RSA-encrypted passwords for type interception
     });
     
   } catch (error) {
@@ -195,6 +219,7 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
 /**
  * GET /api/browser-session/task/:taskId
  * Get current session info for a task.
+ * Includes user's passwords for type interception.
  */
 router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -209,10 +234,39 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Get fingerprint data for the agent to apply via CDP
+// Get fingerprint data for the agent to apply via CDP
     let fingerprintInjection = null;
+
+    // Fetch passwords for the user
+    let serializedPasswords: Array<{
+      origin: string;
+      username: string;
+      encryptedPassword: string;
+      dateLastUsed: number | null;
+    }> = [];
+
     if (session.context?.userId) {
       fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
+
+      const passwords = await prisma.browserPassword.findMany({
+        where: { userId: session.context.userId },
+        select: {
+          origin: true,
+          username: true,
+          encryptedPassword: true,
+          dateLastUsed: true,
+        },
+        orderBy: {
+          dateLastUsed: 'desc',
+        },
+      });
+
+      serializedPasswords = passwords.map(p => ({
+        origin: p.origin,
+        username: p.username,
+        encryptedPassword: p.encryptedPassword,
+        dateLastUsed: p.dateLastUsed ? Number(p.dateLastUsed) : null,
+      }));
     }
 
     res.json({
@@ -223,6 +277,7 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
       status: session.status,
       // Fingerprint data for agent to apply via CDP
       fingerprint_injection: fingerprintInjection,
+      passwords: serializedPasswords,
     });
 
   } catch (error) {

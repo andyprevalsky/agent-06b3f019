@@ -187,6 +187,66 @@ export async function fetchMessagesByIds(
 }
 
 /**
+ * Fetch emails since a given timestamp using Gmail's search query
+ * Returns all emails (no filtering by contact) - useful for OTPs and notifications
+ */
+export async function fetchGmailMessagesSince(
+  accessToken: string,
+  since: Date,
+  limit: number = 50
+): Promise<ParsedEmail[]> {
+  const unixSeconds = Math.floor(since.getTime() / 1000);
+  const query = `after:${unixSeconds}`;
+
+  console.log(`[Gmail] Fetching messages since ${since.toISOString()} (query: ${query})`);
+
+  const messageIds: string[] = [];
+  let pageToken: string | undefined;
+
+  // Fetch message IDs with the after: filter
+  do {
+    const listUrl = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
+    listUrl.searchParams.set('q', query);
+    listUrl.searchParams.set('maxResults', String(Math.min(limit - messageIds.length, 100)));
+    if (pageToken) {
+      listUrl.searchParams.set('pageToken', pageToken);
+    }
+
+    const listResponse = await fetch(listUrl.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!listResponse.ok) {
+      const errorText = await listResponse.text();
+      console.error(`[Gmail] Failed to list messages: ${listResponse.status} - ${errorText}`);
+      throw new Error(`Gmail API error: ${listResponse.status}`);
+    }
+
+    const listData = (await listResponse.json()) as GmailMessageListResponse;
+
+    if (listData.messages) {
+      messageIds.push(...listData.messages.map(m => m.id));
+    }
+
+    pageToken = listData.nextPageToken;
+
+    // Stop if we've hit the limit
+    if (messageIds.length >= limit) {
+      break;
+    }
+  } while (pageToken);
+
+  console.log(`[Gmail] Found ${messageIds.length} messages since ${since.toISOString()}`);
+
+  if (messageIds.length === 0) {
+    return [];
+  }
+
+  // Fetch full message details
+  return fetchMessagesByIds(accessToken, messageIds.slice(0, limit));
+}
+
+/**
  * Fetch multiple messages using Gmail Batch API (up to 100 per request)
  */
 async function fetchMessagesBatch(

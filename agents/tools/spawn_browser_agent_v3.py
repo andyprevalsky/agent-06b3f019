@@ -7,7 +7,7 @@ This is the v3 version that uses:
 - Index-based element selection
 """
 
-from typing import Dict, Any, Optional, AsyncGenerator, List
+from typing import Dict, Any, Optional, AsyncGenerator, List, Tuple
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from datetime import timedelta, datetime, timezone
@@ -425,14 +425,73 @@ def decrypt_payment_info(encrypted_data: str, decryption_key_b64: str) -> Option
         return None
 
 
-def build_autopay_prompt_section(payment_data: Dict[str, Any]) -> str:
-    """Build the autopay section for the browser agent system prompt."""
+def decrypt_password(encrypted_envelope: str, decryption_key_b64: str) -> Optional[str]:
+    """Decrypt a password using the same RSA+AES scheme as payment info.
+
+    Args:
+        encrypted_envelope: Base64-encoded JSON envelope with encrypted_aes_key, iv, ciphertext
+        decryption_key_b64: Base64-encoded RSA private key
+
+    Returns:
+        Decrypted password string, or None on failure
+    """
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.backends import default_backend
+
+    try:
+        # Decode envelope
+        envelope_json = base64.b64decode(encrypted_envelope).decode('utf-8')
+        envelope = json.loads(envelope_json)
+
+        if envelope.get("version") != 1:
+            return None
+
+        # Load RSA private key
+        private_key_pem = base64.b64decode(decryption_key_b64)
+        private_key = serialization.load_pem_private_key(private_key_pem, password=None, backend=default_backend())
+
+        # Decrypt AES key with RSA-OAEP
+        encrypted_aes_key = base64.b64decode(envelope["encrypted_aes_key"])
+        aes_key = private_key.decrypt(
+            encrypted_aes_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+        # Decrypt password with AES-GCM
+        iv = base64.b64decode(envelope["iv"])
+        ciphertext = base64.b64decode(envelope["ciphertext"])
+        auth_tag = ciphertext[-16:]
+        actual_ciphertext = ciphertext[:-16]
+
+        cipher = Cipher(algorithms.AES(aes_key), modes.GCM(iv, auth_tag), backend=default_backend())
+        decryptor = cipher.decryptor()
+        plaintext = decryptor.update(actual_ciphertext) + decryptor.finalize()
+
+        return plaintext.decode('utf-8')
+    except Exception as e:
+        logger.error("Failed to decrypt password", error=extract_error_message(e))
+        return None
+
+
+def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelope: str) -> str:
+    """Build the autopay section for the browser agent system prompt.
+
+    Uses reference IDs for card data that will be decrypted at typing time.
+    The LLM never sees the actual card number, CVV, etc.
+    """
     autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
     autopay_limit_dollars = autopay_limit_cents / 100
-    
+
+    # Get last 4 digits for display (from unencrypted metadata)
     card_number = payment_data.get("card_number", "")
-    card_number_formatted = " ".join([card_number[i:i+4] for i in range(0, len(card_number), 4)])
-    
+    card_last_four = card_number[-4:] if len(card_number) >= 4 else "****"
+
     billing_lines = [
         payment_data.get("billing_street_address", ""),
         payment_data.get("billing_address_line2", ""),
@@ -440,31 +499,204 @@ def build_autopay_prompt_section(payment_data: Dict[str, Any]) -> str:
         payment_data.get("billing_country", "")
     ]
     billing_address = "\n".join(line for line in billing_lines if line.strip())
-    
+
     contact_info = ""
     if payment_data.get("billing_phone"):
         contact_info += f"\nPhone: {payment_data['billing_phone']}"
     if payment_data.get("billing_email"):
         contact_info += f"\nEmail: {payment_data['billing_email']}"
-    
+
     return f"""
 
 AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}):
-When you reach a checkout/payment page, use this card information:
+Payment card ending in {card_last_four} is available for checkout.
 
-Card Number: {card_number_formatted}
-Cardholder Name: {payment_data.get('cardholder_name', '')}
-Expiry: {payment_data.get('card_expiry', '')}
-CVV: {payment_data.get('card_cvv', '')}
+When you reach a payment page, type these exact values into the corresponding fields:
+- Card number field: card_number
+- Cardholder name field: card_name
+- Expiry field: card_expiry
+- CVV field: card_cvv
+
+The values will be automatically filled with the user's saved card information.
 
 Billing Address:
 {billing_address}{contact_info}
 
 PAYMENT RULES:
-- If order total <= ${autopay_limit_dollars:.2f}: Complete payment using card above
+- If order total <= ${autopay_limit_dollars:.2f}: Complete payment using the card refs above
 - If order total > ${autopay_limit_dollars:.2f}: Use send_message_to_user with is_question=true to request approval before paying
 - Always verify the total before entering card details
 - Double-check the billing address matches before submitting"""
+
+
+def build_passwords_prompt_section(passwords: List[Dict[str, Any]]) -> Tuple[str, Dict[str, str]]:
+    """Build the passwords section for the browser agent system prompt.
+
+    Uses simple refs like pwd:username, adding @domain suffix only for duplicates.
+
+    Returns:
+        Tuple of (prompt_section, ref_to_encrypted_map)
+        - prompt_section: Text to add to system prompt
+        - ref_to_encrypted_map: Maps short refs to encrypted blobs for lookup
+    """
+    if not passwords:
+        return "", {}
+
+    # First pass: count username occurrences to detect duplicates
+    username_counts: Dict[str, int] = {}
+    for pwd in passwords:
+        username = pwd.get("username", "")
+        username_counts[username] = username_counts.get(username, 0) + 1
+
+    # Second pass: build refs (add @domain suffix for duplicates)
+    lines = []
+    ref_to_encrypted: Dict[str, str] = {}
+
+    for pwd in passwords:
+        origin = pwd.get("origin", "")
+        username = pwd.get("username", "")
+        encrypted = pwd.get("encryptedPassword", "")
+
+        # Simple ref format: pwd:username
+        if username_counts.get(username, 0) <= 1:
+            ref = f"pwd:{username}"
+        else:
+            # Duplicate username across sites - add @domain suffix
+            from urllib.parse import urlparse
+            parsed = urlparse(origin) if origin.startswith("http") else urlparse(f"https://{origin}")
+            domain = parsed.netloc or origin
+            if domain.startswith("www."):
+                domain = domain[4:]
+            short_domain = domain.split(".")[0]  # "linkedin" from "linkedin.com"
+            ref = f"pwd:{username}@{short_domain}"
+
+        ref_to_encrypted[ref] = encrypted
+        lines.append(f"- {origin} | {username} | ref: {ref}")
+
+    prompt_section = f"""
+
+AVAILABLE PASSWORDS (type the ref into password fields):
+{chr(10).join(lines)}
+
+To log in, type the ref (e.g., pwd:andy@email.com) into the password field.
+It will be automatically decrypted."""
+
+    return prompt_section, ref_to_encrypted
+
+
+def extract_otp_from_text(text: str) -> Optional[str]:
+    """Extract OTP code from email text using regex patterns."""
+    import re
+
+    # Patterns ordered by specificity (most specific first)
+    patterns = [
+        # 6-digit codes with context
+        r'(?:verification|security|auth|login|sign.?in|confirm)\s*(?:code|pin|otp)[\s:]+(\d{6})\b',
+        r'\b(\d{6})\s*(?:is\s+)?(?:your|the)\s+(?:verification|security|auth|one.?time|otp|login)\s*(?:code|pin)?',
+        r'(?:code|pin|otp)[\s:]+(\d{6})\b',
+        r'\b(\d{6})\b.*(?:expires?|valid|verify|enter|use)',
+        # 4-digit PINs
+        r'(?:pin|code)[\s:]+(\d{4})\b',
+        r'\b(\d{4})\s*(?:is\s+)?(?:your|the)\s+(?:pin|code|otp)',
+        # 8-digit codes
+        r'(?:code|otp)[\s:]+(\d{8})\b',
+    ]
+
+    # Skip if text contains low-confidence keywords
+    low_confidence_keywords = ['order', 'tracking', 'receipt', 'invoice', 'account number', 'reference', 'transaction id']
+    lower_text = text.lower()
+    if any(kw in lower_text for kw in low_confidence_keywords):
+        # Still try high-confidence patterns
+        for pattern in patterns[:3]:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> str:
+    """Fetch recent emails and extract OTP codes. Returns formatted prompt section."""
+    from datetime import datetime, timedelta
+
+    try:
+        # Fetch emails from last 10 minutes
+        since = (datetime.utcnow() - timedelta(minutes=10)).isoformat() + "Z"
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{api_url}/api/integrations/email/messages",
+                params={"since": since, "limit": 20},
+                headers={
+                    "X-API-Key": api_key,
+                    "x-user-id": user_id,
+                },
+            )
+
+            if response.status_code == 404:
+                # Gmail not connected - not an error, just no OTPs available
+                return ""
+
+            if response.status_code != 200:
+                logger.warning("Failed to fetch emails for OTP", status=response.status_code)
+                return ""
+
+            data = response.json()
+            emails = data.get("emails", [])
+
+            if not emails:
+                return ""
+
+            # Extract OTPs from emails
+            otps = []
+            for email in emails:
+                body_text = email.get("bodyText", "")
+                if not body_text:
+                    continue
+
+                code = extract_otp_from_text(body_text)
+                if code:
+                    email_date = datetime.fromisoformat(email.get("date", "").replace("Z", "+00:00"))
+                    age_seconds = (datetime.now(email_date.tzinfo) - email_date).total_seconds()
+
+                    # Skip if code is too old (> 10 min)
+                    if age_seconds > 600:
+                        continue
+
+                    age_str = f"{int(age_seconds)}s ago" if age_seconds < 60 else f"{int(age_seconds / 60)}m ago"
+                    ttl_seconds = max(0, 300 - int(age_seconds))  # 5 min typical TTL
+                    ttl_str = f"{ttl_seconds}s" if ttl_seconds < 60 else f"{int(ttl_seconds / 60)}m"
+
+                    sender = email.get("fromName") or email.get("from", "unknown")
+                    otps.append(f'- "{code}" from {sender} (received {age_str}, expires in ~{ttl_str})')
+
+            if not otps:
+                return ""
+
+            # Deduplicate by code
+            seen_codes = set()
+            unique_otps = []
+            for otp_line in otps:
+                code = otp_line.split('"')[1]
+                if code not in seen_codes:
+                    seen_codes.add(code)
+                    unique_otps.append(otp_line)
+
+            return f"""RECENTLY RECEIVED OTP CODES (auto-refreshed every turn):
+{chr(10).join(unique_otps)}
+
+When choosing OTP delivery method: PREFER EMAIL over SMS. SMS OTPs require the user's Mac to be actively receiving messages, while email is more reliable.
+If waiting for an OTP that hasn't arrived yet, take another action and check next turn."""
+
+    except Exception as e:
+        logger.warning("Failed to fetch OTPs from email", error=str(e))
+    return ""
 
 
 # ========================================
@@ -674,6 +906,9 @@ async def execute_action(
     session_id: Optional[str] = None,
     config: Any = None,
     humanizer: Optional[BrowserHumanizer] = None,
+    secret_refs: Optional[Dict[str, str]] = None,
+    password_origins: Optional[Dict[str, str]] = None,
+    current_url: str = "",
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -685,6 +920,8 @@ async def execute_action(
         session_id: Steel session ID for localStorage injection
         config: App config for backend API calls
         humanizer: BrowserHumanizer for human-like mouse/keyboard interactions
+        secret_refs: Dict mapping encrypted/ref values to decrypted values (passwords, cards)
+        password_origins: Dict mapping encrypted password -> expected origin for validation
 
     Returns:
         Result dict with success, message, and any additional data
@@ -785,6 +1022,39 @@ async def execute_action(
         
         elif action_name == "input_text":
             text = params.get("text", "")
+            display_text = text  # What we show in action history (may be redacted)
+
+            # Check if this is a password or card reference that needs decryption
+            if secret_refs and text in secret_refs:
+                # ALWAYS redact in display/logs, even if validation fails
+                display_text = "[encrypted_data]"
+
+                # Check if it's a password (needs origin validation)
+                if password_origins and text in password_origins:
+                    expected_origin = password_origins[text]
+                    # Use current_url passed from caller (browser_state.url)
+                    from urllib.parse import urlparse
+                    current_domain = urlparse(current_url).netloc.lower() if current_url else ""
+                    expected_domain = urlparse(expected_origin).netloc.lower() if expected_origin else ""
+
+                    # Fuzzy domain match (handle auth.amazon.com vs amazon.com)
+                    def get_base_domain(domain: str) -> str:
+                        parts = domain.split('.')
+                        if len(parts) >= 2:
+                            return '.'.join(parts[-2:])
+                        return domain
+
+                    if get_base_domain(current_domain) != get_base_domain(expected_domain):
+                        logger.warning("🔐 Password origin mismatch", expected=expected_domain, got=current_domain)
+                        return {
+                            "success": False,
+                            "error": f"Password origin mismatch: expected {expected_domain}, got {current_domain}"
+                        }
+
+                # Decrypt and replace text for typing
+                text = secret_refs[text]
+                logger.info("🔐 Typing encrypted credential (password/card)", redacted=True)
+
             if element:
                 # Index-based input (DOM models)
                 # Get element coordinates for humanizer (cursor movement handled internally)
@@ -814,10 +1084,10 @@ async def execute_action(
                     thinking=thinking,
                     index=index,
                     coordinates=element_coords,
-                    params={"text": text},
+                    params={"text": display_text},  # Use display_text to redact secrets
                     result={"success": True}
                 )
-                return {"success": True, "message": ""}
+                return {"success": True, "message": "", "typed_text": display_text}
             elif coords:
                 # Coordinate-based input (vision models like Yutori)
                 # Cursor movement handled internally by humanizer
@@ -848,10 +1118,10 @@ async def execute_action(
                     action="input_text",
                     thinking=thinking,
                     coordinates=coords,
-                    params={"text": text},
+                    params={"text": display_text},  # Use display_text to redact secrets
                     result={"success": True}
                 )
-                return {"success": True, "message": ""}
+                return {"success": True, "message": "", "typed_text": display_text}
             else:
                 # Fallback: no index or coords - type to currently focused element
                 if humanizer:
@@ -866,10 +1136,10 @@ async def execute_action(
                     dom_service=dom_service,
                     action="input_text",
                     thinking=thinking,
-                    params={"text": text},
+                    params={"text": display_text},  # Use display_text to redact secrets
                     result={"success": True}
                 )
-                return {"success": True, "message": ""}
+                return {"success": True, "message": "", "typed_text": display_text}
         
         elif action_name == "press_key":
             key = params.get("key", "")
@@ -1274,6 +1544,7 @@ async def spawn_browser_agent_activity_v3(
     dom_service = None
     action_history = ActionHistory()
     browser_url = None
+    current_url = ""  # Initialize early for exception handlers
     config = load_config()
     start_time = _safe_time()
 
@@ -1292,6 +1563,9 @@ async def spawn_browser_agent_activity_v3(
         raise ValueError("output_schema is required for browser agent - parent agent must provide structured output schema in tool call")
     logger.info("Using response schema from tool call", fields=len(response_schema.get("fields", [])))
     
+    # Passwords from session response (consolidates /init and /task endpoints)
+    session_passwords: List[Dict[str, Any]] = []
+
     try:
         # ===== SESSION INITIALIZATION =====
         fingerprint_injection = None  # Will be populated from backend response
@@ -1308,6 +1582,7 @@ async def spawn_browser_agent_activity_v3(
                     browser_url = session_info.get("debug_url")
                     cdp_url = session_info.get("ws_url")  # CDP WebSocket URL
                     fingerprint_injection = session_info.get("fingerprint_injection")  # For CDP re-injection
+                    session_passwords = session_info.get("passwords", [])
                 else:
                     raise RuntimeError(f"Failed to fetch session info: HTTP {response.status_code}")
             activity.heartbeat(f"Resuming task {task_id}")
@@ -1321,13 +1596,14 @@ async def spawn_browser_agent_activity_v3(
                 )
                 if response.status_code not in [200, 201]:
                     raise Exception(f"Failed to init session: {response.text}")
-                
+
                 session_data = response.json()
                 task_id = session_data["task_id"]
                 session_id = session_data["session_id"]
                 browser_url = session_data["debug_url"]
                 cdp_url = session_data.get("ws_url")  # CDP WebSocket URL from Browserbase
                 fingerprint_injection = session_data.get("fingerprint_injection")  # For CDP re-injection
+                session_passwords = session_data.get("passwords", [])
             
             # Init message - include output_schema for FE display
             await save_browser_action_message(
@@ -1490,75 +1766,121 @@ async def spawn_browser_agent_activity_v3(
             shipping_address = "\n".join(line for line in addr_lines if line)
             shipping_section = f"\n\nUSER SHIPPING ADDRESS:\n{shipping_address}\n\nIMPORTANT: During checkout, verify shipping address matches."
         
-        # Build autopay section
+        # Build autopay section (with reference IDs, not plaintext)
         autopay_section = ""
         encrypted_payment = user_profile.get("encryptedPaymentInformation")
+        card_refs: Dict[str, str] = {}  # For type interception
         if encrypted_payment and config.payment.decryption_key:
             payment_data = decrypt_payment_info(encrypted_payment, config.payment.decryption_key)
             if payment_data:
                 autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
                 if autopay_limit_cents > 0:
-                    autopay_section = build_autopay_prompt_section(payment_data)
+                    autopay_section = build_autopay_prompt_section(payment_data, encrypted_payment)
+                    # Store card refs for type interception
+                    card_refs = {
+                        "card_number": payment_data.get("card_number", ""),
+                        "card_name": payment_data.get("cardholder_name", ""),
+                        "card_expiry": payment_data.get("card_expiry", ""),
+                        "card_cvv": payment_data.get("card_cvv", ""),
+                    }
                 else:
                     autopay_section = "\n\nPAYMENT AUTHORIZATION:\nAutopay DISABLED. For ALL purchases, use send_message_to_user to get explicit approval."
-        
-        custom_instructions = (
+
+        # Use passwords from session response (no separate fetch needed)
+        passwords_section = ""
+        ref_to_encrypted: Dict[str, str] = {}  # short_ref -> encrypted_blob
+        password_lookup: Dict[str, Dict[str, str]] = {}  # encrypted -> {origin, username}
+        if session_passwords:
+            passwords_section, ref_to_encrypted = build_passwords_prompt_section(session_passwords)
+            # Build lookup for type interception (encrypted -> origin/username)
+            for pwd in session_passwords:
+                encrypted = pwd.get("encryptedPassword", "")
+                if encrypted:
+                    password_lookup[encrypted] = {
+                        "origin": pwd.get("origin", ""),
+                        "username": pwd.get("username", ""),
+                    }
+            logger.info(f"Loaded {len(session_passwords)} passwords from session response")
+
+        # Build secret_refs for type interception (short_ref -> decrypted value)
+        secret_refs: Dict[str, str] = {}
+        password_origins: Dict[str, str] = {}  # short_ref -> origin for validation
+
+        # Add card refs (no decryption needed, we already have the values from payment_data)
+        for ref, value in card_refs.items():
+            if value:
+                secret_refs[ref] = value
+
+        # Add password refs using short refs (decrypt each password)
+        # ref_to_encrypted maps: short_ref -> encrypted_blob
+        # password_lookup maps: encrypted_blob -> {origin, username}
+        if config.payment.decryption_key:
+            for short_ref, encrypted in ref_to_encrypted.items():
+                decrypted = decrypt_password(encrypted, config.payment.decryption_key)
+                if decrypted:
+                    # Map short ref to decrypted value for type interception
+                    secret_refs[short_ref] = decrypted
+                    # Map short ref to origin for validation
+                    info = password_lookup.get(encrypted, {})
+                    password_origins[short_ref] = info.get("origin", "")
+
+        logger.info(
+            "Built secret refs for type interception",
+            card_refs_count=len(card_refs),
+            password_refs_count=len([k for k in secret_refs if k not in card_refs]),
+        )
+
+        # Base custom instructions (static parts - OTP added each iteration)
+        base_custom_instructions = (
             "Your browser is in full screen mode. No search bar or navigation bar. "
-            "Browser cookies have been injected - assume the user is logged in until proven otherwise."
-            + shipping_section + autopay_section +
+            "Control+L will NOT focus the address bar - use the goto action to navigate to URLs. "
+            "Browser cookies have been injected - assume the user is logged in until proven otherwise. "
+            "Avoid login flows unless the site forces you to login to complete your directed goal."
+            + shipping_section + autopay_section + passwords_section +
+            "\n\nWhen a site offers OTP delivery options, ALWAYS prefer EMAIL over SMS. "
+            "SMS OTPs require the user's Mac to be active; email is more reliable."
             "\n\nUse send_message_to_user when you need human help (login, CAPTCHA, payments over limit). "
             "Use attempt_completion tool when the task is done."
         )
-        
+
         # Model pricing
         model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
-        
+
         # ===== MAIN AGENT LOOP =====
         max_iterations = 25
         iteration = 0
-        
+
         while iteration < max_iterations:
             iteration += 1
             activity.heartbeat(f"Step {iteration}")
-            
+
+            # 0. Fetch recent OTPs at the start of each iteration
+            otp_section = ""
+            try:
+                otp_section = await fetch_recent_otps(user_id, config.backend.api_url, config.backend.api_key)
+            except Exception as e:
+                logger.warning("Failed to fetch OTPs", error=str(e))
+
             # 1. Get current browser state (always includes screenshot)
             browser_state = await dom_service.get_browser_state(include_screenshot=True)
             current_url = browser_state.get("url", "")
-            
+
             # Track URL changes
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
-            
-            # 2. Build system prompt
-            system_prompt = get_browser_system_prompt(
+
+            # 2. Build custom instructions with OTP section (refreshed each iteration)
+            custom_instructions = base_custom_instructions
+            if otp_section:
+                custom_instructions += f"\n\n{otp_section}"
+
+            # 3. Build enriched task from system prompt (single source of truth)
+            # This includes: goal, current_url, all custom_instructions (shipping, autopay, passwords, OTP), available_files
+            enriched_task = get_browser_system_prompt(
                 goal, current_url, custom_instructions,
                 available_files=list(available_file_paths.keys()) if available_file_paths else None
             )
-            
-            # 3. Build enriched task with user context
-            enriched_task = goal
-            if shipping_section:
-                enriched_task += f"\n\n{shipping_section.strip()}"
-            if autopay_section:
-                enriched_task += f"\n\n{autopay_section.strip()}"
-            # Add available files section if files were uploaded to Steel
-            if available_file_paths:
-                files_list = ', '.join(available_file_paths.keys())
-                enriched_task += f"""
 
-AVAILABLE FILES FOR UPLOAD:
-The following files have been uploaded and are ready to use with the upload_file action.
-To upload a file to a file input element, use: upload_file(index=<file_input_index>, filename="<filename>")
-Files: {files_list}"""
-
-            enriched_task += """
-
-BROWSER CONTEXT:
-- Browser is in full screen mode (no URL bar visible)
-- User may already be logged in via stored cookies
-- Use send_message_to_user when you need human help (login, CAPTCHA, payments over limit)
-- Use attempt_completion when the task is complete"""
-            
             # 4. Call Rose API for next action
             try:
                 # Tracing: log last action before Rose API call
@@ -1938,16 +2260,18 @@ Based on this feedback, I need to continue working on the task and address the i
                     title_progress = "Clicking..."
                     title_done = "Clicked"
             elif action_name == "input_text":
-                text = unified_action.get("params", {}).get("text", "")[:25]
+                text = unified_action.get("params", {}).get("text", "")
+                # Redact secrets in display title
+                display_text = "[encrypted_data]" if (secret_refs and text in secret_refs) else text[:25]
                 if element_desc:
                     title_progress = f"Typing into {element_desc}"
-                    title_done = f"Typed '{text}' into {element_desc}"
+                    title_done = f"Typed '{display_text}' into {element_desc}"
                 elif coords:
                     title_progress = f"Typing at ({coords.get('x', '?')}, {coords.get('y', '?')})"
-                    title_done = f"Typed '{text}' at ({coords.get('x', '?')}, {coords.get('y', '?')})"
+                    title_done = f"Typed '{display_text}' at ({coords.get('x', '?')}, {coords.get('y', '?')})"
                 else:
                     title_progress = "Typing..."
-                    title_done = f"Typed '{text}'"
+                    title_done = f"Typed '{display_text}'"
             elif action_name == "goto":
                 url = unified_action.get("params", {}).get("url", "")[:50]
                 title_progress = f"Navigating → {url}"
@@ -2008,7 +2332,7 @@ Based on this feedback, I need to continue working on the task and address the i
             )
 
             # Execute action
-            result = await execute_action(dom_service, action_history, unified_action, available_file_paths, session_id, config, humanizer)
+            result = await execute_action(dom_service, action_history, unified_action, available_file_paths, session_id, config, humanizer, secret_refs, password_origins, current_url)
 
             # Post FINISHED - use action_name for icon mapping, include coordinates for cursor ripple
             if result.get("success", True):

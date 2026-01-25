@@ -378,7 +378,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       return onboardingPrefill;
     }
     // Fall back to DEV default if no prefill
-    return import.meta.env.DEV ? 'make this red' : '';
+    return import.meta.env.DEV ? 'go to linkedin.com and trigger a download for my data' : '';
   });
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-lite');

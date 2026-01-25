@@ -6,7 +6,8 @@ import fs from 'fs';
 import { parseIMessageData, ContactWithMessages } from '../services/integrations/iMessageParser';
 import { parseVcfContent, importVcfContacts } from '../services/integrations/vcfParser';
 import { parseEmailZip, importEmailsToDb } from '../services/integrations/emailParser';
-import { fetchGmailEmails, parseGmailOAuthEmails } from '../services/integrations/gmailParser';
+import { fetchGmailEmails, parseGmailOAuthEmails, fetchGmailMessagesSince } from '../services/integrations/gmailParser';
+import { getValidAccessToken } from '../services/integrations/gmailSync';
 import { prisma } from '../lib/prisma';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
@@ -1940,6 +1941,212 @@ router.post('/cacheStorage/upload', authenticate, upload.none() as any, async (r
     console.error('Error uploading cacheStorage:', error);
     return res.status(500).json({
       error: 'Failed to upload cacheStorage',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/passwords/upload
+ *
+ * Upload browser passwords from the Mac app.
+ * Receives AES-256-CBC encrypted payload containing RSA-encrypted passwords.
+ * The passwords are already RSA-encrypted before upload; we store them as-is.
+ */
+router.post('/passwords/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { data, iv, key } = req.body;
+
+    if (!data || !iv || !key) {
+      return res.status(400).json({
+        error: 'Missing required fields: data, iv, key',
+      });
+    }
+
+    // Decrypt the AES-256-CBC encrypted transport payload
+    let passwordData: {
+      passwords: Array<{
+        origin: string;
+        username: string;
+        encryptedPassword: string;  // Already RSA-encrypted
+        dateLastUsed: number;
+        dateCreated: number;
+        browserSource: string;
+      }>;
+    };
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-cbc',
+        Buffer.from(key, 'hex'),
+        Buffer.from(iv, 'hex')
+      );
+      let decrypted = decipher.update(data, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      passwordData = JSON.parse(decrypted);
+    } catch (decryptError) {
+      console.error('[Integrations] Password decryption failed:', decryptError);
+      return res.status(400).json({
+        error: 'Failed to decrypt password payload',
+      });
+    }
+
+    if (!passwordData.passwords || !Array.isArray(passwordData.passwords)) {
+      return res.status(400).json({
+        error: 'Invalid password payload: expected passwords array',
+      });
+    }
+
+    console.log(
+      `[Integrations] Received ${passwordData.passwords.length} passwords for user ${userId}`
+    );
+
+    // Bulk upsert passwords
+    if (passwordData.passwords.length > 0) {
+      // Deduplicate passwords by (origin, username) - keep most recently used
+      const passwordMap = new Map<string, typeof passwordData.passwords[0]>();
+      for (const pwd of passwordData.passwords) {
+        const key = `${pwd.origin}|${pwd.username}`;
+        const existing = passwordMap.get(key);
+        if (!existing || (pwd.dateLastUsed || 0) > (existing.dateLastUsed || 0)) {
+          passwordMap.set(key, pwd);
+        }
+      }
+      const deduplicatedPasswords = Array.from(passwordMap.values());
+      console.log(`[Integrations] Deduplicated to ${deduplicatedPasswords.length} unique passwords`);
+
+      // Build VALUES clause for bulk upsert
+      const values = deduplicatedPasswords.map((_, i) => {
+        return `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`;
+      }).join(', ');
+
+      // Flatten params
+      const params: (string | number | null)[] = [];
+      for (const pwd of deduplicatedPasswords) {
+        params.push(
+          userId,
+          pwd.origin,
+          pwd.username,
+          pwd.encryptedPassword,
+          pwd.dateLastUsed || null,
+          pwd.dateCreated || null,
+          pwd.browserSource
+        );
+      }
+
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "BrowserPassword" (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", "browserSource", "syncedAt")
+        VALUES ${values}
+        ON CONFLICT ("userId", origin, username) DO UPDATE SET
+          "encryptedPassword" = EXCLUDED."encryptedPassword",
+          "dateLastUsed" = EXCLUDED."dateLastUsed",
+          "browserSource" = EXCLUDED."browserSource",
+          "syncedAt" = NOW()
+      `, ...params);
+
+      console.log(`[Integrations] ✅ Upserted ${deduplicatedPasswords.length} passwords for user ${userId}`);
+
+      return res.json({
+        message: 'Passwords uploaded successfully',
+        passwordCount: deduplicatedPasswords.length,
+      });
+    }
+
+    // No passwords to upload
+    return res.json({
+      message: 'No passwords to upload',
+      passwordCount: 0,
+    });
+  } catch (error) {
+    console.error('Error uploading passwords:', error);
+    return res.status(500).json({
+      error: 'Failed to upload passwords',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * GET /api/integrations/email/messages
+ *
+ * Get emails directly from Gmail API since a given timestamp.
+ * Returns ALL emails without filtering - useful for OTPs and notifications.
+ *
+ * Query params:
+ * - since: ISO timestamp (required) - fetch emails after this time
+ * - limit: Max emails to return (default: 50, max: 100)
+ */
+router.get('/email/messages', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    // Support both JWT auth (req.user) and internal API key auth (x-user-id header)
+    const userId = req.user?.id || (req.isInternal ? (req.headers['x-user-id'] as string) : undefined);
+    if (!userId) {
+      return res.status(400).json({ error: 'Missing user ID. Use JWT auth or x-user-id header with API key.' });
+    }
+    const sinceParam = req.query.since as string;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+
+    if (!sinceParam) {
+      return res.status(400).json({ error: 'Missing required query param: since (ISO timestamp)' });
+    }
+
+    const since = new Date(sinceParam);
+    if (isNaN(since.getTime())) {
+      return res.status(400).json({ error: 'Invalid since timestamp' });
+    }
+
+    // Find user's Gmail integration and credentials
+    const integration = await prisma.integration.findFirst({
+      where: {
+        userId,
+        name: 'gmail',
+        status: IntegrationStatus.CONNECTED,
+      },
+      include: {
+        emailCredentials: {
+          where: { provider: EmailProvider.GMAIL },
+        },
+      },
+    });
+
+    if (!integration) {
+      return res.status(404).json({ error: 'Gmail not connected' });
+    }
+
+    const credential = integration.emailCredentials[0];
+    if (!credential || !credential.refreshToken) {
+      return res.status(404).json({ error: 'Gmail credentials not found' });
+    }
+
+    // Get valid access token (refreshes if needed)
+    const accessToken = await getValidAccessToken(credential);
+    if (!accessToken) {
+      return res.status(401).json({ error: 'Failed to get valid Gmail access token' });
+    }
+
+    // Fetch emails directly from Gmail API
+    const emails = await fetchGmailMessagesSince(accessToken, since, limit);
+
+    console.log(`[Integrations] Fetched ${emails.length} emails since ${since.toISOString()} for user ${userId}`);
+
+    return res.json({
+      emails: emails.map(email => ({
+        from: email.from,
+        fromName: email.fromName,
+        to: email.to,
+        cc: email.cc,
+        subject: email.subject,
+        date: email.date.toISOString(),
+        bodyText: email.bodyText,
+        bodyHtml: email.bodyHtml,
+      })),
+      count: emails.length,
+      since: since.toISOString(),
+    });
+  } catch (error) {
+    console.error('Error fetching emails:', error);
+    return res.status(500).json({
+      error: 'Failed to fetch emails',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

@@ -33,6 +33,11 @@ interface TestPrompt {
 
 const TEST_PROMPTS: TestPrompt[] = [
   {
+    title: 'Test Automatic LinkedIn Connection',
+    description: 'Tests browser agent with LinkedIn data download',
+    prompt: 'go to linkedin.com and trigger a download for my data',
+  },
+  {
     title: 'Test Chat Mode',
     description: 'Tests chat mode web search flow',
     prompt: 'whats the latest news?',
