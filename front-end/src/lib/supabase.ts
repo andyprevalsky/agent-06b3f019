@@ -1,3 +1,10 @@
+/**
+ * Supabase Client & Auth Helpers
+ *
+ * Simple phone-based auth. Sessions are stored in localStorage after
+ * phone OTP verification. The Supabase client is only used for realtime.
+ */
+
 import { createClient, type Session, type User } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -7,214 +14,195 @@ if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error('Missing Supabase environment variables');
 }
 
-type StorageAdapter = {
-  getItem: (key: string) => string | null | Promise<string | null>;
-  setItem: (key: string, value: string) => void | Promise<void>;
-  removeItem: (key: string) => void | Promise<void>;
-};
-
-// Check if we're actually running in Electron (not just web with window.api potentially defined)
-const isElectron = () => {
-  if (typeof window === 'undefined') return false;
-  // Check for Electron-specific properties
-  const result = !!(window.api?.auth && typeof window.api.auth.check === 'function');
-  console.log('[Supabase] isElectron check:', result, 'window.api:', !!window.api, 'window.api?.auth:', !!window.api?.auth);
-  return result;
-};
-
-// In-memory storage for non-session Supabase keys (like PKCE code verifiers)
-// This is needed because the Electron auth bridge only stores the session
-const auxiliaryStorage = new Map<string, string>();
-let cachedSession: Session | null = null;
-
-const SUPABASE_SESSION_PREFIX = 'sb-';
-const SUPABASE_SESSION_SUFFIX = '-auth-token';
+// Storage keys
+const SESSION_KEY = 'rose-session';
 const USER_CACHE_KEY = 'app-user';
 
-const findSupabaseSessionKey = (): string | null => {
-  if (typeof window === 'undefined') return null;
-  for (let i = 0; i < window.localStorage.length; i++) {
-    const key = window.localStorage.key(i);
-    if (key && key.startsWith(SUPABASE_SESSION_PREFIX) && key.endsWith(SUPABASE_SESSION_SUFFIX)) {
-      return key;
-    }
-  }
-  return null;
-};
+// API Configuration
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 
-export const getStoredSession = (): Session | null => {
-  if (cachedSession) {
-    return cachedSession;
-  }
+// =============================================================================
+// Supabase Client (for realtime only)
+// =============================================================================
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+    detectSessionInUrl: false,
+  },
+  realtime: {
+    params: {
+      eventsPerSecond: 10,
+    },
+  },
+});
+
+// =============================================================================
+// Session Management
+// =============================================================================
+
+/**
+ * Get the current session from localStorage.
+ * Returns null if no session exists or if expired.
+ */
+export function getSession(): Session | null {
   if (typeof window === 'undefined') return null;
-  const key = findSupabaseSessionKey();
-  if (!key) return null;
-  const stored = window.localStorage.getItem(key);
+
+  // For Electron, check auth bridge first
+  // Note: This is sync, so we can't await. The session should be primed on app start.
+
+  const stored = window.localStorage.getItem(SESSION_KEY);
   if (!stored) return null;
+
   try {
-    const parsed = JSON.parse(stored);
-    cachedSession = parsed;
-    return parsed;
+    const session = JSON.parse(stored) as Session;
+
+    // Check if expired
+    if (session.expires_at && session.expires_at * 1000 < Date.now()) {
+      console.log('[Supabase] Session expired, clearing');
+      clearSession();
+      return null;
+    }
+
+    return session;
   } catch (error) {
-    console.warn('[Supabase] Failed to parse stored session', error);
+    console.warn('[Supabase] Failed to parse session', error);
     return null;
   }
-};
+}
 
-export const clearStoredSession = () => {
+/**
+ * Store a session in localStorage (and Electron auth bridge if available).
+ */
+export function storeSession(session: Session): void {
   if (typeof window === 'undefined') return;
-  cachedSession = null;
+
+  console.log('[Supabase] Storing session', { userId: session.user?.id });
+
+  // Store in localStorage
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+
+  // For Electron, also use auth bridge
   if (window.api?.auth) {
-    window.api.auth.clear().catch((error: unknown) => {
-      console.warn('[Supabase] Failed to clear Electron auth session', error);
+    window.api.auth.save(session).catch((error: unknown) => {
+      console.warn('[Supabase] Failed to save to Electron auth bridge', error);
     });
   }
-  const key = findSupabaseSessionKey();
-  if (key) {
-    window.localStorage.removeItem(key);
-  }
-};
 
-export const persistCachedUser = (user: User | null) => {
+  // Cache the user
+  if (session.user) {
+    persistCachedUser(session.user);
+  }
+}
+
+/**
+ * Clear the session from all storage.
+ */
+export function clearSession(): void {
+  if (typeof window === 'undefined') return;
+
+  console.log('[Supabase] Clearing session');
+
+  window.localStorage.removeItem(SESSION_KEY);
+  window.localStorage.removeItem(USER_CACHE_KEY);
+
+  // For Electron, also clear auth bridge
+  if (window.api?.auth) {
+    window.api.auth.clear().catch((error: unknown) => {
+      console.warn('[Supabase] Failed to clear Electron auth bridge', error);
+    });
+  }
+}
+
+/**
+ * Check if a session exists.
+ */
+export function hasSession(): boolean {
+  return getSession() !== null;
+}
+
+// =============================================================================
+// User Cache
+// =============================================================================
+
+export function persistCachedUser(user: User | null): void {
   if (typeof window === 'undefined') return;
   if (user) {
     window.localStorage.setItem(USER_CACHE_KEY, JSON.stringify(user));
   } else {
     window.localStorage.removeItem(USER_CACHE_KEY);
   }
-};
+}
 
-export const getCachedUser = (): User | null => {
+export function getCachedUser(): User | null {
   if (typeof window === 'undefined') return null;
   const stored = window.localStorage.getItem(USER_CACHE_KEY);
   if (!stored) return null;
   try {
     return JSON.parse(stored);
-  } catch (error) {
-    console.warn('[Supabase] Failed to parse cached user', error);
+  } catch {
     return null;
   }
-};
+}
 
-const getElectronStorage = (): StorageAdapter | undefined => {
-  if (!isElectron()) return undefined;
-  const authBridge = window.api!.auth!;
+// =============================================================================
+// Anonymous Auth (via Backend)
+// =============================================================================
 
-  return {
-    getItem: async (key: string) => {
-      // For session token, use the auth bridge
-      if (key.endsWith('-auth-token') && !key.includes('code-verifier')) {
-        const session = await authBridge.check();
-        if (session) {
-          cachedSession = session;
-        }
-        return session ? JSON.stringify(session) : null;
-      }
-      // For other keys (like code verifier), use auxiliary storage
-      return auxiliaryStorage.get(key) ?? null;
-    },
-    setItem: async (key: string, value: string) => {
-      // For session token, use the auth bridge
-      if (key.endsWith('-auth-token') && !key.includes('code-verifier')) {
-        if (!value) {
-          await authBridge.clear();
-          return;
-        }
-        try {
-          const session = JSON.parse(value);
-          await authBridge.save(session);
-          cachedSession = session;
-        } catch (error) {
-          console.warn('[Supabase] Failed to parse session for Electron storage', error);
-        }
-        return;
-      }
-      // For other keys (like code verifier), use auxiliary storage
-      if (value) {
-        auxiliaryStorage.set(key, value);
-      } else {
-        auxiliaryStorage.delete(key);
-      }
-    },
-    removeItem: async (key: string) => {
-      // For session token, use the auth bridge
-      if (key.endsWith('-auth-token') && !key.includes('code-verifier')) {
-        await authBridge.clear();
-        cachedSession = null;
-        return;
-      }
-      // For other keys, use auxiliary storage
-      auxiliaryStorage.delete(key);
-    },
+/**
+ * Create an anonymous session for users who haven't signed in yet.
+ */
+export async function createAnonymousSession(): Promise<{ user: User; session: Session }> {
+  const response = await fetch(`${API_BASE_URL}/api/auth/anonymous`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to create anonymous session');
+  }
+
+  // Build session object
+  const session: Session = {
+    access_token: data.session.access_token,
+    refresh_token: data.session.refresh_token,
+    expires_in: data.session.expires_in,
+    expires_at: data.session.expires_at,
+    token_type: data.session.token_type || 'bearer',
+    user: {
+      id: data.user.id,
+      is_anonymous: true,
+      aud: 'authenticated',
+      role: 'authenticated',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      app_metadata: { provider: 'anonymous', providers: ['anonymous'] },
+      user_metadata: {},
+    } as User,
   };
-};
 
-// Only use custom storage for Electron - let Supabase use its default localStorage for web
-const electronStorage = getElectronStorage();
+  // Store the session
+  storeSession(session);
 
-if (typeof window !== 'undefined' && window.api?.auth) {
-  window.api.auth
-    .check()
-    .then((session) => {
-      cachedSession = session ?? null;
-    })
-    .catch((error) => {
-      console.warn('[Supabase] Failed to prime cached session from Electron bridge', error);
-    });
+  console.log('[Supabase] Anonymous session created', { userId: data.user.id });
+
+  return { user: session.user, session };
 }
 
-console.log('[Supabase] 🔧 Environment:', electronStorage ? 'Electron (custom storage)' : 'Web (default localStorage)');
+// =============================================================================
+// Phone Auth (via Backend)
+// =============================================================================
 
-const supabaseAuthConfig: {
-  autoRefreshToken: boolean;
-  persistSession: boolean;
-  detectSessionInUrl: boolean;
-  storage?: StorageAdapter;
-} = {
-  autoRefreshToken: true,
-  persistSession: true,
-  detectSessionInUrl: false,
-};
-
-// IMPORTANT: Only set storage for Electron. For web, let Supabase use its built-in localStorage handling.
-// Explicitly passing localStorage can interfere with Supabase's internal initialization.
-if (electronStorage) {
-  supabaseAuthConfig.storage = electronStorage;
-}
-
-console.log('[Supabase] 🏗️ Creating Supabase client...');
-console.log('[Supabase] 📋 Using custom storage:', !!electronStorage);
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: supabaseAuthConfig,
-  realtime: {
-    params: {
-      eventsPerSecond: 10,
-    },
-  },
-  db: {
-    schema: 'public',
-  },
-  global: {
-    headers: {
-      'X-Client-Info': 'supabase-js-web',
-    },
-  },
-});
-
-console.log('[Supabase] ✅ Supabase client created');
-console.log('[Supabase] 📋 supabase.auth:', !!supabase.auth);
-
-// API Configuration for auth endpoints
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
-
-// Phone Auth helpers - now routed through backend for user initialization
-export const sendOTP = async (phone: string) => {
+/**
+ * Send OTP to phone number.
+ */
+export async function sendOTP(phone: string): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ phone }),
   });
 
@@ -223,21 +211,21 @@ export const sendOTP = async (phone: string) => {
   if (!response.ok) {
     throw new Error(data.error || 'Failed to send OTP');
   }
+}
 
-  return data;
-};
-
-export const verifyOTP = async (
+/**
+ * Verify OTP and get session.
+ * If anonymousUserId is provided, the backend will merge their agents to the new account.
+ */
+export async function verifyOTP(
   phone: string,
   token: string,
   anonymousUserId?: string,
   userInfo?: { firstName?: string; lastName?: string }
-) => {
+): Promise<{ user: User; session: Session }> {
   const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       phone,
       token,
@@ -253,99 +241,78 @@ export const verifyOTP = async (
     throw new Error(data.error || 'Invalid OTP');
   }
 
-  // Set the session in Supabase client so other parts of the app work
-  if (data.session?.access_token) {
-    await supabase.auth.setSession({
-      access_token: data.session.access_token,
-      refresh_token: data.session.refresh_token,
-    });
-  }
+  // Build session object
+  const session: Session = {
+    access_token: data.session.access_token,
+    refresh_token: data.session.refresh_token,
+    expires_in: data.session.expires_in,
+    expires_at: data.session.expires_at,
+    token_type: data.session.token_type || 'bearer',
+    user: {
+      id: data.user.id,
+      phone: data.user.phone || phone,
+      is_anonymous: false,
+      aud: 'authenticated',
+      role: 'authenticated',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      app_metadata: { provider: 'phone', providers: ['phone'] },
+      user_metadata: {},
+    } as User,
+  };
 
-  return { user: data.user, session: data.session };
-};
+  // Store the session
+  storeSession(session);
 
-export const signOut = async () => {
-  console.log('[Supabase] signOut() called');
-  const start = performance.now();
-  const timeoutMs = 3000;
-  let timedOut = false;
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  const timeoutPromise = new Promise<null>((resolve) => {
-    timeoutId = setTimeout(() => {
-      timedOut = true;
-      console.warn('[Supabase] signOut() timed out after', timeoutMs, 'ms. Proceeding with manual cleanup.');
-      resolve(null);
-    }, timeoutMs);
-  });
+  console.log('[Supabase] Phone verification complete', { userId: data.user.id });
 
-  const response = (await Promise.race([
-    supabase.auth.signOut({ scope: 'local' }),
-    timeoutPromise,
-  ])) as { error: Error | null } | null;
-  if (timeoutId) {
-    clearTimeout(timeoutId);
-  }
+  return { user: session.user, session };
+}
 
-  const duration = performance.now() - start;
-  console.log('[Supabase] signOut() finished', { durationMs: duration.toFixed(2), timedOut, error: response?.error ?? null });
+/**
+ * Sign out - just clears the session.
+ */
+export async function signOut(): Promise<void> {
+  clearSession();
+}
 
-  if (!timedOut && response?.error) {
-    throw response.error;
-  }
-};
+// =============================================================================
+// Realtime
+// =============================================================================
 
-export const getCurrentUser = async () => {
-  const { data: { user }, error } = await supabase.auth.getUser();
-  if (error) throw error;
-  return user;
-};
-
-export const getSession = async () => {
-  const { data: { session }, error } = await supabase.auth.getSession();
-  if (error) throw error;
-  return session;
-};
-
-// Initialize realtime with current auth token
-// Call this after authentication succeeds
-export const initializeRealtime = async () => {
-  const { data: { session } } = await supabase.auth.getSession();
-
+/**
+ * Initialize realtime with the current session's token.
+ */
+export async function initializeRealtime(): Promise<void> {
+  const session = getSession();
   if (session?.access_token) {
     await supabase.realtime.setAuth(session.access_token);
   }
-};
+}
 
 // =============================================================================
-// Anonymous User Helpers (using Supabase native anonymous auth)
+// Helpers
 // =============================================================================
 
 /**
- * Sign in anonymously using Supabase's native anonymous auth.
- * Creates a real Supabase user with is_anonymous=true in the JWT.
- * This user can later be converted to a permanent user by linking a phone identity.
+ * Check if a user is anonymous.
  */
-export const signInAnonymously = async () => {
-  console.log('[Supabase] Signing in anonymously...');
-  const { data, error } = await supabase.auth.signInAnonymously();
-
-  if (error) {
-    console.error('[Supabase] Anonymous sign-in failed:', error);
-    throw error;
-  }
-
-  console.log('[Supabase] Anonymous sign-in successful', {
-    userId: data.user?.id,
-    isAnonymous: data.user?.is_anonymous,
-  });
-
-  return data;
-};
-
-/**
- * Check if the current user is anonymous
- */
-export const isAnonymousUser = (user: User | null): boolean => {
+export function isAnonymousUser(user: User | null): boolean {
   return user?.is_anonymous === true;
-};
+}
 
+// Legacy exports for compatibility
+export const getStoredSession = getSession;
+export const clearStoredSession = clearSession;
+
+// Electron auth bridge priming (for mac-app)
+if (typeof window !== 'undefined' && window.api?.auth) {
+  window.api.auth.check().then((session) => {
+    if (session) {
+      console.log('[Supabase] Primed session from Electron auth bridge');
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    }
+  }).catch((error) => {
+    console.warn('[Supabase] Failed to check Electron auth bridge', error);
+  });
+}

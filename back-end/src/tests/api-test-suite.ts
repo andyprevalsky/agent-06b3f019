@@ -12,10 +12,6 @@ import { config } from 'dotenv';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
-const TEST_PHONE = process.env.TEST_PHONE || '+19729777432';
-const TEST_OTP = process.env.TEST_OTP || '181818';
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://kzlurqihzaolhzsbkctf.supabase.co';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_IDiEs2g5w-TQavTqvwPAMA_idQLpbYp';
 
 interface TestResult {
   name: string;
@@ -91,51 +87,24 @@ async function runTest(
 
 /**
  * Authenticate and get access token
+ * Uses our backend's anonymous auth endpoint (generates HS256-signed JWTs)
  */
 async function authenticate(): Promise<void> {
-  // Send OTP
-  const otpResponse = await request(`${SUPABASE_URL}/auth/v1/otp`, {
+  // Create anonymous session via our backend
+  // This generates a JWT signed with SUPABASE_JWT_SECRET (HS256)
+  const response = await request(`${BASE_URL}/api/auth/anonymous`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-      'apikey': SUPABASE_ANON_KEY,
-      'X-Supabase-Api-Version': '2024-01-01',
-    },
-    body: JSON.stringify({
-      phone: TEST_PHONE,
-      create_user: true,
-      channel: 'sms',
-    }),
   });
 
-  if (otpResponse.status !== 200) {
-    throw new Error(`OTP send failed: ${JSON.stringify(otpResponse.data)}`);
+  if (response.status !== 200) {
+    throw new Error(`Anonymous auth failed: ${JSON.stringify(response.data)}`);
   }
 
-  // Verify OTP
-  const verifyResponse = await request(`${SUPABASE_URL}/auth/v1/verify`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-      'apikey': SUPABASE_ANON_KEY,
-      'X-Supabase-Api-Version': '2024-01-01',
-    },
-    body: JSON.stringify({
-      phone: TEST_PHONE,
-      token: TEST_OTP,
-      type: 'sms',
-    }),
-  });
-
-  if (verifyResponse.status !== 200) {
-    throw new Error(`OTP verify failed: ${JSON.stringify(verifyResponse.data)}`);
-  }
-
-  context.accessToken = verifyResponse.data.access_token;
-  context.userId = verifyResponse.data.user.id;
+  context.accessToken = response.data.session?.access_token;
+  context.userId = response.data.user?.id;
 
   if (!context.accessToken) {
-    throw new Error('No access token received');
+    throw new Error('No access token received from anonymous auth');
   }
 }
 

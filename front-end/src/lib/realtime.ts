@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase, getSession } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 // Import and re-export all types from realtime-types.ts
@@ -123,8 +123,7 @@ export async function subscribeToChannel(
   eventHandlers: EventHandlers,
   logPrefix: string = 'Channel'
 ): Promise<RealtimeChannel> {
-  // Use getSession() to trigger auto-refresh if token is expired
-  const { data: { session } } = await supabase.auth.getSession();
+  const session = getSession();
   if (session?.access_token) {
     await supabase.realtime.setAuth(session.access_token);
   } else {

@@ -38,7 +38,7 @@ import { cn } from '@/lib/utils';
 import { useAgentContext } from '@/contexts/AgentContext';
 import { ResponseSchemaField, FilePointer } from '@/lib/api';
 import ClaudeIcon from '@/assets/claude-color.svg';
-import { supabase } from '@/lib/supabase';
+import { supabase, getSession } from '@/lib/supabase';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
@@ -378,8 +378,8 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
     try {
       const url = `${API_URL}/api/claude-code-session/${taskId}`;
 
-      // Get auth token from Supabase session
-      const { data: { session } } = await supabase.auth.getSession();
+      // Get auth token
+      const session = getSession();
       const token = session?.access_token;
       if (!token) return;
 

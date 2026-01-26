@@ -1,18 +1,14 @@
-import { supabase } from './supabase';
+import { getSession } from './supabase';
 
 // API Configuration
-// Default to localhost for development, can be overridden with VITE_BACKEND_API_URL
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
 /**
  * Get auth headers for API requests.
- *
- * With Supabase native anonymous auth, all users (anonymous or not) have a valid JWT.
- * The JWT will contain is_anonymous=true for anonymous users.
  */
-async function getAuthHeaders(): Promise<Record<string, string>> {
-  const { data: { session } } = await supabase.auth.getSession();
+function getAuthHeaders(): Record<string, string> {
+  const session = getSession();
   const token = session?.access_token;
 
   if (token) {
@@ -22,7 +18,6 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
     };
   }
 
-  // No session available - this shouldn't happen as we auto-create anonymous sessions
   throw new Error('Not authenticated');
 }
 
@@ -128,7 +123,7 @@ export interface CreateAgentPayload {
 
 // Get all agents
 export async function getAllAgents(): Promise<Agent[]> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/agents`, {
     headers,
@@ -151,7 +146,7 @@ export async function getAgent(agentId: string, before?: string): Promise<{
     oldest_timestamp: string | null;
   };
 }> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   const url = before 
     ? `${API_BASE_WITH_PATH}/agents/${agentId}?before=${before}`
     : `${API_BASE_WITH_PATH}/agents/${agentId}`;
@@ -169,7 +164,7 @@ export async function getAgent(agentId: string, before?: string): Promise<{
 
 // Create a new agent
 export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   const source = payload.source ?? 'WEB';
   
   const response = await fetch(`${API_BASE_WITH_PATH}/agents`, {
@@ -188,7 +183,7 @@ export async function createAgent(payload: CreateAgentPayload): Promise<Agent> {
 
 // Post a message to an agent
 export async function postMessage(agentId: string, message: string, attachments?: FilePointer[]): Promise<Message> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const body: { message: string; attachments?: FilePointer[] } = { message };
   if (attachments && attachments.length > 0) {
@@ -215,7 +210,7 @@ export async function uploadAttachment(
   file: File,
   onProgress?: (progress: number) => void
 ): Promise<FilePointer> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const session = getSession();
   const token = session?.access_token;
 
   if (!token) {
@@ -266,7 +261,7 @@ export async function uploadAttachment(
 
 // Get a signed URL for downloading a large attachment
 export async function getAttachmentUrl(agentId: string, fileId: string, storagePath: string): Promise<string> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(
     `${API_BASE_WITH_PATH}/agents/${agentId}/attachments/${fileId}/url?storage_path=${encodeURIComponent(storagePath)}`,
@@ -283,7 +278,7 @@ export async function getAttachmentUrl(agentId: string, fileId: string, storageP
 
 // Delete an agent
 export async function deleteAgent(agentId: string): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}`, {
     method: 'DELETE',
@@ -297,7 +292,7 @@ export async function deleteAgent(agentId: string): Promise<void> {
 
 // Generate LLM judge prompt from goal
 export async function generateLLMJudgePrompt(goal: string): Promise<string> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/generate-llm-judge-prompt`, {
     method: 'POST',
@@ -331,7 +326,7 @@ export async function getTools(): Promise<Tool[]> {
 
 // Pause agent
 export async function pauseAgent(agentId: string): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/pause`, {
     method: 'POST',
@@ -345,7 +340,7 @@ export async function pauseAgent(agentId: string): Promise<void> {
 
 // Resume agent
 export async function resumeAgent(agentId: string): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/resume`, {
     method: 'POST',
@@ -367,7 +362,7 @@ export async function updateAgent(
     price_limit_cents?: number;  // Price limit in cents (must be >= current tree_cost_cents)
   }
 ): Promise<AgentDetail> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}`, {
     method: 'PATCH',
@@ -446,7 +441,7 @@ export interface AttentionRequest {
 
 // Check if there's a pending attention request for a specific agent
 export async function hasActiveAttentionRequest(agentId: string): Promise<boolean> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/attention-requests`, {
     headers,
@@ -469,7 +464,7 @@ export async function checkAndRespondToAttentionRequest(
   agentId: string,
   response: string
 ): Promise<boolean> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   // Get pending requests
   const requestsResponse = await fetch(`${API_BASE_WITH_PATH}/attention-requests`, {
@@ -507,7 +502,7 @@ export async function checkAndRespondToAttentionRequest(
 }
 
 export async function respondToAttentionRequest(requestId: string, responseText: string): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const res = await fetch(`${API_BASE_WITH_PATH}/attention-requests/${requestId}/respond`, {
     method: 'POST',
@@ -522,7 +517,7 @@ export async function respondToAttentionRequest(requestId: string, responseText:
 }
 
 export async function skipAttentionRequest(requestId: string): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const res = await fetch(`${API_BASE_WITH_PATH}/attention-requests/${requestId}/skip`, {
     method: 'POST',
@@ -544,7 +539,7 @@ export interface InviteCodeInfo {
 
 // Get current user's invite code
 export async function getMyInviteCode(): Promise<InviteCodeInfo> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/invite-codes/my-code`, {
     headers,
@@ -559,7 +554,7 @@ export async function getMyInviteCode(): Promise<InviteCodeInfo> {
 
 // Use an invite code
 export async function useInviteCode(inviteCode: number): Promise<{ success: boolean; message: string }> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/invite-codes/use`, {
     method: 'POST',
@@ -577,7 +572,7 @@ export async function useInviteCode(inviteCode: number): Promise<{ success: bool
 
 // Check if user needs to enter an invite code
 export async function checkNeedsInviteCode(): Promise<boolean> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
   
   const response = await fetch(`${API_BASE_WITH_PATH}/invite-codes/check`, {
     headers,
@@ -593,7 +588,7 @@ export async function checkNeedsInviteCode(): Promise<boolean> {
 
 // Get paginated people in user's network
 export async function getPeople(page = 1, limit = 50): Promise<PeoplePaginatedResponse> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/people?page=${page}&limit=${limit}`, {
     headers,
@@ -614,7 +609,7 @@ export async function getPeople(page = 1, limit = 50): Promise<PeoplePaginatedRe
  * Signal the agent workflow that signup was completed
  */
 export async function signalSignupCompleted(agentId: string): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/signal/signup_completed`, {
     method: 'POST',
@@ -631,7 +626,7 @@ export async function signalSignupCompleted(agentId: string): Promise<void> {
  * Signal the agent workflow that signup was dismissed (continue as anonymous)
  */
 export async function signalSignupDismissed(agentId: string): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/signal/signup_dismissed`, {
     method: 'POST',
@@ -648,7 +643,7 @@ export async function signalSignupDismissed(agentId: string): Promise<void> {
  * Start agent mode - escalate from chat mode to full Temporal workflow
  */
 export async function startAgent(agentId: string): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/start-agent`, {
     method: 'POST',
@@ -696,7 +691,7 @@ export interface AncestorNode {
 
 // Get all agents in a sub-agent tree by busId
 export async function fetchTreeState(busId: string): Promise<AgentTreeNode[]> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/tree?busId=${encodeURIComponent(busId)}`, {
     headers,
@@ -712,7 +707,7 @@ export async function fetchTreeState(busId: string): Promise<AgentTreeNode[]> {
 
 // Get ancestor chain for breadcrumb navigation
 export async function fetchAncestors(agentId: string): Promise<AncestorNode[]> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/ancestors`, {
     headers,
@@ -736,7 +731,7 @@ export interface BlueprintFeedback {
 
 // Find blueprint by goal
 export async function findBlueprintByGoal(goal: string): Promise<{ id: string } | null> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(
     `${API_BASE_WITH_PATH}/blueprints/by-goal?goal=${encodeURIComponent(goal)}`,
@@ -759,7 +754,7 @@ export async function submitBlueprintFeedback(
   blueprintId: string,
   feedback: BlueprintFeedback & { agentId: string }
 ): Promise<void> {
-  const headers = await getAuthHeaders();
+  const headers = getAuthHeaders();
 
   const response = await fetch(
     `${API_BASE_WITH_PATH}/blueprints/${blueprintId}/feedback`,

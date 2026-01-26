@@ -12,30 +12,29 @@
 
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import jwksClient from 'jwks-rsa';
+import { createSecretKey, KeyObject } from 'crypto';
 import { prisma } from '../lib/prisma';
 import { createInitialCredit } from '../lib/credits';
 
-// Lazy initialization of JWKS client
-let client: jwksClient.JwksClient | null = null;
+// Cache the secret key object to avoid recreating it on every request
+let cachedSecretKey: KeyObject | null = null;
 
-function getJwksClient() {
-  if (!client) {
-    const supabaseUrl = process.env.SUPABASE_URL;
-
-    if (!supabaseUrl) {
-      throw new Error('Missing SUPABASE_URL environment variable');
-    }
-
-    client = jwksClient({
-      jwksUri: `${supabaseUrl}/auth/v1/.well-known/jwks.json`,
-      cache: true,
-      cacheMaxAge: 600000, // 10 minutes
-      rateLimit: true,
-      jwksRequestsPerMinute: 10,
-    });
+// Get the JWT secret as a KeyObject for HS256 verification
+// Must use createSecretKey to ensure jsonwebtoken treats it as symmetric
+function getJwtSecret(): KeyObject {
+  if (cachedSecretKey) {
+    return cachedSecretKey;
   }
-  return client;
+
+  const secret = process.env.SUPABASE_JWT_SECRET;
+  if (!secret) {
+    throw new Error('Missing SUPABASE_JWT_SECRET environment variable');
+  }
+
+  // Create a secret key object from the string
+  // This ensures jsonwebtoken recognizes it as a symmetric key
+  cachedSecretKey = createSecretKey(Buffer.from(secret));
+  return cachedSecretKey;
 }
 
 export interface HybridAuthRequest extends Request {
@@ -49,19 +48,6 @@ export interface HybridAuthRequest extends Request {
     email?: string;
     phone?: string;
   };
-}
-
-// Function to get the signing key from JWKS
-function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback) {
-  const jwksClient = getJwksClient();
-  jwksClient.getSigningKey(header.kid, (err, key) => {
-    if (err) {
-      callback(err);
-      return;
-    }
-    const signingKey = key?.getPublicKey();
-    callback(null, signingKey);
-  });
 }
 
 /**
@@ -174,14 +160,16 @@ export async function hybridAuth(
         return;
       }
 
-      // Verify JWT asynchronously
+      // Verify JWT with our secret (HS256)
+      const secret = getJwtSecret();
+
       return new Promise<void>((resolve) => {
         jwt.verify(
           token,
-          getKey,
+          secret,
           {
             issuer: `${supabaseUrl}/auth/v1`,
-            algorithms: ['ES256', 'HS256', 'RS256'],
+            algorithms: ['HS256'],
           },
           async (err, decoded) => {
             if (err) {
