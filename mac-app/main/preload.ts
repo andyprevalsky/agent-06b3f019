@@ -65,6 +65,11 @@ const api: IPC = {
   syncBrowser: (browser: BrowserType, config?: ReadBrowserCookiesConfig) =>
     ipcRenderer.invoke('browser:sync', browser, config) as Promise<UploadResult>,
 
+  // Password-only sync (just reads and uploads passwords, not full browser state)
+  // For Atlas, pass keychainPassword in config
+  syncBrowserPasswords: (browser: BrowserType, config?: { keychainPassword?: string }) =>
+    ipcRenderer.invoke('browser:syncPasswords', browser, config) as Promise<UploadResult>,
+
   // Fingerprint
   collectFingerprint: () => ipcRenderer.invoke('fingerprint:collect') as Promise<FingerprintData | null>,
   uploadFingerprint: (data: FingerprintData) =>
@@ -74,7 +79,8 @@ const api: IPC = {
   openFullDiskAccessSettings: () => ipcRenderer.invoke('system:openFullDiskAccess') as Promise<{ success: boolean }>,
   openKeychainAccess: (searchQuery?: string) =>
     ipcRenderer.invoke('system:openKeychainAccess', searchQuery) as Promise<{ success: boolean }>,
-  
+  openPasswordsApp: () => ipcRenderer.invoke('system:openPasswordsApp') as Promise<{ success: boolean }>,
+
   // Events
   onProgress: (callback: (progress: UploadProgress) => void) => {
     ipcRenderer.on('upload:progress', (_, data) => callback(data as UploadProgress));

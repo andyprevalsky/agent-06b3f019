@@ -937,6 +937,8 @@ async def execute_action(
         WaitEvent,
         GetDropdownOptionsEvent,
         SelectDropdownOptionEvent,
+        SwitchTabEvent,
+        CloseTabEvent,
     )
     
     session = dom_service.session
@@ -1424,6 +1426,81 @@ async def execute_action(
                 "uploaded": filename,
                 "to_index": index
             }
+
+        elif action_name == "switch_tab":
+            tab_id = params.get("tab_id")
+            if not tab_id:
+                return {"success": False, "error": "Missing 'tab_id' parameter"}
+
+            tabs = await session.get_tabs()
+            target = next((t for t in tabs if t.target_id.endswith(tab_id)), None)
+            if not target:
+                available_tabs = [f"{t.target_id[-4:]} ({t.title or t.url})" for t in tabs]
+                return {"success": False, "error": f"Tab '{tab_id}' not found. Available: {available_tabs}"}
+
+            event = session.event_bus.dispatch(SwitchTabEvent(target_id=target.target_id))
+            await event
+
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="switch_tab",
+                thinking=thinking,
+                params={"tab_id": tab_id},
+                result={"success": True, "switched_to": target.target_id[-4:]}
+            )
+            logger.info(f"🔀 Switched to tab {tab_id} ({target.title or target.url})")
+            return {"success": True, "message": "", "switched_to": tab_id}
+
+        elif action_name == "close_tab":
+            tab_id = params.get("tab_id")
+
+            if tab_id:
+                tabs = await session.get_tabs()
+                target = next((t for t in tabs if t.target_id.endswith(tab_id)), None)
+                if not target:
+                    available_tabs = [f"{t.target_id[-4:]} ({t.title or t.url})" for t in tabs]
+                    return {"success": False, "error": f"Tab '{tab_id}' not found. Available: {available_tabs}"}
+                target_id = target.target_id
+            else:
+                focused = session.get_focused_target()
+                if not focused:
+                    return {"success": False, "error": "No current tab to close"}
+                target_id = focused.target_id
+                tab_id = target_id[-4:]
+
+            event = session.event_bus.dispatch(CloseTabEvent(target_id=target_id))
+            await event
+
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="close_tab",
+                thinking=thinking,
+                params={"tab_id": tab_id},
+                result={"success": True, "closed": tab_id}
+            )
+            logger.info(f"❌ Closed tab {tab_id}")
+            return {"success": True, "message": "", "closed_tab": tab_id}
+
+        elif action_name == "open_new_tab":
+            url = params.get("url") or "about:blank"
+
+            event = session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
+            await event
+            await event.event_result(raise_if_any=True, raise_if_none=False)
+
+            # Get the new tab's target_id
+            focused = session.get_focused_target()
+            new_tab_id = focused.target_id[-4:] if focused else None
+
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="open_new_tab",
+                thinking=thinking,
+                params={"url": url},
+                result={"success": True, "new_tab_id": new_tab_id}
+            )
+            logger.info(f"➕ Opened new tab {new_tab_id} with URL: {url}")
+            return {"success": True, "message": "", "new_tab_id": new_tab_id, "url": url}
 
         else:
             return {"success": False, "error": f"Unknown action: {action_name}"}

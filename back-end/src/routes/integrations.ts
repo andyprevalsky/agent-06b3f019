@@ -8,6 +8,7 @@ import { parseVcfContent, importVcfContacts } from '../services/integrations/vcf
 import { parseEmailZip, importEmailsToDb } from '../services/integrations/emailParser';
 import { fetchGmailEmails, parseGmailOAuthEmails, fetchGmailMessagesSince } from '../services/integrations/gmailParser';
 import { getValidAccessToken } from '../services/integrations/gmailSync';
+import { sendSms } from '../lib/smsQueue';
 import { prisma } from '../lib/prisma';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
@@ -2466,6 +2467,384 @@ router.delete('/:name', authenticate, async (req: AuthRequest, res: Response) =>
     console.error('Error deleting integration:', error);
     return res.status(500).json({
       error: 'Failed to delete integration',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+// RSA-2048 Public Key - same as in browserPasswordReader.ts (mac-app)
+// The corresponding private key is stored as PAYMENT_DECRYPTION_KEY on agent workers
+const RSA_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjSyJhixvre5abdAOA8QK
+MZN9ftryV1ST5bQ/Ne2SsA0LUlsy/t0gVickAHf/iMAI473qBGrJIgYgEBrnQ9Vy
+ak1DpYWG9rC8KNZs/AQnWHiDWKGNUwWTAbT0fZeDHbckgJXiAok2U23F7tHtA1v6
+V65dHj1C+wlb8bBkJtDgSxKIcG6GMZFfR5Arzq8ILQ20mtAP2HW80SeWGiw6Ecnd
+a0RL0kn3Mqzjuw8NB4Iqx7UThKuIZdEnUhdnlVcXhfpEJUngcOm6pqQGNQok+VtL
+MHxsrQsQo0UMgE8zQamTXpTGJEB1G22gPaEY5FB2V8dgWs6PxBTaYZMOH9TRy2G4
+EwIDAQAB
+-----END PUBLIC KEY-----`;
+
+/**
+ * Encrypt a password using RSA-2048 + AES-256-GCM hybrid encryption.
+ * Returns base64-encoded envelope (same format as browserPasswordReader.ts)
+ */
+function encryptPasswordForStorage(password: string): string {
+  // 1. Generate random AES-256 key and IV
+  const aesKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+
+  // 2. Encrypt password with AES-256-GCM
+  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+  const encrypted = Buffer.concat([
+    cipher.update(password, 'utf8'),
+    cipher.final()
+  ]);
+  const authTag = cipher.getAuthTag();
+  const ciphertext = Buffer.concat([encrypted, authTag]);
+
+  // 3. Encrypt AES key with RSA-OAEP
+  const encryptedAesKey = crypto.publicEncrypt(
+    {
+      key: RSA_PUBLIC_KEY_PEM,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: 'sha256',
+    },
+    aesKey
+  );
+
+  // 4. Build envelope
+  const envelope = {
+    version: 1,
+    encrypted_aes_key: encryptedAesKey.toString('base64'),
+    iv: iv.toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  };
+
+  return Buffer.from(JSON.stringify(envelope)).toString('base64');
+}
+
+/**
+ * Parse Apple Passwords export file.
+ * Apple exports passwords as TSV (tab-separated values), not CSV.
+ * Expected columns: Title, URL, Username, Password, Notes, OTPAuth
+ */
+function parseApplePasswordsCsv(csvContent: string): Array<{
+  title: string;
+  url: string;
+  username: string;
+  password: string;
+  notes: string;
+  otpAuth: string;
+}> {
+  // Parse CSV/TSV handling multiline quoted fields correctly
+  // We parse character-by-character to handle newlines inside quotes
+
+  // Detect delimiter from first line (before any newline)
+  const firstNewline = csvContent.indexOf('\n');
+  if (firstNewline === -1) {
+    throw new Error('File must have at least a header row and one data row');
+  }
+  const firstLine = csvContent.substring(0, firstNewline).replace(/\r$/, '');
+  const delimiter = firstLine.includes('\t') ? '\t' : ',';
+
+  // Parse all rows handling quoted fields with embedded newlines
+  const rows: string[][] = [];
+  let currentRow: string[] = [];
+  let currentField = '';
+  let inQuotes = false;
+  let i = 0;
+
+  while (i < csvContent.length) {
+    const char = csvContent[i];
+
+    if (char === '"') {
+      if (inQuotes && csvContent[i + 1] === '"') {
+        // Escaped quote inside quoted field
+        currentField += '"';
+        i += 2;
+        continue;
+      } else {
+        // Toggle quote state
+        inQuotes = !inQuotes;
+        i++;
+        continue;
+      }
+    }
+
+    if (!inQuotes) {
+      if (char === delimiter) {
+        // Field separator
+        currentRow.push(currentField);
+        currentField = '';
+        i++;
+        continue;
+      }
+      if (char === '\r') {
+        // Skip carriage return
+        i++;
+        continue;
+      }
+      if (char === '\n') {
+        // End of row
+        currentRow.push(currentField);
+        rows.push(currentRow);
+        currentRow = [];
+        currentField = '';
+        i++;
+        continue;
+      }
+    }
+
+    // Regular character (or newline inside quotes)
+    currentField += char;
+    i++;
+  }
+
+  // Handle last field/row if file doesn't end with newline
+  if (currentField || currentRow.length > 0) {
+    currentRow.push(currentField);
+    rows.push(currentRow);
+  }
+
+  if (rows.length < 2) {
+    throw new Error('File must have at least a header row and one data row');
+  }
+
+  // Parse header to find column indices
+  const header = rows[0].map(h => h.trim().toLowerCase().replace(/"/g, ''));
+  const titleIdx = header.findIndex(h => h === 'title');
+  const urlIdx = header.findIndex(h => h === 'url');
+  const usernameIdx = header.findIndex(h => h === 'username');
+  const passwordIdx = header.findIndex(h => h === 'password');
+  const notesIdx = header.findIndex(h => h === 'notes');
+  const otpAuthIdx = header.findIndex(h => h === 'otpauth');
+
+  // Validate required columns
+  if (urlIdx === -1 || usernameIdx === -1 || passwordIdx === -1) {
+    throw new Error('File must contain URL, Username, and Password columns');
+  }
+
+  const passwords: Array<{
+    title: string;
+    url: string;
+    username: string;
+    password: string;
+    notes: string;
+    otpAuth: string;
+  }> = [];
+
+  // Parse each data row
+  for (let rowIdx = 1; rowIdx < rows.length; rowIdx++) {
+    const values = rows[rowIdx];
+
+    // Skip empty rows
+    if (values.length === 1 && !values[0].trim()) continue;
+
+    const url = values[urlIdx]?.trim() || '';
+    const username = values[usernameIdx]?.trim() || '';
+    const password = values[passwordIdx]?.trim() || '';
+
+    // Skip rows without required fields (URL, username, password all required)
+    if (!url || !username || !password) continue;
+
+    passwords.push({
+      title: titleIdx >= 0 ? (values[titleIdx]?.trim() || '') : '',
+      url,
+      username,
+      password,
+      notes: notesIdx >= 0 ? (values[notesIdx]?.trim() || '') : '',
+      otpAuth: otpAuthIdx >= 0 ? (values[otpAuthIdx]?.trim() || '') : '',
+    });
+  }
+
+  return passwords;
+}
+
+/**
+ * POST /api/integrations/passwords/apple/upload
+ *
+ * Upload passwords from Apple Passwords CSV export.
+ * The CSV is parsed and each password is encrypted before storage.
+ */
+router.post('/passwords/apple/upload', authenticate, upload.single('file') as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const file = (req as any).file;
+
+    if (!file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Read and parse CSV file
+    const csvContent = fs.readFileSync(file.path, 'utf8');
+
+    // Clean up temp file
+    fs.unlinkSync(file.path);
+
+    let passwords;
+    try {
+      passwords = parseApplePasswordsCsv(csvContent);
+    } catch (parseError) {
+      return res.status(400).json({
+        error: 'Failed to parse CSV file',
+        details: parseError instanceof Error ? parseError.message : 'Unknown error',
+      });
+    }
+
+    if (passwords.length === 0) {
+      return res.status(400).json({ error: 'No valid passwords found in CSV' });
+    }
+
+    console.log(`[Integrations] Parsed ${passwords.length} passwords from Apple CSV for user ${userId}`);
+
+    // Encrypt and prepare passwords for storage
+    const now = Date.now();
+    const encryptedPasswords = passwords.map(p => {
+      // Extract origin from URL
+      let origin = p.url;
+      try {
+        const urlObj = new URL(p.url);
+        origin = urlObj.origin;
+      } catch {
+        // Keep original URL if parsing fails
+      }
+
+      return {
+        origin,
+        username: p.username,
+        encryptedPassword: encryptPasswordForStorage(p.password),
+        dateLastUsed: now,
+        dateCreated: now,
+        browserSource: 'apple_passwords',
+      };
+    });
+
+    // Deduplicate by (origin, username) - keep first occurrence
+    const passwordMap = new Map<string, typeof encryptedPasswords[0]>();
+    for (const pwd of encryptedPasswords) {
+      const key = `${pwd.origin}|${pwd.username}`;
+      if (!passwordMap.has(key)) {
+        passwordMap.set(key, pwd);
+      }
+    }
+    const deduplicatedPasswords = Array.from(passwordMap.values());
+    console.log(`[Integrations] Deduplicated to ${deduplicatedPasswords.length} unique passwords`);
+
+    // Bulk upsert passwords
+    if (deduplicatedPasswords.length > 0) {
+      const values = deduplicatedPasswords.map((_, i) => {
+        return `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`;
+      }).join(', ');
+
+      const params: (string | number | null)[] = [];
+      for (const pwd of deduplicatedPasswords) {
+        params.push(
+          userId,
+          pwd.origin,
+          pwd.username,
+          pwd.encryptedPassword,
+          pwd.dateLastUsed || null,
+          pwd.dateCreated || null,
+          pwd.browserSource
+        );
+      }
+
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "BrowserPassword" (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", "browserSource", "syncedAt")
+        VALUES ${values}
+        ON CONFLICT ("userId", origin, username) DO UPDATE SET
+          "encryptedPassword" = EXCLUDED."encryptedPassword",
+          "dateLastUsed" = EXCLUDED."dateLastUsed",
+          "browserSource" = EXCLUDED."browserSource",
+          "syncedAt" = NOW()
+      `, ...params);
+
+      console.log(`[Integrations] ✅ Imported ${deduplicatedPasswords.length} Apple passwords for user ${userId}`);
+    }
+
+    // Update or create integration record
+    await prisma.integration.upsert({
+      where: {
+        userId_name: {
+          userId,
+          name: 'apple_passwords',
+        },
+      },
+      update: {
+        status: IntegrationStatus.CONNECTED,
+        config: {
+          passwordCount: deduplicatedPasswords.length,
+          lastImportAt: new Date().toISOString(),
+        },
+      },
+      create: {
+        userId,
+        type: IntegrationType.DATA_SOURCE,
+        name: 'apple_passwords',
+        status: IntegrationStatus.CONNECTED,
+        config: {
+          passwordCount: deduplicatedPasswords.length,
+          lastImportAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    return res.json({
+      message: 'Passwords imported successfully',
+      passwordCount: deduplicatedPasswords.length,
+    });
+  } catch (error) {
+    console.error('Error importing Apple passwords:', error);
+    return res.status(500).json({
+      error: 'Failed to import passwords',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * Request a new password integration
+ * POST /api/integrations/passwords/request
+ *
+ * Sends an SMS to the product team requesting a new password client integration.
+ */
+router.post('/passwords/request', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { request } = req.body;
+    const userId = req.user!.id;
+
+    if (!request || typeof request !== 'string' || request.trim().length === 0) {
+      return res.status(400).json({ error: 'Request message is required' });
+    }
+
+    // Get user info for the notification
+    const user = await prisma.user.findUnique({
+      where: { userId: userId },
+      select: { name: true, phone: true },
+    });
+
+    const userName = user?.name || user?.phone || userId || 'Unknown user';
+    const message = `🔑 Password integration request from ${userName}: ${request.trim()}`;
+
+    // Send SMS to Andy
+    const result = await sendSms('+19729777432', message);
+
+    if (!result.success) {
+      console.error('[Integrations] Failed to send feature request SMS:', result.error);
+      return res.status(500).json({ error: 'Failed to send request' });
+    }
+
+    console.log('[Integrations] Password integration request sent', {
+      userId,
+      userName,
+      request: request.substring(0, 50),
+    });
+
+    return res.json({ success: true, message: 'Request sent successfully' });
+  } catch (error) {
+    console.error('Error sending password integration request:', error);
+    return res.status(500).json({
+      error: 'Failed to send request',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

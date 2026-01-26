@@ -16,8 +16,9 @@ export type BrowserType =
   | 'arc'
   | 'opera'
   | 'vivaldi'
-  | 'chromium';
-// Note: Atlas excluded - it doesn't store passwords in standard Chromium format
+  | 'chromium'
+  | 'atlas';
+// Note: Atlas requires manual keychain password entry (uses "ChatGPT Safe Storage")
 
 export interface BrowserConfig {
   type: BrowserType;
@@ -111,6 +112,14 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
     keychainEntry: 'Chromium Safe Storage',
     keychainAccount: 'Chromium',
   },
+  atlas: {
+    type: 'atlas',
+    name: 'ChatGPT Atlas',
+    // Atlas stores passwords in browser-data/host/user-*/Login Data (wildcard for user profile)
+    loginDataPathPattern: path.join(HOME, 'Library/Application Support/com.openai.atlas/browser-data/host/user-*/Login Data'),
+    keychainEntry: 'ChatGPT Safe Storage',
+    keychainAccount: 'ChatGPT',
+  },
 };
 
 // RSA-2048 Public Key - same as payment encryption
@@ -182,25 +191,38 @@ export class BrowserPasswordReader {
 
   /**
    * Get encryption key for a browser from macOS keychain.
+   * @param browser - Browser configuration
+   * @param manualPassword - Optional manual password (for browsers like Atlas that require it)
    */
-  private static async getEncryptionKey(browser: BrowserConfig): Promise<Buffer> {
-    try {
-      const { stdout } = await execAsync(
-        `security find-generic-password -wa "${browser.keychainAccount}"`
-      );
-      const password = stdout.trim();
+  private static async getEncryptionKey(browser: BrowserConfig, manualPassword?: string): Promise<Buffer> {
+    let password: string;
 
-      // Derive AES key using PBKDF2-SHA1
-      // All Chromium browsers use: salt="saltysalt", iterations=1003, key_length=16
-      const salt = 'saltysalt';
-      const iterations = 1003;
-      return crypto.pbkdf2Sync(password, salt, iterations, 16, 'sha1');
-    } catch (error) {
-      throw new Error(
-        `Failed to get ${browser.name} encryption key from keychain. ` +
-        `Make sure ${browser.name} is installed and has been run at least once.`
-      );
+    console.log(`[BrowserPasswordReader] getEncryptionKey called for ${browser.name}, manualPassword provided: ${!!manualPassword}`);
+
+    if (manualPassword) {
+      // Use the manually provided keychain password
+      console.log(`[BrowserPasswordReader] Using manual password (length: ${manualPassword.length})`);
+      password = manualPassword;
+    } else {
+      // Try to get the password from the keychain automatically
+      try {
+        const { stdout } = await execAsync(
+          `security find-generic-password -wa "${browser.keychainAccount}"`
+        );
+        password = stdout.trim();
+      } catch (error) {
+        throw new Error(
+          `Failed to get ${browser.name} encryption key from keychain. ` +
+          `Make sure ${browser.name} is installed and has been run at least once.`
+        );
+      }
     }
+
+    // Derive AES key using PBKDF2-SHA1
+    // All Chromium browsers use: salt="saltysalt", iterations=1003, key_length=16
+    const salt = 'saltysalt';
+    const iterations = 1003;
+    return crypto.pbkdf2Sync(password, salt, iterations, 16, 'sha1');
   }
 
   /**
@@ -258,7 +280,16 @@ export class BrowserPasswordReader {
       const unpadded = this.removePKCS7Padding(decrypted);
 
       // Password values are stored directly (no 32-byte prefix like cookies)
-      return unpadded.toString('utf8');
+      const password = unpadded.toString('utf8');
+
+      // Validate that decrypted password contains only printable characters
+      // Wrong decryption key produces garbage bytes that fail this check
+      // Allows printable ASCII (0x20-0x7E) plus common extended chars (accented letters, etc.)
+      if (!/^[\x20-\x7E\u00A0-\u00FF\u0100-\u017F]*$/.test(password)) {
+        return null;
+      }
+
+      return password;
     } catch {
       return null;
     }
@@ -338,7 +369,7 @@ export class BrowserPasswordReader {
     const db = new Database(tempPath, { readonly: true });
 
     try {
-      const key = await this.getEncryptionKey(browser);
+      const key = await this.getEncryptionKey(browser, config?.keychainPassword);
 
       const rows = db.prepare(`
         SELECT
@@ -353,19 +384,20 @@ export class BrowserPasswordReader {
       `).all() as any[];
 
       const passwords: PasswordData[] = [];
-      let skipped = 0;
+      let emptyEntries = 0;
+      let decryptionFailures = 0;
 
       for (const row of rows) {
         // Skip entries without username or password
         if (!row.username_value || !row.password_value || row.password_value.length === 0) {
-          skipped++;
+          emptyEntries++;
           continue;
         }
 
         const password = this.decryptPassword(row.password_value, key);
 
         if (password === null || password === '') {
-          skipped++;
+          decryptionFailures++;
           continue;
         }
 
@@ -381,8 +413,14 @@ export class BrowserPasswordReader {
 
       console.log(
         `[BrowserPasswordReader] Read ${passwords.length} ${browser.name} passwords ` +
-        `(skipped ${skipped} unreadable/empty)`
+        `(empty: ${emptyEntries}, decryption failures: ${decryptionFailures})`
       );
+
+      // If we had encrypted entries but ALL decryption failed, likely wrong keychain password
+      if (passwords.length === 0 && decryptionFailures > 0 && config?.keychainPassword) {
+        throw new Error('Failed to decrypt passwords. Please check that you entered the correct keychain password.');
+      }
+
       return passwords;
     } finally {
       db.close();

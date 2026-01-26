@@ -9,6 +9,8 @@ interface AtlasPasswordModalProps {
   onClose: () => void;
   onSync: (password: string) => Promise<void>;
   onOpenKeychain: () => Promise<void>;
+  /** What type of data we're syncing - affects displayed text */
+  syncType?: 'cookies' | 'passwords' | 'browser data';
 }
 
 /**
@@ -18,7 +20,7 @@ interface AtlasPasswordModalProps {
  * programmatically. Users must manually retrieve the password from
  * Keychain Access.
  */
-const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain }: AtlasPasswordModalProps) => {
+const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain, syncType = 'cookies' }: AtlasPasswordModalProps) => {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +49,7 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain }: AtlasPa
       await onSync(password);
       // Success - modal will be closed by parent
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to sync cookies');
+      setError(err instanceof Error ? err.message : `Failed to sync ${syncType}`);
       setLoading(false);
     }
   };
@@ -88,7 +90,7 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain }: AtlasPa
         {/* Content */}
         <div className="px-5 py-4 space-y-4">
           <p className="text-sm text-muted-foreground">
-            Atlas (ChatGPT Desktop) uses a protected keychain. To sync your cookies:
+            Atlas (ChatGPT Desktop) uses a protected keychain. To sync your {syncType}:
           </p>
 
           <ol className="text-sm text-muted-foreground space-y-4">
@@ -177,7 +179,7 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain }: AtlasPa
             <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 mt-0.5 flex-shrink-0" />
             <p className="text-xs text-emerald-800 dark:text-emerald-200">
               <span className="font-medium">Your password never leaves your computer.</span>{' '}
-              It's stored locally in Rose to keep your cookies in sync.
+              It's stored locally in Rose to keep your {syncType} in sync.
             </p>
           </div>
 

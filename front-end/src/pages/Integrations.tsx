@@ -6,12 +6,12 @@
  *                                  v (fetchIntegrations + getInstalledBrowsers)
  *       +-------------------[IDLE/READY]-------------------+
  *       |           |              |    |                  |
- *       | (file)    | (browser)    |    |  (provider)      | (handler)
+ *       | (file)    | (browser)    |    |  (provider)      | (handler/passwords)
  *       v           v              |    v                  v
- * [FILE_UPLOADING] [BROWSER_SYNC]  |  [CONNECTING]  [HANDLER_UPLOADING]
+ * [FILE_UPLOADING] [BROWSER_SYNC]  |  [CONNECTING]  [HANDLER/PASSWORD_UPLOADING]
  *       |           |              |       |               |
  *       v           v              v       v               v
- *       +----------(atlas modal?)--+-------+---------------+
+ *       +----------(atlas modal?)--+-------+----(apple passwords modal?)
  *                              v
  *                         [IDLE/READY]
  *
@@ -22,6 +22,17 @@
  * - browserSyncLoading: BrowserType | null --> syncing specific browser
  * - browsersExpanded: boolean --> browser list expanded
  * - atlasModalOpen: boolean --> Atlas password modal
+ * - passwordsExpanded: boolean --> passwords list expanded
+ * - applePasswordsModalOpen: boolean --> Apple passwords import modal
+ * - passwordSyncLoading: 'chrome' | 'apple' | 'atlas' | null --> syncing passwords
+ * - chromePasswordsSynced: boolean --> Chrome passwords connected
+ * - applePasswordsSynced: boolean --> Apple passwords connected
+ * - atlasPasswordsSynced: boolean --> Atlas passwords connected
+ * - atlasPasswordsModalOpen: boolean --> Atlas passwords import modal
+ * - passwordRequestExpanded: boolean --> showing password request input
+ * - passwordRequestInput: string --> password request text
+ * - passwordRequestSending: boolean --> sending password request
+ * - passwordRequestSent: boolean --> password request sent successfully
  * - error: string | null (shown as banner)
  * - success: string | null (shown as banner)
  * - connectedIntegrations: list of connected integrations
@@ -35,11 +46,13 @@ import { Linkedin, Twitter, MessageSquare, Mail, MessageCircle, Send, Instagram,
 import { useIntegrationHandlers, type BrowserType, type BrowserInfo } from '@/contexts/IntegrationHandlersContext';
 import { getStoredSession } from '@/lib/supabase';
 import AtlasPasswordModal from '@/components/AtlasPasswordModal';
+import ApplePasswordsModal from '@/components/ApplePasswordsModal';
 
 // Browser icons
 import chromeIcon from '@/assets/chrome-icon.png';
 import chatgptIcon from '@/assets/chatgpt-icon.webp';
 import braveIcon from '@/assets/brave-icon.webp';
+import applePasswordsIcon from '@/assets/apple-passwords-icon.png';
 
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
@@ -178,6 +191,19 @@ export default function Integrations() {
   const [atlasModalOpen, setAtlasModalOpen] = useState(false);
   const [pendingAtlasBrowser, setPendingAtlasBrowser] = useState<BrowserType | null>(null);
 
+  // Passwords state
+  const [passwordsExpanded, setPasswordsExpanded] = useState(false);
+  const [applePasswordsModalOpen, setApplePasswordsModalOpen] = useState(false);
+  const [atlasPasswordsModalOpen, setAtlasPasswordsModalOpen] = useState(false);
+  const [chromePasswordsSynced, setChromePasswordsSynced] = useState(false);
+  const [applePasswordsSynced, setApplePasswordsSynced] = useState(false);
+  const [atlasPasswordsSynced, setAtlasPasswordsSynced] = useState(false);
+  const [passwordSyncLoading, setPasswordSyncLoading] = useState<'chrome' | 'apple' | 'atlas' | null>(null);
+  const [passwordRequestExpanded, setPasswordRequestExpanded] = useState(false);
+  const [passwordRequestInput, setPasswordRequestInput] = useState('');
+  const [passwordRequestSending, setPasswordRequestSending] = useState(false);
+  const [passwordRequestSent, setPasswordRequestSent] = useState(false);
+
   const fetchIntegrations = useCallback(async () => {
     try {
       const headers = getAuthHeaders();
@@ -198,6 +224,19 @@ export default function Integrations() {
           }
         }
         setConnectedBrowsers(newConnectedBrowsers);
+
+        // Check for password integrations
+        // Chrome passwords are synced as part of browser sync (integration name: 'chrome')
+        const chromeIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'chrome' && i.status === 'CONNECTED');
+        setChromePasswordsSynced(!!chromeIntegration);
+
+        // Apple passwords have their own integration
+        const applePasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'apple_passwords' && i.status === 'CONNECTED');
+        setApplePasswordsSynced(!!applePasswordsIntegration);
+
+        // Atlas passwords have their own integration
+        const atlasPasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'atlas_passwords' && i.status === 'CONNECTED');
+        setAtlasPasswordsSynced(!!atlasPasswordsIntegration);
       }
     } catch (err) {
       console.error('Failed to fetch integrations:', err);
@@ -297,6 +336,113 @@ export default function Integrations() {
   const handleOpenKeychain = async () => {
     if (handlers.browserCookies) {
       await handlers.browserCookies.openKeychainAccess('ChatGPT Safe Storage');
+    }
+  };
+
+  // Handle Chrome passwords sync (password-only, not full browser state)
+  const handleChromePasswordsSync = async () => {
+    if (!handlers.browserCookies) return;
+
+    setPasswordSyncLoading('chrome');
+    setError(null);
+    try {
+      await handlers.browserCookies.syncBrowserPasswords('chrome');
+      setChromePasswordsSynced(true);
+      await fetchIntegrations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to sync Chrome passwords');
+    } finally {
+      setPasswordSyncLoading(null);
+    }
+  };
+
+  // Handle Apple Passwords CSV upload
+  const handleApplePasswordsSync = async (file: File) => {
+    setPasswordSyncLoading('apple');
+    setError(null);
+    try {
+      const session = getStoredSession();
+      const token = session?.access_token;
+      if (!token) {
+        throw new Error('Not authenticated');
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(`${API_BASE_WITH_PATH}/integrations/passwords/apple/upload`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to import passwords');
+      }
+
+      setApplePasswordsSynced(true);
+      setApplePasswordsModalOpen(false);
+      setSuccess(`Imported ${payload.passwordCount} passwords from Apple Passwords`);
+      await fetchIntegrations();
+    } catch (err) {
+      throw err; // Let the modal handle the error display
+    } finally {
+      setPasswordSyncLoading(null);
+    }
+  };
+
+  // Handle Atlas (ChatGPT) password sync via keychain password
+  const handleAtlasPasswordsSync = async (keychainPassword: string) => {
+    if (!handlers.browserCookies) return;
+
+    setPasswordSyncLoading('atlas');
+    setError(null);
+    try {
+      const result = await handlers.browserCookies.syncBrowserPasswords('atlas', { keychainPassword });
+      if (!result.success) {
+        throw new Error(result.message || 'Failed to sync Atlas passwords');
+      }
+      setAtlasPasswordsSynced(true);
+      setAtlasPasswordsModalOpen(false);
+      setSuccess('Synced passwords from ChatGPT Atlas');
+      await fetchIntegrations();
+    } catch (err) {
+      throw err; // Let the modal handle the error display
+    } finally {
+      setPasswordSyncLoading(null);
+    }
+  };
+
+  // Handle password integration request
+  const handlePasswordRequest = async () => {
+    if (!passwordRequestInput.trim()) return;
+
+    setPasswordRequestSending(true);
+    setError(null);
+
+    try {
+      const headers = getAuthHeaders();
+      const response = await fetch(`${API_BASE_WITH_PATH}/integrations/passwords/request`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ request: passwordRequestInput.trim() }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error || 'Failed to send request');
+      }
+
+      setPasswordRequestSent(true);
+      setPasswordRequestInput('');
+      setSuccess('Request sent! We\'ll add the integration within 24 hours.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send request');
+    } finally {
+      setPasswordRequestSending(false);
     }
   };
 
@@ -570,6 +716,207 @@ export default function Integrations() {
                 </div>
               )}
 
+              {/* Passwords Connector - Expandable Section */}
+              <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
+                {/* Main row */}
+                <div className="p-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="url(#keyGradient)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <defs>
+                          <linearGradient id="keyGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stopColor="#f59e0b" />
+                            <stop offset="100%" stopColor="#fcd34d" />
+                          </linearGradient>
+                        </defs>
+                        <path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4" />
+                      </svg>
+                    </div>
+                    <div className="flex flex-col">
+                      <h3 className="font-medium">Passwords</h3>
+                      <span className="text-xs text-muted-foreground">Auto-fill login credentials</span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => setPasswordsExpanded(!passwordsExpanded)}
+                    className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                      chromePasswordsSynced || applePasswordsSynced || atlasPasswordsSynced
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                    }`}
+                  >
+                    {chromePasswordsSynced || applePasswordsSynced || atlasPasswordsSynced ? (
+                      <Check className="w-4 h-4" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Expanded password options */}
+                {passwordsExpanded && (
+                  <div className="border-t border-border">
+                    {/* Chrome passwords */}
+                    {handlers.browserCookies?.isAvailable ? (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <img src={chromeIcon} alt="Chrome" className="w-6 h-6" />
+                          <span className="text-sm">Chrome</span>
+                        </div>
+
+                        <button
+                          onClick={handleChromePasswordsSync}
+                          disabled={passwordSyncLoading === 'chrome'}
+                          className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                            chromePasswordsSynced
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                              : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          {passwordSyncLoading === 'chrome' ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : chromePasswordsSynced ? (
+                            <Check className="w-3.5 h-3.5" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <img src={chromeIcon} alt="Chrome" className="w-6 h-6" />
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm">Chrome</span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                              Desktop Only
+                            </span>
+                          </div>
+                        </div>
+                        <Button size="sm" variant="ghost" asChild className="h-8 px-2">
+                          <a href="/download" className="text-xs">Get App</a>
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* Apple Passwords */}
+                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                      <div className="flex items-center gap-3">
+                        <img src={applePasswordsIcon} alt="Apple Passwords" className="w-6 h-6" />
+                        <span className="text-sm">Apple Passwords</span>
+                      </div>
+
+                      <button
+                        onClick={() => setApplePasswordsModalOpen(true)}
+                        disabled={passwordSyncLoading === 'apple'}
+                        className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                          applePasswordsSynced
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                            : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {passwordSyncLoading === 'apple' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : applePasswordsSynced ? (
+                          <Check className="w-3.5 h-3.5" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+
+                    {/* ChatGPT Atlas Passwords */}
+                    {handlers.browserCookies?.isAvailable ? (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <img src={chatgptIcon} alt="ChatGPT Atlas" className="w-6 h-6 rounded" />
+                          <span className="text-sm">ChatGPT Atlas</span>
+                        </div>
+
+                        <button
+                          onClick={() => setAtlasPasswordsModalOpen(true)}
+                          disabled={passwordSyncLoading === 'atlas'}
+                          className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                            atlasPasswordsSynced
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                              : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          {passwordSyncLoading === 'atlas' ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : atlasPasswordsSynced ? (
+                            <Check className="w-3.5 h-3.5" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <img src={chatgptIcon} alt="ChatGPT Atlas" className="w-6 h-6 rounded" />
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm">ChatGPT Atlas</span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                              Desktop Only
+                            </span>
+                          </div>
+                        </div>
+                        <Button size="sm" variant="ghost" asChild className="h-8 px-2">
+                          <a href="/download" className="text-xs">Get App</a>
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* Request new password integration */}
+                    <div className="px-4 py-2">
+                      {!passwordRequestExpanded ? (
+                        <button
+                          onClick={() => setPasswordRequestExpanded(true)}
+                          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          Don't see your password client? <span className="underline">Request one</span> and we'll add it in &lt; 1 day
+                        </button>
+                      ) : passwordRequestSent ? (
+                        <p className="text-xs text-green-600 dark:text-green-400">
+                          Request sent! We'll add the integration within 24 hours.
+                        </p>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={passwordRequestInput}
+                            onChange={(e) => setPasswordRequestInput(e.target.value)}
+                            placeholder="e.g., 1Password, Bitwarden, LastPass..."
+                            disabled={passwordRequestSending}
+                            className="flex-1 px-2 py-1 text-xs bg-background border border-border rounded focus:outline-none focus:ring-1 focus:ring-primary/50 disabled:opacity-50"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !passwordRequestSending) {
+                                handlePasswordRequest();
+                              }
+                            }}
+                          />
+                          <Button
+                            size="sm"
+                            variant="default"
+                            onClick={handlePasswordRequest}
+                            disabled={passwordRequestSending || !passwordRequestInput.trim()}
+                            className="h-7 px-2 text-xs"
+                          >
+                            {passwordRequestSending ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              'Send'
+                            )}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Other integrations */}
               {integrations.map((integration) => {
               const Icon = integration.Icon;
@@ -741,7 +1088,7 @@ export default function Integrations() {
         </div>
       </div>
 
-      {/* Atlas Password Modal */}
+      {/* Atlas Browser Data Modal */}
       <AtlasPasswordModal
         isOpen={atlasModalOpen}
         onClose={() => {
@@ -750,6 +1097,23 @@ export default function Integrations() {
         }}
         onSync={handleAtlasSync}
         onOpenKeychain={handleOpenKeychain}
+        syncType="browser data"
+      />
+
+      {/* Apple Passwords Modal */}
+      <ApplePasswordsModal
+        isOpen={applePasswordsModalOpen}
+        onClose={() => setApplePasswordsModalOpen(false)}
+        onSync={handleApplePasswordsSync}
+      />
+
+      {/* Atlas Passwords Modal */}
+      <AtlasPasswordModal
+        isOpen={atlasPasswordsModalOpen}
+        onClose={() => setAtlasPasswordsModalOpen(false)}
+        onSync={handleAtlasPasswordsSync}
+        onOpenKeychain={handleOpenKeychain}
+        syncType="passwords"
       />
     </div>
   );

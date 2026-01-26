@@ -774,19 +774,8 @@ export class BrowserStateSync {
         console.error('[BrowserStateSync] Failed to read Cache Storage:', error);
       }
 
-      // Passwords
-      try {
-        const passwords = await BrowserPasswordReader.readAndEncryptPasswords('chrome');
-        console.log(`[BrowserStateSync] Read ${passwords.length} passwords`);
-
-        if (passwords.length > 0) {
-          uploadPromises.push(
-            this.uploadPasswords(passwords, session.access_token)
-          );
-        }
-      } catch (error) {
-        console.error('[BrowserStateSync] Failed to read passwords:', error);
-      }
+      // NOTE: Passwords are NOT synced as part of browser sync.
+      // Users must explicitly sync passwords via the Passwords connector.
     }
 
     // 3. Collect and upload browser fingerprint (for any browser sync)
@@ -818,6 +807,63 @@ export class BrowserStateSync {
       const failures = results.filter(r => !r.success);
       console.error(`[BrowserStateSync] ❌ Some uploads failed for ${browserType}:`, failures);
       return { success: false, message: `Some uploads failed: ${failures.map(f => f.message).join(', ')}` };
+    }
+  }
+
+  /**
+   * Sync ONLY passwords for a specific browser (not full browser state).
+   * This reads passwords from the browser's Login Data and uploads them.
+   * @param browserType - The browser to sync passwords from
+   * @param options - Optional config, including keychainPassword for browsers that need it (Atlas)
+   */
+  static async syncBrowserPasswordsOnly(
+    browserType: string,
+    options?: { keychainPassword?: string }
+  ): Promise<{ success: boolean; message?: string }> {
+    const session = await AuthService.getSession();
+    if (!session) {
+      return { success: false, message: 'Not authenticated' };
+    }
+
+    // Supported browsers for password reading
+    const supportedBrowsers = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas'];
+    if (!supportedBrowsers.includes(browserType)) {
+      return { success: false, message: `Password sync not supported for ${browserType}` };
+    }
+
+    // Atlas requires a keychain password
+    if (browserType === 'atlas' && !options?.keychainPassword) {
+      return { success: false, message: 'Atlas requires a keychain password' };
+    }
+
+    console.log(`[BrowserStateSync] Starting password-only sync for ${browserType}, keychainPassword provided: ${!!options?.keychainPassword}`);
+
+    try {
+      // Read and encrypt passwords
+      const config = options?.keychainPassword ? { keychainPassword: options.keychainPassword } : undefined;
+      console.log(`[BrowserStateSync] Passing config to readAndEncryptPasswords:`, { hasKeychainPassword: !!config?.keychainPassword });
+      const passwords = await BrowserPasswordReader.readAndEncryptPasswords(browserType as any, config);
+      console.log(`[BrowserStateSync] Read ${passwords.length} passwords from ${browserType}`);
+
+      if (passwords.length === 0) {
+        console.log(`[BrowserStateSync] No passwords to sync for ${browserType}`);
+        return { success: true, message: 'No passwords to sync' };
+      }
+
+      // Upload passwords
+      const result = await this.uploadPasswords(passwords, session.access_token);
+
+      if (result.success) {
+        console.log(`[BrowserStateSync] ✅ Password-only sync complete for ${browserType}`);
+      } else {
+        console.error(`[BrowserStateSync] ❌ Password sync failed for ${browserType}:`, result.message);
+      }
+
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[BrowserStateSync] ❌ Password sync failed for ${browserType}:`, message);
+      return { success: false, message };
     }
   }
 }

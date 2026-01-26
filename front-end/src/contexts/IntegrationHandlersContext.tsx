@@ -12,7 +12,8 @@
  *
  * browserCookies handler provides multi-browser support:
  * - getInstalledBrowsers(): returns list of installed browsers
- * - syncBrowser(type, password?): syncs cookies for a specific browser
+ * - syncBrowser(type, password?): syncs full browser state (cookies + localStorage + etc)
+ * - syncBrowserPasswords(type): syncs ONLY passwords (not full browser state)
  * - storeAtlasPassword(password): stores Atlas password locally
  * - openKeychainAccess(searchQuery?): opens Keychain Access app
  */
@@ -46,6 +47,7 @@ export interface BrowserCookiesHandler {
   isAvailable: boolean;
   getInstalledBrowsers: () => Promise<BrowserInfo[]>;
   syncBrowser: (browserType: BrowserType, keychainPassword?: string) => Promise<void>;
+  syncBrowserPasswords: (browserType: BrowserType) => Promise<void>;
   storeAtlasPassword: (password: string) => Promise<{ success: boolean; error?: string }>;
   openKeychainAccess: (searchQuery?: string) => Promise<{ success: boolean }>;
 }

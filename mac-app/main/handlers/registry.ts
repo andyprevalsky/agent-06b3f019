@@ -232,6 +232,22 @@ export function registerHandlers() {
     }
   });
 
+  // Password-only sync handler (just passwords, not full browser state)
+  // For Atlas, pass keychainPassword in config
+  ipcMain.handle('browser:syncPasswords', async (_, browser: BrowserType, config?: { keychainPassword?: string }) => {
+    logIpc('IN', 'browser:syncPasswords', { browser, hasKeychainPassword: !!config?.keychainPassword });
+    try {
+      const result = await BrowserStateSync.syncBrowserPasswordsOnly(browser, config);
+      logConsole('BrowserStateSync', `syncBrowserPasswordsOnly(${browser}) complete`, result);
+      logIpc('OUT', 'browser:syncPasswords', result);
+      return result;
+    } catch (error: any) {
+      logConsoleError('BrowserStateSync', `syncBrowserPasswordsOnly(${browser}) failed`, error);
+      logIpc('OUT', 'browser:syncPasswords', { success: false, error: error.message });
+      return { success: false, message: error.message };
+    }
+  });
+
   // Fingerprint handlers
   ipcMain.handle('fingerprint:collect', async () => {
     logIpc('IN', 'fingerprint:collect');
@@ -304,6 +320,19 @@ export function registerHandlers() {
         logIpc('OUT', 'system:openKeychainAccess', { success: false });
         return { success: false };
       }
+    }
+  });
+
+  ipcMain.handle('system:openPasswordsApp', async () => {
+    logIpc('IN', 'system:openPasswordsApp', {});
+    try {
+      await shell.openPath('/System/Applications/Passwords.app');
+      logIpc('OUT', 'system:openPasswordsApp', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('System', 'Failed to open Passwords app', error);
+      logIpc('OUT', 'system:openPasswordsApp', { success: false });
+      return { success: false };
     }
   });
 

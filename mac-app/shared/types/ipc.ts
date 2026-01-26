@@ -69,6 +69,10 @@ export interface IPC {
   // Full browser sync (cookies + localStorage + IndexedDB + permissions + Cache Storage in parallel)
   syncBrowser: (browser: BrowserType, config?: ReadBrowserCookiesConfig) => Promise<UploadResult>;
 
+  // Password-only sync (just reads and uploads passwords, not full browser state)
+  // For Atlas, pass keychainPassword in config
+  syncBrowserPasswords: (browser: BrowserType, config?: { keychainPassword?: string }) => Promise<UploadResult>;
+
   // Fingerprint
   collectFingerprint: () => Promise<FingerprintData | null>;
   uploadFingerprint: (data: FingerprintData) => Promise<UploadResult>;
@@ -76,6 +80,7 @@ export interface IPC {
   // System
   openFullDiskAccessSettings: () => Promise<{ success: boolean }>;
   openKeychainAccess: (searchQuery?: string) => Promise<{ success: boolean }>;
+  openPasswordsApp: () => Promise<{ success: boolean }>;
 
   // Events
   onProgress: (callback: (progress: UploadProgress) => void) => void;
