@@ -28,7 +28,7 @@ const Terms = () => {
             <div className="space-y-8">
               <div className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-lg p-6">
                 <p className="text-lg leading-relaxed">
-                  Welcome to <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">www.hinavi.ai</a> ("Navi", "we", "us", or "our"). By using our website or joining our waitlist, you agree to these Terms of Service. Please read them carefully.
+                  Welcome to <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">https://roselabs.ai</a> ("Rose Labs", "we", "us", or "our"). By using our website or joining our waitlist, you agree to these Terms of Service. Please read them carefully.
                 </p>
               </div>
 
@@ -37,7 +37,7 @@ const Terms = () => {
               <section>
                 <h2 className="text-2xl font-semibold mb-4 text-foreground">1. Use of Our Website</h2>
                 <p className="text-muted-foreground">
-                  You may use <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">www.hinavi.ai</a> only for lawful purposes. You agree not to misuse the website, attempt to gain unauthorized access, or disrupt the site's functionality.
+                  You may use <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">https://roselabs.ai</a> only for lawful purposes. You agree not to misuse the website, attempt to gain unauthorized access, or disrupt the site's functionality.
                 </p>
               </section>
 
@@ -46,7 +46,7 @@ const Terms = () => {
               <section>
                 <h2 className="text-2xl font-semibold mb-4 text-foreground">2. Waitlist Sign-Up</h2>
                 <p className="text-muted-foreground">
-                  If you join our waitlist, you agree to provide accurate information. By signing up, you consent to us contacting you by email about Navi updates and news. You can unsubscribe at any time.
+                  If you join our waitlist, you agree to provide accurate information. By signing up, you consent to us contacting you by email about Rose Labs updates and news. You can unsubscribe at any time.
                 </p>
               </section>
 
@@ -55,7 +55,7 @@ const Terms = () => {
               <section>
                 <h2 className="text-2xl font-semibold mb-4 text-foreground">3. Intellectual Property</h2>
                 <p className="text-muted-foreground">
-                  All content on this site—including text, branding, images, and design—is owned by Navi and may not be used without our permission.
+                  All content on this site—including text, branding, images, and design—is owned by Rose Labs and may not be used without our permission.
                 </p>
               </section>
 
@@ -64,7 +64,7 @@ const Terms = () => {
               <section>
                 <h2 className="text-2xl font-semibold mb-4 text-foreground">4. No Warranties</h2>
                 <p className="text-muted-foreground">
-                  <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">www.hinavi.ai</a> is provided "as is." We make no guarantees about the accuracy, reliability, or availability of our website or information on it.
+                  <a href="/" className="text-primary hover:text-primary/80 underline transition-colors">https://roselabs.ai</a> is provided "as is." We make no guarantees about the accuracy, reliability, or availability of our website or information on it.
                 </p>
               </section>
 
@@ -73,7 +73,7 @@ const Terms = () => {
               <section>
                 <h2 className="text-2xl font-semibold mb-4 text-foreground">5. Limitation of Liability</h2>
                 <p className="text-muted-foreground">
-                  To the fullest extent permitted by law, Navi is not liable for any damages or losses arising from your use of this site.
+                  To the fullest extent permitted by law, Rose Labs is not liable for any damages or losses arising from your use of this site.
                 </p>
               </section>
 
@@ -103,7 +103,7 @@ const Terms = () => {
                   Questions about these Terms?
                 </p>
                 <p className="text-muted-foreground">
-                  Contact: <a href="mailto:andy@hinavi.ai" className="text-primary hover:text-primary/80 underline transition-colors">andy@hinavi.ai</a>
+                  Contact: <a href="mailto:andy@roselabs.ai" className="text-primary hover:text-primary/80 underline transition-colors">andy@roselabs.ai</a>
                 </p>
               </section>
 

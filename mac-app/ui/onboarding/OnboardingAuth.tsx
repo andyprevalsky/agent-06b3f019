@@ -112,7 +112,7 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
 
     try {
       const strippedPhone = stripPhoneNumber(phone);
-      await verifyOTP(strippedPhone, otp, undefined, { firstName, lastName, smsOptIn: smsAuthorized });
+      await verifyOTP(strippedPhone, otp, undefined, { firstName, lastName });
       onComplete();
     } catch (err: any) {
       setError(err.message || 'Invalid verification code');
@@ -243,7 +243,7 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
                 I authorize SMS communication
               </span>
               <p className="text-xs text-muted-foreground mt-1">
-                By checking this box, you agree to receive automated messages from Rose Labs. Message/data rates may apply. Reply STOP to cancel. See our{' '}
+                By checking this box, you agree to receive automated SMS messages from Rose Labs related to tasks you initiate, including reminders, clarifying questions, and status updates. Message and data rates may apply. Reply STOP to cancel. See our{' '}
                 <a
                   href="https://roselabs.ai/privacy"
                   target="_blank"
@@ -251,6 +251,15 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
                   className="underline hover:text-foreground"
                 >
                   Privacy Policy
+                </a>
+                {' '}and{' '}
+                <a
+                  href="https://roselabs.ai/terms"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline hover:text-foreground"
+                >
+                  Terms of Service
                 </a>
                 .
               </p>

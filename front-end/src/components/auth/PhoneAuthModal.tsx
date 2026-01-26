@@ -54,6 +54,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [modalPosition, setModalPosition] = useState({ top: 0, left: 0 });
+  const [smsAuthorized, setSmsAuthorized] = useState(false);
 
   // Calculate modal position based on QueryInput
   useEffect(() => {
@@ -206,6 +207,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
   const handleBack = () => {
     setStep('phone');
     setOtp('');
+    setSmsAuthorized(false);
   };
 
   const handleClose = () => {
@@ -215,6 +217,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
       setStep('phone');
       setPhone('');
       setOtp('');
+      setSmsAuthorized(false);
     }, 200);
   };
 
@@ -375,9 +378,45 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
                 />
               </div>
 
+              {/* SMS Authorization checkbox */}
+              <label className="flex items-start gap-3 p-3 bg-white/50 border border-gray-300 rounded-lg cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={smsAuthorized}
+                  onChange={(e) => setSmsAuthorized(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-gray-300 text-navi-black focus:ring-0 focus:ring-offset-0"
+                />
+                <div className="flex-1">
+                  <span className="text-sm font-medium text-navi-black">
+                    I authorize SMS communication
+                  </span>
+                  <p className="text-xs text-gray-500 mt-1">
+                    By checking this box, you agree to receive automated SMS messages from Rose Labs related to tasks you initiate, including reminders, clarifying questions, and status updates. Message and data rates may apply. Reply STOP to cancel. See our{' '}
+                    <a
+                      href="https://roselabs.ai/privacy"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline hover:text-navi-black"
+                    >
+                      Privacy Policy
+                    </a>
+                    {' '}and{' '}
+                    <a
+                      href="https://roselabs.ai/terms"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline hover:text-navi-black"
+                    >
+                      Terms of Service
+                    </a>
+                    .
+                  </p>
+                </div>
+              </label>
+
               <button
                 type="submit"
-                disabled={loading || otp.length !== 6}
+                disabled={loading || otp.length !== 6 || !smsAuthorized}
                 className="w-full px-3 py-2 bg-navi-black text-white text-sm rounded-lg hover:bg-navi-black/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? 'Verifying...' : 'Verify'}
