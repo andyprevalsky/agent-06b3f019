@@ -22,7 +22,8 @@ const MODEL_POOLS = {
   'rose-1-ultra': [
     'anthropic/claude-opus-4-5-20251101',
     'openai/gpt-5.2',
-    'google/gemini-3-pro-preview'
+    'google/gemini-3-pro-preview',
+    'moonshotai/kimi-k2.5'
   ],
   // Browser automation pool - specialized models for web interaction
   // browser-use has fixed pricing, yutori/n1 uses OpenRouter
@@ -75,6 +76,11 @@ serve(async (req) => {
       'browser-use': {
         prompt: 0.10 / 1000000,      // $0.10 per 1M tokens -> per token
         completion: 0.40 / 1000000,  // $0.40 per 1M tokens -> per token
+        contextLength: 128000,       // 128k context
+      },
+      'moonshotai/kimi-k2.5': {
+        prompt: 0.60 / 1000000,      // $0.60 per 1M tokens -> per token
+        completion: 3.00 / 1000000,  // $3.00 per 1M tokens -> per token
         contextLength: 128000,       // 128k context
       },
     };

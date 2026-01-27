@@ -25,7 +25,8 @@ const MODEL_POOLS: Record<string, string[]> = {
   'rose-1-ultra': [
     'anthropic/claude-opus-4-5-20251101',
     'openai/gpt-5.2',
-    'google/gemini-3-pro-preview'
+    'google/gemini-3-pro-preview',
+    'moonshotai/kimi-k2.5'
   ],
   // Browser automation pool - specialized models for web interaction
   'rose-1-browser-use': [

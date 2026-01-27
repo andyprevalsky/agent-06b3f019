@@ -9,6 +9,7 @@ export const ROSE_MODEL_POOLS = {
     'anthropic/claude-opus-4-5-20251101',
     'openai/gpt-5.2',
     'google/gemini-3-pro-preview',
+    'moonshotai/kimi-k2.5',
   ],
   // Cerebras-powered hyper model - direct API calls for ultra-fast inference
   'rose-hyper': [
