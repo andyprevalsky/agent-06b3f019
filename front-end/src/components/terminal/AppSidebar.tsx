@@ -23,6 +23,18 @@
  *     v
  * [MODAL_OPEN] <-- showSubscriptionModal: true
  *
+ * FEEDBACK (FeedbackButton component):
+ * [COLLAPSED] <-- expanded: false
+ *     |
+ *     v (click)
+ * [EXPANDED] <-- expanded: true, shows input panel to the right
+ *     |
+ *     v (submit)
+ * [SENDING] <-- sending: true
+ *     |
+ *     v
+ * [SENT] <-- sent: true (auto-closes after 2s)
+ *
  * States:
  * - isCollapsed: boolean (sidebar width)
  * - isLoadingCredits: boolean
@@ -33,7 +45,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { Plus, LogOut, Settings as SettingsIcon, Plug, Network, ChevronLeft, ChevronRight, Loader2, CreditCard } from 'lucide-react';
+import { Plus, LogOut, Settings as SettingsIcon, Plug, Network, ChevronLeft, ChevronRight, Loader2, CreditCard, Megaphone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
@@ -342,6 +354,153 @@ function CreditIndicator({ isCollapsed }: { isCollapsed: boolean }) {
   );
 }
 
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
+
+// Feedback button with inline input popover
+function FeedbackButton({ isCollapsed }: { isCollapsed: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [position, setPosition] = useState<{ top: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!expanded) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        buttonRef.current && !buttonRef.current.contains(e.target as Node) &&
+        panelRef.current && !panelRef.current.contains(e.target as Node)
+      ) {
+        setExpanded(false);
+        setSent(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [expanded]);
+
+  const handleSubmit = async () => {
+    if (!input.trim() || sending) return;
+
+    setSending(true);
+    try {
+      const session = getStoredSession();
+      if (!session) throw new Error('Not authenticated');
+
+      const response = await fetch(`${API_BASE_WITH_PATH}/feedback`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ feedback: input.trim() }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to submit');
+      }
+
+      setSent(true);
+      setInput('');
+      setTimeout(() => {
+        setExpanded(false);
+        setSent(false);
+      }, 2000);
+    } catch (err) {
+      console.error('Feedback error:', err);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <>
+      <SidebarTooltip label="Feedback" isCollapsed={isCollapsed}>
+        <button
+          ref={buttonRef}
+          onClick={() => {
+            if (!expanded && buttonRef.current) {
+              const rect = buttonRef.current.getBoundingClientRect();
+              setPosition({ top: rect.top });
+            }
+            setExpanded(!expanded);
+            setSent(false);
+          }}
+          className={cn(
+            "w-full flex items-center gap-3 rounded-lg text-sm transition-all duration-200",
+            "hover:bg-gray-100 dark:hover:bg-zinc-800",
+            expanded && "bg-gray-100 dark:bg-zinc-800",
+            isCollapsed ? "justify-center p-2.5 mx-auto" : "px-3 py-2.5"
+          )}
+        >
+          <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
+            <Megaphone className="h-4 w-4" />
+          </span>
+          {!isCollapsed && <span className="truncate">Feedback</span>}
+        </button>
+      </SidebarTooltip>
+
+      {/* Feedback input panel - positioned to the right of sidebar */}
+      {expanded && position && (
+        <div
+          ref={panelRef}
+          className="fixed z-[100]"
+          style={{
+            left: isCollapsed ? SIDEBAR_WIDTH_COLLAPSED + 8 : SIDEBAR_WIDTH_EXPANDED + 8,
+            top: position.top,
+          }}
+        >
+          <div className="bg-white dark:bg-zinc-800 rounded-lg shadow-lg border border-gray-200 dark:border-zinc-700 p-3 w-72">
+            {sent ? (
+              <p className="text-sm text-green-600 dark:text-green-400">
+                Thank you for your feedback!
+              </p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder="Share your thoughts..."
+                  disabled={sending}
+                  autoFocus
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !sending) {
+                      handleSubmit();
+                    }
+                    if (e.key === 'Escape') {
+                      setExpanded(false);
+                    }
+                  }}
+                />
+                <Button
+                  size="sm"
+                  onClick={handleSubmit}
+                  disabled={sending || !input.trim()}
+                  className="w-full"
+                >
+                  {sending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    'Submit'
+                  )}
+                </Button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function AppSidebar({
   currentView,
   onViewChange,
@@ -503,6 +662,7 @@ export default function AppSidebar({
       {/* Bottom Navigation */}
       <div className="border-t border-gray-200/60 dark:border-zinc-800/60">
         <div className={cn("px-2 py-2 space-y-0.5", isCollapsed && "px-1.5")}>
+          <FeedbackButton isCollapsed={isCollapsed} />
           {navItems.map((item) => (
             <NavButton
               key={item.id}

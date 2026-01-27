@@ -511,6 +511,16 @@ model SmsQueuePending {
   @@index([agentId])
 }
 
+model Feedback {
+  id        String   @id @default(uuid())
+  userId    String
+  feedback  String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
 enum AgentStatus {
   STARTING_UP
   ACTIVE
