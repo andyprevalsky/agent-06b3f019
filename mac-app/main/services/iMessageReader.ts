@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import type { IMessageData } from '../../shared/types/ipc';
 import { ContactsReaderNative, ContactRecord } from './contactsReaderNative';
+import type { NormalizedMessage } from './messaging/types';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const bplistParser = require('bplist-parser') as {
@@ -212,12 +213,23 @@ const isoToImessageTimestamp = (isoString: string): number => {
   return (unixSeconds - APPLE_EPOCH_OFFSET) * 1_000_000_000;
 };
 
+// Convert iMessage timestamp to Date
+const appleTimestampToDate = (appleTimestamp: number): Date => {
+  const APPLE_EPOCH_OFFSET = 978307200;
+  const timestampInSeconds = appleTimestamp / 1_000_000_000;
+  const unixTimestamp = timestampInSeconds + APPLE_EPOCH_OFFSET;
+  return new Date(unixTimestamp * 1000);
+};
+
 export class IMessageReader {
   static checkAccess(): boolean {
     try {
+      console.log(`[IMessageReader] Checking access to: ${IMESSAGE_DB_PATH}`);
       fs.accessSync(IMESSAGE_DB_PATH, fs.constants.R_OK);
+      console.log('[IMessageReader] ✅ Access granted');
       return true;
-    } catch {
+    } catch (err) {
+      console.log(`[IMessageReader] ❌ Access denied: ${err}`);
       return false;
     }
   }
@@ -403,6 +415,168 @@ export class IMessageReader {
       }
 
       return filteredMessages;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Convert IMessageData to NormalizedMessage format for unified processing.
+   */
+  static toNormalizedMessage(msg: IMessageData): NormalizedMessage {
+    return {
+      id: String(msg.id),
+      text: msg.text,
+      timestamp: appleTimestampToDate(msg.date),
+      isFromMe: msg.is_from_me,
+      chatId: msg.contact_id,
+      contactId: msg.contact_id,
+      contactName: msg.contact_name || undefined,
+      channel: 'IMESSAGE',
+      contact: {
+        firstName: msg.contact_firstName || undefined,
+        lastName: msg.contact_lastName || undefined,
+        company: msg.contact_company || undefined,
+        title: msg.contact_title || undefined,
+        email: msg.contact_email || undefined,
+        emailAddresses: msg.contact_emailAddresses,
+      },
+    };
+  }
+
+  /**
+   * Convert array of IMessageData to NormalizedMessage format.
+   */
+  static toNormalizedMessages(messages: IMessageData[]): NormalizedMessage[] {
+    return messages.map(msg => this.toNormalizedMessage(msg));
+  }
+
+  /**
+   * Read messages since a specific ROWID (for real-time sync).
+   * Returns messages with ROWID > sinceRowId, ordered by date ascending.
+   */
+  static async readMessagesSinceRowId(sinceRowId: number): Promise<IMessageData[]> {
+    if (!this.checkAccess()) {
+      throw new Error('No access to iMessage database. Grant Full Disk Access in System Preferences.');
+    }
+
+    const db = new Database(IMESSAGE_DB_PATH, { readonly: true });
+
+    try {
+      const hasAssociatedTextColumn = hasColumn(db, 'message', 'associated_message_text');
+      const hasAttributedBodyColumn = hasColumn(db, 'message', 'attributedBody');
+      const contentWhereClause = hasAssociatedTextColumn || hasAttributedBodyColumn
+        ? `(m.text IS NOT NULL OR ${hasAssociatedTextColumn ? 'm.associated_message_text IS NOT NULL' : '0'} OR ${hasAttributedBodyColumn ? 'm.attributedBody IS NOT NULL' : '0'})`
+        : 'm.text IS NOT NULL';
+
+      const rawMessages = db.prepare(`
+        SELECT
+          m.ROWID as id,
+          m.text,
+          m.date,
+          m.is_from_me,
+          ${hasAssociatedTextColumn ? 'm.associated_message_text' : 'NULL as associated_message_text'},
+          ${hasAttributedBodyColumn ? 'm.attributedBody' : 'NULL as attributedBody'},
+          h.id as handle_id,
+          c.chat_identifier,
+          COALESCE(c.display_name, h.id, c.chat_identifier) as contact_name
+        FROM message m
+        LEFT JOIN handle h ON m.handle_id = h.ROWID
+        LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+        LEFT JOIN chat c ON cmj.chat_id = c.ROWID
+        WHERE
+          m.ROWID > ?
+          AND ${contentWhereClause}
+          AND (
+            c.chat_identifier IS NULL
+            OR c.chat_identifier NOT LIKE 'chat%'
+          )
+        ORDER BY m.date ASC
+      `).all(sinceRowId) as RawMessageRow[];
+
+      if (rawMessages.length === 0) {
+        return [];
+      }
+
+      console.log(`[IMessageReader] Real-time: Found ${rawMessages.length} new messages since ROWID ${sinceRowId}`);
+
+      let contactMap = new Map<string, ContactRecord>();
+      try {
+        contactMap = await ContactsReaderNative.readContacts();
+      } catch (error) {
+        console.warn('[IMessageReader] Failed to load contacts for enrichment:', error);
+      }
+
+      const cleanedMessages: IMessageData[] = [];
+
+      for (const msg of rawMessages) {
+        const contactId = normalizeHandle(msg.handle_id || msg.chat_identifier || '');
+        if (!contactId || contactId === INVALID_HANDLE_SENTINEL) {
+          continue;
+        }
+
+        if (/^\d+$/.test(contactId) && contactId.length <= 8) {
+          continue;
+        }
+
+        let cleanedText = sanitizeMessageCandidate(msg.text, msg.id);
+
+        if ((!cleanedText || !cleanedText.trim()) && hasAssociatedTextColumn && msg.associated_message_text) {
+          cleanedText = sanitizeMessageCandidate(msg.associated_message_text, msg.id, 'associated');
+        }
+
+        if ((!cleanedText || !cleanedText.trim()) && hasAttributedBodyColumn && msg.attributedBody) {
+          const decoded = extractTextFromAttributedBody(msg.attributedBody);
+          cleanedText = sanitizeMessageCandidate(decoded, msg.id, 'attributed');
+        }
+
+        if (!cleanedText) {
+          continue;
+        }
+
+        let contactName = msg.contact_name || contactId;
+        const contactInfo = ContactsReaderNative.lookupContact(contactId, contactMap);
+        if (contactInfo) {
+          const fullName = [contactInfo.firstName, contactInfo.lastName].filter(Boolean).join(' ').trim();
+          if (fullName) {
+            contactName = fullName;
+          }
+        }
+
+        cleanedMessages.push({
+          id: msg.id,
+          text: cleanedText,
+          date: msg.date,
+          is_from_me: msg.is_from_me === 1,
+          contact_id: contactId,
+          contact_name: contactName,
+          contact_firstName: contactInfo?.firstName || null,
+          contact_lastName: contactInfo?.lastName || null,
+          contact_email: contactInfo?.emails?.[0] || null,
+          contact_company: contactInfo?.company || null,
+          contact_title: contactInfo?.jobTitle || null,
+          contact_emailAddresses: contactInfo?.emails || [],
+        });
+      }
+
+      return cleanedMessages;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Get the maximum ROWID from the message table (for initializing real-time watcher).
+   */
+  static getMaxRowId(): number {
+    if (!this.checkAccess()) {
+      return 0;
+    }
+
+    const db = new Database(IMESSAGE_DB_PATH, { readonly: true });
+    try {
+      const result = db.prepare('SELECT MAX(ROWID) as maxId FROM message').get() as { maxId: number } | undefined;
+      return result?.maxId ?? 0;
     } finally {
       db.close();
     }

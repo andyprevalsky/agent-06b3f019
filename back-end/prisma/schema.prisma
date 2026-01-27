@@ -33,14 +33,15 @@ model Agent {
   parentWorkflowId          String?
   reasoningMaxTokens        Int         @default(2048)
   responseSchema            Json?
-  structuredResponse        Json?
   busId                     String?
   toolsInUse                String[]    @default([])
-  proxyCountry              String?     // Proxy geolocation from client IP (e.g., "US")
-  proxyState                String?     // State abbreviation (e.g., "TX")
-  proxyCity                 String?     // City name uppercase (e.g., "DALLAS")
-  priceLimitCents           Int         @default(100)  // Price limit in cents (100 = $1.00)
-  treeCostCents             Int         @default(0)   // Total subtree cost (own + all descendants)
+  structuredResponse        Json?
+  proxyCity                 String?
+  proxyCountry              String?
+  proxyState                String?
+  priceLimitCents           Int         @default(100)
+  treeCostCents             Int         @default(0)
+  writeLockEnabled          Boolean     @default(true)
   parent                    Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
   children                  Agent[]     @relation("AgentHierarchy")
   tools                     AgentTool[]
@@ -93,7 +94,7 @@ model Message {
   role        MessageRole
   createdAt   DateTime    @default(now())
   metadata    Json?
-  filePointer Json?       // FilePointer for file attachment messages (stored in Supabase Storage)
+  filePointer Json?
   agent       Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([agentId, timestamp])
@@ -186,9 +187,7 @@ model User {
   usedInviteCode              Int?
   encryptedPaymentInformation String?
   phone                       String?
-  // Anonymous user field - tracks if user was created via Supabase signInAnonymously
   isAnonymous                 Boolean       @default(false)
-  // Mac-app onboarding completion timestamp (null = not completed)
   onboardingCompletedAt       DateTime?
   credits                     Credit[]
   subscriptions               Subscription?
@@ -245,11 +244,11 @@ model BrowserSession {
   sessionId       String               @unique
   status          BrowserSessionStatus @default(ACTIVE)
   debugUrl        String?
-  wsUrl           String?              // CDP WebSocket URL for browser-use
   currentUrl      String?
-  injectedOrigins Json?                // Map of origin -> hash for localStorage injection tracking
   createdAt       DateTime             @default(now())
   closedAt        DateTime?
+  wsUrl           String?
+  injectedOrigins Json?
   context         BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
 
   @@index([contextId])
@@ -265,7 +264,7 @@ model ClaudeCodeSession {
   streamUrl String?
   goal      String
   status    ClaudeCodeSessionStatus @default(ACTIVE)
-  output    String?                 @db.Text // Full terminal output buffer, persisted on clean shutdown
+  output    String?
   createdAt DateTime                @default(now())
   closedAt  DateTime?
 
@@ -277,7 +276,7 @@ model ClaudeCodeSession {
 model GithubRepoAccess {
   id        String   @id @default(uuid())
   userId    String
-  repoUrl   String   // Full GitHub URL e.g. "https://github.com/org/repo"
+  repoUrl   String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -286,16 +285,18 @@ model GithubRepoAccess {
 }
 
 model MessageRecord {
-  id        String         @id @default(uuid())
-  personId  String
-  channel   MessageChannel
-  from      String
-  to        String
-  timestamp DateTime
-  message   String
-  createdAt DateTime       @default(now())
-  person    Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  id         String         @id @default(uuid())
+  personId   String
+  channel    MessageChannel
+  from       String
+  to         String
+  timestamp  DateTime
+  message    String
+  externalId String?        // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
+  createdAt  DateTime       @default(now())
+  person     Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
+  @@unique([personId, channel, externalId]) // Primary dedup: same message can't be inserted twice
   @@index([personId, channel])
   @@index([timestamp])
   @@index([personId, timestamp])
@@ -377,7 +378,6 @@ model EmailIntegrationCredential {
   userId        String
   integrationId String
   provider      EmailProvider
-  email         String?       // The connected email address - nullable during OAuth flow
   pkceVerifier  String?
   stateToken    String?
   accessToken   String?
@@ -387,6 +387,7 @@ model EmailIntegrationCredential {
   metadata      Json?
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
+  email         String?
   integration   Integration   @relation(fields: [integrationId], references: [id], onDelete: Cascade)
 
   @@unique([userId, provider, email])
@@ -461,24 +462,24 @@ model RoseConversationModel {
 }
 
 model GoalHistory {
-  id                        String       @id @default(uuid())
-  originalAgentId           String
-  userId                    String
-  goal                      String
-  status                    AgentStatus
-  statusMessage             String?
-  model                     String
-  contextSize               Int
-  messageCount              Int
-  tokenCount                Int
-  tokensIn                  Int
-  tokensOut                 Int
-  source                    AgentSource
-  depth                     Int
-  agentCreatedAt            DateTime
-  agentUpdatedAt            DateTime
-  agentDeletedAt            DateTime?
-  archivedAt                DateTime     @default(now())
+  id              String      @id @default(uuid())
+  originalAgentId String
+  userId          String
+  goal            String
+  status          AgentStatus
+  statusMessage   String?
+  model           String
+  contextSize     Int
+  messageCount    Int
+  tokenCount      Int
+  tokensIn        Int
+  tokensOut       Int
+  source          AgentSource
+  depth           Int
+  agentCreatedAt  DateTime
+  agentUpdatedAt  DateTime
+  agentDeletedAt  DateTime?
+  archivedAt      DateTime    @default(now())
 
   @@index([userId])
   @@index([archivedAt])
@@ -487,11 +488,11 @@ model GoalHistory {
 
 model SmsQueue {
   id           String   @id @default(uuid())
-  userId       String   @unique // One active SMS per user
-  agentId      String // Agent waiting for reply
-  workflowId   String // To signal when reply arrives
-  questionText String // The question sent
-  messageSid   String? // Twilio message SID
+  userId       String   @unique
+  agentId      String
+  workflowId   String
+  questionText String
+  messageSid   String?
   sentAt       DateTime @default(now())
   createdAt    DateTime @default(now())
 
@@ -509,6 +510,111 @@ model SmsQueuePending {
 
   @@index([userId, createdAt])
   @@index([agentId])
+}
+
+model PendingLocalStorageBatch {
+  id           String   @id @default(uuid())
+  userId       String
+  uploadId     String
+  batchIndex   Int
+  totalBatches Int
+  data         Json
+  createdAt    DateTime @default(now())
+
+  @@unique([userId, uploadId, batchIndex])
+  @@index([userId, uploadId])
+}
+
+model LocalStorageOrigin {
+  id        String   @id @default(uuid())
+  userId    String
+  origin    String
+  entries   Json
+  hash      String
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, origin])
+  @@index([userId])
+}
+
+model IndexedDBOrigin {
+  id        String   @id @default(uuid())
+  userId    String
+  origin    String
+  databases Json
+  hash      String
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, origin])
+  @@index([userId])
+}
+
+model BrowserPermission {
+  id         String   @id @default(uuid())
+  userId     String
+  origin     String
+  permission String
+  setting    Int
+  syncedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([userId, origin, permission])
+  @@index([userId])
+}
+
+model CacheStorageOrigin {
+  id        String   @id @default(uuid())
+  userId    String
+  origin    String
+  caches    Json
+  hash      String
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, origin])
+  @@index([userId])
+}
+
+model Cookie {
+  id              String   @id @default(uuid())
+  userId          String
+  domain          String
+  name            String
+  path            String   @default("/")
+  value           String
+  expiresUtc      BigInt?
+  isSecure        Boolean  @default(false)
+  isHttpOnly      Boolean  @default(false)
+  browserSource   String
+  syncedAt        DateTime @default(now()) @updatedAt
+  creationUtc     BigInt?
+  hasExpires      Boolean  @default(true)
+  isPersistent    Boolean  @default(true)
+  lastAccessUtc   BigInt?
+  lastUpdateUtc   BigInt?
+  priority        Int      @default(1)
+  sameSite        Int      @default(-1)
+  sourcePort      Int      @default(-1)
+  sourceScheme    Int      @default(0)
+  topFrameSiteKey String?
+
+  @@unique([userId, domain, name, path, topFrameSiteKey])
+  @@index([userId])
+  @@index([userId, domain])
+}
+
+model BrowserPassword {
+  id                String   @id @default(uuid())
+  userId            String
+  origin            String
+  username          String
+  encryptedPassword String
+  dateLastUsed      BigInt?
+  dateCreated       BigInt?
+  browserSource     String
+  syncedAt          DateTime @default(now()) @updatedAt
+
+  @@unique([userId, origin, username])
+  @@index([userId])
+  @@index([userId, origin])
 }
 
 model Feedback {
@@ -588,124 +694,4 @@ enum IntegrationStatus {
 enum EmailProvider {
   GMAIL
   YAHOO
-}
-
-// Temporary storage for batched localStorage uploads
-// Each batch is stored separately, then merged on finalize
-model PendingLocalStorageBatch {
-  id         String   @id @default(uuid())
-  userId     String
-  uploadId   String   // Groups batches from same upload session
-  batchIndex Int
-  totalBatches Int
-  data       Json     // { byOrigin: {...}, hashes: {...} }
-  createdAt  DateTime @default(now())
-
-  @@unique([userId, uploadId, batchIndex])
-  @@index([userId, uploadId])
-}
-
-// Per-origin localStorage storage for efficient reads
-// One row per origin allows O(1) lookup when injecting
-model LocalStorageOrigin {
-  id        String   @id @default(uuid())
-  userId    String
-  origin    String   // "https://google.com"
-  entries   Json     // [{ key: "token", value: "..." }, ...]
-  hash      String   // For cache invalidation
-  updatedAt DateTime @updatedAt
-
-  @@unique([userId, origin])
-  @@index([userId])
-}
-
-// Per-origin IndexedDB storage
-// Stores all databases + object stores + records for an origin
-model IndexedDBOrigin {
-  id        String   @id @default(uuid())
-  userId    String
-  origin    String   // "https://www.amazon.com"
-  databases Json     // [{ name: "dbName", objectStores: [{ name: "storeName", records: [...] }] }]
-  hash      String   // For cache invalidation
-  updatedAt DateTime @updatedAt
-
-  @@unique([userId, origin])
-  @@index([userId])
-}
-
-// Per-origin permission grants from user's browser
-// Used to make Steel sessions appear to have the same permissions
-model BrowserPermission {
-  id         String   @id @default(uuid())
-  userId     String
-  origin     String   // "https://www.amazon.com" or pattern "[*.]amazon.com"
-  permission String   // "geolocation", "notifications", "camera", "microphone", etc.
-  setting    Int      // 1=allow, 2=block (Chrome's content_settings values)
-  syncedAt   DateTime @default(now()) @updatedAt
-
-  @@unique([userId, origin, permission])
-  @@index([userId])
-}
-
-// Per-origin Cache Storage metadata (cache names and URL indexes, not response bodies)
-model CacheStorageOrigin {
-  id        String   @id @default(uuid())
-  userId    String
-  origin    String   // "https://www.amazon.com"
-  caches    Json     // [{ name: "cache-v1", urls: ["url1", "url2", ...] }, ...]
-  hash      String   // For cache invalidation
-  updatedAt DateTime @updatedAt
-
-  @@unique([userId, origin])
-  @@index([userId])
-}
-
-// Deduplicated cookie storage across all browsers
-// When same cookie exists in multiple browsers, the one that expires latest wins
-model Cookie {
-  id              String   @id @default(uuid())
-  userId          String
-  domain          String   // Normalized host_key (e.g., ".google.com" -> "google.com")
-  name            String   // Cookie name
-  path            String   @default("/")
-  value           String   // Decrypted cookie value
-  expiresUtc      BigInt?  // Chromium timestamp (microseconds since 1601-01-01)
-  isSecure        Boolean  @default(false)
-  isHttpOnly      Boolean  @default(false)
-  browserSource   String   // Which browser this came from (for debugging)
-  syncedAt        DateTime @default(now()) @updatedAt
-  // Additional Chrome cookie fields
-  creationUtc     BigInt?  // When cookie was created
-  topFrameSiteKey String?  // For partitioned cookies
-  lastAccessUtc   BigInt?  // When cookie was last read
-  hasExpires      Boolean  @default(true)
-  isPersistent    Boolean  @default(true)
-  priority        Int      @default(1) // 0=Low, 1=Medium, 2=High
-  sameSite        Int      @default(-1) // -1=Unspecified, 0=None, 1=Lax, 2=Strict
-  sourceScheme    Int      @default(0) // 0=Unset, 1=NonSecure, 2=Secure
-  sourcePort      Int      @default(-1)
-  lastUpdateUtc   BigInt?  // When cookie was last modified
-
-  @@unique([userId, domain, name, path, topFrameSiteKey])
-  @@index([userId])
-  @@index([userId, domain])
-}
-
-// Browser password storage with RSA-encrypted passwords
-// Passwords are encrypted with RSA-2048 + AES-256-GCM on the mac-app
-// and decrypted only at runtime when typing into password fields
-model BrowserPassword {
-  id                String   @id @default(uuid())
-  userId            String
-  origin            String   // "https://amazon.com"
-  username          String   // "user@email.com"
-  encryptedPassword String   // RSA envelope (base64) - NEVER store plaintext
-  dateLastUsed      BigInt?  // Chromium timestamp for most-recently-used selection
-  dateCreated       BigInt?  // When password was first saved
-  browserSource     String   // Which browser this came from
-  syncedAt          DateTime @default(now()) @updatedAt
-
-  @@unique([userId, origin, username])
-  @@index([userId])
-  @@index([userId, origin])
 }

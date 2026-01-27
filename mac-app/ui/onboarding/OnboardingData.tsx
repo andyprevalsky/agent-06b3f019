@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
 import { Check, Loader2, ArrowRight, X, RefreshCw } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
+import { getSession } from '@/lib/supabase';
 import AtlasPasswordModal from '../components/AtlasPasswordModal';
 import ApplePasswordsModal from '../components/ApplePasswordsModal';
+import WhatsAppQRModal from '../components/WhatsAppQRModal';
+import TelegramAuthModal from '../components/TelegramAuthModal';
 import type { BrowserInfo, BrowserType } from '../../shared/types/ipc';
 
 // Browser icons
@@ -198,6 +200,41 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const [passwordRequestSending, setPasswordRequestSending] = useState(false);
   const [passwordRequestSent, setPasswordRequestSent] = useState(false);
 
+  // Chat Sync state
+  const [chatSyncExpanded, setChatSyncExpanded] = useState(false);
+  const [iMessageSynced, setIMessageSynced] = useState(false);
+  const [whatsAppConnected, setWhatsAppConnected] = useState(false);
+  const [telegramConnected, setTelegramConnected] = useState(false);
+  const [chatSyncLoading, setChatSyncLoading] = useState<'imessage' | 'whatsapp' | 'telegram' | null>(null);
+  const [whatsAppQRModalOpen, setWhatsAppQRModalOpen] = useState(false);
+  const [whatsAppQRCode, setWhatsAppQRCode] = useState<string | null>(null);
+  const [telegramAuthModalOpen, setTelegramAuthModalOpen] = useState(false);
+
+  // Accordion behavior - expand one section, collapse others
+  const handleBrowsersExpand = () => {
+    setBrowsersExpanded(!browsersExpanded);
+    if (!browsersExpanded) {
+      setPasswordsExpanded(false);
+      setChatSyncExpanded(false);
+    }
+  };
+
+  const handlePasswordsExpand = () => {
+    setPasswordsExpanded(!passwordsExpanded);
+    if (!passwordsExpanded) {
+      setBrowsersExpanded(false);
+      setChatSyncExpanded(false);
+    }
+  };
+
+  const handleChatSyncExpand = () => {
+    setChatSyncExpanded(!chatSyncExpanded);
+    if (!chatSyncExpanded) {
+      setBrowsersExpanded(false);
+      setPasswordsExpanded(false);
+    }
+  };
+
   // Fetch installed browsers and existing integrations on mount
   useEffect(() => {
     const fetchData = async () => {
@@ -214,7 +251,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         }
 
         // Fetch existing integrations
-        const { data: { session } } = await supabase.auth.getSession();
+        const session = getSession();
         if (!session?.access_token) {
           setInitialLoading(false);
           return;
@@ -262,6 +299,16 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
               setConnectedEmails([gmailIntegration.config.connectedEmail]);
             }
           }
+
+          // Check for messaging integrations
+          const imessageIntegration = integrations.find((i: Integration) => i.name === 'imessage' && i.status === 'CONNECTED');
+          setIMessageSynced(!!imessageIntegration);
+
+          const whatsappIntegration = integrations.find((i: Integration) => i.name === 'whatsapp' && i.status === 'CONNECTED');
+          setWhatsAppConnected(!!whatsappIntegration);
+
+          const telegramIntegration = integrations.find((i: Integration) => i.name === 'telegram' && i.status === 'CONNECTED');
+          setTelegramConnected(!!telegramIntegration);
         }
       } catch (err) {
         console.error('Failed to fetch data:', err);
@@ -353,7 +400,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const handleApplePasswordsSync = async (file: File) => {
     setPasswordSyncLoading('apple');
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      const session = getSession();
       if (!session?.access_token) {
         throw new Error('Not authenticated');
       }
@@ -413,7 +460,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     setPasswordRequestSending(true);
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      const session = getSession();
       if (!session?.access_token) {
         console.error('No auth session');
         setPasswordRequestSending(false);
@@ -445,10 +492,121 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     }
   };
 
+  // Handle iMessage sync
+  const handleIMessageSync = async () => {
+    setChatSyncLoading('imessage');
+    try {
+      // Check for Full Disk Access first
+      const hasAccess = await window.api.checkIMessageAccess();
+      if (!hasAccess) {
+        // Open Full Disk Access settings
+        await window.api.openFullDiskAccessSettings();
+        return;
+      }
+
+      // Start iMessage upload
+      const result = await window.api.startIMessageUpload();
+      if (result.success) {
+        setIMessageSynced(true);
+      } else {
+        console.error('Failed to sync iMessage:', result.message);
+      }
+    } catch (err) {
+      console.error('Failed to sync iMessage:', err);
+    } finally {
+      setChatSyncLoading(null);
+    }
+  };
+
+  // Handle WhatsApp connect
+  const handleWhatsAppConnect = async () => {
+    if (!window.api.whatsapp) {
+      console.error('WhatsApp API not available');
+      return;
+    }
+
+    setChatSyncLoading('whatsapp');
+    try {
+      // Check if already has credentials
+      const hasCredentials = await window.api.whatsapp.hasCredentials();
+      if (hasCredentials) {
+        // Try to connect with existing credentials
+        const result = await window.api.whatsapp.connect();
+        if (result.success) {
+          setWhatsAppConnected(true);
+          setChatSyncLoading(null);
+          return;
+        }
+      }
+
+      // Set up QR code listener
+      if (window.api.onWhatsAppQRCode) {
+        window.api.onWhatsAppQRCode((qr: string) => {
+          setWhatsAppQRCode(qr);
+        });
+      }
+
+      // Open QR modal and start connection
+      setWhatsAppQRModalOpen(true);
+      const result = await window.api.whatsapp.connect();
+      if (result.success) {
+        setWhatsAppConnected(true);
+        setWhatsAppQRModalOpen(false);
+        setWhatsAppQRCode(null);
+      } else {
+        console.error('Failed to connect WhatsApp:', result.error);
+      }
+    } catch (err) {
+      console.error('Failed to connect WhatsApp:', err);
+    } finally {
+      setChatSyncLoading(null);
+    }
+  };
+
+  // Handle Telegram connect/resync
+  const handleTelegramConnect = async () => {
+    if (!window.api.telegram) {
+      console.error('Telegram API not available');
+      return;
+    }
+
+    setChatSyncLoading('telegram');
+    try {
+      // Check if already connected - if so, just resync historical
+      const isConnected = await window.api.telegram.isConnected();
+      if (isConnected) {
+        console.log('Telegram already connected, resyncing historical...');
+        const result = await window.api.telegram.syncHistorical();
+        console.log(`Telegram resync complete: ${result.count ?? 0} messages`);
+        setChatSyncLoading(null);
+        return;
+      }
+
+      // Check if has saved session - try to reconnect
+      const hasSession = await window.api.telegram.hasSession();
+      if (hasSession) {
+        // Try to connect with existing session (triggers historical sync automatically)
+        const result = await window.api.telegram.connectWithExistingSession();
+        if (result.success) {
+          setTelegramConnected(true);
+          setChatSyncLoading(null);
+          return;
+        }
+      }
+
+      // No session - open auth modal for phone/code flow
+      setTelegramAuthModalOpen(true);
+    } catch (err) {
+      console.error('Failed to connect Telegram:', err);
+    } finally {
+      setChatSyncLoading(null);
+    }
+  };
+
   const handleGmailConnect = async () => {
     setGmailLoading(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      const session = getSession();
       if (!session?.access_token) {
         console.error('No auth session');
         setGmailLoading(false);
@@ -596,7 +754,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
               </div>
 
               <button
-                onClick={() => setBrowsersExpanded(!browsersExpanded)}
+                onClick={handleBrowsersExpand}
                 className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
                   connectedBrowsers.size > 0
                     ? 'bg-green-100 text-green-700'
@@ -681,7 +839,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
               </div>
 
               <button
-                onClick={() => setPasswordsExpanded(!passwordsExpanded)}
+                onClick={handlePasswordsExpand}
                 className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
                   chromePasswordsSynced || applePasswordsSynced || atlasPasswordsSynced
                     ? 'bg-green-100 text-green-700'
@@ -823,39 +981,175 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             )}
           </div>
 
-          <IntegrationItem
-            icon={
-              <svg className="w-5 h-5" viewBox="0 0 24 24">
-                <path fill="#EA4335" d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/>
-              </svg>
-            }
-            name="Gmail"
-            description="Access and manage your emails"
-            connected={connectedEmails.length > 0}
-            loading={gmailLoading}
-            onConnect={handleGmailConnect}
-          >
-            {/* Connected emails chips */}
-            {connectedEmails.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {connectedEmails.map(email => (
-                  <EmailChip
-                    key={email}
-                    email={email}
-                  />
-                ))}
-                {/* Add another button - hidden for now since backend only supports one Gmail */}
-                {/* <button
-                  onClick={handleGmailConnect}
-                  disabled={gmailLoading}
-                  className="inline-flex items-center gap-1 px-2 py-1 border border-dashed border-border rounded-md text-xs text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
-                >
-                  <Plus className="w-3 h-3" />
-                  Add another
-                </button> */}
+          {/* Messages Sync - Expandable */}
+          <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
+            {/* Main row */}
+            <div className="p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                    <defs>
+                      <linearGradient id="chatSyncGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stopColor="#34d399" />
+                        <stop offset="100%" stopColor="#10b981" />
+                      </linearGradient>
+                    </defs>
+                    <path fill="url(#chatSyncGradient)" transform="scale(-1,1)" transform-origin="center" d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div className="font-medium text-sm text-foreground">Messages Sync</div>
+                  <div className="text-xs text-muted-foreground">Sync messaging clients</div>
+                </div>
+              </div>
+
+              <button
+                onClick={handleChatSyncExpand}
+                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                  iMessageSynced || whatsAppConnected || telegramConnected || connectedEmails.length > 0
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-foreground text-background hover:bg-foreground/90'
+                }`}
+              >
+                {iMessageSynced || whatsAppConnected || telegramConnected || connectedEmails.length > 0 ? (
+                  <Check className="w-4 h-4" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+
+            {/* Expanded chat options */}
+            {chatSyncExpanded && (
+              <div className="border-t border-border">
+                {/* iMessage */}
+                <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                  <div className="flex items-center gap-3">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24">
+                      <defs>
+                        <linearGradient id="imessageGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                          <stop offset="0%" stopColor="#5bf675" />
+                          <stop offset="100%" stopColor="#1fcc3f" />
+                        </linearGradient>
+                      </defs>
+                      <rect width="24" height="24" rx="5" fill="url(#imessageGrad)" />
+                      <path fill="white" d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z" />
+                    </svg>
+                    <span className="text-sm text-foreground">iMessage</span>
+                  </div>
+
+                  <button
+                    onClick={handleIMessageSync}
+                    disabled={chatSyncLoading === 'imessage'}
+                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                      iMessageSynced
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {chatSyncLoading === 'imessage' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : iMessageSynced ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                {/* WhatsApp */}
+                <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                  <div className="flex items-center gap-3">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24">
+                      <rect width="24" height="24" rx="5" fill="#25D366" />
+                      <path fill="white" d="M12 4c-4.42 0-8 3.58-8 8 0 1.41.37 2.73 1.01 3.88L4 20l4.26-1.12A7.93 7.93 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8zm4.14 11.07c-.17.48-1 .93-1.38.99-.37.06-.84.09-1.35-.09-.31-.11-.71-.25-1.23-.49-2.16-1-3.57-3.18-3.68-3.33-.1-.15-.86-1.14-.86-2.18s.55-1.55.74-1.76c.2-.21.43-.27.57-.27h.42c.13 0 .31-.05.48.37.18.43.61 1.49.66 1.59.05.1.08.22.02.35-.07.14-.1.22-.2.34-.1.12-.21.26-.3.35-.1.1-.2.2-.09.4.12.2.53.87 1.13 1.41.78.7 1.43.91 1.63 1.02.2.1.32.09.44-.06.12-.14.5-.58.64-.78.13-.2.27-.16.45-.1.18.07 1.15.54 1.34.64.2.1.33.15.38.23.05.09.05.51-.12.99z"/>
+                    </svg>
+                    <span className="text-sm text-foreground">WhatsApp</span>
+                  </div>
+
+                  <button
+                    onClick={handleWhatsAppConnect}
+                    disabled={chatSyncLoading === 'whatsapp'}
+                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                      whatsAppConnected
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {chatSyncLoading === 'whatsapp' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : whatsAppConnected ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Telegram */}
+                <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                  <div className="flex items-center gap-3">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24">
+                      <rect width="24" height="24" rx="5" fill="#229ED9" />
+                      <path fill="white" d="M5.5 11.5l10.7-4.3c.6-.24 1.1.12.9.92l-1.9 9c-.14.64-.52.8-1.06.5l-2.9-2.1-1.4 1.4c-.12.1-.2.2-.4.2-.26 0-.37-.15-.5-.52l-1.1-3.5-2.7-.84c-.32-.11-.34-.41.06-.56zm4.7 1.7l.6 2.55.17-1.85 4.5-4c.2-.18-.05-.27-.32-.1l-5.5 3.4z" transform="translate(12, 12) scale(1.05) translate(-12, -12)"/>
+                    </svg>
+                    <span className="text-sm text-foreground">Telegram</span>
+                  </div>
+
+                  <button
+                    onClick={handleTelegramConnect}
+                    disabled={chatSyncLoading === 'telegram'}
+                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                      telegramConnected
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {chatSyncLoading === 'telegram' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : telegramConnected ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Gmail */}
+                <div className="px-4 py-2 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24">
+                      <path fill="#EA4335" d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/>
+                    </svg>
+                    <div className="flex flex-col">
+                      <span className="text-sm text-foreground">Gmail</span>
+                      {connectedEmails.length > 0 && (
+                        <span className="text-xs text-muted-foreground truncate max-w-[140px]">{connectedEmails[0]}</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleGmailConnect}
+                    disabled={gmailLoading}
+                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                      connectedEmails.length > 0
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {gmailLoading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : connectedEmails.length > 0 ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
               </div>
             )}
-          </IntegrationItem>
+          </div>
         </div>
 
         {/* Continue button */}
@@ -901,6 +1195,27 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         onClose={() => setAtlasPasswordsModalOpen(false)}
         onSync={handleAtlasPasswordsSync}
         syncType="passwords"
+      />
+
+      {/* WhatsApp QR Modal */}
+      <WhatsAppQRModal
+        isOpen={whatsAppQRModalOpen}
+        onClose={() => {
+          setWhatsAppQRModalOpen(false);
+          setWhatsAppQRCode(null);
+        }}
+        qrCode={whatsAppQRCode}
+        isConnecting={chatSyncLoading === 'whatsapp'}
+      />
+
+      {/* Telegram Auth Modal */}
+      <TelegramAuthModal
+        isOpen={telegramAuthModalOpen}
+        onClose={() => setTelegramAuthModalOpen(false)}
+        onSuccess={() => {
+          setTelegramConnected(true);
+          setTelegramAuthModalOpen(false);
+        }}
       />
     </div>
   );

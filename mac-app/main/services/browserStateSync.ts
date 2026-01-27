@@ -10,20 +10,15 @@ import { FingerprintReader } from './fingerprintReader';
 import { BatchUploader } from './batchUploader';
 import { AtlasCredentialStore } from './atlasCredentialStore';
 import { Crypto } from '../base/crypto';
+import { IntegrationCache } from './sync/IntegrationCache';
 import zlib from 'zlib';
 import { promisify } from 'util';
 
 const gzip = promisify(zlib.gzip);
 
-const SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const ORIGINS_PER_BATCH = 100; // Number of origins per batch
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
-
-interface Integration {
-  name: string;
-  status: string;
-}
 
 interface LocalStorageBatch {
   byOrigin: Record<string, { key: string; value: string }[]>;
@@ -50,7 +45,6 @@ interface IndexedDBBatch {
  * localStorage is batched by origins and compressed with gzip.
  */
 export class BrowserStateSync {
-  private static intervalId: NodeJS.Timeout | null = null;
 
   /**
    * Split localStorage data into batches by origins.
@@ -461,27 +455,12 @@ export class BrowserStateSync {
     }
 
     try {
-      // Check which browser integrations are connected
-      const response = await fetch(`${config.apiUrl}/api/integrations`, {
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-      });
-
-      if (!response.ok) {
-        console.error('[BrowserStateSync] Failed to fetch integrations:', response.statusText);
-        return;
-      }
-
-      const data = await response.json() as { integrations?: Integration[] };
-      const integrations = data.integrations ?? [];
+      // Check which browser integrations are connected via cache
+      const connected = await IntegrationCache.getConnected();
 
       // Find all connected browser integrations
-      // Integration names are browser types: 'chrome', 'edge', 'atlas', etc.
       const validBrowsers = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas', 'safari', 'firefox'];
-      const connectedBrowserTypes = integrations
-        .filter(i => validBrowsers.includes(i.name) && i.status === 'CONNECTED')
-        .map(i => i.name);
+      const connectedBrowserTypes = validBrowsers.filter(browser => connected.has(browser));
 
       if (connectedBrowserTypes.length === 0) {
         console.log('[BrowserStateSync] Skipping sync - no browser integrations connected');
@@ -645,29 +624,19 @@ export class BrowserStateSync {
   }
 
   /**
-   * Start background sync that runs every 5 minutes.
+   * @deprecated Use SyncManager.startAll() instead.
+   * SyncManager now handles periodic sync intervals centrally.
    */
   static startBackgroundSync(): void {
-    if (this.intervalId) {
-      console.log('[BrowserStateSync] Background sync already running');
-      return;
-    }
-
-    console.log(`[BrowserStateSync] Starting background sync (every ${SYNC_INTERVAL_MS / 1000 / 60} minutes)`);
-    this.intervalId = setInterval(() => {
-      this.sync().catch(err => console.error('[BrowserStateSync] Background sync error:', err));
-    }, SYNC_INTERVAL_MS);
+    // SyncManager handles periodic syncs now - no-op
+    console.log('[BrowserStateSync] startBackgroundSync() is deprecated. Use SyncManager.startAll()');
   }
 
   /**
-   * Stop background sync.
+   * @deprecated Use SyncManager.stopAll() instead.
    */
   static stopBackgroundSync(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-      console.log('[BrowserStateSync] Background sync stopped');
-    }
+    // SyncManager handles periodic syncs now - no-op
   }
 
   /**

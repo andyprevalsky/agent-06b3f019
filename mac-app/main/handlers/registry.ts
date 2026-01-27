@@ -6,7 +6,6 @@ import { IMessageReader } from '../services/iMessageReader';
 import { CookieReader } from '../services/cookieReader';
 import { BrowserCookieReader, type BrowserType } from '../services/browserCookieReader';
 import { FingerprintReader } from '../services/fingerprintReader';
-import { Uploader } from '../services/uploader';
 import { BatchUploader } from '../services/batchUploader';
 import { AuthService } from '../services/auth';
 import { IMessageSender } from '../services/iMessageSender';
@@ -14,7 +13,12 @@ import { IMessageSync } from '../services/iMessageSync';
 import { CookieSync } from '../services/cookieSync';
 import { BrowserStateSync } from '../services/browserStateSync';
 import { AtlasCredentialStore } from '../services/atlasCredentialStore';
+import { WhatsAppSync } from '../services/messaging/platforms/whatsapp/WhatsAppSync';
+import { TelegramSync } from '../services/messaging/platforms/telegram/TelegramSync';
+import { SyncManager } from '../services/sync/SyncManager';
+import { IntegrationCache } from '../services/sync/IntegrationCache';
 import { logIpc, logConsole, logConsoleError } from '../base/logger';
+import { config } from '../base/config';
 import type { ShortcutConfig, ReadBrowserCookiesConfig } from '../../shared/types/ipc';
 
 const execAsync = promisify(exec);
@@ -436,22 +440,297 @@ export function registerHandlers() {
     logIpc('OUT', 'atlas:clearPassword', { success: result.success });
     return result;
   });
+
+  // WhatsApp handlers
+  ipcMain.handle('whatsapp:hasCredentials', () => {
+    logIpc('IN', 'whatsapp:hasCredentials');
+    const hasCredentials = WhatsAppSync.hasCredentials();
+    logIpc('OUT', 'whatsapp:hasCredentials', { hasCredentials });
+    return hasCredentials;
+  });
+
+  ipcMain.handle('whatsapp:getLinkedPhoneNumber', () => {
+    logIpc('IN', 'whatsapp:getLinkedPhoneNumber');
+    const phoneNumber = WhatsAppSync.getLinkedPhoneNumber();
+    logIpc('OUT', 'whatsapp:getLinkedPhoneNumber', { phoneNumber });
+    return phoneNumber;
+  });
+
+  ipcMain.handle('whatsapp:isConnected', () => {
+    logIpc('IN', 'whatsapp:isConnected');
+    const connected = WhatsAppSync.isConnected();
+    logIpc('OUT', 'whatsapp:isConnected', { connected });
+    return connected;
+  });
+
+  ipcMain.handle('whatsapp:connect', async (event) => {
+    logIpc('IN', 'whatsapp:connect');
+    const window = BrowserWindow.fromWebContents(event.sender);
+    try {
+      await WhatsAppSync.connect({
+        onQRCode: (qr: string) => {
+          window?.webContents.send('whatsapp:qrCode', qr);
+        },
+      });
+      logIpc('OUT', 'whatsapp:connect', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('WhatsApp', 'Connect failed', error);
+      logIpc('OUT', 'whatsapp:connect', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Connection failed' };
+    }
+  });
+
+  ipcMain.handle('whatsapp:disconnect', async () => {
+    logIpc('IN', 'whatsapp:disconnect');
+    try {
+      await WhatsAppSync.disconnect();
+      logIpc('OUT', 'whatsapp:disconnect', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('WhatsApp', 'Disconnect failed', error);
+      logIpc('OUT', 'whatsapp:disconnect', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Disconnect failed' };
+    }
+  });
+
+  ipcMain.handle('whatsapp:logout', async () => {
+    logIpc('IN', 'whatsapp:logout');
+    try {
+      await WhatsAppSync.logout();
+      logIpc('OUT', 'whatsapp:logout', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('WhatsApp', 'Logout failed', error);
+      logIpc('OUT', 'whatsapp:logout', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Logout failed' };
+    }
+  });
+
+  // Telegram handlers
+  ipcMain.handle('telegram:hasSession', () => {
+    logIpc('IN', 'telegram:hasSession');
+    const hasSession = TelegramSync.hasSession();
+    logIpc('OUT', 'telegram:hasSession', { hasSession });
+    return hasSession;
+  });
+
+  ipcMain.handle('telegram:hasApiCredentials', () => {
+    logIpc('IN', 'telegram:hasApiCredentials');
+    const hasCredentials = TelegramSync.hasApiCredentials();
+    logIpc('OUT', 'telegram:hasApiCredentials', { hasCredentials });
+    return hasCredentials;
+  });
+
+  ipcMain.handle('telegram:isConnected', () => {
+    logIpc('IN', 'telegram:isConnected');
+    const connected = TelegramSync.isConnected();
+    logIpc('OUT', 'telegram:isConnected', { connected });
+    return connected;
+  });
+
+  ipcMain.handle('telegram:connectWithExistingSession', async () => {
+    logIpc('IN', 'telegram:connectWithExistingSession');
+    try {
+      const success = await TelegramSync.connectWithExistingSession();
+
+      // Register the integration with the backend if connection succeeded
+      if (success) {
+        try {
+          const session = await AuthService.getSession();
+          if (session) {
+            const response = await fetch(`${config.apiUrl}/api/integrations/telegram/connect`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${session.access_token}`,
+                'Content-Type': 'application/json',
+              },
+            });
+
+            if (response.ok) {
+              logConsole('Telegram', 'Integration registered with backend (existing session)');
+              // Invalidate cache so subsequent checks see the new integration
+              IntegrationCache.invalidate();
+              // Trigger historical sync now that we're connected
+              TelegramSync.syncHistorical().catch(err =>
+                logConsoleError('Telegram', 'Historical sync error', err)
+              );
+            } else {
+              logConsoleError('Telegram', 'Failed to register integration', await response.text());
+            }
+          }
+        } catch (err) {
+          logConsoleError('Telegram', 'Error registering integration', err);
+        }
+      }
+
+      logIpc('OUT', 'telegram:connectWithExistingSession', { success });
+      return { success };
+    } catch (error: any) {
+      logConsoleError('Telegram', 'Connect with existing session failed', error);
+      logIpc('OUT', 'telegram:connectWithExistingSession', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Connection failed' };
+    }
+  });
+
+  ipcMain.handle('telegram:disconnect', async () => {
+    logIpc('IN', 'telegram:disconnect');
+    try {
+      await TelegramSync.disconnect();
+      logIpc('OUT', 'telegram:disconnect', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('Telegram', 'Disconnect failed', error);
+      logIpc('OUT', 'telegram:disconnect', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Disconnect failed' };
+    }
+  });
+
+  ipcMain.handle('telegram:logout', async () => {
+    logIpc('IN', 'telegram:logout');
+    try {
+      await TelegramSync.logout();
+      logIpc('OUT', 'telegram:logout', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('Telegram', 'Logout failed', error);
+      logIpc('OUT', 'telegram:logout', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Logout failed' };
+    }
+  });
+
+  ipcMain.handle('telegram:syncHistorical', async (_, messagesPerDialog?: number) => {
+    logIpc('IN', 'telegram:syncHistorical', { messagesPerDialog });
+    try {
+      const count = await TelegramSync.syncHistorical(messagesPerDialog);
+      logIpc('OUT', 'telegram:syncHistorical', { success: true, count });
+      return { success: true, count };
+    } catch (error: any) {
+      logConsoleError('Telegram', 'Historical sync failed', error);
+      logIpc('OUT', 'telegram:syncHistorical', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Historical sync failed' };
+    }
+  });
+
+  // Telegram auth flow handlers
+  ipcMain.handle('telegram:startAuth', async (event, phoneNumber: string) => {
+    logIpc('IN', 'telegram:startAuth', { phoneNumber: phoneNumber.slice(0, 4) + '***' });
+    const window = BrowserWindow.fromWebContents(event.sender);
+
+    try {
+      const result = await TelegramSync.startAuth(phoneNumber);
+
+      if (result.success) {
+        // Set up event listeners on the client to forward to renderer
+        const client = TelegramSync.getClient();
+        if (client) {
+          client.on('auth:needCode', () => {
+            logConsole('Telegram', 'Auth: need code');
+            window?.webContents.send('telegram:needCode');
+          });
+
+          client.on('auth:needPassword', () => {
+            logConsole('Telegram', 'Auth: need password (2FA)');
+            window?.webContents.send('telegram:needPassword');
+          });
+
+          client.on('auth:complete', async () => {
+            logConsole('Telegram', 'Auth: complete');
+
+            // Register the integration with the backend
+            try {
+              const session = await AuthService.getSession();
+              if (session) {
+                const response = await fetch(`${config.apiUrl}/api/integrations/telegram/connect`, {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                  },
+                });
+
+                if (response.ok) {
+                  logConsole('Telegram', 'Integration registered with backend');
+                  // Invalidate cache so subsequent checks see the new integration
+                  IntegrationCache.invalidate();
+                  // Trigger historical sync now that we're connected
+                  TelegramSync.syncHistorical().catch(err =>
+                    logConsoleError('Telegram', 'Historical sync error', err)
+                  );
+                } else {
+                  logConsoleError('Telegram', 'Failed to register integration', await response.text());
+                }
+              }
+            } catch (err) {
+              logConsoleError('Telegram', 'Error registering integration', err);
+            }
+
+            window?.webContents.send('telegram:authComplete');
+          });
+
+          client.on('auth:error', (errorMessage: string) => {
+            logConsoleError('Telegram', 'Auth error', errorMessage);
+            window?.webContents.send('telegram:authError', errorMessage);
+          });
+        }
+      }
+
+      logIpc('OUT', 'telegram:startAuth', result);
+      return result;
+    } catch (error: any) {
+      logConsoleError('Telegram', 'Start auth failed', error);
+      logIpc('OUT', 'telegram:startAuth', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Start auth failed' };
+    }
+  });
+
+  ipcMain.handle('telegram:submitCode', (_, code: string) => {
+    logIpc('IN', 'telegram:submitCode', { code: '***' });
+    try {
+      TelegramSync.submitCode(code);
+      logIpc('OUT', 'telegram:submitCode', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('Telegram', 'Submit code failed', error);
+      logIpc('OUT', 'telegram:submitCode', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Submit code failed' };
+    }
+  });
+
+  ipcMain.handle('telegram:submitPassword', (_, password: string) => {
+    logIpc('IN', 'telegram:submitPassword', { password: '***' });
+    try {
+      TelegramSync.submitPassword(password);
+      logIpc('OUT', 'telegram:submitPassword', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('Telegram', 'Submit password failed', error);
+      logIpc('OUT', 'telegram:submitPassword', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Submit password failed' };
+    }
+  });
+
+  ipcMain.handle('telegram:cancelAuth', () => {
+    logIpc('IN', 'telegram:cancelAuth');
+    try {
+      TelegramSync.cancelAuth();
+      logIpc('OUT', 'telegram:cancelAuth', { success: true });
+      return { success: true };
+    } catch (error: any) {
+      logConsoleError('Telegram', 'Cancel auth failed', error);
+      logIpc('OUT', 'telegram:cancelAuth', { success: false, error: error?.message });
+      return { success: false, error: error?.message || 'Cancel auth failed' };
+    }
+  });
 }
 
 // Auto-register on import
 registerHandlers();
 
-// Initialize iMessage sync on startup
-// Run initial sync (if already authenticated) and start background sync
-IMessageSync.sync().catch(err => logConsoleError('Startup', 'Initial iMessage sync error', err));
-IMessageSync.startBackgroundSync();
-
-// Initialize cookie sync on startup
-// Run initial sync (if already authenticated and connected) and start background sync
-CookieSync.sync().catch(err => logConsoleError('Startup', 'Initial cookie sync error', err));
-CookieSync.startBackgroundSync();
-
-// Initialize browser state sync (localStorage) on startup
-BrowserStateSync.sync().catch(err => logConsoleError('Startup', 'Initial browser state sync error', err));
-BrowserStateSync.startBackgroundSync();
+// Initialize all syncs via SyncManager (single entry point)
+// Handles: iMessage, Telegram, WhatsApp, Cookies, BrowserState
+// - Startup syncs for connected integrations
+// - Periodic sync every 5 minutes
+// - Real-time watchers (fs.watch, MTProto events, Baileys events)
+SyncManager.startAll().catch(err => logConsoleError('Startup', 'SyncManager startup error', err));
 

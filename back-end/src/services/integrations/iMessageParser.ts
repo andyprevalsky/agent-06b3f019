@@ -67,6 +67,7 @@ function transformToContactToUpsert(contact: ContactWithMessages): ContactToUpse
       to: msg.is_from_me ? (msg.contactHandle || contactId) : 'me',
       timestamp: appleTimestampToDate(msg.date),
       message: msg.text,
+      externalId: String(msg.id), // iMessage ROWID for deduplication
     })),
   };
 }

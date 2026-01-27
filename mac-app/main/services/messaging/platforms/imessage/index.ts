@@ -1,0 +1,1 @@
+export { IMessageWatcher } from './IMessageWatcher';

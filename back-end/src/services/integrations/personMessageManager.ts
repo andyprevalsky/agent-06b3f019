@@ -24,6 +24,7 @@ export interface ContactToUpsert {
     to: string;
     timestamp: Date;
     message: string;
+    externalId?: string; // Platform-native message ID for deduplication
   }>;
 }
 
@@ -183,6 +184,7 @@ export async function upsertPersonAndMessageRecords(
               to: msg.to,
               timestamp: msg.timestamp,
               message: msg.message,
+              externalId: msg.externalId,
             })),
             skipDuplicates: true,
           });

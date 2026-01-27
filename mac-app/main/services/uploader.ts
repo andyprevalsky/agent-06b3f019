@@ -100,8 +100,40 @@ export class Uploader {
           contacts: payload.contacts,
           accessedAt: new Date().toISOString(),
         };
-        
+
         response = await fetch(`${config.apiUrl}/api/integrations/imessage/upload`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
+      } else if (integrationType === 'whatsapp') {
+        // WhatsApp messages go to the dedicated WhatsApp endpoint
+        // Data is expected to be ContactWithMessages[] from MessageTransformer
+        const body = {
+          contacts: data,
+          accessedAt: new Date().toISOString(),
+        };
+
+        response = await fetch(`${config.apiUrl}/api/integrations/whatsapp/upload`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
+      } else if (integrationType === 'telegram') {
+        // Telegram messages go to the dedicated Telegram endpoint
+        // Data is expected to be ContactWithMessages[] from MessageTransformer
+        const body = {
+          contacts: data,
+          accessedAt: new Date().toISOString(),
+        };
+
+        response = await fetch(`${config.apiUrl}/api/integrations/telegram/upload`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${accessToken}`,

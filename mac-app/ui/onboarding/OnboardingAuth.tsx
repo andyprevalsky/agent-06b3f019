@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { sendOTP, verifyOTP } from '@/lib/supabase';
 import { ArrowRight } from 'lucide-react';
 
@@ -30,6 +30,14 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
   const [phone, setPhone] = useState('');
   const [otp, setOtp] = useState('');
   const [smsAuthorized, setSmsAuthorized] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(0);
+
+  // Countdown timer for resend button
+  useEffect(() => {
+    if (resendCountdown <= 0) return;
+    const timer = setTimeout(() => setResendCountdown(resendCountdown - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [resendCountdown]);
 
   // Format phone number as user types: +1 (XXX)-XXX-XXXX
   const formatPhoneNumber = (value: string) => {
@@ -96,8 +104,26 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
       const strippedPhone = stripPhoneNumber(phone);
       await sendOTP(strippedPhone);
       setStep('otp');
+      setResendCountdown(30);
     } catch (err: any) {
       setError(err.message || 'Failed to send verification code');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResendOTP = async () => {
+    if (resendCountdown > 0) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const strippedPhone = stripPhoneNumber(phone);
+      await sendOTP(strippedPhone);
+      setResendCountdown(30);
+    } catch (err: any) {
+      setError(err.message || 'Failed to resend verification code');
     } finally {
       setLoading(false);
     }
@@ -276,17 +302,29 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
           </button>
         </form>
 
-        <button
-          type="button"
-          onClick={() => {
-            setStep('signup');
-            setOtp('');
-            setError(null);
-          }}
-          className="text-sm text-muted-foreground hover:text-foreground transition-colors mt-4"
-        >
-          Use a different number
-        </button>
+        <div className="flex items-center justify-center gap-4 mt-4">
+          <button
+            type="button"
+            onClick={handleResendOTP}
+            disabled={loading || resendCountdown > 0}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {resendCountdown > 0 ? `Resend in ${resendCountdown}s` : 'Resend code'}
+          </button>
+          <span className="text-muted-foreground/30">|</span>
+          <button
+            type="button"
+            onClick={() => {
+              setStep('signup');
+              setOtp('');
+              setError(null);
+              setResendCountdown(0);
+            }}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Use a different number
+          </button>
+        </div>
       </div>
     </div>
   );

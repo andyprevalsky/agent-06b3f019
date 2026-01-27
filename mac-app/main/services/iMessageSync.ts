@@ -1,21 +1,136 @@
-import { config } from '../base/config';
 import { AuthService } from './auth';
 import { IMessageReader } from './iMessageReader';
 import { BatchUploader } from './batchUploader';
-
-const SYNC_INTERVAL_MS = (5 * 60 * 1000); // 5 minutes
-
-interface Integration {
-  name: string;
-  status: string;
-  config?: {
-    lastFrontendAccessAt?: string;
-  };
-}
+import { IMessageWatcher } from './messaging/platforms/imessage/IMessageWatcher';
+import { MessageTransformer } from './messaging/MessageTransformer';
+import { IntegrationCache } from './sync/IntegrationCache';
+import type { SyncEvent, NormalizedMessage } from './messaging/types';
 
 export class IMessageSync {
-  private static intervalId: NodeJS.Timeout | null = null;
+  private static watcher: IMessageWatcher | null = null;
+  private static lastSyncRowId: number = 0;
 
+  /**
+   * Check if iMessage integration is connected for the current user.
+   */
+  private static async isIntegrationConnected(): Promise<boolean> {
+    return IntegrationCache.isConnected('imessage');
+  }
+
+  /**
+   * Upload normalized messages to the backend.
+   */
+  private static async uploadMessages(messages: NormalizedMessage[]): Promise<boolean> {
+    const session = await AuthService.getSession();
+    if (!session) {
+      console.log('[IMessageSync] Skipping upload - not authenticated');
+      return false;
+    }
+
+    const contacts = MessageTransformer.toContactWithMessages(messages);
+    const stats = MessageTransformer.getStats(messages);
+
+    console.log(`[IMessageSync] Uploading ${stats.total} messages from ${stats.uniqueContacts} contacts`);
+
+    const result = await BatchUploader.uploadInBatches(
+      'imessage',
+      contacts,
+      session.access_token,
+      null
+    );
+
+    return result.success;
+  }
+
+  /**
+   * Handle sync events from the real-time watcher.
+   */
+  private static async handleSyncEvent(event: SyncEvent): Promise<void> {
+    if (event.type === 'error') {
+      console.error('[IMessageSync] Real-time watcher error:', event.error);
+      return;
+    }
+
+    if (event.type === 'new_messages' && event.messages?.length) {
+      // Check if integration is still connected
+      const isConnected = await this.isIntegrationConnected();
+      if (!isConnected) {
+        console.log('[IMessageSync] Real-time: skipping upload - integration not connected');
+        return;
+      }
+
+      console.log(`[IMessageSync] Real-time: ${event.messages.length} new message(s) detected`);
+      const success = await this.uploadMessages(event.messages);
+
+      if (success) {
+        console.log('[IMessageSync] Real-time: upload complete');
+      } else {
+        console.error('[IMessageSync] Real-time: upload failed');
+      }
+    }
+  }
+
+  /**
+   * Query new messages since the last known ROWID for real-time watcher.
+   */
+  private static async queryNewMessagesForWatcher(): Promise<NormalizedMessage[]> {
+    const rawMessages = await IMessageReader.readMessagesSinceRowId(this.lastSyncRowId);
+
+    if (rawMessages.length > 0) {
+      // Update lastSyncRowId
+      const maxId = Math.max(...rawMessages.map(m => m.id));
+      if (maxId > this.lastSyncRowId) {
+        this.lastSyncRowId = maxId;
+      }
+    }
+
+    return IMessageReader.toNormalizedMessages(rawMessages);
+  }
+
+  /**
+   * Start real-time file watching for iMessage database changes.
+   */
+  static startRealTimeSync(): void {
+    if (this.watcher?.isActive()) {
+      console.log('[IMessageSync] Real-time sync already running');
+      return;
+    }
+
+    if (!IMessageReader.checkAccess()) {
+      console.log('[IMessageSync] Cannot start real-time sync - no iMessage access');
+      return;
+    }
+
+    // Initialize the last ROWID to current max to avoid re-syncing existing messages
+    this.lastSyncRowId = IMessageReader.getMaxRowId();
+    console.log(`[IMessageSync] Initializing real-time sync from ROWID ${this.lastSyncRowId}`);
+
+    this.watcher = new IMessageWatcher(() => this.queryNewMessagesForWatcher());
+    this.watcher.on('sync', (event: SyncEvent) => {
+      this.handleSyncEvent(event).catch(err => {
+        console.error('[IMessageSync] Error handling sync event:', err);
+      });
+    });
+
+    this.watcher.start();
+    console.log('[IMessageSync] Real-time sync started');
+  }
+
+  /**
+   * Stop real-time file watching.
+   */
+  static stopRealTimeSync(): void {
+    if (this.watcher) {
+      this.watcher.stop();
+      this.watcher.removeAllListeners();
+      this.watcher = null;
+      console.log('[IMessageSync] Real-time sync stopped');
+    }
+  }
+
+  /**
+   * Full sync (used for periodic background sync and initial sync).
+   */
   static async sync(): Promise<void> {
     const session = await AuthService.getSession();
     if (!session) {
@@ -29,30 +144,18 @@ export class IMessageSync {
     }
 
     try {
-      // Fetch integrations to get last sync timestamp
-      const response = await fetch(`${config.apiUrl}/api/integrations`, {
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-      });
+      // Check integration status via cache
+      const integration = await IntegrationCache.getIntegration('imessage');
 
-      if (!response.ok) {
-        console.error('[IMessageSync] Failed to fetch integrations:', response.statusText);
-        return;
-      }
-
-      const data = await response.json() as { integrations?: Integration[] };
-      const integrations = data.integrations;
-      const imessageIntegration = integrations?.find(i => i.name === 'imessage');
-      
       // Only sync if already connected (user has previously synced)
-      if (!imessageIntegration || imessageIntegration.status !== 'CONNECTED') {
+      if (!integration || integration.status !== 'CONNECTED') {
         console.log('[IMessageSync] Skipping sync - integration not connected');
         return;
       }
 
-      const lastAccessedAt = imessageIntegration?.config?.lastFrontendAccessAt;
-      
+      const integrationConfig = integration.config as { lastFrontendAccessAt?: string } | undefined;
+      const lastAccessedAt = integrationConfig?.lastFrontendAccessAt;
+
       // Read messages (filtered by timestamp if available)
       const isIncrementalSync = !!lastAccessedAt;
       console.log(`[IMessageSync] Reading messages${lastAccessedAt ? ` since ${lastAccessedAt}` : ' (full sync)'}`);
@@ -72,33 +175,42 @@ export class IMessageSync {
       );
 
       if (result.success) {
-        console.log('[IMessageSync] ✅ Sync complete');
+        console.log('[IMessageSync] Sync complete');
+        // Update lastSyncRowId for real-time watcher
+        if (messages.length > 0) {
+          const maxId = Math.max(...messages.map(m => m.id));
+          if (maxId > this.lastSyncRowId) {
+            this.lastSyncRowId = maxId;
+          }
+        }
       } else {
-        console.error('[IMessageSync] ❌ Sync failed:', result.message);
+        console.error('[IMessageSync] Sync failed:', result.message);
       }
     } catch (error) {
       console.error('[IMessageSync] Error during sync:', error);
     }
   }
 
+  /**
+   * @deprecated Use SyncManager.startAll() instead. This is kept for backward compatibility.
+   * SyncManager now handles periodic sync intervals centrally.
+   */
   static startBackgroundSync(): void {
-    if (this.intervalId) {
-      console.log('[IMessageSync] Background sync already running');
-      return;
-    }
-
-    console.log(`[IMessageSync] Starting background sync (every ${SYNC_INTERVAL_MS / 1000 / 60} minutes)`);
-    this.intervalId = setInterval(() => {
-      this.sync().catch(err => console.error('[IMessageSync] Background sync error:', err));
-    }, SYNC_INTERVAL_MS);
+    // SyncManager handles periodic syncs now - just start real-time
+    this.startRealTimeSync();
   }
 
+  /**
+   * @deprecated Use SyncManager.stopAll() instead.
+   */
   static stopBackgroundSync(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-      console.log('[IMessageSync] Background sync stopped');
-    }
+    this.stopRealTimeSync();
+  }
+
+  /**
+   * Check if real-time sync is active.
+   */
+  static isRealTimeSyncActive(): boolean {
+    return this.watcher?.isActive() ?? false;
   }
 }
-

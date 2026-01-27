@@ -110,6 +110,41 @@ export interface IPC {
     hasPassword: () => Promise<boolean>;
     clearPassword: () => Promise<{ success: boolean }>;
   };
+
+  // WhatsApp
+  whatsapp?: {
+    hasCredentials: () => Promise<boolean>;
+    getLinkedPhoneNumber: () => Promise<string | null>;
+    isConnected: () => Promise<boolean>;
+    connect: () => Promise<{ success: boolean; error?: string }>;
+    disconnect: () => Promise<{ success: boolean; error?: string }>;
+    logout: () => Promise<{ success: boolean; error?: string }>;
+  };
+
+  // WhatsApp events
+  onWhatsAppQRCode?: (callback: (qr: string) => void) => void;
+
+  // Telegram
+  telegram?: {
+    hasSession: () => Promise<boolean>;
+    hasApiCredentials: () => Promise<boolean>;
+    isConnected: () => Promise<boolean>;
+    connectWithExistingSession: () => Promise<{ success: boolean; error?: string }>;
+    disconnect: () => Promise<{ success: boolean; error?: string }>;
+    logout: () => Promise<{ success: boolean; error?: string }>;
+    syncHistorical: (messagesPerDialog?: number) => Promise<{ success: boolean; count?: number; error?: string }>;
+    // Auth flow methods
+    startAuth: (phoneNumber: string) => Promise<{ success: boolean; error?: string }>;
+    submitCode: (code: string) => Promise<{ success: boolean; error?: string }>;
+    submitPassword: (password: string) => Promise<{ success: boolean; error?: string }>;
+    cancelAuth: () => Promise<{ success: boolean; error?: string }>;
+  };
+
+  // Telegram auth events
+  onTelegramNeedCode?: (callback: () => void) => void;
+  onTelegramNeedPassword?: (callback: () => void) => void;
+  onTelegramAuthComplete?: (callback: () => void) => void;
+  onTelegramAuthError?: (callback: (error: string) => void) => void;
 }
 
 // Data types

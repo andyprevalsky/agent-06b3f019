@@ -94,6 +94,17 @@ async function main() {
   });
   console.log(`✓ Deleted ${deletedPendingBatches.count} PendingLocalStorageBatch records`);
 
+  // 12. Delete Messages (through agents)
+  const userAgents = await prisma.agent.findMany({
+    where: { userId: targetUser.userId },
+    select: { id: true },
+  });
+  const agentIds = userAgents.map((a) => a.id);
+  const deletedMessages = await prisma.message.deleteMany({
+    where: { agentId: { in: agentIds } },
+  });
+  console.log(`✓ Deleted ${deletedMessages.count} Message records`);
+
   console.log('\n=== Reset complete ===');
 }
 

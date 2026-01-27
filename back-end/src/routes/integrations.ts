@@ -4,6 +4,8 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import multer from 'multer';
 import fs from 'fs';
 import { parseIMessageData, ContactWithMessages } from '../services/integrations/iMessageParser';
+import { parseWhatsAppData, WhatsAppContactWithMessages } from '../services/integrations/whatsappParser';
+import { parseTelegramData, TelegramContactWithMessages } from '../services/integrations/telegramParser';
 import { parseVcfContent, importVcfContacts } from '../services/integrations/vcfParser';
 import { parseEmailZip, importEmailsToDb } from '../services/integrations/emailParser';
 import { fetchGmailEmails, parseGmailOAuthEmails, fetchGmailMessagesSince } from '../services/integrations/gmailParser';
@@ -1094,6 +1096,276 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
     console.error('Error uploading iMessage payload:', error);
     return res.status(500).json({
       error: 'Failed to upload iMessage payload',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/whatsapp/upload
+ *
+ * Upload WhatsApp messages from the Mac app.
+ */
+router.post('/whatsapp/upload', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { contacts, accessedAt } = req.body as { contacts?: WhatsAppContactWithMessages[]; accessedAt?: string };
+
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      return res.status(400).json({
+        error: 'contacts array is required',
+      });
+    }
+
+    const totalMessages = contacts.reduce(
+      (sum, contact) => sum + (contact.messages?.length ?? 0),
+      0
+    );
+
+    console.log(
+      `[Integrations] Received WhatsApp payload from user ${userId} (${contacts.length} contacts, ${totalMessages} messages)`
+    );
+
+    const integration = await prisma.integration.upsert({
+      where: {
+        userId_name: {
+          userId,
+          name: 'whatsapp',
+        },
+      },
+      create: {
+        userId,
+        name: 'whatsapp',
+        type: IntegrationType.DATA_SOURCE,
+        status: IntegrationStatus.SYNCING,
+        config: {
+          contacts: contacts.length,
+          messages: totalMessages,
+          uploadedAt: new Date().toISOString(),
+          lastFrontendAccessAt: accessedAt || new Date().toISOString(),
+        },
+      },
+      update: {
+        status: IntegrationStatus.SYNCING,
+        config: {
+          contacts: contacts.length,
+          messages: totalMessages,
+          uploadedAt: new Date().toISOString(),
+          lastFrontendAccessAt: accessedAt || new Date().toISOString(),
+        },
+      },
+    });
+
+    const jobId = `whatsapp-upload-${userId}-${Date.now()}`;
+    res.json({
+      message: 'WhatsApp payload received, processing in background',
+      integration,
+      jobId,
+    });
+
+    (async () => {
+      try {
+        await parseWhatsAppData(userId, contacts, jobId);
+
+        const existingConfig = (integration.config as Record<string, unknown>) || {};
+        const existingContacts = (existingConfig.contacts as number) || 0;
+        const existingMessages = (existingConfig.messages as number) || 0;
+
+        await prisma.integration.update({
+          where: { id: integration.id },
+          data: {
+            status: IntegrationStatus.CONNECTED,
+            isActive: true,
+            lastSyncAt: new Date(),
+            lastSuccessfulSyncAt: new Date(),
+            config: {
+              ...existingConfig,
+              contacts: existingContacts + contacts.length,
+              messages: existingMessages + totalMessages,
+              lastJobId: jobId,
+              lastUploadedAt: new Date().toISOString(),
+              lastFrontendAccessAt: accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
+            },
+          },
+        });
+      } catch (error) {
+        console.error('Error processing WhatsApp payload:', error);
+        await prisma.integration.update({
+          where: { id: integration.id },
+          data: {
+            status: IntegrationStatus.SYNC_FAILED,
+            lastSyncAt: new Date(),
+            lastFailedSyncAt: new Date(),
+            failureReason: error instanceof Error ? error.message : 'Unknown error',
+          },
+        });
+      }
+    })();
+  } catch (error) {
+    console.error('Error uploading WhatsApp payload:', error);
+    return res.status(500).json({
+      error: 'Failed to upload WhatsApp payload',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/telegram/connect
+ *
+ * Mark Telegram integration as connected after successful auth.
+ * Call this after GramJS auth completes to create the integration record.
+ */
+router.post('/telegram/connect', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+
+    console.log(`[Integrations] Creating Telegram integration for user ${userId}`);
+
+    const integration = await prisma.integration.upsert({
+      where: {
+        userId_name: {
+          userId,
+          name: 'telegram',
+        },
+      },
+      create: {
+        userId,
+        name: 'telegram',
+        type: IntegrationType.DATA_SOURCE,
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config: {
+          connectedAt: new Date().toISOString(),
+        },
+      },
+      update: {
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        lastSyncAt: new Date(),
+        config: {
+          connectedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    res.json({
+      message: 'Telegram connected successfully',
+      integration,
+    });
+  } catch (error) {
+    console.error('Error connecting Telegram:', error);
+    return res.status(500).json({
+      error: 'Failed to connect Telegram',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/telegram/upload
+ *
+ * Upload Telegram messages from the Mac app.
+ */
+router.post('/telegram/upload', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { contacts, accessedAt } = req.body as { contacts?: TelegramContactWithMessages[]; accessedAt?: string };
+
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      return res.status(400).json({
+        error: 'contacts array is required',
+      });
+    }
+
+    const totalMessages = contacts.reduce(
+      (sum, contact) => sum + (contact.messages?.length ?? 0),
+      0
+    );
+
+    console.log(
+      `[Integrations] Received Telegram payload from user ${userId} (${contacts.length} contacts, ${totalMessages} messages)`
+    );
+
+    const integration = await prisma.integration.upsert({
+      where: {
+        userId_name: {
+          userId,
+          name: 'telegram',
+        },
+      },
+      create: {
+        userId,
+        name: 'telegram',
+        type: IntegrationType.DATA_SOURCE,
+        status: IntegrationStatus.SYNCING,
+        config: {
+          contacts: contacts.length,
+          messages: totalMessages,
+          uploadedAt: new Date().toISOString(),
+          lastFrontendAccessAt: accessedAt || new Date().toISOString(),
+        },
+      },
+      update: {
+        status: IntegrationStatus.SYNCING,
+        config: {
+          contacts: contacts.length,
+          messages: totalMessages,
+          uploadedAt: new Date().toISOString(),
+          lastFrontendAccessAt: accessedAt || new Date().toISOString(),
+        },
+      },
+    });
+
+    const jobId = `telegram-upload-${userId}-${Date.now()}`;
+    res.json({
+      message: 'Telegram payload received, processing in background',
+      integration,
+      jobId,
+    });
+
+    (async () => {
+      try {
+        await parseTelegramData(userId, contacts, jobId);
+
+        const existingConfig = (integration.config as Record<string, unknown>) || {};
+        const existingContacts = (existingConfig.contacts as number) || 0;
+        const existingMessages = (existingConfig.messages as number) || 0;
+
+        await prisma.integration.update({
+          where: { id: integration.id },
+          data: {
+            status: IntegrationStatus.CONNECTED,
+            isActive: true,
+            lastSyncAt: new Date(),
+            lastSuccessfulSyncAt: new Date(),
+            config: {
+              ...existingConfig,
+              contacts: existingContacts + contacts.length,
+              messages: existingMessages + totalMessages,
+              lastJobId: jobId,
+              lastUploadedAt: new Date().toISOString(),
+              lastFrontendAccessAt: accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
+            },
+          },
+        });
+      } catch (error) {
+        console.error('Error processing Telegram payload:', error);
+        await prisma.integration.update({
+          where: { id: integration.id },
+          data: {
+            status: IntegrationStatus.SYNC_FAILED,
+            lastSyncAt: new Date(),
+            lastFailedSyncAt: new Date(),
+            failureReason: error instanceof Error ? error.message : 'Unknown error',
+          },
+        });
+      }
+    })();
+  } catch (error) {
+    console.error('Error uploading Telegram payload:', error);
+    return res.status(500).json({
+      error: 'Failed to upload Telegram payload',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

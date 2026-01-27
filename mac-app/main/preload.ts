@@ -127,6 +127,68 @@ const api: IPC = {
     clearPassword: () =>
       ipcRenderer.invoke('atlas:clearPassword') as Promise<{ success: boolean }>,
   },
+
+  // WhatsApp
+  whatsapp: {
+    hasCredentials: () =>
+      ipcRenderer.invoke('whatsapp:hasCredentials') as Promise<boolean>,
+    getLinkedPhoneNumber: () =>
+      ipcRenderer.invoke('whatsapp:getLinkedPhoneNumber') as Promise<string | null>,
+    isConnected: () =>
+      ipcRenderer.invoke('whatsapp:isConnected') as Promise<boolean>,
+    connect: () =>
+      ipcRenderer.invoke('whatsapp:connect') as Promise<{ success: boolean; error?: string }>,
+    disconnect: () =>
+      ipcRenderer.invoke('whatsapp:disconnect') as Promise<{ success: boolean; error?: string }>,
+    logout: () =>
+      ipcRenderer.invoke('whatsapp:logout') as Promise<{ success: boolean; error?: string }>,
+  },
+
+  // WhatsApp events
+  onWhatsAppQRCode: (callback: (qr: string) => void) => {
+    ipcRenderer.on('whatsapp:qrCode', (_, qr) => callback(qr as string));
+  },
+
+  // Telegram
+  telegram: {
+    hasSession: () =>
+      ipcRenderer.invoke('telegram:hasSession') as Promise<boolean>,
+    hasApiCredentials: () =>
+      ipcRenderer.invoke('telegram:hasApiCredentials') as Promise<boolean>,
+    isConnected: () =>
+      ipcRenderer.invoke('telegram:isConnected') as Promise<boolean>,
+    connectWithExistingSession: () =>
+      ipcRenderer.invoke('telegram:connectWithExistingSession') as Promise<{ success: boolean; error?: string }>,
+    disconnect: () =>
+      ipcRenderer.invoke('telegram:disconnect') as Promise<{ success: boolean; error?: string }>,
+    logout: () =>
+      ipcRenderer.invoke('telegram:logout') as Promise<{ success: boolean; error?: string }>,
+    syncHistorical: (messagesPerDialog?: number) =>
+      ipcRenderer.invoke('telegram:syncHistorical', messagesPerDialog) as Promise<{ success: boolean; count?: number; error?: string }>,
+    // Auth flow methods
+    startAuth: (phoneNumber: string) =>
+      ipcRenderer.invoke('telegram:startAuth', phoneNumber) as Promise<{ success: boolean; error?: string }>,
+    submitCode: (code: string) =>
+      ipcRenderer.invoke('telegram:submitCode', code) as Promise<{ success: boolean; error?: string }>,
+    submitPassword: (password: string) =>
+      ipcRenderer.invoke('telegram:submitPassword', password) as Promise<{ success: boolean; error?: string }>,
+    cancelAuth: () =>
+      ipcRenderer.invoke('telegram:cancelAuth') as Promise<{ success: boolean; error?: string }>,
+  },
+
+  // Telegram auth events
+  onTelegramNeedCode: (callback: () => void) => {
+    ipcRenderer.on('telegram:needCode', () => callback());
+  },
+  onTelegramNeedPassword: (callback: () => void) => {
+    ipcRenderer.on('telegram:needPassword', () => callback());
+  },
+  onTelegramAuthComplete: (callback: () => void) => {
+    ipcRenderer.on('telegram:authComplete', () => callback());
+  },
+  onTelegramAuthError: (callback: (error: string) => void) => {
+    ipcRenderer.on('telegram:authError', (_, error) => callback(error as string));
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);
