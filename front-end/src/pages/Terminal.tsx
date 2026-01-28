@@ -1847,7 +1847,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
               placeholder={selectedAgentId ? "Type your message..." : "Enter any goal"}
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
-              availableModels={models}
+              availableModels={models.filter(m => m.id === 'rose-labs/rose-1-lite' || m.id === 'rose-labs/rose-1-ultra')}
               modelsLoading={modelsLoading}
               contextPercentage={agentDetail ? getContextPercentage(agentDetail, models) : 0}
               contextSize={agentDetail?.context_size || 0}

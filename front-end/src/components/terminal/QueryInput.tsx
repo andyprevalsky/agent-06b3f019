@@ -545,10 +545,6 @@ export default function QueryInput({
 
   // Tool picker removed - LLM automatically selects tools based on goal
 
-  // Separate featured (first 6) from rest
-  const featuredModels = availableModels.slice(0, 6);
-  const otherModels = availableModels.slice(6);
-  
   const selectedModelInfo = availableModels.find((m) => m.id === selectedModel);
   const selectedModelName = selectedModelInfo 
     ? `${selectedModelInfo.provider}/${selectedModelInfo.name}`
@@ -902,23 +898,15 @@ export default function QueryInput({
                   {showModelSelector && (
                     <PopoverContent className="w-[300px] p-0 z-50" align="start">
                     <Command className="bg-white">
-                      <CommandInput placeholder="Search models..." />
-                      <CommandList className="max-h-[400px]">
-                        <CommandEmpty>No models available.</CommandEmpty>
-                        {/* Featured Models */}
-                        <CommandGroup heading="⭐ Featured">
-                          {featuredModels.map((model) => {
-                            const formatPrice = (price?: string) => {
-                              if (!price) return null;
-                              const num = parseFloat(price);
-                              if (num === 0) return 'FREE';
-                              return `$${(num * 1000000).toFixed(2)}/M`;
+                      <CommandList>
+                        <CommandGroup>
+                          {availableModels.map((model) => {
+                            const getModelDescription = (modelId: string) => {
+                              if (modelId === 'rose-labs/rose-1-lite') return 'Fast and cost-effective for everyday tasks';
+                              if (modelId === 'rose-labs/rose-1-ultra') return 'Most capable for complex reasoning';
+                              return model.provider;
                             };
-                            
-                            const inputPrice = formatPrice(model.pricing?.prompt);
-                            const outputPrice = formatPrice(model.pricing?.completion);
-                            const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
-                            
+
                             return (
                               <CommandItem
                                 key={model.id}
@@ -930,49 +918,7 @@ export default function QueryInput({
                                 <div className="flex items-center justify-between w-full">
                                   <div className="flex flex-col gap-0.5">
                                     <span className="font-medium">{model.name}</span>
-                                    <span className="text-xs text-gray-500">{model.provider}</span>
-                                    {priceText && (
-                                      <span className="text-[10px] text-gray-400">{priceText}</span>
-                                    )}
-                                  </div>
-                                  {model.id === selectedModel && (
-                                    <span className="text-primary">✓</span>
-                                  )}
-                                </div>
-                              </CommandItem>
-                            );
-                          })}
-                        </CommandGroup>
-
-                        {/* Other Models */}
-                        <CommandGroup heading="All Models">
-                          {otherModels.map((model) => {
-                            const formatPrice = (price?: string) => {
-                              if (!price) return null;
-                              const num = parseFloat(price);
-                              if (num === 0) return 'FREE';
-                              return `$${(num * 1000000).toFixed(2)}/M`;
-                            };
-                            
-                            const inputPrice = formatPrice(model.pricing?.prompt);
-                            const outputPrice = formatPrice(model.pricing?.completion);
-                            const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
-                            
-                            return (
-                              <CommandItem
-                                key={model.id}
-                                onSelect={() => {
-                                  onModelChange?.(model.id);
-                                  setShowModelPicker(false);
-                                }}
-                              >
-                                <div className="flex items-center justify-between w-full">
-                                  <div className="flex flex-col gap-0.5">
-                                    <span className="text-sm">{model.name}</span>
-                                    <span className="text-xs text-gray-500">{model.provider}</span>
-                                    {priceText && (
-                                      <span className="text-[10px] text-gray-400">{priceText}</span>
-                                    )}
+                                    <span className="text-xs text-gray-500">{getModelDescription(model.id)}</span>
                                   </div>
                                   {model.id === selectedModel && (
                                     <span className="text-primary">✓</span>
