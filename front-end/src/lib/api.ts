@@ -60,6 +60,7 @@ export interface Agent {
   tree_cost_cents: number;    // Total tree cost in cents
   created_at: string;
   updated_at: string;
+  write_lock_enabled: boolean;
 }
 
 export interface ResponseSchemaField {
@@ -360,6 +361,7 @@ export async function updateAgent(
     tool_ids?: string[];
     verifier_prompt?: string;
     price_limit_cents?: number;  // Price limit in cents (must be >= current tree_cost_cents)
+    write_lock_enabled?: boolean;
   }
 ): Promise<AgentDetail> {
   const headers = getAuthHeaders();

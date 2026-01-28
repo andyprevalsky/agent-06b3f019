@@ -291,11 +291,14 @@ class MessagePersonTool(BaseModel):
 
 
 class SpawnBrowserAgentTool(BaseModel):
-    """Spawn an autonomous browser agent to complete short, simple web tasks. Best for: purchases, checkouts, form submissions, downloading files, and reading content from JS-heavy sites. The browser agent should be used for short simple trajectories, not complex reasoning loops—it has a 25-step limit. Provide a complete, high-level goal - the browser agent will autonomously execute all necessary steps. Login state and saved payment methods persist across sessions. Minimize the work done by this tool and keep the trajectory as short as possible. Give it the deepest starting URL you reasonably can. Do not call this tool multiple times in parallel."""
+    """Spawn an autonomous browser agent to complete short, simple web tasks. Best for: purchases, checkouts, form submissions, downloading files, and reading content from JS-heavy sites. The browser agent should be used for short simple trajectories, not complex reasoning loops—it has a 25-step limit. Provide a complete, high-level goal - the browser agent will autonomously execute all necessary steps. Login state and saved payment methods persist across sessions. Minimize the work done by this tool and keep the trajectory as short as possible. Do not call this tool multiple times in parallel."""
 
     tool: Literal["spawn_browser_agent"]
+    start_url: str = Field(
+        description="The URL to navigate to first. The browser will automatically navigate here before starting. Examples: 'https://amazon.com/dp/B09V3KXJPB', 'https://x.com/compose/post', 'https://uber.com/orders'"
+    )
     goal: str = Field(
-        description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy a black beanie under $35 from Amazon', 'Order a Chipotle bowl from Uber Eats with white rice, steak, fajita peppers, corn, pico de gallo, and hot sauce', 'Purchase the cheapest MacBook Pro M3 from Amazon, Best Buy, or Apple Store', 'Find the top 3 trending Python repos on GitHub and summarize their READMEs'"
+        description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy this item', 'Post a tweet saying Hello World', 'Reorder my last Uber Eats order'"
     )
     output_schema: ResponseSchemaConfig
     attachments: Optional[List[str]] = Field(

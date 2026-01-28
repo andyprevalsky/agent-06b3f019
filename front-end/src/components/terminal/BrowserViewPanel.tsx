@@ -142,11 +142,11 @@ export default function BrowserViewPanel({
     return { isComplete: complete, isSuccess: success, completionMessage: message };
   }, [messages, taskId]);
   
-  // Listen for BrowserBase disconnection message (for real-time detection)
+  // Listen for Steel disconnection message (for real-time detection)
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data === 'browserbase-disconnected') {
-        console.log('🔴 BrowserBase iframe disconnected');
+        console.log('🔴 Steel iframe disconnected');
         if (!isComplete) {
           setIsDisconnected(true);
         }

@@ -1382,8 +1382,9 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   // Extract action array - it could be in different places
   let actions = completion.action;
   if (!actions || actions.length === 0) {
-    console.log('⚠️ No actions in completion, checking for alternative formats');
-    throw new Error(`normalizeBrowserUseResponse: No actions in completion. Got: ${JSON.stringify(completion).slice(0, 300)}`);
+    // Model returned no actions - throw error to trigger provider failover
+    console.log('⚠️ No actions in completion, triggering failover to next provider');
+    throw new Error('normalizeBrowserUseResponse: No actions returned in completion');
   }
   
   const firstAction = actions[0];
@@ -2991,10 +2992,15 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  // Extract request ID from header (sent by agent) or generate one
+  const requestId = req.headers.get('x-request-id') || crypto.randomUUID().slice(0, 8);
+  console.log(`\n🔷 [${requestId}] ========== REQUEST START ==========`);
+
   try {
     // Extract API key from header
     const apiKey = req.headers.get('x-api-key');
     if (!apiKey) {
+      console.log(`❌ [${requestId}] Missing x-api-key header`);
       return new Response(JSON.stringify({ error: 'Missing x-api-key header' }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 401,
@@ -3009,30 +3015,33 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Validate API key
+    console.log(`🔍 [${requestId}] Validating API key...`);
     const authInfo = await validateApiKey(apiKey, supabase);
     if (!authInfo) {
+      console.log(`❌ [${requestId}] Invalid API key`);
       return new Response(JSON.stringify({ error: 'Invalid API key' }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 401,
       });
     }
+    console.log(`✅ [${requestId}] API key validated for userId: ${authInfo.userId}`);
 
     // Parse request body (raw first for browser-use detection)
     const rawBody = await req.json();
-    
+
     // ============================================
     // HANDLE BROWSER-USE REQUESTS (EARLY)
     // Browser-use has different format: task + browser_state instead of messages
     // ============================================
     if (isBrowserUseRequest(rawBody)) {
-      console.log(`🌐 Browser-use request detected for model: ${rawBody.model}`);
+      console.log(`🌐 [${requestId}] Browser-use request detected for model: ${rawBody.model}`);
       const browserUseReq = rawBody as BrowserUseRequest;
 
       // Tracing: log action_history details
-      console.log('🔍 [TRACE] action_history count:', browserUseReq.action_history.length);
+      console.log(`🔍 [${requestId}] action_history count: ${browserUseReq.action_history.length}`);
       if (browserUseReq.action_history.length > 0) {
         const lastAction = browserUseReq.action_history[browserUseReq.action_history.length - 1];
-        console.log('🔍 [TRACE] Last action:', {
+        console.log(`🔍 [${requestId}] Last action:`, {
           action: lastAction.action,
           hasThinking: !!lastAction.thinking,
           hasScreenshot: !!lastAction.screenshot,
@@ -3042,32 +3051,34 @@ serve(async (req) => {
 
       // Tracing: log screenshot metadata
       if (browserUseReq.browser_state.screenshot) {
-        console.log('📸 [SCREENSHOT] Rose API received', {
+        console.log(`📸 [${requestId}] Screenshot received:`, {
           viewport: `${browserUseReq.browser_state.viewport.width}x${browserUseReq.browser_state.viewport.height}`,
           screenshotChars: browserUseReq.browser_state.screenshot.length,
           isBase64: !browserUseReq.browser_state.screenshot.startsWith('http')
         });
       }
-      
+
       // Get the browser-use pool
       const browserPool = MODEL_POOLS['rose-1-browser-use'];
       if (!browserPool) {
-        return new Response(JSON.stringify({ 
-          error: 'Browser-use pool not configured' 
+        console.log(`❌ [${requestId}] Browser-use pool not configured`);
+        return new Response(JSON.stringify({
+          error: 'Browser-use pool not configured'
         }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
           status: 500,
         });
       }
-      
+
       // Helper to call a specific provider with full request/response logging
       async function callProvider(
         provider: string,
         providerIndex: number
       ): Promise<{ action: UnifiedAction; ttftMs: number; actualModel: string; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
         // Log the full request (with truncated screenshots)
-        console.log(`\n📤 [${provider}] FULL REQUEST:`);
+        console.log(`\n📤 [${requestId}] [${provider}] FULL REQUEST:`);
         console.log(JSON.stringify(truncateForLogging({
+          requestId,
           provider,
           providerIndex,
           task: browserUseReq.task,
@@ -3080,12 +3091,13 @@ serve(async (req) => {
           const browserUseApiKey = Deno.env.get('BROWSER_USE_API_KEY');
           if (!browserUseApiKey) throw new Error('BROWSER_USE_API_KEY not configured');
 
+          console.log(`🚀 [${requestId}] [${provider}] Calling browser-use API...`);
           const result = await callBrowserUseLLM(browserUseReq, browserUseApiKey);
           const normalizedAction = normalizeBrowserUseResponse(result.response);
 
-          console.log(`\n📥 [${provider}] FULL RESPONSE:`);
+          console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
           console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
-          console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
+          console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
           console.log(JSON.stringify(normalizedAction, null, 2));
 
           return {
@@ -3102,14 +3114,15 @@ serve(async (req) => {
             throw new Error('Yutori requires screenshot');
           }
 
+          console.log(`🚀 [${requestId}] [${provider}] Calling Yutori API...`);
           const result = await callYutoriLLM(browserUseReq, yutoriApiKey);
 
-          console.log(`\n📥 [${provider}] FULL RESPONSE:`);
+          console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
           console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
 
           const normalizedAction = normalizeYutoriResponse(result.response, browserUseReq.browser_state.viewport);
 
-          console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
+          console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
           console.log(JSON.stringify(normalizedAction, null, 2));
 
           return {
@@ -3126,14 +3139,15 @@ serve(async (req) => {
             throw new Error('Anthropic CUA requires base64 screenshot');
           }
 
+          console.log(`🚀 [${requestId}] [${provider}] Calling Anthropic CUA API...`);
           const result = await callAnthropicCUA(browserUseReq, anthropicApiKey);
 
-          console.log(`\n📥 [${provider}] FULL RESPONSE:`);
+          console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
           console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
 
           const normalizedAction = normalizeAnthropicCUAResponse(result.response);
 
-          console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
+          console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
           console.log(JSON.stringify(normalizedAction, null, 2));
 
           return {
@@ -3148,14 +3162,15 @@ serve(async (req) => {
           const openRouterKey = Deno.env.get('OPENROUTER_API_KEY');
           if (!openRouterKey) throw new Error('OPENROUTER_API_KEY not configured');
 
+          console.log(`🚀 [${requestId}] [${provider}] Calling OpenRouter API...`);
           const result = await callGenericLLM(browserUseReq, provider, openRouterKey, supabaseUrl);
 
-          console.log(`\n📥 [${provider}] FULL RESPONSE:`);
+          console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
           console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
 
           const normalizedAction = normalizeBrowserUseResponse(result.response);
 
-          console.log(`\n🔄 [${provider}] NORMALIZED ACTION:`);
+          console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
           console.log(JSON.stringify(normalizedAction, null, 2));
 
           return {
@@ -3172,23 +3187,25 @@ serve(async (req) => {
       // ============================================
       if (browserUseReq.model_seed !== undefined) {
         const providerIndex = browserUseReq.model_seed;
-        
+
         if (providerIndex < 0 || providerIndex >= browserPool.length) {
-          return new Response(JSON.stringify({ 
-            error: `model_seed ${providerIndex} out of range. Pool has ${browserPool.length} providers (0-${browserPool.length - 1})` 
+          console.log(`❌ [${requestId}] model_seed ${providerIndex} out of range`);
+          return new Response(JSON.stringify({
+            error: `model_seed ${providerIndex} out of range. Pool has ${browserPool.length} providers (0-${browserPool.length - 1})`
           }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
             status: 400,
           });
         }
-        
+
         const selectedProvider = browserPool[providerIndex];
-        console.log(`🎯 Browser-use provider (seeded): ${selectedProvider} (index: ${providerIndex})`);
-        
+        console.log(`🎯 [${requestId}] Browser-use provider (seeded): ${selectedProvider} (index: ${providerIndex})`);
+
         try {
           const result = await callProvider(selectedProvider, providerIndex);
 
-          console.log(`✅ Browser-use response: action=${result.action.action}, index=${result.action.index}`);
+          console.log(`✅ [${requestId}] Browser-use response: action=${result.action.action}, index=${result.action.index}`);
+          console.log(`🔷 [${requestId}] ========== REQUEST END (success) ==========\n`);
 
           return new Response(JSON.stringify({
             action: result.action,
@@ -3199,35 +3216,38 @@ serve(async (req) => {
             provider_index: providerIndex,
             ttft_ms: result.ttftMs,
             usage: result.usage,
+            request_id: requestId,
           }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
             status: 200,
           });
 
         } catch (error) {
-          console.error(`❌ Browser-use (seeded) failed:`, error);
-          return new Response(JSON.stringify({ 
+          console.error(`❌ [${requestId}] Browser-use (seeded) failed:`, error);
+          console.log(`🔷 [${requestId}] ========== REQUEST END (error) ==========\n`);
+          return new Response(JSON.stringify({
             error: 'Browser-use request failed',
-            details: error instanceof Error ? error.message : 'Unknown error'
+            details: error instanceof Error ? error.message : 'Unknown error',
+            request_id: requestId,
           }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
             status: 500,
           });
         }
       }
-      
+
       // ============================================
-      // MODE 2: No model_seed - random rotation with 5s timeout + fallback
+      // MODE 2: No model_seed - random rotation with 10s timeout + fallback
       // ============================================
       const providerOrder = shuffleArray([...Array(browserPool.length).keys()]);
-      console.log(`🎲 Browser-use provider order: ${providerOrder.map(i => browserPool[i]).join(' → ')}`);
-      
+      console.log(`🎲 [${requestId}] Browser-use provider order: ${providerOrder.map(i => browserPool[i]).join(' → ')}`);
+
       let lastError = '';
-      
+
       for (const providerIndex of providerOrder) {
         const selectedProvider = browserPool[providerIndex];
-        console.log(`🎯 Trying: ${selectedProvider} (${BROWSER_USE_TIMEOUT_MS}ms timeout)`);
-        
+        console.log(`🎯 [${requestId}] Trying: ${selectedProvider} (${BROWSER_USE_TIMEOUT_MS}ms timeout)`);
+
         try {
           const result = await withTimeout(
             callProvider(selectedProvider, providerIndex),
@@ -3235,7 +3255,8 @@ serve(async (req) => {
             selectedProvider
           );
 
-          console.log(`✅ Browser-use response: action=${result.action.action}, index=${result.action.index}`);
+          console.log(`✅ [${requestId}] Browser-use response: action=${result.action.action}, index=${result.action.index}`);
+          console.log(`🔷 [${requestId}] ========== REQUEST END (success) ==========\n`);
 
           return new Response(JSON.stringify({
             action: result.action,
@@ -3246,6 +3267,7 @@ serve(async (req) => {
             provider_index: providerIndex,
             ttft_ms: result.ttftMs,
             usage: result.usage,
+            request_id: requestId,
           }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
             status: 200,
@@ -3253,16 +3275,18 @@ serve(async (req) => {
 
         } catch (error) {
           lastError = error instanceof Error ? error.message : 'Unknown error';
-          console.log(`⏱️ ${selectedProvider} failed: ${lastError}, trying next...`);
+          console.log(`⏱️ [${requestId}] ${selectedProvider} failed: ${lastError}, trying next...`);
           continue;
         }
       }
-      
+
       // All providers failed
-      console.error(`❌ All browser-use providers failed. Last error: ${lastError}`);
-      return new Response(JSON.stringify({ 
+      console.error(`❌ [${requestId}] All browser-use providers failed. Last error: ${lastError}`);
+      console.log(`🔷 [${requestId}] ========== REQUEST END (all providers failed) ==========\n`);
+      return new Response(JSON.stringify({
         error: 'All browser-use providers failed or timed out',
-        last_error: lastError
+        last_error: lastError,
+        request_id: requestId,
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 500,
@@ -3272,11 +3296,11 @@ serve(async (req) => {
     // ============================================
     // STANDARD CHAT COMPLETION FORMAT
     // ============================================
-    const { 
-      model, 
-      messages: originalMessages, 
-      temperature, 
-      max_tokens, 
+    const {
+      model,
+      messages: originalMessages,
+      temperature,
+      max_tokens,
       seed,
       stream = false,
       tools,
@@ -3289,13 +3313,14 @@ serve(async (req) => {
       conversation_id,  // Optional: ensures same model used for entire conversation
       ...otherParams
     } = rawBody;
-    
+
     const cotSteps = cot_steps || 1;
     const maxTokens = max_tokens;
     let messages = originalMessages;
 
     // Log incoming messages for debugging
-    console.log(`[Rose Completions] Received ${messages?.length || 0} messages:`, JSON.stringify(truncateForLogging(messages), null, 2));
+    console.log(`🌐 [${requestId}] Chat completion request for model: ${model}`);
+    console.log(`📝 [${requestId}] Received ${messages?.length || 0} messages:`, JSON.stringify(truncateForLogging(messages), null, 2));
 
     // Default reasoning tokens to 256 if reasoning is enabled but no max_tokens specified
     const DEFAULT_REASONING_TOKENS = 256;
@@ -4053,34 +4078,39 @@ serve(async (req) => {
     finalResponse.actual_model = actualModel;
     finalResponse.pool_name = poolName;
     finalResponse.pool_size = pool.length;
+    finalResponse.request_id = requestId;
 
     // Calculate cost
     const costCents = calculateCost(totalPromptTokens, totalCompletionTokens, actualModel);
 
     // Log usage
-    await logUsage(supabase, authInfo.apiKeyId, authInfo.userId, { 
-      model, 
-      messages, 
+    await logUsage(supabase, authInfo.apiKeyId, authInfo.userId, {
+      model,
+      messages,
       temperature,
       max_tokens: maxTokens,
       seed,
       tools,
       tool_choice,
-      cot_steps: cotSteps 
+      cot_steps: cotSteps
     }, finalResponse, costCents, cotSteps);
 
     // Return response
+    console.log(`✅ [${requestId}] Chat completion success: model=${actualModel}, tokens=${totalPromptTokens + totalCompletionTokens}`);
+    console.log(`🔷 [${requestId}] ========== REQUEST END (success) ==========\n`);
     return new Response(JSON.stringify(finalResponse), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
       status: 200,
     });
 
   } catch (error) {
-    console.error('Rose completions endpoint error:', error);
+    console.error(`❌ [${requestId}] Rose completions endpoint error:`, error);
+    console.log(`🔷 [${requestId}] ========== REQUEST END (error) ==========\n`);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return new Response(JSON.stringify({ 
+    return new Response(JSON.stringify({
       error: 'Internal server error',
-      details: errorMessage 
+      details: errorMessage,
+      request_id: requestId,
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
       status: 500,

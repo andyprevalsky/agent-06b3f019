@@ -581,6 +581,7 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
         token_out_price_microdollars: agent.tokenOutPriceMicrodollars,
         created_at: agent.createdAt,
         updated_at: agent.updatedAt,
+        write_lock_enabled: agent.writeLockEnabled,
         verifier: agent.verifier
           ? {
               type: agent.verifier.type,
@@ -1272,6 +1273,7 @@ const updateAgentSchema = z.object({
   response_schema: ResponseSchemaSchema.optional(), // For storing generated schema during set_plan
   price_limit_cents: z.number().int().min(1).optional(), // User sets this (min 1 cent)
   tree_cost_cents: z.number().int().min(0).optional(), // Workflow updates this
+  write_lock_enabled: z.boolean().optional(), // Write lock for browser agent actions
 });
 
 router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
@@ -1350,6 +1352,9 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       }
     }
 
+    if (body.write_lock_enabled !== undefined) {
+      agentUpdateData.writeLockEnabled = body.write_lock_enabled;
+    }
     if (Object.keys(agentUpdateData).length > 0) {
       await prisma.agent.update({
         where: { id: agentId },
@@ -1420,6 +1425,7 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
         tree_cost_cents: updatedAgent!.treeCostCents,
         created_at: updatedAgent!.createdAt,
         updated_at: updatedAgent!.updatedAt,
+        write_lock_enabled: updatedAgent!.writeLockEnabled,
         verifier: updatedAgent!.verifier
           ? {
               type: updatedAgent!.verifier.type,

@@ -92,9 +92,9 @@ class GeminiConfig:
 
 
 @dataclass
-class BrowserbaseConfig:
-    """Browserbase configuration for browser automation."""
-    
+class SteelConfig:
+    """Steel configuration for browser automation."""
+
     api_key: str
     project_id: str
 
@@ -189,7 +189,7 @@ class AppConfig:
     openai: OpenAIConfig
     perplexity: PerplexityConfig
     gemini: GeminiConfig
-    browserbase: BrowserbaseConfig
+    steel: SteelConfig
     parallel: ParallelConfig
     rose: RoseConfig
     supabase: SupabaseConfig
@@ -263,7 +263,7 @@ def load_config() -> AppConfig:
         api_key=os.environ["GEMINI_API_KEY"],
     )
     
-    browserbase = BrowserbaseConfig(
+    steel = SteelConfig(
         api_key=os.environ["BROWSERBASE_API_KEY"],
         project_id=os.environ["BROWSERBASE_PROJECT_ID"],
     )
@@ -332,7 +332,7 @@ def load_config() -> AppConfig:
         openai=openai,
         perplexity=perplexity,
         gemini=gemini,
-        browserbase=browserbase,
+        steel=steel,
         parallel=parallel,
         rose=rose,
         supabase=supabase,

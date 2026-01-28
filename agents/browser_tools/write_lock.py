@@ -1,0 +1,299 @@
+"""Write lock detection heuristics for browser agent actions.
+
+This module provides functions to detect high-risk browser actions:
+1. Payment field detection - before entering card details
+2. Social posting detection - before clicking submit on social media
+
+When write lock is enabled and a high-risk action is detected,
+the agent must request user approval before proceeding.
+"""
+
+import re
+import logging
+from typing import Any, Optional
+from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+# Social media and forum domains
+SOCIAL_DOMAINS = [
+    # Major social platforms
+    "twitter.com",
+    "x.com",
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "reddit.com",
+    "threads.net",
+    "tiktok.com",
+    "youtube.com",
+    "pinterest.com",
+    "tumblr.com",
+    "snapchat.com",
+    # Messaging/Community
+    "discord.com",
+    "slack.com",
+    "telegram.org",
+    "whatsapp.com",
+    # Publishing platforms
+    "medium.com",
+    "substack.com",
+    "dev.to",
+    "hashnode.com",
+    "blogger.com",
+    "wordpress.com",
+    # Forums
+    "quora.com",
+    "stackoverflow.com",
+    "news.ycombinator.com",
+]
+
+# Forum URL patterns (match partial URLs)
+FORUM_URL_PATTERNS = [
+    "/forum/",
+    "/forums/",
+    "/discuss/",
+    "/discussion/",
+    "/community/",
+    "/board/",
+    "/boards/",
+    "discourse.",
+    "phpbb",
+    "vbulletin",
+]
+
+# Payment field patterns (case-insensitive, check name, id, autocomplete, placeholder)
+PAYMENT_FIELD_PATTERNS = [
+    "card",
+    "cc-",
+    "credit",
+    "debit",
+    "cvv",
+    "cvc",
+    "csv",
+    "expir",
+    "payment",
+    "billing",
+    "cardnumber",
+    "card-number",
+    "card_number",
+    "securitycode",
+    "security-code",
+    "security_code",
+]
+
+# Payment autocomplete values (exact matches)
+PAYMENT_AUTOCOMPLETE_VALUES = [
+    "cc-number",
+    "cc-exp",
+    "cc-exp-month",
+    "cc-exp-year",
+    "cc-csc",
+    "cc-name",
+    "cc-given-name",
+    "cc-family-name",
+    "cc-type",
+]
+
+# Submit button text patterns (case-insensitive contains)
+SUBMIT_BUTTON_PATTERNS = [
+    "post",
+    "tweet",
+    "reply",
+    "comment",
+    "send",
+    "publish",
+    "share",
+    "submit",
+]
+
+
+def is_social_domain(url: str) -> bool:
+    """Check if URL is a social media or forum domain.
+
+    Args:
+        url: The current page URL
+
+    Returns:
+        True if the URL matches a social media or forum pattern
+    """
+    if not url:
+        return False
+
+    try:
+        parsed = urlparse(url.lower())
+        domain = parsed.netloc
+        full_url = url.lower()
+
+        # Remove www. prefix for matching
+        if domain.startswith("www."):
+            domain = domain[4:]
+
+        # Check exact domain matches
+        for social_domain in SOCIAL_DOMAINS:
+            if domain == social_domain or domain.endswith("." + social_domain):
+                logger.debug(f"URL {url} matched social domain: {social_domain}")
+                return True
+
+        # Check forum URL patterns
+        for pattern in FORUM_URL_PATTERNS:
+            if pattern in full_url:
+                logger.debug(f"URL {url} matched forum pattern: {pattern}")
+                return True
+
+        return False
+    except Exception as e:
+        logger.warning(f"Error parsing URL {url}: {e}")
+        return False
+
+
+def is_submit_button(element_text: str) -> bool:
+    """Check if element text indicates a submit/post button.
+
+    Args:
+        element_text: The text content of the button element
+
+    Returns:
+        True if the text contains submit-like patterns
+    """
+    if not element_text:
+        return False
+
+    text_lower = element_text.lower().strip()
+
+    for pattern in SUBMIT_BUTTON_PATTERNS:
+        if pattern in text_lower:
+            logger.debug(f"Element text '{element_text}' matched submit pattern: {pattern}")
+            return True
+
+    return False
+
+
+async def is_payment_field(
+    session: Any,
+    element: Any,
+    element_index: int,
+) -> bool:
+    """Check if element is a payment input field.
+
+    Uses Playwright to get element attributes and check for payment patterns.
+
+    Args:
+        session: BrowserSession instance
+        element: EnhancedDOMTreeNode element
+        element_index: Element's backend_node_id
+
+    Returns:
+        True if the element appears to be a payment field
+    """
+    if not session or not element:
+        return False
+
+    try:
+        # Get the Playwright page
+        page = await session.get_page()
+        if not page:
+            return False
+
+        # Get element attributes via CDP
+        # We need to resolve the backend_node_id to a selector or use CDP directly
+        try:
+            # Use CDP to get node info
+            result = await page.client.send("DOM.describeNode", {
+                "backendNodeId": element_index
+            })
+
+            node = result.get("node", {})
+            attributes = node.get("attributes", [])
+
+            # Parse attributes into a dict (attributes come as [name, value, name, value, ...])
+            attrs = {}
+            for i in range(0, len(attributes), 2):
+                if i + 1 < len(attributes):
+                    attrs[attributes[i].lower()] = attributes[i + 1].lower()
+
+            # Check autocomplete attribute (exact match)
+            autocomplete = attrs.get("autocomplete", "")
+            if autocomplete in PAYMENT_AUTOCOMPLETE_VALUES:
+                logger.info(f"Payment field detected: autocomplete='{autocomplete}'")
+                return True
+
+            # Check name, id, placeholder for payment patterns
+            for attr_name in ["name", "id", "placeholder", "aria-label"]:
+                attr_value = attrs.get(attr_name, "")
+                for pattern in PAYMENT_FIELD_PATTERNS:
+                    if pattern in attr_value:
+                        logger.info(f"Payment field detected: {attr_name}='{attr_value}' matches '{pattern}'")
+                        return True
+
+            # Check type="password" on payment domains (could be CVV)
+            if attrs.get("type") == "password":
+                # Check if we're on a payment-related domain
+                url = page.url.lower() if page.url else ""
+                payment_domains = ["stripe.com", "paypal.com", "checkout.", "payment.", "pay."]
+                for domain in payment_domains:
+                    if domain in url:
+                        logger.info(f"Password field on payment domain detected: {url}")
+                        return True
+
+            return False
+
+        except Exception as cdp_error:
+            logger.warning(f"CDP error getting element attributes: {cdp_error}")
+
+            # Fallback: check element text_content for payment hints
+            text_content = getattr(element, "text_content", "") or ""
+            text_lower = text_content.lower()
+            for pattern in PAYMENT_FIELD_PATTERNS:
+                if pattern in text_lower:
+                    logger.info(f"Payment field detected via text content: '{text_content}'")
+                    return True
+
+            return False
+
+    except Exception as e:
+        logger.warning(f"Error checking payment field: {e}")
+        return False
+
+
+def get_write_lock_approval_question(
+    action_type: str,
+    url: str,
+    element_text: Optional[str] = None,
+    field_description: Optional[str] = None,
+) -> str:
+    """Generate an approval question for a write lock violation.
+
+    Args:
+        action_type: "payment" or "social_post"
+        url: Current page URL
+        element_text: Text of the element being interacted with
+        field_description: Description of the field (for payment)
+
+    Returns:
+        Formatted approval question string
+    """
+    if action_type == "payment":
+        return (
+            f"**Payment Input Detected**\n\n"
+            f"Rose wants to enter payment details.\n\n"
+            f"**Field:** {field_description or 'Payment field'}\n"
+            f"**Page:** {url}\n\n"
+            f"Reply 'yes' to approve or 'no' to deny."
+        )
+    elif action_type == "social_post":
+        domain = urlparse(url).netloc if url else "unknown"
+        return (
+            f"**Social Media Post Detected**\n\n"
+            f"Rose wants to post content to **{domain}**.\n\n"
+            f"**Button:** {element_text or 'Submit'}\n"
+            f"**Page:** {url}\n\n"
+            f"Reply 'yes' to approve or 'no' to deny."
+        )
+    else:
+        return (
+            f"**Write Action Detected**\n\n"
+            f"Rose wants to perform a write action.\n\n"
+            f"**Page:** {url}\n\n"
+            f"Reply 'yes' to approve or 'no' to deny."
+        )

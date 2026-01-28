@@ -164,8 +164,8 @@ class DOMService:
     """Wrapper for browser-use BrowserSession with DOM extraction and coordinate helpers.
     
     Usage:
-        # Initialize with Browserbase CDP URL
-        dom_service = DOMService(cdp_url="wss://connect.browserbase.com/...")
+        # Initialize with Steel CDP URL
+        dom_service = DOMService(cdp_url="wss://connect.steel.com/...")
         await dom_service.connect()
         
         # Get browser state for LLM
@@ -182,7 +182,7 @@ class DOMService:
         """Initialize DOM service.
 
         Args:
-            cdp_url: WebSocket URL for CDP connection (from Browserbase)
+            cdp_url: WebSocket URL for CDP connection (from Steel)
             viewport_width: Browser viewport width (WXGA default)
             viewport_height: Browser viewport height (WXGA default)
         """
@@ -243,14 +243,14 @@ class DOMService:
     async def disconnect(self) -> None:
         """Disconnect from the browser.
         
-        Note: For remote browsers (Browserbase), this just releases our connection.
+        Note: For remote browsers (Steel), this just releases our connection.
         The actual browser session may still be alive on the server.
         """
         if self._session:
             try:
                 # For remote browsers, we don't want to kill the browser,
                 # just release our connection. The browser session remains alive.
-                pass  # Don't call stop/kill - session persists on Browserbase
+                pass  # Don't call stop/kill - session persists on Steel
             except Exception as e:
                 logger.warning(f"Error during disconnect: {e}")
             finally:
@@ -376,8 +376,27 @@ class DOMService:
             f"has_screenshot={bool(state.screenshot)}, "
             f"screenshot_len={len(state.screenshot) if state.screenshot else 0}"
         )
-        if include_screenshot and state.screenshot:
-            result["screenshot"] = state.screenshot
+
+        # Generate blank screenshot if none provided (e.g., about:blank pages)
+        screenshot_to_use = state.screenshot
+        if include_screenshot and not state.screenshot:
+            logger.info(f"📸 [DEBUG] No screenshot from browser-use, generating blank screenshot for {result.get('url', 'unknown')}")
+            try:
+                import base64
+                from io import BytesIO
+                from PIL import Image
+
+                # Create a white image with viewport dimensions
+                blank_img = Image.new('RGB', (viewport_width, viewport_height), color='white')
+                buffer = BytesIO()
+                blank_img.save(buffer, format='PNG')
+                screenshot_to_use = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                logger.info(f"📸 [DEBUG] Generated blank screenshot: {viewport_width}x{viewport_height}")
+            except Exception as e:
+                logger.warning(f"📸 [DEBUG] Failed to generate blank screenshot: {e}")
+
+        if include_screenshot and screenshot_to_use:
+            result["screenshot"] = screenshot_to_use
 
             # Debug: analyze and save screenshot
             import base64
@@ -386,7 +405,7 @@ class DOMService:
             import time as time_module
 
             try:
-                screenshot_bytes = base64.b64decode(state.screenshot)
+                screenshot_bytes = base64.b64decode(screenshot_to_use)
                 logger.info(f"📸 [SCREENSHOT] Captured: size_kb={round(len(screenshot_bytes) / 1024, 1)}")
 
                 # Get dimensions using PIL

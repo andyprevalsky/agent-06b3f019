@@ -58,11 +58,17 @@ async def save_browser_action_message(
     auxiliary: dict = None,
     tool_call_id: str = None,
     is_init_message: bool = False,
+    is_completion_message: bool = False,
     output_schema: dict = None,
     steps_taken: int = None,
     total_steps: int = None,
 ):
-    """Save browser sub-action message directly to DB."""
+    """Save browser sub-action message directly to DB.
+
+    Args:
+        is_init_message: If True, don't set subAgentId (shows in main chat as init)
+        is_completion_message: If True, don't set subAgentId (shows in main chat as completion/error)
+    """
     try:
         config = load_config()
         unique_tool_call_id = tool_call_id or str(uuid_module.uuid4())
@@ -88,9 +94,11 @@ async def save_browser_action_message(
         if output_schema:
             metadata["output_schema"] = output_schema
 
-        if not is_init_message:
+        # Only set subAgentId for intermediate messages (not init or completion)
+        # This ensures init and completion messages show in main chat
+        if not is_init_message and not is_completion_message:
             metadata["subAgentId"] = task_id
-        
+
         if status == MessageStatus.ERROR:
             metadata["error"] = True
         
@@ -136,6 +144,114 @@ async def save_browser_assistant_message(
             )
     except Exception as e:
         logger.error("Failed to save browser assistant message", error=extract_error_message(e))
+
+
+async def request_write_lock_approval(
+    agent_id: str,
+    user_id: str,
+    workflow_id: str,
+    question: str,
+    url: str,
+    config,
+    timeout_seconds: int = 300,  # 5 minute timeout
+) -> Dict[str, Any]:
+    """Request user approval for a write-locked action.
+
+    Creates an attention request and polls for user response.
+
+    Args:
+        agent_id: Agent ID
+        user_id: User ID
+        workflow_id: Workflow/task ID for the attention request
+        question: The approval question to show the user
+        url: Current page URL (for context)
+        config: Config object with backend API settings
+        timeout_seconds: How long to wait for approval
+
+    Returns:
+        Dict with 'approved': True/False and optional 'response': str
+    """
+    import time as time_module
+
+    try:
+        # Create attention request
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/attention-requests",
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "workflow_id": workflow_id,
+                    "question": question,
+                    "metadata": {
+                        "writePermission": True,
+                        "url": url,
+                    }
+                }
+            )
+
+            if response.status_code not in [200, 201]:
+                logger.error(f"Failed to create attention request: {response.status_code}")
+                # Default to denied if we can't create the request
+                return {"approved": False, "error": "Failed to create approval request"}
+
+            request_data = response.json()
+            request_id = request_data.get("id")
+
+        if not request_id:
+            return {"approved": False, "error": "No request ID returned"}
+
+        logger.info(f"Created write lock attention request: {request_id}")
+
+        # Poll for response
+        start_time = time_module.time()
+        poll_interval = 2  # seconds
+
+        while time_module.time() - start_time < timeout_seconds:
+            # Heartbeat while waiting
+            activity.heartbeat(f"Waiting for write lock approval ({int(time_module.time() - start_time)}s)")
+
+            # Check for response
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    f"{config.backend.api_url}/api/attention-requests/{request_id}",
+                    headers={"x-api-key": config.backend.api_key or ""}
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    user_response = data.get("userResponse")
+
+                    if user_response is not None:
+                        # User responded
+                        response_lower = user_response.lower().strip()
+                        approved = response_lower in ["yes", "y", "approve", "approved", "ok", "okay", "sure", "go ahead"]
+                        denied = response_lower in ["no", "n", "deny", "denied", "cancel", "stop", "don't", "dont"]
+
+                        if approved:
+                            logger.info(f"Write lock approval granted: {user_response}")
+                            return {"approved": True, "response": user_response}
+                        elif denied:
+                            logger.info(f"Write lock approval denied: {user_response}")
+                            return {"approved": False, "response": user_response}
+                        else:
+                            # Ambiguous response - treat as approved (they typed something)
+                            logger.info(f"Write lock ambiguous response (treating as approved): {user_response}")
+                            return {"approved": True, "response": user_response}
+
+            await asyncio.sleep(poll_interval)
+
+        # Timeout - default to denied for safety
+        logger.warning(f"Write lock approval timed out after {timeout_seconds}s")
+        return {"approved": False, "error": "Approval request timed out"}
+
+    except Exception as e:
+        logger.error(f"Error requesting write lock approval: {e}")
+        return {"approved": False, "error": str(e)}
 
 
 # ========================================
@@ -479,6 +595,59 @@ def decrypt_password(encrypted_envelope: str, decryption_key_b64: str) -> Option
         return None
 
 
+def decrypt_password_with_key(encrypted_envelope: str, private_key: Any) -> Optional[str]:
+    """Decrypt a password using a pre-loaded RSA private key.
+
+    This is an optimized version that avoids re-loading the private key on each call.
+    Use this when decrypting many passwords in a loop.
+
+    Args:
+        encrypted_envelope: Base64-encoded JSON envelope with encrypted_aes_key, iv, ciphertext
+        private_key: Pre-loaded RSA private key object
+
+    Returns:
+        Decrypted password string, or None on failure
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.backends import default_backend
+
+    try:
+        # Decode envelope
+        envelope_json = base64.b64decode(encrypted_envelope).decode('utf-8')
+        envelope = json.loads(envelope_json)
+
+        if envelope.get("version") != 1:
+            return None
+
+        # Decrypt AES key with RSA-OAEP (key already loaded)
+        encrypted_aes_key = base64.b64decode(envelope["encrypted_aes_key"])
+        aes_key = private_key.decrypt(
+            encrypted_aes_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+        # Decrypt password with AES-GCM
+        iv = base64.b64decode(envelope["iv"])
+        ciphertext = base64.b64decode(envelope["ciphertext"])
+        auth_tag = ciphertext[-16:]
+        actual_ciphertext = ciphertext[:-16]
+
+        cipher = Cipher(algorithms.AES(aes_key), modes.GCM(iv, auth_tag), backend=default_backend())
+        decryptor = cipher.decryptor()
+        plaintext = decryptor.update(actual_ciphertext) + decryptor.finalize()
+
+        return plaintext.decode('utf-8')
+    except Exception as e:
+        logger.error("Failed to decrypt password with pre-loaded key", error=extract_error_message(e))
+        return None
+
+
 def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelope: str) -> str:
     """Build the autopay section for the browser agent system prompt.
 
@@ -787,16 +956,19 @@ async def call_rose_browser_use(
     config: Any,
 ) -> Dict[str, Any]:
     """Call Rose API rose-1-browser-use endpoint.
-    
+
     Args:
         task: The browser automation task/goal
         browser_state: Current browser state (url, dom_tree, screenshot, viewport, scroll_position)
         action_history: List of previous action entries
         config: App config with Rose API credentials
-        
+
     Returns:
         Dict with 'action' (UnifiedAction) and metadata
     """
+    # Generate unique request ID for tracing through edge function
+    request_id = str(uuid_module.uuid4())[:8]
+
     request_body = {
         "model": "rose-labs/rose-1-browser-use",
         "task": task,
@@ -814,7 +986,7 @@ async def call_rose_browser_use(
             "dom_tree": f"<{len(browser_state.get('dom_tree', ''))} chars>" if browser_state.get('dom_tree') else None,
         }
     }
-    logger.info("📤 Rose browser-use request", request=json.dumps(log_body, indent=2, default=str))
+    logger.info(f"📤 [{request_id}] Rose browser-use request", request_id=request_id, request=json.dumps(log_body, indent=2, default=str))
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
@@ -822,18 +994,21 @@ async def call_rose_browser_use(
             headers={
                 "Authorization": f"Bearer {config.rose.supabase_anon_key}",
                 "x-api-key": config.rose.api_key,
+                "x-request-id": request_id,
                 "Content-Type": "application/json"
             },
             json=request_body
         )
-        
+
         if response.status_code != 200:
             error_text = response.text
-            logger.error(f"Rose API error: {response.status_code} - {error_text}")
+            logger.error(f"❌ [{request_id}] Rose API error: {response.status_code} - {error_text}", request_id=request_id)
             raise RuntimeError(f"Rose API error: {response.status_code}")
 
         result = response.json()
-        logger.info("📥 Rose browser-use response", response=json.dumps(result, indent=2, default=str))
+        # Include request_id in response for downstream logging
+        result["request_id"] = request_id
+        logger.info(f"📥 [{request_id}] Rose browser-use response", request_id=request_id, response=json.dumps(result, indent=2, default=str))
         return result
 
 
@@ -898,6 +1073,68 @@ def get_element_description(element, max_length: int = 40) -> str:
     return desc[:max_length]
 
 
+async def move_visual_cursor(dom_service: DOMService, x: int, y: int) -> None:
+    """Move the injected visual cursor to coordinates."""
+    try:
+        session = dom_service.session
+        if not session:
+            return
+        cdp_session = await session.get_or_create_cdp_session(focus=True)
+        await cdp_session.cdp_client.send.Runtime.evaluate(
+            params={
+                "expression": f"if (window.__moveRoseCursor) window.__moveRoseCursor({x}, {y});",
+                "returnByValue": True
+            },
+            session_id=cdp_session.session_id
+        )
+    except:
+        pass  # Visual cursor is optional
+
+
+def _get_domain_from_url(url: str) -> str:
+    """Extract domain from URL for approval tracking."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url.lower())
+        domain = parsed.netloc
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    except:
+        return ""
+
+
+def _is_approval_valid(approvals: Dict, approval_type: str, current_url: str, timeout_seconds: int = 120) -> bool:
+    """Check if an existing approval is still valid for the current domain.
+
+    Approval is valid if:
+    - Same domain as when approved
+    - Less than timeout_seconds have passed (default 2 minutes)
+    """
+    import time as time_module
+
+    if not approvals:
+        return False
+
+    approval = approvals.get(approval_type, {})
+    if not approval.get("domain") or not approval.get("approved_at"):
+        return False
+
+    current_domain = _get_domain_from_url(current_url)
+    approved_domain = approval["domain"]
+    approved_at = approval["approved_at"]
+
+    # Check domain matches
+    if current_domain != approved_domain:
+        return False
+
+    # Check timeout
+    if time_module.time() - approved_at > timeout_seconds:
+        return False
+
+    return True
+
+
 async def execute_action(
     dom_service: DOMService,
     action_history: ActionHistory,
@@ -909,6 +1146,8 @@ async def execute_action(
     secret_refs: Optional[Dict[str, str]] = None,
     password_origins: Optional[Dict[str, str]] = None,
     current_url: str = "",
+    write_lock_enabled: bool = True,
+    write_lock_approvals: Optional[Dict[str, Dict]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -922,9 +1161,14 @@ async def execute_action(
         humanizer: BrowserHumanizer for human-like mouse/keyboard interactions
         secret_refs: Dict mapping encrypted/ref values to decrypted values (passwords, cards)
         password_origins: Dict mapping encrypted password -> expected origin for validation
+        current_url: Current page URL for domain checking
+        write_lock_enabled: Whether write lock is enabled for this agent
+        write_lock_approvals: Dict tracking approved domains by type (mutated on approval):
+            {"payment": {"domain": str, "approved_at": float}, "social_post": {...}}
 
     Returns:
         Result dict with success, message, and any additional data
+        May return {"status": "needs_write_approval", ...} if write lock triggered
     """
     from browser_use.browser.events import (
         ClickElementEvent,
@@ -940,7 +1184,13 @@ async def execute_action(
         SwitchTabEvent,
         CloseTabEvent,
     )
-    
+    from browser_tools.write_lock import (
+        is_social_domain,
+        is_submit_button,
+        is_payment_field,
+        get_write_lock_approval_question,
+    )
+
     session = dom_service.session
     if not session:
         return {"success": False, "error": "Browser not connected"}
@@ -961,6 +1211,37 @@ async def execute_action(
         
         # Execute action based on type
         if action_name == "click":
+            # Write lock check for social posting
+            if write_lock_enabled and element:
+                # Get element text for submit button detection
+                # Note: EnhancedDOMTreeNode uses get_all_children_text() method, not text_content attribute
+                element_text = element.get_all_children_text() if hasattr(element, 'get_all_children_text') else ''
+                if is_social_domain(current_url) and is_submit_button(element_text):
+                    # Check if we already have valid approval for this domain
+                    if not _is_approval_valid(write_lock_approvals, "social_post", current_url):
+                        logger.info(
+                            "Write lock triggered: social posting detected",
+                            url=current_url,
+                            element_text=element_text[:50]
+                        )
+                        return {
+                            "status": "needs_write_approval",
+                            "approval_type": "social_post",
+                            "question": get_write_lock_approval_question(
+                                action_type="social_post",
+                                url=current_url,
+                                element_text=element_text[:100]
+                            ),
+                            "element_text": element_text[:100],
+                            "url": current_url,
+                        }
+                    else:
+                        logger.info(
+                            "Write lock bypassed: existing approval valid",
+                            approval_type="social_post",
+                            url=current_url
+                        )
+
             if element:
                 # Index-based click (DOM models)
                 # Get element coordinates for humanizer (cursor movement handled internally)
@@ -1056,6 +1337,41 @@ async def execute_action(
                 # Decrypt and replace text for typing
                 text = secret_refs[text]
                 logger.info("🔐 Typing encrypted credential (password/card)", redacted=True)
+
+            # Write lock check for payment fields
+            if write_lock_enabled and element and index is not None:
+                if await is_payment_field(session, element, index):
+                    # Check if we already have valid approval for this domain
+                    if not _is_approval_valid(write_lock_approvals, "payment", current_url):
+                        # Get element description for the approval question
+                        element_text = getattr(element, 'text_content', '') or ''
+                        tag_name = getattr(element, 'tag_name', '') or getattr(element, 'node_name', 'input')
+                        field_desc = f"{tag_name} field"
+                        if element_text:
+                            field_desc = f"{tag_name}: {element_text[:50]}"
+
+                        logger.info(
+                            "Write lock triggered: payment field detected",
+                            url=current_url,
+                            field_desc=field_desc
+                        )
+                        return {
+                            "status": "needs_write_approval",
+                            "approval_type": "payment",
+                            "question": get_write_lock_approval_question(
+                                action_type="payment",
+                                url=current_url,
+                                field_description=field_desc
+                            ),
+                            "field_description": field_desc,
+                            "url": current_url,
+                        }
+                    else:
+                        logger.info(
+                            "Write lock bypassed: existing approval valid",
+                            approval_type="payment",
+                            url=current_url
+                        )
 
             if element:
                 # Index-based input (DOM models)
@@ -1194,6 +1510,10 @@ async def execute_action(
         
         elif action_name == "goto":
             url = params.get("url", "")
+            # Auto-add https:// if no scheme provided
+            if url and not url.startswith(("http://", "https://", "about:", "file:")):
+                url = f"https://{url}"
+                logger.info(f"🔗 Auto-added https:// to URL: {url}")
             event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
             await event
             await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -1550,9 +1870,7 @@ To upload a file, find a file input element (<input type="file">) and use upload
 Files: {', '.join(available_files)}
 """
 
-    return f"""You are a browser automation agent. Your goal is to accomplish tasks by interacting with web pages.
-
-Current time: {current_time}
+    return f"""Current time: {current_time}
 
 CURRENT GOAL: {goal}
 CURRENT URL: {current_url}
@@ -1580,6 +1898,11 @@ AVAILABLE ACTIONS:
 - attempt_completion: Signal you believe the task is complete
 - send_message_to_user: Request user assistance
 
+CRITICAL SAFETY RULES:
+- NEVER delete or close any user account
+- NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
+- When making payments or posting to social media, you may be asked to confirm with the user first
+
 {custom_instructions}
 
 Think step-by-step about what action to take next. Always prefer using element indices from the DOM tree for precise interactions."""
@@ -1600,7 +1923,9 @@ async def spawn_browser_agent_activity_v3(
     cdp_url: Optional[str] = None,
     is_resume: bool = False,
     output_schema: Optional[Dict[str, Any]] = None,
-    attachments: Optional[List[Dict[str, Any]]] = None
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    write_lock_enabled: bool = True,
+    start_url: str = "",
 ) -> Dict[str, Any]:
     """
     Browser agent activity using browser-use BrowserSession + Rose API.
@@ -1614,6 +1939,8 @@ async def spawn_browser_agent_activity_v3(
     Args:
         output_schema: Response schema from parent agent's tool call (required for sub-agents)
         attachments: List of FilePointer dicts for files to upload to the browser session
+        write_lock_enabled: Whether to require approval for high-risk actions (payments, social posts)
+        start_url: URL to navigate to automatically before starting the agent loop
     """
     from helpers.llm import check_progress
     from tools.knowledge_base import query_blueprints_activity
@@ -1633,6 +1960,10 @@ async def spawn_browser_agent_activity_v3(
     visited_urls = []
     reasoning_messages = []
     action_summary = []
+
+    # Write lock approval state - tracks approved domains by type to avoid repeated prompts
+    # Structure: {"payment": {"domain": str, "approved_at": float}, "social_post": {...}}
+    write_lock_approvals: Dict[str, Dict] = {}
 
     # Use response schema from parent agent's tool call (required)
     response_schema = output_schema
@@ -1665,7 +1996,7 @@ async def spawn_browser_agent_activity_v3(
             activity.heartbeat(f"Resuming task {task_id}")
         else:
             activity.heartbeat("Initializing browser session")
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:  # 120s for session init + user data injection
                 response = await client.post(
                     f"{config.backend.api_url}/api/browser-session/init",
                     headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
@@ -1678,7 +2009,7 @@ async def spawn_browser_agent_activity_v3(
                 task_id = session_data["task_id"]
                 session_id = session_data["session_id"]
                 browser_url = session_data["debug_url"]
-                cdp_url = session_data.get("ws_url")  # CDP WebSocket URL from Browserbase
+                cdp_url = session_data.get("ws_url")  # CDP WebSocket URL from Steel
                 fingerprint_injection = session_data.get("fingerprint_injection")  # For CDP re-injection
                 session_passwords = session_data.get("passwords", [])
             
@@ -1697,7 +2028,7 @@ async def spawn_browser_agent_activity_v3(
         
         # ===== BROWSER-USE SESSION INITIALIZATION =====
         if not cdp_url:
-            raise RuntimeError("No CDP URL provided - backend must return ws_url from Browserbase")
+            raise RuntimeError("No CDP URL provided - backend must return ws_url from Steel")
         
         activity.heartbeat(f"Connecting via CDP: {cdp_url[:50]}...")
         
@@ -1789,31 +2120,86 @@ async def spawn_browser_agent_activity_v3(
         # Visual cursor is now handled by CursorVisualizer inside BrowserHumanizer
         # It's injected on demand and re-injected on navigation
         
-        # ===== REPLACE BROWSER-USE LOGO WITH ROSE LOGO =====
+        # ===== HIJACK IMG.SRC TO REPLACE BROWSER-USE LOGO WITH ROSE LOGO =====
         try:
-            logo_replace_script = """
+            logo_hijack_script = """
                 (() => {
                     const ROSE_LOGO_URL = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIxIDYyIDIyMCAyMjIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjIyIj4KICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMwMykgc2NhbGUoMC4xLC0wLjEpIiBmaWxsPSIjZmZmZmZmIj4KICAgIDxwYXRoIGQ9Ik0xMjc2IDIzNzggYy0xNDUgLTE5MiAtMjMxIC00NDIgLTIxMSAtNjE2IDggLTY4IDQxIC0yMDIgNjEgLTI1MSA4IC0xOSAxMyAtMzUgMTEgLTM3IC0yIC0yIC0zMCA3IC02MiAyMSAtMjQ5IDEwMCAtNTM3IDU0IC03ODQgLTEyNCAtMzYgLTI1IC02OSAtNDkgLTc1IC01MyAtMTcgLTExIDIyIC00NiAxMTkgLTEwNSAxNjMgLTEwMSAzMDAgLTE0NCA0NjAgLTE0NCA5MiAtMSAyMjYgMjQgMzAxIDU2IDIwIDggMzggMTUgMzkgMTUgMiAwIC0xMCAtMzkgLTI1IC04NyAtNjkgLTIxMyAtNTggLTM5NSAzNiAtNjAwIDMxIC02OSAxMzYgLTIzNyAxNTQgLTI0OCAxMCAtNiAxMTQgMTQ0IDE1MiAyMjAgMzcgNzMgNzUgMTk5IDg4IDI5MyAxNCAxMDEgMSAyMDYgLTQwIDMzMCAtMTUgNDggLTI3IDg4IC0yNiA4OSAxIDIgMjYgLTcgNTUgLTE4IDE5NSAtNzQgNDIzIC02NiA2MTEgMjIgOTggNDYgMjE3IDExOCAyNDUgMTQ5IDE4IDIwIDE4IDIxIC0xIDM1IC0xNzcgMTM5IC0zOTYgMjI1IC01NzAgMjI1IC03OSAwIC0xOTUgLTIzIC0yODIgLTU2IC00NCAtMTYgLTYzIC0yMCAtNTkgLTExIDI3IDcyIDYwIDE5NiA2OCAyNjAgMTcgMTMyIC0xNyAzMDAgLTg5IDQ0MiAtMzYgNzIgLTEyNCAyMDkgLTE0MSAyMTkgLTUgNCAtMjEgLTggLTM1IC0yNnogbTQwIC05MzUgYzcgLTQ2IDUwIC05MiAxMDkgLTExOSAyNyAtMTMgNDEgLTIzIDMxIC0yMyAtMTEgLTEgLTM4IC0xMiAtNjIgLTI2IC00OSAtMjkgLTgzIC05MCAtODUgLTE1MSAtMSAtMzcgLTIgLTM2IC05IDEzIC00IDI5IC0xNyA2NyAtMjggODUgLTIyIDM1IC04NiA3NyAtMTE4IDc5IC0xMSAwIDEgOSAyNiAyMCA3OSAzNSAxMTggOTAgMTIxIDE2OCAxIDI1IDMgMjggNiAxMSAyIC0xNCA2IC0zOSA5IC01N3oiLz4KICA8L2c+Cjwvc3ZnPg==';
-                    
-                    function replaceLogo() {
-                        const img = document.querySelector('#pretty-loading-animation img');
-                        if (img && img.src.includes('browser-use.com')) {
+
+                    // Only hijack once per context
+                    if (window.__roseSrcHijacked) return;
+                    window.__roseSrcHijacked = true;
+
+                    // Store original property descriptor
+                    const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+
+                    // Hijack img.src setter to intercept browser-use logo
+                    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+                        get: function() {
+                            return originalDescriptor.get.call(this);
+                        },
+                        set: function(value) {
+                            if (value && typeof value === 'string' && value.includes('browser-use.com')) {
+                                value = ROSE_LOGO_URL;
+                                this.alt = 'Rose';
+                            }
+                            return originalDescriptor.set.call(this, value);
+                        },
+                        enumerable: originalDescriptor.enumerable,
+                        configurable: originalDescriptor.configurable
+                    });
+
+                    // Also intercept setAttribute('src', ...) calls
+                    const originalSetAttribute = Element.prototype.setAttribute;
+                    Element.prototype.setAttribute = function(name, value) {
+                        if (this instanceof HTMLImageElement && name === 'src' &&
+                            value && typeof value === 'string' && value.includes('browser-use.com')) {
+                            value = ROSE_LOGO_URL;
+                            this.alt = 'Rose';
+                        }
+                        return originalSetAttribute.call(this, name, value);
+                    };
+                })();
+            """
+            # Register for future documents
+            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                params={"source": logo_hijack_script, "runImmediately": True},
+                session_id=cdp_session.session_id
+            )
+
+            # Also run immediately on all existing pages to replace already-loaded logos
+            immediate_replace_script = """
+                (() => {
+                    const ROSE_LOGO_URL = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIxIDYyIDIyMCAyMjIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjIyIj4KICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMwMykgc2NhbGUoMC4xLC0wLjEpIiBmaWxsPSIjZmZmZmZmIj4KICAgIDxwYXRoIGQ9Ik0xMjc2IDIzNzggYy0xNDUgLTE5MiAtMjMxIC00NDIgLTIxMSAtNjE2IDggLTY4IDQxIC0yMDIgNjEgLTI1MSA4IC0xOSAxMyAtMzUgMTEgLTM3IC0yIC0yIC0zMCA3IC02MiAyMSAtMjQ5IDEwMCAtNTM3IDU0IC03ODQgLTEyNCAtMzYgLTI1IC02OSAtNDkgLTc1IC01MyAtMTcgLTExIDIyIC00NiAxMTkgLTEwNSAxNjMgLTEwMSAzMDAgLTE0NCA0NjAgLTE0NCA5MiAtMSAyMjYgMjQgMzAxIDU2IDIwIDggMzggMTUgMzkgMTUgMiAwIC0xMCAtMzkgLTI1IC04NyAtNjkgLTIxMyAtNTggLTM5NSAzNiAtNjAwIDMxIC02OSAxMzYgLTIzNyAxNTQgLTI0OCAxMCAtNiAxMTQgMTQ0IDE1MiAyMjAgMzcgNzMgNzUgMTk5IDg4IDI5MyAxNCAxMDEgMSAyMDYgLTQwIDMzMCAtMTUgNDggLTI3IDg4IC0yNiA4OSAxIDIgMjYgLTcgNTUgLTE4IDE5NSAtNzQgNDIzIC02NiA2MTEgMjIgOTggNDYgMjE3IDExOCAyNDUgMTQ5IDE4IDIwIDE4IDIxIC0xIDM1IC0xNzcgMTM5IC0zOTYgMjI1IC01NzAgMjI1IC03OSAwIC0xOTUgLTIzIC0yODIgLTU2IC00NCAtMTYgLTYzIC0yMCAtNTkgLTExIDI3IDcyIDYwIDE5NiA2OCAyNjAgMTcgMTMyIC0xNyAzMDAgLTg5IDQ0MiAtMzYgNzIgLTEyNCAyMDkgLTE0MSAyMTkgLTUgNCAtMjEgLTggLTM1IC0yNnogbTQwIC05MzUgYzcgLTQ2IDUwIC05MiAxMDkgLTExOSAyNyAtMTMgNDEgLTIzIDMxIC0yMyAtMTEgLTEgLTM4IC0xMiAtNjIgLTI2IC00OSAtMjkgLTgzIC05MCAtODUgLTE1MSAtMSAtMzcgLTIgLTM2IC05IDEzIC00IDI5IC0xNyA2NyAtMjggODUgLTIyIDM1IC04NiA3NyAtMTE4IDc5IC0xMSAwIDEgOSAyNiAyMCA3OSAzNSAxMTggOTAgMTIxIDE2OCAxIDI1IDMgMjggNiAxMSAyIC0xNCA2IC0zOSA5IC01N3oiLz4KICA8L2c+Cjwvc3ZnPg==';
+
+                    // Replace any existing browser-use logos
+                    document.querySelectorAll('img').forEach(img => {
+                        if (img.src && img.src.includes('browser-use.com')) {
                             img.src = ROSE_LOGO_URL;
                             img.alt = 'Rose';
                         }
-                    }
-                    
-                    replaceLogo();
-                    const observer = new MutationObserver(replaceLogo);
-                    if (document.body) observer.observe(document.body, { childList: true, subtree: true });
-                    setTimeout(() => observer.disconnect(), 10000);
+                    });
                 })();
             """
-            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
-                params={"source": logo_replace_script, "runImmediately": True},
-                session_id=cdp_session.session_id
-            )
-            logger.info("🎨 Replaced browser-use logo with Rose logo")
+
+            # Run on all existing page targets
+            try:
+                page_targets = await dom_service._session._cdp_get_all_pages()
+                for target in page_targets:
+                    try:
+                        target_id = target.get('targetId')
+                        if target_id:
+                            temp_session = await dom_service._session.get_or_create_cdp_session(target_id, focus=False)
+                            await temp_session.cdp_client.send.Runtime.evaluate(
+                                params={"expression": immediate_replace_script},
+                                session_id=temp_session.session_id
+                            )
+                    except Exception:
+                        pass  # Skip targets that can't be accessed
+            except Exception as e:
+                logger.debug(f"Could not replace logos on existing pages: {e}")
+
+            logger.info("🎨 Hijacked img.src to replace browser-use logo with Rose logo")
         except Exception as e:
             logger.warning(f"Failed to replace logo: {e}")
         
@@ -1891,13 +2277,36 @@ async def spawn_browser_agent_activity_v3(
         # Add password refs using short refs (decrypt each password)
         # ref_to_encrypted maps: short_ref -> encrypted_blob
         # password_lookup maps: encrypted_blob -> {origin, username}
-        if config.payment.decryption_key:
-            for short_ref, encrypted in ref_to_encrypted.items():
-                decrypted = decrypt_password(encrypted, config.payment.decryption_key)
+        # OPTIMIZED: Pre-load RSA key once and decrypt in parallel to avoid blocking
+        if config.payment.decryption_key and ref_to_encrypted:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.backends import default_backend
+
+            # Pre-load RSA private key ONCE (was loading 667 times before!)
+            private_key_pem = base64.b64decode(config.payment.decryption_key)
+            private_key = serialization.load_pem_private_key(
+                private_key_pem, password=None, backend=default_backend()
+            )
+            logger.info(f"Pre-loaded RSA key, decrypting {len(ref_to_encrypted)} passwords in parallel...")
+
+            # Decrypt all passwords in parallel using thread pool
+            async def decrypt_one(short_ref: str, encrypted: str) -> tuple[str, Optional[str]]:
+                decrypted = await asyncio.to_thread(decrypt_password_with_key, encrypted, private_key)
+                return (short_ref, decrypted)
+
+            decrypt_tasks = [
+                decrypt_one(short_ref, encrypted)
+                for short_ref, encrypted in ref_to_encrypted.items()
+            ]
+            results = await asyncio.gather(*decrypt_tasks)
+
+            # Process results
+            for short_ref, decrypted in results:
                 if decrypted:
                     # Map short ref to decrypted value for type interception
                     secret_refs[short_ref] = decrypted
                     # Map short ref to origin for validation
+                    encrypted = ref_to_encrypted[short_ref]
                     info = password_lookup.get(encrypted, {})
                     password_origins[short_ref] = info.get("origin", "")
 
@@ -1922,6 +2331,63 @@ async def spawn_browser_agent_activity_v3(
 
         # Model pricing
         model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
+
+        # ===== AUTO-NAVIGATE TO START URL =====
+        from browser_use.browser.events import NavigateToUrlEvent
+
+        # Auto-add https:// if no scheme provided
+        nav_url = start_url
+        if not nav_url.startswith(("http://", "https://", "about:", "file:")):
+            nav_url = f"https://{nav_url}"
+            logger.info(f"🔗 Auto-added https:// to start URL: {nav_url}")
+
+        # Post IN_PROGRESS message
+        await save_browser_action_message(
+            agent_id=agent_id, title=f"Navigating → {nav_url[:50]}",
+            task_id=task_id,
+            message="", status=MessageStatus.IN_PROGRESS,
+            browser_url=browser_url, action_type="goto", tool_call_id=tool_call_id,
+            steps_taken=0, total_steps=25
+        )
+
+        # Navigate
+        event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
+
+        # Inject localStorage for this origin after navigation
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(nav_url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                inject_response = await client.post(
+                    f"{config.backend.api_url}/api/browser-session/{session_id}/inject-localStorage",
+                    headers={
+                        "x-api-key": config.backend.api_key or "",
+                        "Content-Type": "application/json"
+                    },
+                    json={"origin": origin}
+                )
+                if inject_response.status_code == 200:
+                    result_data = inject_response.json()
+                    if result_data.get("injected"):
+                        logger.info(f"💾 Injected {result_data.get('count', 0)} localStorage entries for {origin}")
+                else:
+                    logger.warning(f"Failed to inject localStorage: HTTP {inject_response.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
+
+        # Post FINISHED message
+        await save_browser_action_message(
+            agent_id=agent_id, title=f"Navigated → {nav_url[:50]}",
+            task_id=task_id,
+            message="", status=MessageStatus.FINISHED,
+            browser_url=browser_url, action_type="goto", tool_call_id=tool_call_id,
+            steps_taken=0, total_steps=25
+        )
+
+        logger.info(f"🌐 Auto-navigated to start URL: {nav_url}")
 
         # ===== MAIN AGENT LOOP =====
         max_iterations = 25
@@ -1983,12 +2449,15 @@ async def spawn_browser_agent_activity_v3(
                 usage = llm_result.get("usage", {})
                 total_input_tokens += usage.get("prompt_tokens", 0)
                 total_output_tokens += usage.get("completion_tokens", 0)
-                
+
             except Exception as e:
                 logger.error(f"Rose API call failed: {e}")
                 await asyncio.sleep(2)
                 continue
-            
+
+            # Extract request_id for downstream logging
+            rose_request_id = llm_result.get("request_id", "unknown")
+
             # 4. Extract action from response
             unified_action = llm_result.get("action", {})
             action_name = unified_action.get("action", "")
@@ -2217,6 +2686,7 @@ async def spawn_browser_agent_activity_v3(
                         )
 
                         # Send task_complete message so FE shows completion card
+                        # Use original tool_call_id + is_completion_message to update main chat
                         await save_browser_action_message(
                             agent_id=agent_id,
                             title="✓ Task Completed",
@@ -2224,7 +2694,9 @@ async def spawn_browser_agent_activity_v3(
                             message=context_message,
                             status=MessageStatus.FINISHED,
                             browser_url=browser_url,
-                            action_type="task_complete"
+                            action_type="task_complete",
+                            tool_call_id=tool_call_id,
+                            is_completion_message=True,
                         )
 
                         usage_items = [
@@ -2408,8 +2880,77 @@ Based on this feedback, I need to continue working on the task and address the i
                 auxiliary={"coordinates": coords_for_cursor} if coords_for_cursor else None
             )
 
-            # Execute action
-            result = await execute_action(dom_service, action_history, unified_action, available_file_paths, session_id, config, humanizer, secret_refs, password_origins, current_url)
+            # Execute action (with write lock check and humanizer)
+            result = await execute_action(
+                dom_service, action_history, unified_action, available_file_paths,
+                session_id=session_id,
+                config=config,
+                humanizer=humanizer,
+                secret_refs=secret_refs,
+                password_origins=password_origins,
+                current_url=current_url,
+                write_lock_enabled=write_lock_enabled,
+                write_lock_approvals=write_lock_approvals,
+            )
+
+            # Handle write lock approval request
+            if result.get("status") == "needs_write_approval":
+                approval_type = result.get("approval_type", "unknown")
+                question = result.get("question", "Rose wants to perform a write action. Approve?")
+
+                logger.info(
+                    "Write lock approval required",
+                    approval_type=approval_type,
+                    url=current_url
+                )
+
+                # Create attention request and wait for user response
+                approval_result = await request_write_lock_approval(
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    workflow_id=task_id,  # Use task_id as workflow_id for browser agent
+                    question=question,
+                    url=current_url,
+                    config=config
+                )
+
+                if approval_result.get("approved"):
+                    logger.info("Write lock approval granted, recording for domain")
+
+                    # Record approval for this domain (avoids repeated prompts for same type+domain)
+                    import time as time_module
+                    write_lock_approvals[approval_type] = {
+                        "domain": _get_domain_from_url(current_url),
+                        "approved_at": time_module.time(),
+                    }
+                    logger.info(
+                        "Write lock approval recorded",
+                        approval_type=approval_type,
+                        domain=write_lock_approvals[approval_type]["domain"]
+                    )
+
+                    # Re-execute the action (approval state will allow it through)
+                    result = await execute_action(
+                        dom_service, action_history, unified_action, available_file_paths,
+                        session_id=session_id,
+                        config=config,
+                        humanizer=humanizer,
+                        secret_refs=secret_refs,
+                        password_origins=password_origins,
+                        current_url=current_url,
+                        write_lock_enabled=write_lock_enabled,
+                        write_lock_approvals=write_lock_approvals,
+                    )
+                else:
+                    logger.info("Write lock approval denied by user")
+                    await save_browser_action_message(
+                        agent_id=agent_id, title="Action blocked by user", task_id=task_id,
+                        message=f"User denied permission for {approval_type}",
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url, action_type="system", tool_call_id=tool_call_id_action
+                    )
+                    # Continue to next iteration - agent will decide what to do
+                    continue
 
             # Post FINISHED - use action_name for icon mapping, include coordinates for cursor ripple
             if result.get("success", True):
@@ -2461,6 +3002,7 @@ Based on this feedback, I need to continue working on the task and address the i
         )
         
         # Send task_complete message so FE shows completion card
+        # Use original tool_call_id + is_completion_message to update main chat
         await save_browser_action_message(
             agent_id=agent_id,
             title="Task Incomplete - Max Steps Reached",
@@ -2468,7 +3010,9 @@ Based on this feedback, I need to continue working on the task and address the i
             message=context_message,
             status=MessageStatus.FINISHED,
             browser_url=browser_url,
-            action_type="task_complete"
+            action_type="task_complete",
+            tool_call_id=tool_call_id,
+            is_completion_message=True,
         )
         
         execution_time_ms = (_safe_time() - start_time) * 1000
@@ -2525,6 +3069,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 logger.warning(f"Failed to pause session on cancel: {e}")
 
         # Send task_complete message so FE hides the browser chip
+        # Use original tool_call_id + is_completion_message to update main chat
         if task_id:
             try:
                 await save_browser_action_message(
@@ -2534,7 +3079,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     message="Agent paused by user",
                     status=MessageStatus.FINISHED,
                     browser_url=browser_url or "",
-                    action_type="task_complete"
+                    action_type="task_complete",
+                    tool_call_id=tool_call_id,
+                    is_completion_message=True,
                 )
             except:
                 pass
@@ -2579,12 +3126,19 @@ Based on this feedback, I need to continue working on the task and address the i
             error_context=error_context
         )
 
+        # Use original tool_call_id + is_completion_message to update main chat
         if task_id:
             try:
                 await save_browser_action_message(
-                    agent_id=agent_id, title="Task Failed", task_id=task_id,
-                    message=error_message, status=MessageStatus.ERROR,
-                    browser_url=browser_url or "", action_type="task_complete"
+                    agent_id=agent_id,
+                    title="Task Failed",
+                    task_id=task_id,
+                    message=error_message,
+                    status=MessageStatus.ERROR,
+                    browser_url=browser_url or "",
+                    action_type="task_complete",
+                    tool_call_id=tool_call_id,
+                    is_completion_message=True,
                 )
             except:
                 pass
@@ -2608,6 +3162,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
+        start_url = tool_call.get("start_url", "")
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")  # Response schema from parent's tool call
         requested_attachments = tool_call.get("attachments")  # List of filenames from tool call
@@ -2650,13 +3205,16 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         )
 
         try:
+            # Get write_lock_enabled from workflow (defaults to True if not available)
+            write_lock_enabled = getattr(workflow_instance, 'write_lock_enabled', True)
+
             # Start activity with limited retries (expensive/long-running)
-            # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema, attachments
+            # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema, attachments, write_lock_enabled, start_url
             activity_handle = workflow.start_activity(
                 spawn_browser_agent_activity_v3,
-                args=[user_id, agent_id, goal, tool_call_id, None, None, None, False, output_schema, attachments if attachments else None],
+                args=[user_id, agent_id, goal, tool_call_id, None, None, None, False, output_schema, attachments if attachments else None, write_lock_enabled, start_url],
                 start_to_close_timeout=timedelta(minutes=15),
-                heartbeat_timeout=timedelta(seconds=30),
+                heartbeat_timeout=timedelta(seconds=120),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )

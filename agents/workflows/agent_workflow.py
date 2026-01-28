@@ -136,6 +136,7 @@ class AgentWorkflow:
         self._has_new_messages: bool = False
         self._has_credits: bool = True  # Cached credit status
         self._last_credit_check: int = 0  # Iteration count at last check
+        self.write_lock_enabled: bool = True  # Write lock for browser agent actions
 
         # Signup request state (for request_user_signup tool)
         self._signup_completed: bool = False
@@ -434,7 +435,7 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
 
-        # Fetch response schema from agent config (for system prompts, verifier, and completion summary)
+        # Fetch response schema and write_lock_enabled from agent config
         response_schema = None
         try:
             agent_config = await workflow.execute_activity(
@@ -445,7 +446,8 @@ class AgentWorkflow:
             )
             response_schema = agent_config.get("response_schema")
             self.output_schema = response_schema  # Single source of truth for output schema
-            workflow.logger.info(f"Fetched output_schema: {response_schema is not None}")
+            self.write_lock_enabled = agent_config.get("write_lock_enabled", True)  # Default to True (locked)
+            workflow.logger.info(f"Fetched output_schema: {response_schema is not None}, write_lock_enabled: {self.write_lock_enabled}")
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 

@@ -87,6 +87,7 @@ import {
 import RoseToolSetChip from './RoseToolSetChip';
 import TestPromptsSelector from './TestPromptsSelector';
 import AgentSettingsDialog from './AgentSettingsDialog';
+import WriteLockToggle from './WriteLockToggle';
 // Button styles
 import LiquidBlackButton from '@/components/ui/liquid-black-button';
 import RoseWhiteButton from '@/components/ui/rose-white-button';
@@ -603,6 +604,12 @@ export default function QueryInput({
             {/* Top Bar */}
             <div className="flex items-center justify-between gap-2 px-3 pb-2">
             <div className="flex items-center gap-2">
+              {/* Write Lock Toggle */}
+              <WriteLockToggle
+                agentId={agentDetail?.agent_id}
+                writeLockEnabled={agentDetail?.write_lock_enabled ?? true}
+                onUpdate={onAgentUpdate}
+              />
               {/* Rose-ToolSet Chip */}
               <RoseToolSetChip />
               {/* Test Prompts Selector - Dev only */}

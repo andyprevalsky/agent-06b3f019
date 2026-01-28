@@ -469,8 +469,10 @@ async def call_llm_structured_streaming(
     is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
     
     if is_rose_model:
-        logger.info(f"🌹 Streaming Rose model via Supabase: {model} → {config.rose.api_url}")
-        
+        # Generate unique request ID for tracing
+        request_id = str(uuid.uuid4())[:8]
+        logger.info(f"📤 [{request_id}] Streaming Rose model via Supabase: {model} → {config.rose.api_url}")
+
         # Build JSON schema from Pydantic model
         schema = prepare_schema_for_openai(response_model)
         
@@ -578,13 +580,14 @@ async def call_llm_structured_streaming(
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {config.rose.supabase_anon_key}",
                         "x-api-key": config.rose.api_key,
+                        "x-request-id": request_id,
                     }
                 ) as stream_response:
                     stream_response.raise_for_status()
                     
                     # Heartbeat after connection established - catches cancellation during initial request
                     _safe_heartbeat("Rose stream connected, waiting for chunks...")
-                    logger.info(f"🔄 Rose streaming response started, status={stream_response.status_code}")
+                    logger.info(f"🔄 [{request_id}] Rose streaming response started, status={stream_response.status_code}")
                     
                     async for line in stream_response.aiter_lines():
                         chunk_count += 1
@@ -1201,9 +1204,11 @@ async def call_llm(
         is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
         
         if is_rose_model:
+            # Generate unique request ID for tracing
+            request_id = str(uuid.uuid4())[:8]
             # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
-            logger.info(f"🌹 Routing Rose model to Supabase: {model} → {config.rose.api_url}")
-            
+            logger.info(f"📤 [{request_id}] Routing Rose model to Supabase: {model} → {config.rose.api_url}")
+
             request_body = {
                 "model": model,
                 "messages": messages,
@@ -1212,10 +1217,11 @@ async def call_llm(
             }
             if response_format:
                 request_body["response_format"] = response_format
-            
+
             # Log outbound request summary for debugging 400s
             logger.debug(
-                "📤 Rose non-streaming request payload",
+                f"📤 [{request_id}] Rose non-streaming request payload",
+                request_id=request_id,
                 model=request_body.get("model"),
                 message_count=len(messages),
                 has_response_format=bool(response_format),
@@ -1239,14 +1245,15 @@ async def call_llm(
                     for i, m in enumerate(messages)
                 ]
             )
-            
+
             # Log FULL request for replay/debugging slow requests
             logger.info(
-                "📋 Rose non-streaming request FULL (for replay)",
+                f"📋 [{request_id}] Rose non-streaming request FULL (for replay)",
+                request_id=request_id,
                 url=config.rose.api_url,
                 request_body_json=json.dumps(request_body, default=str),
             )
-            
+
             async with httpx.AsyncClient(timeout=120.0) as http_client:
                 http_response = await http_client.post(
                     config.rose.api_url,
@@ -1255,13 +1262,14 @@ async def call_llm(
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {config.rose.supabase_anon_key}",
                         "x-api-key": config.rose.api_key,
+                        "x-request-id": request_id,
                     }
                 )
                 http_response.raise_for_status()
-            
+
             data = http_response.json()
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            
+
             result = {
                 "content": content,
                 "model": data.get("model", model),
@@ -1272,15 +1280,16 @@ async def call_llm(
                     "total_tokens": data.get("usage", {}).get("total_tokens", 0)
                 }
             }
-            
+
             logger.info(
-                "LLM call complete (Rose)",
+                f"📥 [{request_id}] LLM call complete (Rose)",
+                request_id=request_id,
                 model=model,
                 tokens=result["usage"]["total_tokens"],
                 content_length=len(content),
                 content_preview=content[:100] if content else "EMPTY"
             )
-            
+
             return result
         
         # Use OpenRouter for all other models

@@ -51,7 +51,7 @@ def service_usage(cost_cents: int, provider: str) -> Dict[str, Any]:
 
     Args:
         cost_cents: Pre-calculated cost in cents
-        provider: Human-readable provider name (e.g., "Browserbase Session", "Perplexity Search")
+        provider: Human-readable provider name (e.g., "Steel Session", "Perplexity Search")
     """
     return {
         "cost_cents": cost_cents,

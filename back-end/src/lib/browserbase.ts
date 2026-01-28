@@ -17,9 +17,9 @@ const bb = new Browserbase({
 const projectId = process.env.BROWSERBASE_PROJECT_ID;
 
 /**
- * Get or create a persistent Browserbase context for a user.
+ * Get or create a persistent Steel context for a user.
  * Contexts store cookies, localStorage, etc. forever (no expiry).
- * 
+ *
  * @returns The database ID (BrowserContext.id) for use as foreign key
  */
 export async function getOrCreateContext(userId: string): Promise<string> {
@@ -33,7 +33,7 @@ export async function getOrCreateContext(userId: string): Promise<string> {
     return existing.id;  // ✅ Return database ID (for foreign key)
   }
   
-  // Create new context in Browserbase
+  // Create new context in Steel
   console.log(`Creating new context for user ${userId}...`);
   const bbContext = await bb.contexts.create({ projectId });
   
@@ -62,7 +62,7 @@ export async function createSessionWithContext(
 ): Promise<{ sessionId: string; debugUrl: string; taskId: string; wsUrl: string }> {
   console.log(`Creating browser session for context ${dbContextId}...`);
   
-  // Look up the BrowserBase context ID from database
+  // Look up the Steel context ID from database
   const dbContext = await prisma.browserContext.findUnique({
     where: { id: dbContextId }
   });
@@ -71,14 +71,14 @@ export async function createSessionWithContext(
     throw new Error(`Browser context not found: ${dbContextId}`);
   }
   
-  // Create session in BrowserBase using the BrowserBase context ID
-  // Create BrowserBase session with context, proxies, and NYC geolocation
+  // Create session in Steel using the Steel context ID
+  // Create Steel session with context, proxies, and NYC geolocation
   // Documentation: https://docs.browserbase.com/features/proxies
   const session = await bb.sessions.create({
     projectId,
     browserSettings: {
       context: {
-        id: dbContext.contextId,  // ← Use BrowserBase context ID
+        id: dbContext.contextId,  // ← Use Steel context ID
         persist: true, // Save state back to context on close
       },
       viewport: {
@@ -90,7 +90,7 @@ export async function createSessionWithContext(
       {
         type: "browserbase",
         geolocation: {
-          city: "NEW_YORK",  // BrowserBase uses UPPER_CASE format
+          city: "NEW_YORK",  // Steel uses UPPER_CASE format
           state: "NY",
           country: "US"
         }
@@ -104,7 +104,7 @@ export async function createSessionWithContext(
   const liveUrls = await bb.sessions.debug(session.id);
   console.log('📺 Live URLs:', JSON.stringify(liveUrls, null, 2));
   
-  // Use debuggerFullscreenUrl for embedding (no BrowserBase chrome, just the browser)
+  // Use debuggerFullscreenUrl for embedding (no Steel chrome, just the browser)
   const debugUrl = liveUrls.debuggerFullscreenUrl || liveUrls.debuggerUrl;
   
   // CDP WebSocket URL for browser-use/Playwright connection
@@ -145,14 +145,14 @@ export async function closeSession(sessionId: string, pause: boolean = false, cu
   console.log(`${pause ? 'Pausing' : 'Closing'} browser session ${sessionId}...`);
   
   try {
-    // Close in Browserbase by requesting release (saves context state, stops billing)
+    // Close in Steel by requesting release (saves context state, stops billing)
     await bb.sessions.update(sessionId, {
       projectId,
       status: 'REQUEST_RELEASE'
     });
   } catch (error) {
-    console.error(`Failed to close session in Browserbase:`, error);
-    // Continue to update DB even if Browserbase call fails
+    console.error(`Failed to close session in Steel:`, error);
+    // Continue to update DB even if Steel call fails
   }
   
   // Update DB
@@ -176,7 +176,7 @@ export async function closeSession(sessionId: string, pause: boolean = false, cu
 
 /**
  * Resume a paused browser session by creating a NEW session with the same context.
- * The task ID stays the same, but we get a new BrowserBase session ID.
+ * The task ID stays the same, but we get a new Steel session ID.
  * @param taskId - The stable task ID (BrowserSession.id)
  * @returns Session info including saved URL to navigate back to
  */
@@ -195,13 +195,13 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
   
   console.log(`  Found old session with currentUrl: ${oldSession.currentUrl || 'NONE'}`);
   
-  // Create NEW BrowserBase session with same context, proxies, and NYC geolocation
+  // Create NEW Steel session with same context, proxies, and NYC geolocation
   // Documentation: https://docs.browserbase.com/features/proxies
   const session = await bb.sessions.create({
     projectId,
     browserSettings: {
       context: {
-        id: oldSession.context.contextId,  // Same BrowserBase context
+        id: oldSession.context.contextId,  // Same Steel context
         persist: true,
       },
       viewport: {
@@ -213,7 +213,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
       {
         type: "browserbase",
         geolocation: {
-          city: "NEW_YORK",  // BrowserBase uses UPPER_CASE format
+          city: "NEW_YORK",  // Steel uses UPPER_CASE format
           state: "NY",
           country: "US"
         }
@@ -223,7 +223,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
     timeout: 7200,  // 2 hours in seconds
   });
   
-  console.log(`  ✓ Created new BrowserBase session: ${session.id}`);
+  console.log(`  ✓ Created new Steel session: ${session.id}`);
   
   // Get debug URLs for new session
   const liveUrls = await bb.sessions.debug(session.id);
@@ -241,7 +241,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
       await page.goto(oldSession.currentUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
       console.log(`  ✅ Navigation complete`);
       // Note: Not calling browser.close() - let connection drop naturally
-      // Calling browser.close() causes BrowserBase to terminate the session
+      // Calling browser.close() causes Steel to terminate the session
     } catch (navError) {
       console.error(`  ⚠️ Failed to navigate to saved URL:`, navError);
       // Continue anyway - user can navigate manually
@@ -252,7 +252,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
   await prisma.browserSession.update({
     where: { id: taskId },
     data: {
-      sessionId: session.id,  // NEW BrowserBase session ID
+      sessionId: session.id,  // NEW Steel session ID
       debugUrl,
       wsUrl,  // CDP WebSocket URL
       status: 'ACTIVE',
@@ -397,7 +397,7 @@ export async function injectUserCookies(
     console.log(`  ✅ Injected ${injectedCount}/${validCookies.length} cookies`);
     
     // Don't close browser - let connection drop naturally
-    // Closing would terminate the BrowserBase session
+    // Closing would terminate the Steel session
     
     return { injected: true, cookieCount: injectedCount };
   } catch (error) {
