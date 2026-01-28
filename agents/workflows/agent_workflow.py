@@ -43,7 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.wait_seconds import wait_seconds
     from tools.send_message_to_user import send_message_to_user
     from tools.enable_write_permissions import enable_write_permissions
-    from tools.request_user_approval import request_user_approval_direct
+    from tools.request_user_approval import request_user_approval_direct, UserRejectedError
     from tools.knowledge_base import save_blueprint_activity
     from tools.web_search import web_search
     from tools.web_fetch import web_fetch
@@ -64,6 +64,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
     from helpers.sms_activities import get_agent_source, send_direct_sms_activity
     from tools.request_user_signup import request_user_signup
+    from tools.call_phone_number import call_phone_number, get_manager as get_call_phone_manager
     from tools.people_search import people_search
     from loop.run_agent import run_agent
     from loop.dag_executor import extract_plan_from_context, TaskDAG, execute_dag
@@ -100,13 +101,15 @@ TOOL_EXECUTORS = {
     "search_x402_bazaar": search_x402_bazaar,
     "pay_for_x402_bazaar_service": pay_for_x402_bazaar_service,
     "request_user_signup": request_user_signup,
+    "call_phone_number": call_phone_number,
     "people_search": people_search,
 }
 
 # Tools requiring user approval before execution
 APPROVAL_REQUIRED_TOOLS = {
     "message_person": get_message_person_manager,
-    }
+    "call_phone_number": get_call_phone_manager,
+}
 
 
 @workflow.defn
@@ -773,7 +776,11 @@ class AgentWorkflow:
                 manager = APPROVAL_REQUIRED_TOOLS[tool_name]()
                 if manager.requires_approval:
                     question = manager.get_approval_question({"tool": tool_name, **tool_args})
-                    await request_user_approval_direct(self, question=question, metadata={"toolApproval": True})
+                    try:
+                        await request_user_approval_direct(self, question=question, metadata={"toolApproval": True})
+                    except UserRejectedError:
+                        workflow.logger.info(f"User rejected {tool_name}, skipping tool execution")
+                        return {"success": False, "rejected": True, "message": f"User rejected {tool_name}. The action was not performed."}
 
             executor = TOOL_EXECUTORS[tool_name]
 
@@ -785,6 +792,7 @@ class AgentWorkflow:
                 "monitor", "check_monitor_events",
                 "deep_research", "attempt_completion",
                 "search_x402_bazaar", "pay_for_x402_bazaar_service",
+                "call_phone_number",
                 "people_search",
             }
 

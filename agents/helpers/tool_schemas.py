@@ -33,6 +33,7 @@ EXECUTE_PHASE_TOOLS = [
     "web_search",
     "people_search",
     "send_message_to_user_execute_phase",
+    "call_phone_number",
     "attempt_completion",
 ]
 
@@ -44,6 +45,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "wait_seconds",
     "web_search",
     "people_search",
+    "call_phone_number",
     "send_message_to_user_execute_phase",
     "reasoning",  # Pure thinking/analysis step (no tool call)
 ]
@@ -56,6 +58,7 @@ class PlanToolName(str, Enum):
     wait_seconds = "wait_seconds"
     web_search = "web_search"
     people_search = "people_search"
+    call_phone_number = "call_phone_number"
     send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
     reasoning = "reasoning"
 
@@ -742,6 +745,42 @@ class PayForX402BazaarServiceTool(BaseModel):
     )
 
 
+class CallPhoneNumberTool(BaseModel):
+    """
+    Make an outbound phone call to extract structured data via voice AI.
+
+    This tool initiates a phone call using a voice AI agent that will have a conversation
+    with the person who answers. The agent follows the system_prompt instructions and
+    extracts structured data according to the output_schema.
+
+    The call is monitored until completion and returns the extracted data.
+
+    IMPORTANT: Only call this tool ONCE per phone number. Do NOT make parallel calls to the
+    same number - this will result in multiple simultaneous calls to the same person. If you
+    need to call multiple different numbers, you may call them in parallel.
+    """
+
+    tool: Literal["call_phone_number"]
+    to: str = Field(
+        description="Phone number to call in E.164 format (e.g., +19729777432)"
+    )
+    system_prompt: str = Field(
+        description=(
+            "Instructions for how the voice agent should behave, who they are, and what they're calling about. "
+            "Be specific about the agent's identity, tone, and conversation goals. "
+            "Example: 'You are a friendly assistant from Acme Corp calling to confirm an appointment. "
+            "Introduce yourself, verify you're speaking with the right person, and confirm the appointment details.'"
+        )
+    )
+    output_schema: Dict[str, str] = Field(
+        description=(
+            "Simple key-value mapping of field names to their descriptions. "
+            "Each key is the field name (snake_case), each value is a description of what to extract. "
+            "Example: {'full_name': 'The person\\'s full name', 'arrival_time': 'When they will arrive'}"
+        )
+    )
+
+
 # Map tool names to their Pydantic models
 TOOL_MODELS = {
     "wait_seconds": WaitSecondsTool,
@@ -770,6 +809,8 @@ TOOL_MODELS = {
     # x402 Bazaar tools
     "search_x402_bazaar": SearchX402BazaarTool,
     "pay_for_x402_bazaar_service": PayForX402BazaarServiceTool,
+    # Phone calling tool
+    "call_phone_number": CallPhoneNumberTool,
 }
 
 # ============================================================================
@@ -883,6 +924,7 @@ __all__ = [
     "ProgressToAutonomousExecutionPhaseTool",
     "SearchX402BazaarTool",
     "PayForX402BazaarServiceTool",
+    "CallPhoneNumberTool",
     "TOOL_MODELS",
     "create_agent_action_model",
     "ProgressScore",

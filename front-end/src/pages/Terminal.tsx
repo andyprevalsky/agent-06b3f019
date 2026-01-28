@@ -54,7 +54,7 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Loader2, Plus, LogOut, Settings as SettingsIcon, BarChart3, Menu, X, Bot, Copy, Check, Plug, Network } from 'lucide-react';
 import AppSidebar from '@/components/terminal/AppSidebar';
-import { supabase, signOut, initializeRealtime, clearStoredSession } from '@/lib/supabase';
+import { supabase, signOut, clearStoredSession } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
 // Realtime subscription now handled by AgentContext
 import {
@@ -87,6 +87,7 @@ import AsciiLoader from '@/components/terminal/AsciiLoader';
 import { PlanChip } from '@/components/terminal/PlanChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import QueryInput from '@/components/terminal/QueryInput';
+import ApprovalChip from '@/components/terminal/ApprovalChip';
 import AttentionInbox from '@/components/terminal/AttentionInbox';
 import Settings from '@/pages/Settings';
 import Integrations from '@/pages/Integrations';
@@ -319,7 +320,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
   const { toast } = useToast();
   
   // Auth state from hook - isAuthenticated is TRUE for both JWT users AND anonymous users (Supabase native)
-  const { user: authUser, isFullySignedIn, isAuthenticated, isAnonymous, refreshAuthState, loading: authLoading } = useAuth();
+  const { user: authUser, isFullySignedIn, isAuthenticated, isAnonymous, refreshAuthState, loading: authLoading, realtimeReady } = useAuth();
 
   // User is considered "logged in" for Terminal features when fully signed in (non-anonymous)
   // For features like invite codes, we need a non-anonymous user
@@ -709,12 +710,10 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     };
   }, [FRAME_DURATION_MS, animationComplete]);
 
-  // Initialize realtime and Amplitude when user is authenticated (JWT or anonymous)
+  // Initialize Amplitude when user is authenticated (JWT or anonymous)
+  // Note: Realtime auth is now set centrally by useAuth via setRealtimeAuth()
   useEffect(() => {
     if (isAuthenticated && authUser) {
-      // Set up realtime connection - works for both anonymous and regular users now
-      initializeRealtime();
-
       // Identify user in Amplitude
       if (authUser.phone) {
         amplitude.setUserId(authUser.phone);
@@ -724,16 +723,9 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
     }
   }, [isAuthenticated, authUser]);
   
-  // Handle sign out - reset Amplitude
-  useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
-      if (event === 'SIGNED_OUT') {
-        amplitude.reset();
-      }
-    });
-    
-    return () => subscription.unsubscribe();
-  }, []);
+  // Note: We don't use supabase.auth.onAuthStateChange because we're using
+  // the accessToken option for third-party auth. Amplitude reset is handled
+  // by the signOut function in useAuth instead.
 
   // Load agents on mount (for authenticated users, including anonymous)
   useEffect(() => {
@@ -757,29 +749,65 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
 
   // Realtime subscription is now handled by AgentContext
 
-  // Derive hasActiveAttentionRequest from messages - when a message has isUserAttentionMessage + IN_PROGRESS
+  // Derive pending approval from messages - when a message has isUserAttentionMessage + IN_PROGRESS
   // Must deduplicate by toolCallId first (keep latest) since FINISHED messages may exist alongside IN_PROGRESS
-  const hasActiveAttentionRequest = useMemo(() => {
+  const pendingApproval = useMemo(() => {
     // Deduplicate attention messages by toolCallId, keeping the latest one
     const attentionByToolCallId = new Map<string, typeof messages[0]>();
-    
+
     for (const m of messages) {
       if (!m.metadata?.isUserAttentionMessage) continue;
       const toolCallId = m.metadata?.toolCallId;
       if (!toolCallId) continue;
-      
+
       const existing = attentionByToolCallId.get(toolCallId);
       if (!existing || new Date(m.timestamp) > new Date(existing.timestamp)) {
         attentionByToolCallId.set(toolCallId, m);
       }
     }
-    
+
+    // Find the first IN_PROGRESS attention message with toolApproval metadata
+    // toolApproval is nested inside requestUserApproval: { toolApproval: true, attentionRequestId: "..." }
+    const activeApproval = Array.from(attentionByToolCallId.values()).find(
+      (m) => m.metadata?.toolStatus === 'IN_PROGRESS' && m.metadata?.requestUserApproval?.toolApproval
+    );
+
+    if (!activeApproval) return null;
+
+    // Extract the attentionRequestId from the metadata
+    const attentionRequestId = activeApproval.metadata?.requestUserApproval?.attentionRequestId;
+    if (!attentionRequestId) {
+      console.warn('Active approval found but missing attentionRequestId:', activeApproval.metadata);
+      return null;
+    }
+
+    return {
+      attentionRequestId,
+      question: activeApproval.text || '',
+      imageUrl: activeApproval.metadata?.imageUrl || null,
+    };
+  }, [messages]);
+
+  // Derive hasActiveAttentionRequest for canSubmit logic (any IN_PROGRESS attention request)
+  const hasActiveAttentionRequest = useMemo(() => {
+    // Deduplicate attention messages by toolCallId, keeping the latest one
+    const attentionByToolCallId = new Map<string, typeof messages[0]>();
+
+    for (const m of messages) {
+      if (!m.metadata?.isUserAttentionMessage) continue;
+      const toolCallId = m.metadata?.toolCallId;
+      if (!toolCallId) continue;
+
+      const existing = attentionByToolCallId.get(toolCallId);
+      if (!existing || new Date(m.timestamp) > new Date(existing.timestamp)) {
+        attentionByToolCallId.set(toolCallId, m);
+      }
+    }
+
     // Check if any deduplicated attention message is still IN_PROGRESS
-    const result = Array.from(attentionByToolCallId.values()).some(
+    return Array.from(attentionByToolCallId.values()).some(
       (m) => m.metadata?.toolStatus === 'IN_PROGRESS'
     );
-    
-    return result;
   }, [messages]);
 
   // Debug: Log canSubmit state
@@ -1559,7 +1587,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         </button>
         
         {/* Attention Inbox */}
-        <AttentionInbox onSelectAgent={setSelectedAgentIdContext} />
+        <AttentionInbox onSelectAgent={setSelectedAgentIdContext} realtimeReady={realtimeReady} />
       </header>
 
 
@@ -1838,6 +1866,14 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
                 </div>
               </div>
             )}
+            {/* Approval Chip - shows above query input when selected agent has pending approval */}
+            <ApprovalChip
+              pendingApproval={pendingApproval}
+              onApprovalHandled={() => {
+                // Refresh agent detail after approval handled
+                if (selectedAgentId) refreshAgentDetail(selectedAgentId);
+              }}
+            />
             <div className="relative z-10">
             <QueryInput
               value={messageInput}
@@ -1925,17 +1961,23 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
 
 // Main Terminal component - wraps content in AgentProvider
 export default function Terminal() {
-  const { user: authUser, isFullySignedIn, isAuthenticated } = useAuth();
+  const { user: authUser, isFullySignedIn, isAuthenticated, realtimeReady } = useAuth();
   const user = isFullySignedIn ? authUser : null;
 
   // loadAgents callback will be set by TerminalContent via ref
   const loadAgentsRef = useRef<(() => void) | null>(null);
 
+  // Memoize to prevent useEffect re-runs in AgentContext
+  const handleLoadAgents = useCallback(() => {
+    loadAgentsRef.current?.();
+  }, []);
+
   return (
     <AgentProvider
       user={user}
       isAuthenticated={isAuthenticated}
-      onLoadAgents={() => loadAgentsRef.current?.()}
+      realtimeReady={realtimeReady}
+      onLoadAgents={handleLoadAgents}
     >
       <TerminalContentWithRef loadAgentsRef={loadAgentsRef} />
     </AgentProvider>

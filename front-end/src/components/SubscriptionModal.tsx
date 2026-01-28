@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Button } from "@/components/ui/button";
 import { Check } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { supabase } from "@/lib/supabase";
+import { getSession } from "@/lib/supabase";
 
 interface SubscriptionModalProps {
   open: boolean;
@@ -39,9 +39,10 @@ export default function SubscriptionModal({
 
   const handleUpgrade = async (url: string) => {
     try {
-      // Get current user
-      const { data: { user } } = await supabase.auth.getUser();
-      
+      // Get current user from our session (not Supabase auth, since we use accessToken option)
+      const session = getSession();
+      const user = session?.user;
+
       if (!user) {
         console.error('No user found');
         // TODO: Show login modal
@@ -51,7 +52,7 @@ export default function SubscriptionModal({
       // Add userId as client_reference_id query param
       // Stripe will include this in webhook events!
       const urlWithUserId = `${url}?client_reference_id=${user.id}`;
-      
+
       // Open payment link with userId attached
       window.open(urlWithUserId, '_blank');
     } catch (error) {

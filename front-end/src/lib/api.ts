@@ -532,6 +532,20 @@ export async function skipAttentionRequest(requestId: string): Promise<void> {
   }
 }
 
+export async function rejectAttentionRequest(requestId: string): Promise<void> {
+  const headers = getAuthHeaders();
+
+  const res = await fetch(`${API_BASE_WITH_PATH}/attention-requests/${requestId}/reject`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to reject attention request');
+  }
+}
+
 // Invite Codes
 export interface InviteCodeInfo {
   inviteCode: number;

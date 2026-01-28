@@ -22,10 +22,49 @@ const USER_CACHE_KEY = 'app-user';
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 
 // =============================================================================
+// Clear stale Supabase auth keys on load
+// These can interfere with our custom session management
+// =============================================================================
+
+if (typeof window !== 'undefined') {
+  const keysToRemove: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith('sb-') && key.endsWith('-auth-token')) {
+      keysToRemove.push(key);
+    }
+  }
+  keysToRemove.forEach(key => {
+    console.log(`[Supabase] Clearing stale auth key: ${key}`);
+    localStorage.removeItem(key);
+  });
+}
+
+// =============================================================================
 // Supabase Client (for realtime only)
 // =============================================================================
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  // CRITICAL: Top-level accessToken callback for third-party auth.
+  // This is called by Supabase internally for ALL operations (Data API, Realtime, Storage, etc.)
+  // Without this, Supabase uses the anon key which breaks private channels.
+  // See: https://supabase.com/docs/guides/auth/third-party/auth0
+  accessToken: async () => {
+    const stored = window.localStorage.getItem(SESSION_KEY);
+    if (!stored) {
+      console.log('[Supabase] accessToken callback: no session');
+      return null;
+    }
+    try {
+      const session = JSON.parse(stored);
+      if (session?.access_token) {
+        return session.access_token;
+      }
+    } catch {
+      console.error('[Supabase] accessToken callback: failed to parse session');
+    }
+    return null;
+  },
   auth: {
     autoRefreshToken: false,
     persistSession: false,
@@ -277,16 +316,76 @@ export async function signOut(): Promise<void> {
 }
 
 // =============================================================================
-// Realtime
+// Realtime Auth - SINGLE SOURCE OF TRUTH
 // =============================================================================
 
+let realtimeInitialized = false;
+
 /**
- * Initialize realtime with the current session's token.
+ * Helper to identify token type for logging
+ */
+function identifyToken(token: string | null): string {
+  if (!token) return 'null';
+  if (token.length < 50) return 'invalid (too short)';
+
+  try {
+    // Decode JWT payload (middle part)
+    const parts = token.split('.');
+    if (parts.length !== 3) return 'invalid (not JWT)';
+
+    const payload = JSON.parse(atob(parts[1]));
+
+    // Check if it's the anon key (has role: "anon" or no sub claim)
+    if (payload.role === 'anon') {
+      return 'ANON_KEY ⚠️';
+    }
+
+    // Check if it's a user token
+    if (payload.sub && payload.role === 'authenticated') {
+      return `USER_JWT (sub: ${payload.sub.slice(0, 8)}...)`;
+    }
+
+    return `unknown (role: ${payload.role}, sub: ${payload.sub ? 'yes' : 'no'})`;
+  } catch {
+    return 'invalid (decode failed)';
+  }
+}
+
+/**
+ * Set the realtime auth token. This is the ONLY place setAuth should be called.
+ * Called by useAuth when session changes.
+ */
+export async function setRealtimeAuth(accessToken: string | null): Promise<void> {
+  const tokenType = identifyToken(accessToken);
+  const stack = new Error().stack?.split('\n').slice(2, 5).join('\n') || 'no stack';
+
+  console.log(`[Supabase] setRealtimeAuth called with: ${tokenType}`);
+  console.log(`[Supabase] Call stack:\n${stack}`);
+
+  if (accessToken) {
+    await supabase.realtime.setAuth(accessToken);
+    realtimeInitialized = true;
+    console.log(`[Supabase] ✅ Realtime auth set to: ${tokenType}`);
+  } else {
+    console.log('[Supabase] Clearing realtime auth (no token)');
+    realtimeInitialized = false;
+  }
+}
+
+/**
+ * Check if realtime auth has been initialized.
+ */
+export function isRealtimeReady(): boolean {
+  return realtimeInitialized;
+}
+
+/**
+ * @deprecated Use setRealtimeAuth instead. This is kept for backwards compatibility.
  */
 export async function initializeRealtime(): Promise<void> {
   const session = getSession();
   if (session?.access_token) {
-    await supabase.realtime.setAuth(session.access_token);
+    await setRealtimeAuth(session.access_token);
   }
 }
 

@@ -459,9 +459,10 @@ export function MessageList({
       // In chat mode: NOT (last message is send_message_to_user at all)
       if (isChatMode) return false;
 
-      // In agent mode: NOT (isQuestion == true)
+      // In agent mode: NOT (isQuestion == true OR toolApproval == true)
       const isQuestion = lastMessage.metadata?.sendMessageToUser?.isQuestion;
-      if (isQuestion === true) return false;
+      const toolApproval = lastMessage.metadata?.requestUserApproval?.toolApproval;
+      if (isQuestion === true || toolApproval === true) return false;
     }
 
     return true;

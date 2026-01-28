@@ -167,21 +167,21 @@ router.post('/:id/skip', authenticate, async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
     const userId = req.user!.id;
-    
+
     // Find the request
     const request = await prisma.agentAttentionRequest.findUnique({
       where: { id },
     });
-    
+
     if (!request) {
       return res.status(404).json({ error: 'Attention request not found' });
     }
-    
+
     // Verify ownership
     if (request.userId !== userId) {
       return res.status(403).json({ error: 'Not authorized' });
     }
-    
+
     // Update updatedAt to move to back of queue
     await prisma.agentAttentionRequest.update({
       where: { id },
@@ -189,7 +189,7 @@ router.post('/:id/skip', authenticate, async (req: AuthRequest, res) => {
         updatedAt: new Date(),
       },
     });
-    
+
     res.json({
       success: true,
       request_id: id,
@@ -197,6 +197,55 @@ router.post('/:id/skip', authenticate, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error('Failed to skip attention request:', error);
     res.status(500).json({ error: 'Failed to skip attention request' });
+  }
+});
+
+// POST /api/attention-requests/:id/reject - Reject request and signal workflow
+router.post('/:id/reject', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user!.id;
+
+    // Find the request
+    const request = await prisma.agentAttentionRequest.findUnique({
+      where: { id },
+    });
+
+    if (!request) {
+      return res.status(404).json({ error: 'Attention request not found' });
+    }
+
+    // Verify ownership
+    if (request.userId !== userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    // Update the request with rejection marker
+    await prisma.agentAttentionRequest.update({
+      where: { id },
+      data: {
+        userResponse: '__REJECTED__',
+      },
+    });
+
+    // Send signal to workflow to resume (with rejection)
+    try {
+      const { getTemporalClient } = await import('../lib/temporal');
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(request.workflowId);
+      await handle.signal('receive_user_response', '__REJECTED__');
+    } catch (error) {
+      console.error(`Failed to send rejection signal to workflow ${request.workflowId}:`, error);
+      // Don't fail the request - DB is updated, workflow will eventually check
+    }
+
+    res.json({
+      success: true,
+      request_id: id,
+    });
+  } catch (error) {
+    console.error('Failed to reject attention request:', error);
+    res.status(500).json({ error: 'Failed to reject attention request' });
   }
 });
 

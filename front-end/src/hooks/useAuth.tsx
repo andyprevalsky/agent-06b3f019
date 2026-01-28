@@ -2,6 +2,7 @@
  * STATE MACHINE: useAuth
  *
  * Simple auth with anonymous fallback.
+ * SINGLE SOURCE OF TRUTH for realtime auth - setRealtimeAuth() is called here only.
  *
  * [LOADING] <-- loading: true
  *     |
@@ -10,6 +11,11 @@
  *     |
  *     +--> isAnonymous: true (anonymous session)
  *     +--> isAnonymous: false (phone-verified session)
+ *
+ * On session change (applySession):
+ *   1. Update React state (session, user)
+ *   2. setRealtimeAuth(session.access_token) <-- ONLY place realtime auth is set
+ *   3. Update invite status
  *
  * Returns:
  * - user: User | null
@@ -29,6 +35,7 @@ import {
   persistCachedUser,
   createAnonymousSession,
   isAnonymousUser,
+  setRealtimeAuth,
 } from '@/lib/supabase';
 import { checkNeedsInviteCode } from '@/lib/api';
 
@@ -37,6 +44,7 @@ export function useAuth() {
   const [session, setSession] = useState<Session | null>(null);
   const [isFullySignedIn, setIsFullySignedIn] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [realtimeReady, setRealtimeReady] = useState(false);
   const initRef = useRef(false);
 
   const isAuthenticated = !!session;
@@ -73,6 +81,7 @@ export function useAuth() {
   );
 
   // Apply a session (from login or refresh)
+  // This is the SINGLE place where realtime auth is set
   const applySession = useCallback(
     async (origin: string, nextSession: Session | null) => {
       log(`Applying session (${origin})`, {
@@ -88,6 +97,10 @@ export function useAuth() {
         setUser(null);
         persistCachedUser(null);
       }
+
+      // Set realtime auth - this is the ONLY place setAuth is called
+      await setRealtimeAuth(nextSession?.access_token ?? null);
+      setRealtimeReady(!!nextSession?.access_token);
 
       await updateInviteStatus(nextSession, nextSession?.user ?? null);
     },
@@ -171,6 +184,7 @@ export function useAuth() {
     isAnonymous,
     isFullySignedIn,
     loading,
+    realtimeReady,
     refreshAuthState,
     signOut,
   };

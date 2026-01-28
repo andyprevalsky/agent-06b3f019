@@ -53,6 +53,7 @@ import SubAgentTree from './SubAgentTree';
 import ClaudeCodeChip from './ClaudeCodeChip';
 import { MarkdownText } from './MarkdownText';
 import { PlanChip } from './PlanChip';
+import { PhoneCallCard, PhoneCallMetadata } from './PhoneCallCard';
 import { CompletionSummaryCard, CompletionSummaryData } from './CompletionSummaryCard';
 import { FeedbackBanner, FeedbackData } from './FeedbackBanner';
 import { getToolIcon, isX402Tool, x402IconSrc, isClaudeCodeTool, claudeCodeIconSrc } from '@/lib/toolIcons';
@@ -824,6 +825,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // Check if this is a send_message_to_user message (render as raw text, not tool card)
   const isUserAttentionMessage = isTool && message.metadata?.isUserAttentionMessage;
 
+  // Check if this is a tool approval message (rendered by ApprovalChip, not MessageBubble)
+  const isToolApproval = isTool && message.metadata?.requestUserApproval?.toolApproval;
+
   // Check if this is a request_user_signup message (render as SignupPromptBubble)
   const isSignupRequest = isTool && message.metadata?.requestUserSignup;
 
@@ -833,8 +837,11 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // Check if this is a set_plan tool message (render as PlanChip)
   const isSetPlanTool = isTool && message.metadata?.toolName === 'set_plan';
 
+  // Check if this is a phone call tool message (render as PhoneCallCard)
+  const isPhoneCallTool = isTool && message.metadata?.toolName === 'call_phone_number';
+
   // Check if this is a spawn_claude_code_agent tool message (render as ClaudeCodeChip)
-  const isClaudeCodeTool = isTool && message.metadata?.toolName === 'spawn_claude_code_agent';
+  const isClaudeCodeToolMessage = isTool && message.metadata?.toolName === 'spawn_claude_code_agent';
 
   // Check if this is a completion summary message (render as CompletionSummaryCard + FeedbackBanner)
   const isCompletionSummary = isTool && message.metadata?.isFinalSummary === true;
@@ -981,6 +988,14 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     );
   }
 
+  // Tool approval messages are rendered by ApprovalChip, not MessageBubble
+  if (isToolApproval) {
+    if (shouldType && onTypingComplete) {
+      requestAnimationFrame(() => onTypingComplete());
+    }
+    return null;
+  }
+
   // set_plan tool: render as PlanChip instead of standard tool card
   // NOTE: Must call onTypingComplete immediately since PlanChip doesn't animate text.
   // The message queue in Terminal.tsx blocks on isAnimating until callback is called.
@@ -1024,13 +1039,35 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     );
   }
 
+  // call_phone_number tool: render as PhoneCallCard
+  if (isPhoneCallTool) {
+    const toolStatus = (message.metadata?.toolStatus || 'IN_PROGRESS') as 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
+    const phoneCallMetadata = message.metadata?.phoneCall as PhoneCallMetadata | undefined;
+
+    // Default to basic metadata if phoneCall object not present
+    const phoneCall: PhoneCallMetadata = phoneCallMetadata || {
+      status: toolStatus === 'IN_PROGRESS' ? 'in-progress' : toolStatus === 'FINISHED' ? 'ended' : 'error',
+      to: message.metadata?.title?.replace(/[📞✅❌]\s*/g, '').trim() || 'Unknown',
+    };
+
+    return (
+      <div className="animate-in fade-in duration-300">
+        <PhoneCallCard
+          phoneCall={phoneCall}
+          toolStatus={toolStatus}
+          onTypingComplete={onTypingComplete}
+        />
+      </div>
+    );
+  }
+
   // spawn_claude_code_agent tool: render as ClaudeCodeChip
   // - IN_PROGRESS (toolStatus) shows spinning_up state
   // - claude_code_started shows live terminal
   // - task_complete shows completed/failed state with expandable terminal
-  const isClaudeCodeInProgress = isClaudeCodeTool && message.metadata?.toolStatus === 'IN_PROGRESS';
-  const isClaudeCodeStarted = isClaudeCodeTool && message.metadata?.action_type === 'claude_code_started';
-  const isClaudeCodeComplete = isClaudeCodeTool && message.metadata?.action_type === 'task_complete';
+  const isClaudeCodeInProgress = isClaudeCodeToolMessage && message.metadata?.toolStatus === 'IN_PROGRESS';
+  const isClaudeCodeStarted = isClaudeCodeToolMessage && message.metadata?.action_type === 'claude_code_started';
+  const isClaudeCodeComplete = isClaudeCodeToolMessage && message.metadata?.action_type === 'task_complete';
 
   if (isClaudeCodeInProgress || isClaudeCodeStarted || isClaudeCodeComplete) {
     const taskId = (message.metadata?.task_id as string) || 'pending';

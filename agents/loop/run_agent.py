@@ -616,7 +616,12 @@ async def run_agent(
 
                 # Add successful result to context
                 is_error = isinstance(result, dict) and result.get("error", False)
-                result_message = result.get("message", "") if isinstance(result, dict) else str(result)
+                # Check for nested result with its own message (from NEW_SIGNATURE_TOOLS)
+                if isinstance(result, dict) and isinstance(result.get("result"), dict):
+                    nested_result = result["result"]
+                    result_message = nested_result.get("message", result.get("message", ""))
+                else:
+                    result_message = result.get("message", "") if isinstance(result, dict) else str(result)
 
                 if is_error:
                     new_msg = {

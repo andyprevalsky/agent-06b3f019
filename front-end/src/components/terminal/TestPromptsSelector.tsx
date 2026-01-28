@@ -124,6 +124,11 @@ Clients will
 
 For any services that require a API Key or Credential, mock the service for now and then return back to me a list of API keys I need to give to you in order to finish the implementation.`,
   },
+  {
+    title: 'Test Call Phone Number',
+    description: 'Tests phone call tool with Vapi voice AI',
+    prompt: 'Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.',
+  },
 ];
 
 interface TestPromptsSelectorProps {

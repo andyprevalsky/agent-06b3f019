@@ -307,7 +307,7 @@ class SetPlanManager(ToolManager):
             except Exception as e:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="❌ Planner Error",
+                    title="Planner Error",
                     message=f"Failed to generate plan: {str(e)}",
                     status=MessageStatus.ERROR
                 )
@@ -326,7 +326,7 @@ class SetPlanManager(ToolManager):
             if attempt < self.MAX_RETRIES - 1:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="🔄 Retrying plan generation...",
+                    title="Regenerating plan",
                     message=f"Validation error: {validation_error}\n\nRetrying with correction...",
                     status=MessageStatus.IN_PROGRESS
                 )
@@ -335,7 +335,7 @@ class SetPlanManager(ToolManager):
         if last_error:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="❌ Plan Validation Failed",
+                title="Plan Validation Failed",
                 message=f"Planner failed after {self.MAX_RETRIES} attempts: {last_error}",
                 status=MessageStatus.ERROR
             )

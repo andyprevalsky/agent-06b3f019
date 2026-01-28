@@ -34,7 +34,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { supabase, getSession } from '@/lib/supabase';
-import { respondToAttentionRequest, skipAttentionRequest } from '@/lib/api';
+import { respondToAttentionRequest, skipAttentionRequest, rejectAttentionRequest } from '@/lib/api';
 import { subscribeToAttentionRequests, unsubscribe } from '@/lib/realtime';
 import { MarkdownText } from './MarkdownText';
 import type { RealtimeChannel } from '@supabase/supabase-js';
@@ -58,9 +58,10 @@ interface AttentionRequest {
 
 interface AttentionInboxProps {
   onSelectAgent?: (agentId: string) => void;
+  realtimeReady?: boolean;
 }
 
-export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
+export default function AttentionInbox({ onSelectAgent, realtimeReady = false }: AttentionInboxProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [requests, setRequests] = useState<AttentionRequest[]>([]);
   const [loading, setLoading] = useState(false);
@@ -120,9 +121,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       const userId = session?.user?.id;
       if (!userId) return;
 
-      if (session?.access_token) {
-        await supabase.realtime.setAuth(session.access_token);
-      }
+      // Auth is set centrally by useAuth - no need to call setAuth here
 
       // Clean up existing channel
       if (channelRef.current) {
@@ -224,6 +223,12 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       }
     };
 
+    // Only subscribe once realtime auth is ready
+    if (!realtimeReady) {
+      console.log('[AttentionInbox] Waiting for realtime auth to be ready...');
+      return;
+    }
+
     setupRealtimeSubscription();
 
     return () => {
@@ -234,7 +239,7 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       unsubscribe(channelRef.current);
       channelRef.current = null;
     };
-  }, [forceResubscribe]);
+  }, [forceResubscribe, realtimeReady]);
 
   // Fetch when modal is opened (for latest state)
   useEffect(() => {
@@ -246,17 +251,10 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   // Get unanswered count
   const unansweredCount = requests.filter(r => !r.answered).length;
 
-  // Handle respond
+  // Handle respond (accept)
   const handleRespond = async (requestId: string, overrideResponse?: string) => {
-    const response = overrideResponse ?? responses[requestId];
-    if (!response?.trim()) {
-      toast({
-        title: 'Error',
-        description: 'Please enter a response',
-        variant: 'destructive',
-      });
-      return;
-    }
+    // Use provided response, or user input, or default to "Approved"
+    const response = overrideResponse ?? (responses[requestId]?.trim() || 'Approved');
 
     try {
       setLoading(true);
@@ -347,6 +345,45 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
       toast({
         title: 'Error',
         description: 'Failed to skip request',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle reject
+  const handleReject = async (requestId: string) => {
+    try {
+      setLoading(true);
+      const remainingBeforeReject = requests.filter(r => !r.answered && r.id !== requestId).length;
+
+      await rejectAttentionRequest(requestId);
+
+      // Clear the response if any
+      setResponses(prev => {
+        const newResponses = { ...prev };
+        delete newResponses[requestId];
+        return newResponses;
+      });
+
+      // Refetch to get updated list
+      console.log('🔄 Refetching requests after reject...');
+      await fetchRequests();
+      console.log('✅ Refetch complete');
+
+      // Keep modal open if there are more requests
+      setIsOpen(remainingBeforeReject > 0);
+
+      toast({
+        title: 'Action rejected',
+        description: 'The agent will skip this action and continue',
+      });
+    } catch (error) {
+      console.error('Failed to reject:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to reject request',
         variant: 'destructive',
       });
     } finally {
@@ -570,9 +607,9 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                         View agent →
                       </Button>
 
-                      {/* Response textarea */}
+                      {/* Response input */}
                       <Textarea
-                        placeholder="Type your response..."
+                        placeholder="Add context (optional)..."
                         value={responses[currentRequest.id] || ''}
                         onChange={(e) =>
                           setResponses((prev) => ({
@@ -580,25 +617,35 @@ export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
                             [currentRequest.id]: e.target.value,
                           }))
                         }
-                        className="min-h-[80px]"
+                        className="min-h-[60px]"
                       />
 
                       {/* Actions */}
                       <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          onClick={() => handleRespond(currentRequest.id)}
-                          disabled={loading || !responses[currentRequest.id]?.trim()}
-                        >
-                          Respond (⌘↵)
-                        </Button>
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={() => handleSkip(currentRequest.id)}
                           disabled={loading}
                         >
-                          Skip (⌘S)
+                          Skip
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleReject(currentRequest.id)}
+                          disabled={loading}
+                          className="text-red-600 border-red-300 hover:bg-red-50 dark:text-red-400 dark:border-red-700 dark:hover:bg-red-900/20"
+                        >
+                          Reject
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => handleRespond(currentRequest.id)}
+                          disabled={loading}
+                          className="bg-green-600 hover:bg-green-700 text-white"
+                        >
+                          Accept
                         </Button>
                       </div>
 

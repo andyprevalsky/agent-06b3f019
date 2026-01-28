@@ -3,6 +3,11 @@
  *
  * Central state management for agent conversations and real-time updates.
  *
+ * SUBSCRIPTION GATING:
+ * canSubscribe = isAuthenticated && realtimeReady
+ * - Prevents subscribing before setRealtimeAuth() has been called by useAuth
+ * - realtimeReady is set true only after setRealtimeAuth completes
+ *
  * AGENT SELECTION (agentId filtering pattern):
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ SWITCH FROM AGENT A → AGENT B:                                         │
@@ -172,12 +177,14 @@ interface AgentProviderProps {
   children: React.ReactNode;
   user: any; // Auth user (null for anonymous users in some contexts)
   isAuthenticated?: boolean; // True for both JWT and anonymous users (Supabase native)
+  realtimeReady?: boolean; // True when realtime auth has been set
   onLoadAgents?: () => void; // Callback to refresh agent list in sidebar
 }
 
-export function AgentProvider({ children, user, isAuthenticated, onLoadAgents }: AgentProviderProps) {
-  // canSubscribe is true when user is authenticated (JWT or anonymous - both have real Supabase sessions)
-  const canSubscribe = isAuthenticated ?? !!user;
+export function AgentProvider({ children, user, isAuthenticated, realtimeReady, onLoadAgents }: AgentProviderProps) {
+  // canSubscribe requires both authentication AND realtime auth to be set
+  // This prevents subscribing before setRealtimeAuth has been called
+  const canSubscribe = (isAuthenticated ?? !!user) && (realtimeReady ?? false);
   // Agent state
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [selectedAgentId, setSelectedAgentIdState] = useState<string | null>(() => {

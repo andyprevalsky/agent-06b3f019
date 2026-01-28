@@ -123,12 +123,20 @@ export async function subscribeToChannel(
   eventHandlers: EventHandlers,
   logPrefix: string = 'Channel'
 ): Promise<RealtimeChannel> {
+  // Verify session exists
   const session = getSession();
-  if (session?.access_token) {
-    await supabase.realtime.setAuth(session.access_token);
-  } else {
+  if (!session?.access_token) {
     throw new Error('Not authenticated');
   }
+
+  // IMPORTANT: Call setAuth immediately before creating each channel
+  // This ensures the new channel gets the correct token in its join payload.
+  // Supabase doesn't automatically apply setAuth to new channels created later.
+  // See: https://github.com/supabase/realtime-js/pull/126
+  console.log(`[Realtime] subscribeToChannel(${channelName}) - calling setAuth with user token`);
+  console.log(`[Realtime] Token preview: ${session.access_token.slice(0, 50)}...`);
+  await supabase.realtime.setAuth(session.access_token);
+  console.log(`[Realtime] setAuth completed for ${channelName}`);
 
   // Private channel - requires auth, worker uses service_role_key to broadcast
   const channel = supabase.channel(channelName, {

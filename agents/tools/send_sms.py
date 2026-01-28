@@ -7,7 +7,7 @@ from datetime import timedelta
 import structlog
 import httpx
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, extract_root_error
 from helpers.handle_tool_event import handle_tool_event
 
 # Config import is safe - no side effects at import time (load_dotenv is lazy)
@@ -125,8 +125,9 @@ class SendSmsManager(ToolManager):
             }
             
         except Exception as e:
-            # Error status
-            error_msg = str(e)
+            # Error status - extract root cause from Temporal exception chain
+            error_msg = extract_root_error(e)
+            logger.error("SMS send failed", error=error_msg, to=to[:4] + "****")
             await handle_tool_event(
                 event=ToolEvent(
                     type=EventType.POST_MESSAGE,
