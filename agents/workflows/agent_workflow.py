@@ -49,7 +49,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.web_fetch import web_fetch
     from tools.spawn_sub_agents import spawn_sub_agent
     from helpers.error_utils import extract_error_message
-    from tools.send_sms_as_user import send_sms_as_user
+    from tools.send_sms_as_user import send_sms_as_user, get_manager as get_send_sms_as_user_manager
     from tools.spawn_browser_agent_v3 import spawn_browser_agent  # V3: browser-use + Rose API
     from tools.spawn_claude_code_agent import spawn_claude_code_agent  # Claude Code in E2B sandbox
     from tools.search_user_network import search_user_network_for_people
@@ -109,6 +109,7 @@ TOOL_EXECUTORS = {
 APPROVAL_REQUIRED_TOOLS = {
     "message_person": get_message_person_manager,
     "call_phone_number": get_call_phone_manager,
+    "send_sms_as_user": get_send_sms_as_user_manager,
 }
 
 

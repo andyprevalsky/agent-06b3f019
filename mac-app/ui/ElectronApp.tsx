@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { AppDataProvider } from "@/hooks/useAppData";
 import { useAuth } from "@/hooks/useAuth";
-import { supabase } from "@/lib/supabase";
+import { getSession } from "@/lib/supabase";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import Terminal from "@/pages/Terminal";
 import Privacy from "@/pages/Privacy";
@@ -38,7 +38,7 @@ const ElectronAppInner = () => {
       }
 
       try {
-        const { data: { session } } = await supabase.auth.getSession();
+        const session = getSession();
         if (!session?.access_token) {
           setOnboardingComplete(false);
           setCheckingOnboarding(false);
@@ -81,7 +81,7 @@ const ElectronAppInner = () => {
 
   const handleOnboardingComplete = async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      const session = getSession();
       if (session?.access_token) {
         // Call backend to mark onboarding complete and send welcome SMS
         await fetch(`${backendUrl}/api/auth/complete-onboarding`, {

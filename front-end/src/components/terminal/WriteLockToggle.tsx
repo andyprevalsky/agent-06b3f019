@@ -17,7 +17,7 @@
  * - isUpdating: boolean (API call in progress)
  */
 
-import { Lock, LockOpen } from 'lucide-react';
+import { Lock, Unlock } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import {
   Tooltip,
@@ -95,7 +95,7 @@ export default function WriteLockToggle({
           {isLocked ? (
             <Lock className="h-3.5 w-3.5" />
           ) : (
-            <LockOpen className="h-3.5 w-3.5" />
+            <Unlock className="h-3.5 w-3.5" />
           )}
           <span className="font-medium">
             {isLocked ? 'Safe Writes' : 'Skip Write Permissions'}

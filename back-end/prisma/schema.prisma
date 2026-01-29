@@ -512,6 +512,18 @@ model SmsQueuePending {
   @@index([agentId])
 }
 
+model ImessageQueue {
+  id          String   @id @default(uuid())
+  userId      String
+  agentId     String
+  phoneNumber String
+  message     String
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([agentId])
+}
+
 model PendingLocalStorageBatch {
   id           String   @id @default(uuid())
   userId       String

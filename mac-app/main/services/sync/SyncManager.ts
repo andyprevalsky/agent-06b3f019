@@ -4,6 +4,7 @@ import { CookieSync } from '../cookieSync';
 import { BrowserStateSync } from '../browserStateSync';
 import { TelegramSync } from '../messaging/platforms/telegram/TelegramSync';
 import { WhatsAppSync } from '../messaging/platforms/whatsapp/WhatsAppSync';
+import { IMessageQueueService } from '../IMessageQueueService';
 import { IntegrationCache } from './IntegrationCache';
 import { logConsole, logConsoleError } from '../../base/logger';
 
@@ -93,6 +94,9 @@ export class SyncManager {
     // 3. Start real-time watchers
     await this.startRealTimeWatchers();
 
+    // 4. Start iMessage queue polling (for agent-sent messages)
+    IMessageQueueService.start();
+
     logConsole('SyncManager', 'All syncs started');
   }
 
@@ -116,6 +120,9 @@ export class SyncManager {
     await WhatsAppSync.disconnect().catch(err =>
       logConsoleError('SyncManager', 'Error disconnecting WhatsApp', err)
     );
+
+    // Stop iMessage queue polling
+    IMessageQueueService.stop();
 
     this.isRunning = false;
     logConsole('SyncManager', 'All syncs stopped');

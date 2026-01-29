@@ -34,6 +34,7 @@ EXECUTE_PHASE_TOOLS = [
     "people_search",
     "send_message_to_user_execute_phase",
     "call_phone_number",
+    "send_sms_as_user",
     "attempt_completion",
 ]
 
@@ -46,6 +47,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "web_search",
     "people_search",
     "call_phone_number",
+    "send_sms_as_user",
     "send_message_to_user_execute_phase",
     "reasoning",  # Pure thinking/analysis step (no tool call)
 ]
@@ -59,6 +61,7 @@ class PlanToolName(str, Enum):
     web_search = "web_search"
     people_search = "people_search"
     call_phone_number = "call_phone_number"
+    send_sms_as_user = "send_sms_as_user"
     send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
     reasoning = "reasoning"
 

@@ -26,6 +26,7 @@ from workflows import AgentWorkflow
 from tools.spawn_sub_agents import spawn_sub_agent_activity
 from tools.request_user_approval import create_approval_request_activity
 from tools.send_sms import send_sms_activity
+from tools.send_sms_as_user import queue_imessage_activity
 from tools.send_email import send_email_activity
 from tools.spawn_browser_agent_v3 import spawn_browser_agent_activity_v3  # V3: browser-use + Rose API
 from tools.spawn_claude_code_agent import spawn_claude_code_activity  # Claude Code in E2B sandbox
@@ -213,6 +214,8 @@ async def main():
             pay_for_x402_service_activity,
             # Phone call activity
             call_phone_number_activity,
+            # iMessage queue activity
+            queue_imessage_activity,
             # Helper activities
             poll_new_messages,
             post_agent_message,
