@@ -610,7 +610,54 @@ class DOMService:
         except Exception as e:
             logger.warning(f"Failed to get element at ({x}, {y}): {e}")
             return None
-    
+
+    async def get_text_at_coordinates(self, x: int, y: int) -> str:
+        """Get combined text content from all elements at coordinates (z-stack).
+
+        Uses document.elementsFromPoint() to get all elements in the z-stack,
+        then extracts and combines their text content.
+
+        Args:
+            x: X coordinate in viewport
+            y: Y coordinate in viewport
+
+        Returns:
+            Combined text content from all elements at that point
+        """
+        if not self._session:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        try:
+            page = await self._session.get_current_page()
+
+            # Use elementsFromPoint to get all elements in the z-stack
+            result = await page.evaluate(
+                """(coords) => {
+                    const elements = document.elementsFromPoint(coords.x, coords.y);
+                    const texts = [];
+                    for (const el of elements) {
+                        // Get innerText (visible text) and aria-label
+                        const innerText = (el.innerText || '').trim();
+                        const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+                        const title = (el.getAttribute('title') || '').trim();
+                        const value = (el.value || '').trim();
+
+                        if (innerText) texts.push(innerText);
+                        if (ariaLabel) texts.push(ariaLabel);
+                        if (title) texts.push(title);
+                        if (value) texts.push(value);
+                    }
+                    // Dedupe and join
+                    return [...new Set(texts)].join(' ');
+                }""",
+                {"x": x, "y": y}
+            )
+
+            return result or ''
+        except Exception as e:
+            logger.warning(f"Failed to get text at ({x}, {y}): {e}")
+            return ''
+
     @property
     def selector_map(self) -> Dict[int, Any]:
         """Get the cached selector map.

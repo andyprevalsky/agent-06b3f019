@@ -31,19 +31,141 @@
 
 import React, { memo, useState, useCallback, useMemo, useRef, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronUp, ChevronDown, Maximize2, X, FileJson } from 'lucide-react';
+import { ChevronUp, ChevronDown, Maximize2, X, FileJson, Check, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getToolIcon } from '@/lib/toolIcons';
 import { getStoredSession } from '@/lib/supabase';
 import { MessageList } from './MessageList';
 import { useAgentContext } from '@/contexts/AgentContext';
-import { ResponseSchemaField } from '@/lib/api';
+import { ResponseSchemaField, respondToAttentionRequest, rejectAttentionRequest } from '@/lib/api';
 import BrowserBorderGlow from './BrowserBorderGlow';
 import BrowserCursorOverlay from './BrowserCursorOverlay';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { useToast } from '@/hooks/use-toast';
 
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
+
+// Browser Write Lock Approval Component - renders at bottom of browser panel
+interface BrowserWriteLockApprovalProps {
+  attentionRequestId: string;
+  question: string;
+  onApprovalHandled?: () => void;
+}
+
+function BrowserWriteLockApproval({ attentionRequestId, question, onApprovalHandled }: BrowserWriteLockApprovalProps) {
+  const [actionState, setActionState] = useState<'accepting' | 'rejecting' | null>(null);
+  const [contextInput, setContextInput] = useState('');
+  const { toast } = useToast();
+
+  const handleAccept = async () => {
+    try {
+      setActionState('accepting');
+      const responseText = contextInput.trim() || 'Approved';
+      await respondToAttentionRequest(attentionRequestId, responseText);
+      toast({
+        title: 'Approved',
+        description: 'Write action approved',
+      });
+      setContextInput('');
+      onApprovalHandled?.();
+    } catch (error) {
+      console.error('Failed to accept:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to approve action',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionState(null);
+    }
+  };
+
+  const handleReject = async () => {
+    try {
+      setActionState('rejecting');
+      await rejectAttentionRequest(attentionRequestId);
+      toast({
+        title: 'Rejected',
+        description: 'Write action rejected',
+      });
+      setContextInput('');
+      onApprovalHandled?.();
+    } catch (error) {
+      console.error('Failed to reject:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to reject action',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionState(null);
+    }
+  };
+
+  return (
+    <div className="p-3">
+      <div className="rounded-xl border border-border bg-background/80 backdrop-blur-sm p-4 shadow-md">
+        {/* Header */}
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+          <span className="text-sm font-medium text-foreground">Approval Required</span>
+        </div>
+
+        {/* Question */}
+        <div className="mb-3 text-sm text-foreground">{question}</div>
+
+        {/* Context input */}
+        <div className="mb-3">
+          <Input
+            placeholder="Add context (optional)..."
+            value={contextInput}
+            onChange={(e) => setContextInput(e.target.value)}
+            className="text-sm bg-muted"
+            disabled={actionState !== null}
+          />
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleReject}
+            disabled={actionState !== null}
+            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 border-red-500/30 hover:border-red-500/50 transition-colors"
+          >
+            {actionState === 'rejecting' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <>
+                <X className="w-4 h-4 mr-1" />
+                Reject
+              </>
+            )}
+          </Button>
+          <Button
+            size="sm"
+            onClick={handleAccept}
+            disabled={actionState !== null}
+            className="bg-green-600 hover:bg-green-700 text-white"
+          >
+            {actionState === 'accepting' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <>
+                <Check className="w-4 h-4 mr-1" />
+                Accept
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function formatFieldType(type: ResponseSchemaField['type']): string {
   switch (type) {
@@ -213,6 +335,33 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
     return null;
   }, [browserMessages]);
 
+  // Detect pending write lock approval for this browser task
+  const pendingWriteLockApproval = useMemo(() => {
+    // Find messages with writePermission in requestUserApproval metadata
+    const approvalMessage = messages.find(m =>
+      m.metadata?.toolStatus === 'IN_PROGRESS' &&
+      m.metadata?.requestUserApproval?.writePermission === true &&
+      m.metadata?.requestUserApproval?.attentionRequestId
+    );
+
+    if (!approvalMessage) return null;
+
+    const attentionRequestId = approvalMessage.metadata?.requestUserApproval?.attentionRequestId as string;
+
+    // Check if there's a FINISHED message for this same attentionRequestId (approval was handled)
+    const hasFinishedMessage = messages.some(m =>
+      m.metadata?.toolStatus === 'FINISHED' &&
+      m.metadata?.requestUserApproval?.attentionRequestId === attentionRequestId
+    );
+
+    if (hasFinishedMessage) return null;
+
+    return {
+      attentionRequestId,
+      question: approvalMessage.text || 'Approve this write action?',
+    };
+  }, [messages]);
+
   // Event handlers
   const handleResume = useCallback(async () => {
     setIsResuming(true);
@@ -290,8 +439,15 @@ function BrowserStatusBarImpl({ taskId, browserUrl, forceMinimized = false }: Br
               />
             </div>
           </div>
+          {/* Write lock approval chip - shows at bottom of actions panel when pending approval */}
+          {pendingWriteLockApproval && (
+            <BrowserWriteLockApproval
+              attentionRequestId={pendingWriteLockApproval.attentionRequestId}
+              question={pendingWriteLockApproval.question}
+            />
+          )}
         </div>
-        
+
         {/* Browser on right */}
         <div className="flex-1 flex flex-col">
           <div className="flex items-center justify-between p-4 border-b border-border">

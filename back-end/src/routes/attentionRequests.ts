@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { AuthRequest, authenticate } from '../middleware/auth';
+import { hybridAuth, HybridAuthRequest } from '../middleware/hybridAuth';
 
 const router = Router();
 
@@ -94,18 +95,55 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
 router.get('/count', authenticate, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.id;
-    
+
     const count = await prisma.agentAttentionRequest.count({
       where: {
         userId,
         userResponse: null,
       },
     });
-    
+
     res.json({ count });
   } catch (error) {
     console.error('Failed to count attention requests:', error);
     res.status(500).json({ error: 'Failed to count attention requests' });
+  }
+});
+
+// GET /api/attention-requests/:id - Get a single attention request by ID (for polling)
+// Uses hybridAuth to support both agent (API key) and user (JWT) authentication
+router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
+  try {
+    const { id } = req.params;
+
+    const request = await prisma.agentAttentionRequest.findUnique({
+      where: { id },
+    });
+
+    if (!request) {
+      return res.status(404).json({ error: 'Attention request not found' });
+    }
+
+    // Authorization: internal API calls (agents) can access any request,
+    // but user calls must own the request
+    if (!req.isInternal && request.userId !== req.userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    res.json({
+      id: request.id,
+      agentId: request.agentId,
+      workflowId: request.workflowId,
+      question: request.question,
+      imageUrl: request.imageUrl,
+      metadata: request.metadata,
+      userResponse: request.userResponse,
+      createdAt: request.createdAt,
+      updatedAt: request.updatedAt,
+    });
+  } catch (error) {
+    console.error('Failed to fetch attention request:', error);
+    res.status(500).json({ error: 'Failed to fetch attention request' });
   }
 });
 

@@ -27,17 +27,117 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { Maximize2, X, CheckCircle2, XCircle } from 'lucide-react';
+import { Maximize2, X, CheckCircle2, XCircle, Check, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getStoredSession } from '@/lib/supabase';
 import { MessageList } from './MessageList';
 import { useAgentContext } from '@/contexts/AgentContext';
 import BrowserBorderGlow from './BrowserBorderGlow';
 import BrowserCursorOverlay from './BrowserCursorOverlay';
+import { Button } from '@/components/ui/button';
+import { respondToAttentionRequest, rejectAttentionRequest } from '@/lib/api';
+import { useToast } from '@/hooks/use-toast';
 
 // API Configuration - match pattern used in lib/api.ts
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
+
+// Browser Write Lock Approval Component - renders at bottom of browser panel
+interface BrowserWriteLockApprovalProps {
+  attentionRequestId: string;
+  question: string;
+  onApprovalHandled?: () => void;
+}
+
+function BrowserWriteLockApproval({ attentionRequestId, question, onApprovalHandled }: BrowserWriteLockApprovalProps) {
+  const [actionState, setActionState] = useState<'accepting' | 'rejecting' | null>(null);
+  const { toast } = useToast();
+
+  const handleAccept = async () => {
+    try {
+      setActionState('accepting');
+      await respondToAttentionRequest(attentionRequestId, 'Approved');
+      toast({
+        title: 'Approved',
+        description: 'Write action approved',
+      });
+      onApprovalHandled?.();
+    } catch (error) {
+      console.error('Failed to accept:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to approve action',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionState(null);
+    }
+  };
+
+  const handleReject = async () => {
+    try {
+      setActionState('rejecting');
+      await rejectAttentionRequest(attentionRequestId);
+      toast({
+        title: 'Rejected',
+        description: 'Write action rejected',
+      });
+      onApprovalHandled?.();
+    } catch (error) {
+      console.error('Failed to reject:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to reject action',
+        variant: 'destructive',
+      });
+    } finally {
+      setActionState(null);
+    }
+  };
+
+  return (
+    <div className="px-3 py-3 border-x border-b border-border bg-amber-500/10 rounded-b-lg">
+      <div className="flex items-center gap-2 mb-2">
+        <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+        <span className="text-xs font-medium text-foreground">Write Approval Required</span>
+      </div>
+      <p className="text-xs text-muted-foreground mb-3 line-clamp-2">{question}</p>
+      <div className="flex items-center justify-end gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleReject}
+          disabled={actionState !== null}
+          className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 border-red-500/30 hover:border-red-500/50"
+        >
+          {actionState === 'rejecting' ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <>
+              <X className="w-3 h-3 mr-1" />
+              Reject
+            </>
+          )}
+        </Button>
+        <Button
+          size="sm"
+          onClick={handleAccept}
+          disabled={actionState !== null}
+          className="h-7 text-xs bg-green-600 hover:bg-green-700 text-white"
+        >
+          {actionState === 'accepting' ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <>
+              <Check className="w-3 h-3 mr-1" />
+              Accept
+            </>
+          )}
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 // Helper function to get auth headers (same as lib/api.ts)
 function getAuthHeaders() {
@@ -59,6 +159,7 @@ interface BrowserViewPanelProps {
   browserUrl: string;  // Current browser URL (may change on resume)
   isAnyBrowserFullscreen: boolean;
   onFullscreenToggle: (isFullscreen: boolean) => void;
+  onApprovalHandled?: () => void;  // Called when write lock approval is accepted/rejected
 }
 
 // Completion View Component - uses MessageList for action log
@@ -110,11 +211,12 @@ function BrowserCompletionView({
   );
 }
 
-export default function BrowserViewPanel({ 
+export default function BrowserViewPanel({
   taskId,
-  browserUrl, 
+  browserUrl,
   isAnyBrowserFullscreen,
-  onFullscreenToggle
+  onFullscreenToggle,
+  onApprovalHandled
 }: BrowserViewPanelProps) {
   const { messages } = useAgentContext();
   const [isThisFullscreen, setIsThisFullscreen] = useState(false);
@@ -129,18 +231,35 @@ export default function BrowserViewPanel({
   const { isComplete, isSuccess, completionMessage } = useMemo(() => {
     const browserMessages = messages.filter(m => m.metadata?.task_id === taskId);
     const lastMessage = browserMessages[browserMessages.length - 1];
-    
+
     const complete = lastMessage?.metadata?.action_type === 'task_complete';
     const success = lastMessage?.metadata?.action_type === 'task_complete';
-    
+
     // Log errors but don't mark as complete
     if (lastMessage?.metadata?.action_type === 'error') {
       console.log('🖥️ [Browser] Action error:', lastMessage?.text?.slice(0, 100));
     }
     const message = complete ? lastMessage?.text : undefined;
-    
+
     return { isComplete: complete, isSuccess: success, completionMessage: message };
   }, [messages, taskId]);
+
+  // Detect pending write lock approval for this browser task
+  const pendingWriteLockApproval = useMemo(() => {
+    // Find messages with writePermission in requestUserApproval metadata
+    const approvalMessage = messages.find(m =>
+      m.metadata?.toolStatus === 'IN_PROGRESS' &&
+      m.metadata?.requestUserApproval?.writePermission === true &&
+      m.metadata?.requestUserApproval?.attentionRequestId
+    );
+
+    if (!approvalMessage) return null;
+
+    return {
+      attentionRequestId: approvalMessage.metadata?.requestUserApproval?.attentionRequestId as string,
+      question: approvalMessage.text || 'Approve this write action?',
+    };
+  }, [messages]);
   
   // Listen for Steel disconnection message (for real-time detection)
   useEffect(() => {
@@ -398,17 +517,26 @@ export default function BrowserViewPanel({
               )}
             </div>
 
-            {/* Control hint */}
-            <div 
-              className={cn(
-                "px-3 py-2 border-x border-b border-border bg-muted/20",
-                !isThisFullscreen && "rounded-br-lg"
-              )}
-            >
-              <p className="text-[10px] text-muted-foreground italic">
-                You can interact with the browser to handle logins or captchas
-              </p>
-            </div>
+            {/* Write lock approval chip - shows when pending approval */}
+            {pendingWriteLockApproval ? (
+              <BrowserWriteLockApproval
+                attentionRequestId={pendingWriteLockApproval.attentionRequestId}
+                question={pendingWriteLockApproval.question}
+                onApprovalHandled={onApprovalHandled}
+              />
+            ) : (
+              /* Control hint - only show when no approval pending */
+              <div
+                className={cn(
+                  "px-3 py-2 border-x border-b border-border bg-muted/20",
+                  !isThisFullscreen && "rounded-br-lg"
+                )}
+              >
+                <p className="text-[10px] text-muted-foreground italic">
+                  You can interact with the browser to handle logins or captchas
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </div>

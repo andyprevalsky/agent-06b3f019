@@ -102,15 +102,26 @@ export default function WriteLockToggle({
           </span>
         </button>
       </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-[280px] z-[100]">
+      <TooltipContent side="top" className="max-w-[300px] z-[100]">
         {isLocked ? (
-          <p className="text-xs">
-            <span className="font-semibold">Write lock enabled.</span> Rose will ask permission before entering payment details or posting to social media.
-          </p>
+          <div className="text-xs space-y-1">
+            <p><span className="font-semibold">Write lock enabled.</span> Rose will ask permission before committing writes to the internet:</p>
+            <ul className="list-disc list-inside text-muted-foreground">
+              <li>Sending emails or texts</li>
+              <li>Submitting payment details</li>
+              <li>Posting on social media</li>
+            </ul>
+          </div>
         ) : (
-          <p className="text-xs">
-            <span className="font-semibold text-red-500">Write lock disabled.</span> Rose can make payments and post to social media without asking. Click to enable protection.
-          </p>
+          <div className="text-xs space-y-1">
+            <p><span className="font-semibold text-red-500">Write lock disabled.</span> Rose can act autonomously without asking:</p>
+            <ul className="list-disc list-inside text-muted-foreground">
+              <li>Send emails or texts</li>
+              <li>Submit payment details</li>
+              <li>Post on social media</li>
+            </ul>
+            <p className="text-red-500">Click to enable protection.</p>
+          </div>
         )}
       </TooltipContent>
     </Tooltip>

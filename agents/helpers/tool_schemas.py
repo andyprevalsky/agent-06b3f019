@@ -298,7 +298,7 @@ class SpawnBrowserAgentTool(BaseModel):
 
     tool: Literal["spawn_browser_agent"]
     start_url: str = Field(
-        description="The URL to navigate to first. The browser will automatically navigate here before starting. Examples: 'https://amazon.com/dp/B09V3KXJPB', 'https://x.com/compose/post', 'https://uber.com/orders'"
+        description="The URL to navigate to first. Must be a URL normally visited by a user in common website interaction. Bad: 'https://x.com/compose/post'. Good: 'https://x.com' (when posting). The browser will automatically navigate here before starting."
     )
     goal: str = Field(
         description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy this item', 'Post a tweet saying Hello World', 'Reorder my last Uber Eats order'"

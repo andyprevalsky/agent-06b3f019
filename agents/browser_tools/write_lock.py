@@ -278,8 +278,7 @@ def get_write_lock_approval_question(
             f"**Payment Input Detected**\n\n"
             f"Rose wants to enter payment details.\n\n"
             f"**Field:** {field_description or 'Payment field'}\n"
-            f"**Page:** {url}\n\n"
-            f"Reply 'yes' to approve or 'no' to deny."
+            f"**Page:** {url}"
         )
     elif action_type == "social_post":
         domain = urlparse(url).netloc if url else "unknown"
@@ -287,13 +286,11 @@ def get_write_lock_approval_question(
             f"**Social Media Post Detected**\n\n"
             f"Rose wants to post content to **{domain}**.\n\n"
             f"**Button:** {element_text or 'Submit'}\n"
-            f"**Page:** {url}\n\n"
-            f"Reply 'yes' to approve or 'no' to deny."
+            f"**Page:** {url}"
         )
     else:
         return (
             f"**Write Action Detected**\n\n"
             f"Rose wants to perform a write action.\n\n"
-            f"**Page:** {url}\n\n"
-            f"Reply 'yes' to approve or 'no' to deny."
+            f"**Page:** {url}"
         )

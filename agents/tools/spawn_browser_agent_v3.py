@@ -146,114 +146,6 @@ async def save_browser_assistant_message(
         logger.error("Failed to save browser assistant message", error=extract_error_message(e))
 
 
-async def request_write_lock_approval(
-    agent_id: str,
-    user_id: str,
-    workflow_id: str,
-    question: str,
-    url: str,
-    config,
-    timeout_seconds: int = 300,  # 5 minute timeout
-) -> Dict[str, Any]:
-    """Request user approval for a write-locked action.
-
-    Creates an attention request and polls for user response.
-
-    Args:
-        agent_id: Agent ID
-        user_id: User ID
-        workflow_id: Workflow/task ID for the attention request
-        question: The approval question to show the user
-        url: Current page URL (for context)
-        config: Config object with backend API settings
-        timeout_seconds: How long to wait for approval
-
-    Returns:
-        Dict with 'approved': True/False and optional 'response': str
-    """
-    import time as time_module
-
-    try:
-        # Create attention request
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{config.backend.api_url}/api/attention-requests",
-                headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "user_id": user_id,
-                    "agent_id": agent_id,
-                    "workflow_id": workflow_id,
-                    "question": question,
-                    "metadata": {
-                        "writePermission": True,
-                        "url": url,
-                    }
-                }
-            )
-
-            if response.status_code not in [200, 201]:
-                logger.error(f"Failed to create attention request: {response.status_code}")
-                # Default to denied if we can't create the request
-                return {"approved": False, "error": "Failed to create approval request"}
-
-            request_data = response.json()
-            request_id = request_data.get("id")
-
-        if not request_id:
-            return {"approved": False, "error": "No request ID returned"}
-
-        logger.info(f"Created write lock attention request: {request_id}")
-
-        # Poll for response
-        start_time = time_module.time()
-        poll_interval = 2  # seconds
-
-        while time_module.time() - start_time < timeout_seconds:
-            # Heartbeat while waiting
-            activity.heartbeat(f"Waiting for write lock approval ({int(time_module.time() - start_time)}s)")
-
-            # Check for response
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(
-                    f"{config.backend.api_url}/api/attention-requests/{request_id}",
-                    headers={"x-api-key": config.backend.api_key or ""}
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    user_response = data.get("userResponse")
-
-                    if user_response is not None:
-                        # User responded
-                        response_lower = user_response.lower().strip()
-                        approved = response_lower in ["yes", "y", "approve", "approved", "ok", "okay", "sure", "go ahead"]
-                        denied = response_lower in ["no", "n", "deny", "denied", "cancel", "stop", "don't", "dont"]
-
-                        if approved:
-                            logger.info(f"Write lock approval granted: {user_response}")
-                            return {"approved": True, "response": user_response}
-                        elif denied:
-                            logger.info(f"Write lock approval denied: {user_response}")
-                            return {"approved": False, "response": user_response}
-                        else:
-                            # Ambiguous response - treat as approved (they typed something)
-                            logger.info(f"Write lock ambiguous response (treating as approved): {user_response}")
-                            return {"approved": True, "response": user_response}
-
-            await asyncio.sleep(poll_interval)
-
-        # Timeout - default to denied for safety
-        logger.warning(f"Write lock approval timed out after {timeout_seconds}s")
-        return {"approved": False, "error": "Approval request timed out"}
-
-    except Exception as e:
-        logger.error(f"Error requesting write lock approval: {e}")
-        return {"approved": False, "error": str(e)}
-
-
 # ========================================
 # CONTEXT SUMMARY BUILDER
 # ========================================
@@ -1277,6 +1169,43 @@ async def execute_action(
                 # Coordinate-based click (vision models like Yutori)
                 # Cursor movement handled internally by humanizer
 
+                # Write lock check for coordinate-based clicks
+                if write_lock_enabled:
+                    # Get text from all elements in the z-stack at click coordinates
+                    coord_element_text = await dom_service.get_text_at_coordinates(
+                        int(coords["x"]), int(coords["y"])
+                    )
+
+                    is_social = is_social_domain(current_url)
+                    is_submit = is_submit_button(coord_element_text)
+
+                    if is_social and is_submit:
+                        # Check if we already have valid approval for this domain
+                        if not _is_approval_valid(write_lock_approvals, "social_post", current_url):
+                            logger.info(
+                                "Write lock triggered: social posting detected (coordinate click)",
+                                url=current_url,
+                                element_text=coord_element_text[:50],
+                                coords=coords
+                            )
+                            return {
+                                "status": "needs_write_approval",
+                                "approval_type": "social_post",
+                                "question": get_write_lock_approval_question(
+                                    action_type="social_post",
+                                    url=current_url,
+                                    element_text=coord_element_text[:100]
+                                ),
+                                "element_text": coord_element_text[:100],
+                                "url": current_url,
+                            }
+                        else:
+                            logger.info(
+                                "Write lock bypassed: existing approval valid (coordinate click)",
+                                approval_type="social_post",
+                                url=current_url
+                            )
+
                 # Browser-use highlight (fire-and-forget)
                 asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
 
@@ -1926,6 +1855,7 @@ async def spawn_browser_agent_activity_v3(
     attachments: Optional[List[Dict[str, Any]]] = None,
     write_lock_enabled: bool = True,
     start_url: str = "",
+    write_lock_resume_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Browser agent activity using browser-use BrowserSession + Rose API.
@@ -1941,6 +1871,7 @@ async def spawn_browser_agent_activity_v3(
         attachments: List of FilePointer dicts for files to upload to the browser session
         write_lock_enabled: Whether to require approval for high-risk actions (payments, social posts)
         start_url: URL to navigate to automatically before starting the agent loop
+        write_lock_resume_state: State to resume from after write lock approval (contains pending_action, etc.)
     """
     from helpers.llm import check_progress
     from tools.knowledge_base import query_blueprints_activity
@@ -1965,6 +1896,23 @@ async def spawn_browser_agent_activity_v3(
     # Structure: {"payment": {"domain": str, "approved_at": float}, "social_post": {...}}
     write_lock_approvals: Dict[str, Dict] = {}
 
+    # Resume state from write lock approval (contains pending action to execute)
+    pending_write_lock_action: Optional[Dict[str, Any]] = None
+    resume_step_count: int = 0
+    if write_lock_resume_state:
+        pending_write_lock_action = write_lock_resume_state.get("pending_action")
+        write_lock_approvals = write_lock_resume_state.get("write_lock_approvals", {})
+        resume_step_count = write_lock_resume_state.get("step_count", 0)
+        # Use session info from resume state
+        session_id = write_lock_resume_state.get("session_id") or session_id
+        cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
+        logger.info(
+            "Resuming from write lock approval",
+            has_pending_action=pending_write_lock_action is not None,
+            approval_type=write_lock_resume_state.get("approval_type"),
+            step_count=resume_step_count,
+        )
+
     # Use response schema from parent agent's tool call (required)
     response_schema = output_schema
     if not response_schema:
@@ -1977,6 +1925,12 @@ async def spawn_browser_agent_activity_v3(
     try:
         # ===== SESSION INITIALIZATION =====
         fingerprint_injection = None  # Will be populated from backend response
+        logger.info(
+            "Session init check",
+            is_resume=is_resume,
+            task_id=task_id,
+            has_write_lock_resume_state=write_lock_resume_state is not None,
+        )
         if is_resume and task_id:
             logger.info("🔍 Fetching session info for resumed task", task_id=task_id)
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -2332,70 +2286,113 @@ async def spawn_browser_agent_activity_v3(
         # Model pricing
         model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
 
-        # ===== AUTO-NAVIGATE TO START URL =====
-        from browser_use.browser.events import NavigateToUrlEvent
+        # ===== AUTO-NAVIGATE TO START URL (skip when resuming from write lock) =====
+        if not write_lock_resume_state:
+            from browser_use.browser.events import NavigateToUrlEvent
 
-        # Auto-add https:// if no scheme provided
-        nav_url = start_url
-        if not nav_url.startswith(("http://", "https://", "about:", "file:")):
-            nav_url = f"https://{nav_url}"
-            logger.info(f"🔗 Auto-added https:// to start URL: {nav_url}")
+            # Auto-add https:// if no scheme provided
+            nav_url = start_url
+            if not nav_url.startswith(("http://", "https://", "about:", "file:")):
+                nav_url = f"https://{nav_url}"
+                logger.info(f"🔗 Auto-added https:// to start URL: {nav_url}")
 
-        # Post IN_PROGRESS message
-        await save_browser_action_message(
-            agent_id=agent_id, title=f"Navigating → {nav_url[:50]}",
-            task_id=task_id,
-            message="", status=MessageStatus.IN_PROGRESS,
-            browser_url=browser_url, action_type="goto", tool_call_id=tool_call_id,
-            steps_taken=0, total_steps=25
-        )
+            # Post IN_PROGRESS message
+            await save_browser_action_message(
+                agent_id=agent_id, title=f"Navigating → {nav_url[:50]}",
+                task_id=task_id,
+                message="", status=MessageStatus.IN_PROGRESS,
+                browser_url=browser_url, action_type="goto", tool_call_id=tool_call_id,
+                steps_taken=0, total_steps=25
+            )
 
-        # Navigate
-        event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url))
-        await event
-        await event.event_result(raise_if_any=True, raise_if_none=False)
+            # Navigate
+            event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url))
+            await event
+            await event.event_result(raise_if_any=True, raise_if_none=False)
 
-        # Inject localStorage for this origin after navigation
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(nav_url)
-            origin = f"{parsed.scheme}://{parsed.netloc}"
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                inject_response = await client.post(
-                    f"{config.backend.api_url}/api/browser-session/{session_id}/inject-localStorage",
-                    headers={
-                        "x-api-key": config.backend.api_key or "",
-                        "Content-Type": "application/json"
-                    },
-                    json={"origin": origin}
-                )
-                if inject_response.status_code == 200:
-                    result_data = inject_response.json()
-                    if result_data.get("injected"):
-                        logger.info(f"💾 Injected {result_data.get('count', 0)} localStorage entries for {origin}")
-                else:
-                    logger.warning(f"Failed to inject localStorage: HTTP {inject_response.status_code}")
-        except Exception as e:
-            logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
+            # Inject localStorage for this origin after navigation
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(nav_url)
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    inject_response = await client.post(
+                        f"{config.backend.api_url}/api/browser-session/{session_id}/inject-localStorage",
+                        headers={
+                            "x-api-key": config.backend.api_key or "",
+                            "Content-Type": "application/json"
+                        },
+                        json={"origin": origin}
+                    )
+                    if inject_response.status_code == 200:
+                        result_data = inject_response.json()
+                        if result_data.get("injected"):
+                            logger.info(f"💾 Injected {result_data.get('count', 0)} localStorage entries for {origin}")
+                    else:
+                        logger.warning(f"Failed to inject localStorage: HTTP {inject_response.status_code}")
+            except Exception as e:
+                logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
 
-        # Post FINISHED message
-        await save_browser_action_message(
-            agent_id=agent_id, title=f"Navigated → {nav_url[:50]}",
-            task_id=task_id,
-            message="", status=MessageStatus.FINISHED,
-            browser_url=browser_url, action_type="goto", tool_call_id=tool_call_id,
-            steps_taken=0, total_steps=25
-        )
+            # Post FINISHED message
+            await save_browser_action_message(
+                agent_id=agent_id, title=f"Navigated → {nav_url[:50]}",
+                task_id=task_id,
+                message="", status=MessageStatus.FINISHED,
+                browser_url=browser_url, action_type="goto", tool_call_id=tool_call_id,
+                steps_taken=0, total_steps=25
+            )
 
-        logger.info(f"🌐 Auto-navigated to start URL: {nav_url}")
+            logger.info(f"🌐 Auto-navigated to start URL: {nav_url}")
+        else:
+            logger.info("🔄 Resuming from write lock approval - skipping start URL navigation")
 
         # ===== MAIN AGENT LOOP =====
         max_iterations = 25
-        iteration = 0
+        iteration = resume_step_count  # Resume from step count if coming back from write lock approval
 
         while iteration < max_iterations:
             iteration += 1
             activity.heartbeat(f"Step {iteration}")
+
+            # Handle pending write lock action (resumed from workflow after approval)
+            if pending_write_lock_action:
+                logger.info("Executing pending write lock action after approval")
+                unified_action = pending_write_lock_action
+                pending_write_lock_action = None  # Clear so we don't re-execute
+
+                # Execute the pending action with updated approvals
+                result = await execute_action(
+                    dom_service, action_history, unified_action, available_file_paths,
+                    session_id=session_id,
+                    config=config,
+                    humanizer=humanizer,
+                    secret_refs=secret_refs,
+                    password_origins=password_origins,
+                    current_url=current_url,
+                    write_lock_enabled=write_lock_enabled,
+                    write_lock_approvals=write_lock_approvals,
+                )
+
+                # Log result and continue to next iteration
+                action_name = unified_action.get("action", "unknown")
+                logger.info(f"Pending write lock action executed: {action_name}", result=result)
+
+                # Get screenshot and update browser state for next iteration
+                browser_state = await dom_service.get_browser_state(include_screenshot=True)
+                current_url = browser_state.get("url", "")
+
+                # Track the executed action in history
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action=action_name,
+                    thinking=f"Executed after write lock approval: {action_name}",
+                    index=unified_action.get("params", {}).get("index"),
+                    coordinates=unified_action.get("params", {}).get("coordinates"),
+                    params=unified_action.get("params", {}),
+                    result=result,
+                )
+
+                continue  # Continue to next iteration
 
             # 0. Fetch recent OTPs at the start of each iteration
             otp_section = ""
@@ -2893,64 +2890,43 @@ Based on this feedback, I need to continue working on the task and address the i
                 write_lock_approvals=write_lock_approvals,
             )
 
-            # Handle write lock approval request
+            # Handle write lock approval request - return to workflow for signal-based approval
             if result.get("status") == "needs_write_approval":
                 approval_type = result.get("approval_type", "unknown")
                 question = result.get("question", "Rose wants to perform a write action. Approve?")
 
                 logger.info(
-                    "Write lock approval required",
+                    "Write lock approval required - returning to workflow",
                     approval_type=approval_type,
                     url=current_url
                 )
 
-                # Create attention request and wait for user response
-                approval_result = await request_write_lock_approval(
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    workflow_id=task_id,  # Use task_id as workflow_id for browser agent
-                    question=question,
-                    url=current_url,
-                    config=config
+                # Close browser connection before returning (will reconnect on resume)
+                if dom_service:
+                    try:
+                        await dom_service.disconnect()
+                    except Exception as e:
+                        logger.warning(f"Failed to disconnect browser before write lock return: {e}")
+
+                # Return to workflow with state needed to resume after approval
+                logger.info(
+                    "Returning to workflow for write lock approval",
+                    task_id=task_id,
+                    session_id=session_id,
+                    cdp_url=cdp_url[:50] if cdp_url else None,
                 )
-
-                if approval_result.get("approved"):
-                    logger.info("Write lock approval granted, recording for domain")
-
-                    # Record approval for this domain (avoids repeated prompts for same type+domain)
-                    import time as time_module
-                    write_lock_approvals[approval_type] = {
-                        "domain": _get_domain_from_url(current_url),
-                        "approved_at": time_module.time(),
-                    }
-                    logger.info(
-                        "Write lock approval recorded",
-                        approval_type=approval_type,
-                        domain=write_lock_approvals[approval_type]["domain"]
-                    )
-
-                    # Re-execute the action (approval state will allow it through)
-                    result = await execute_action(
-                        dom_service, action_history, unified_action, available_file_paths,
-                        session_id=session_id,
-                        config=config,
-                        humanizer=humanizer,
-                        secret_refs=secret_refs,
-                        password_origins=password_origins,
-                        current_url=current_url,
-                        write_lock_enabled=write_lock_enabled,
-                        write_lock_approvals=write_lock_approvals,
-                    )
-                else:
-                    logger.info("Write lock approval denied by user")
-                    await save_browser_action_message(
-                        agent_id=agent_id, title="Action blocked by user", task_id=task_id,
-                        message=f"User denied permission for {approval_type}",
-                        status=MessageStatus.FINISHED,
-                        browser_url=browser_url, action_type="system", tool_call_id=tool_call_id_action
-                    )
-                    # Continue to next iteration - agent will decide what to do
-                    continue
+                return {
+                    "status": "awaiting_write_approval",
+                    "approval_type": approval_type,
+                    "question": question,
+                    "current_url": current_url,
+                    "pending_action": unified_action,
+                    "write_lock_approvals": write_lock_approvals,
+                    "step_count": iteration,
+                    "session_id": session_id,
+                    "cdp_url": cdp_url,
+                    "task_id": task_id,
+                }
 
             # Post FINISHED - use action_name for icon mapping, include coordinates for cursor ripple
             if result.get("success", True):
@@ -3208,50 +3184,149 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             # Get write_lock_enabled from workflow (defaults to True if not available)
             write_lock_enabled = getattr(workflow_instance, 'write_lock_enabled', True)
 
-            # Start activity with limited retries (expensive/long-running)
-            # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema, attachments, write_lock_enabled, start_url
-            activity_handle = workflow.start_activity(
-                spawn_browser_agent_activity_v3,
-                args=[user_id, agent_id, goal, tool_call_id, None, None, None, False, output_schema, attachments if attachments else None, write_lock_enabled, start_url],
-                start_to_close_timeout=timedelta(minutes=15),
-                heartbeat_timeout=timedelta(seconds=120),
-                cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-
-            # Poll for pause while activity runs
-            was_cancelled = False
-            while not activity_handle.done():
-                if workflow_instance.is_paused:
-                    logger.info("🔴 Cancelling browser agent due to pause")
-                    activity_handle.cancel()
-                    was_cancelled = True
-                    break
-                await workflow.sleep(1)  # Use workflow.sleep for determinism
-
-            # Get result
+            # Loop to handle write lock approvals - activity may return needing approval,
+            # we handle it at workflow level (signal-based), then resume activity
+            write_lock_resume_state = None
             result = None
-            try:
-                result = await activity_handle
-            except (asyncio.CancelledError, ActivityError) as e:
-                # Check if it's a cancellation (either direct or wrapped by Temporal)
-                if isinstance(e, ActivityError):
-                    if not isinstance(e.cause, (asyncio.CancelledError, TemporalCancelledError)):
-                        raise  # Re-raise non-cancellation errors
-                was_cancelled = True
-                result = {"status": "cancelled", "message": "Browser agent cancelled by user"}
 
-            # Handle cancelled
-            if was_cancelled or (result and result.get("status") == "cancelled"):
-                logger.info("🔴 Browser agent cancelled")
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="Browser Session Paused",
-                    message="User paused the browser agent",
-                    status=MessageStatus.FINISHED,
-                    metadata={"action_type": "session_paused"}
+            while True:
+                # Start activity with limited retries (expensive/long-running)
+                # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema, attachments, write_lock_enabled, start_url, write_lock_resume_state
+                activity_handle = workflow.start_activity(
+                    spawn_browser_agent_activity_v3,
+                    args=[
+                        user_id, agent_id, goal, tool_call_id,
+                        write_lock_resume_state.get("task_id") if write_lock_resume_state else None,  # task_id
+                        write_lock_resume_state.get("session_id") if write_lock_resume_state else None,  # session_id
+                        write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None,  # cdp_url
+                        write_lock_resume_state is not None,  # is_resume
+                        output_schema,
+                        attachments if attachments else None,
+                        write_lock_enabled,
+                        start_url,
+                        write_lock_resume_state,  # write_lock_resume_state
+                    ],
+                    start_to_close_timeout=timedelta(minutes=15),
+                    heartbeat_timeout=timedelta(seconds=120),
+                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                return
+
+                # Poll for pause while activity runs
+                was_cancelled = False
+                while not activity_handle.done():
+                    if workflow_instance.is_paused:
+                        logger.info("🔴 Cancelling browser agent due to pause")
+                        activity_handle.cancel()
+                        was_cancelled = True
+                        break
+                    await workflow.sleep(1)  # Use workflow.sleep for determinism
+
+                # Get result
+                try:
+                    result = await activity_handle
+                except (asyncio.CancelledError, ActivityError) as e:
+                    # Check if it's a cancellation (either direct or wrapped by Temporal)
+                    if isinstance(e, ActivityError):
+                        if not isinstance(e.cause, (asyncio.CancelledError, TemporalCancelledError)):
+                            raise  # Re-raise non-cancellation errors
+                    was_cancelled = True
+                    result = {"status": "cancelled", "message": "Browser agent cancelled by user"}
+
+                # Handle cancelled
+                if was_cancelled or (result and result.get("status") == "cancelled"):
+                    logger.info("🔴 Browser agent cancelled")
+                    yield ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title="Browser Session Paused",
+                        message="User paused the browser agent",
+                        status=MessageStatus.FINISHED,
+                        metadata={"action_type": "session_paused"}
+                    )
+                    return
+
+                # Handle write lock approval request - use signal-based approval at workflow level
+                if result and result.get("status") == "awaiting_write_approval":
+                    logger.info(
+                        "Browser agent needs write lock approval",
+                        approval_type=result.get("approval_type"),
+                        url=result.get("current_url"),
+                    )
+
+                    # Import the shared approval function
+                    from tools.request_user_approval import request_user_approval_direct, UserRejectedError
+
+                    try:
+                        # Call shared signal-based approval (waits on workflow._has_new_messages)
+                        approval_response = await request_user_approval_direct(
+                            workflow_instance,
+                            question=result["question"],
+                            metadata={
+                                "toolApproval": True,
+                                "writePermission": True,
+                                "url": result.get("current_url", ""),
+                            }
+                        )
+
+                        # User approved - build resume state and loop back to activity
+                        approval_type = result.get("approval_type", "unknown")
+                        current_approvals = result.get("write_lock_approvals", {})
+
+                        # Record the new approval (use workflow.now() for determinism)
+                        current_approvals[approval_type] = {
+                            "domain": _get_domain_from_url(result.get("current_url", "")),
+                            "approved_at": workflow.now().timestamp(),
+                        }
+
+                        write_lock_resume_state = {
+                            "pending_action": result.get("pending_action"),
+                            "write_lock_approvals": current_approvals,
+                            "approval_type": approval_type,
+                            "step_count": result.get("step_count", 0),
+                            "session_id": result.get("session_id"),
+                            "cdp_url": result.get("cdp_url"),
+                            "task_id": result.get("task_id"),
+                        }
+
+                        logger.info(
+                            "Write lock approval granted, resuming browser activity",
+                            approval_type=approval_type,
+                            task_id=write_lock_resume_state.get("task_id"),
+                            session_id=write_lock_resume_state.get("session_id"),
+                        )
+
+                        # Post FINISHED to browser panel to clear the approval chip
+                        # The approval_response contains the attentionRequestId from request_user_approval_direct
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="✓ Write permission granted",
+                            message="",
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "task_id": write_lock_resume_state.get("task_id"),
+                                "requestUserApproval": {
+                                    "writePermission": True,
+                                    "attentionRequestId": approval_response.get("attention_request_id"),
+                                },
+                            }
+                        )
+
+                        continue  # Loop back to start activity again with resume state
+
+                    except UserRejectedError:
+                        # User rejected - post rejection message and return
+                        logger.info("Write lock approval rejected by user")
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Action blocked by user",
+                            message=f"User denied permission for {result.get('approval_type', 'action')}",
+                            status=MessageStatus.FINISHED,
+                            metadata={"action_type": "write_lock_rejected"}
+                        )
+                        return
+
+                # Normal completion - break the loop
+                break
 
             # Build standardized usage for workflow cost tracking
             tool_usage = {"llm": [], "service": []}
