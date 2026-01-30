@@ -381,7 +381,28 @@ async def request_user_approval_direct(
     # Reset the flag so subsequent waits work correctly
     workflow_instance._has_new_messages = False
 
-    # Poll messages to get the actual response content
+    # Check signal response first (set directly by receive_user_response signal)
+    # This handles rejection signals from the backend which don't create DB messages
+    signal_response = workflow_instance._last_signal_response
+    workflow_instance._last_signal_response = None  # Reset after reading
+
+    if signal_response and signal_response.strip() == "__REJECTED__":
+        logger.info("User rejected approval request (via signal)", request_id=request_id)
+
+        # Post FINISHED to close the approval chip cleanly (caller will post ERROR for the tool)
+        reject_event = ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="✗ User rejected action",
+            message="",
+            status=MessageStatus.FINISHED,
+            metadata=event_metadata
+        )
+        await workflow_instance._handle_tool_event(reject_event, tool_call_id, "request_user_approval")
+
+        # Raise exception so caller posts ERROR for the actual tool
+        raise UserRejectedError("User rejected the approval request")
+
+    # Poll messages to get the actual response content (for approvals with user text)
     from datetime import datetime, timezone
     messages = await workflow_instance._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
 
@@ -404,23 +425,6 @@ async def request_user_approval_direct(
         response_length=len(response_text),
         response_preview=response_text[:50] if response_text else ""
     )
-
-    # Check if user rejected
-    if response_text.strip() == "__REJECTED__":
-        logger.info("User rejected approval request", request_id=request_id)
-
-        # Post rejection message
-        reject_event = ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="✗ User rejected action",
-            message="The user rejected this action. The agent will continue with other tasks.",
-            status=MessageStatus.ERROR,
-            metadata=event_metadata
-        )
-        await workflow_instance._handle_tool_event(reject_event, tool_call_id, "request_user_approval")
-
-        # Raise exception to signal rejection to caller
-        raise UserRejectedError("User rejected the approval request")
 
     # Post success message
     post_event = ToolEvent(

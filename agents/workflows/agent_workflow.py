@@ -138,6 +138,7 @@ class AgentWorkflow:
         self.context_size: int = 0  # Current context window usage (from last LLM call)
         self.is_paused: bool = False
         self._has_new_messages: bool = False
+        self._last_signal_response: Optional[str] = None  # Stores response from receive_user_response signal
         self._has_credits: bool = True  # Cached credit status
         self._last_credit_check: int = 0  # Iteration count at last check
         self.write_lock_enabled: bool = True  # Write lock for browser agent actions
@@ -207,8 +208,9 @@ class AgentWorkflow:
     
     @workflow.signal
     async def receive_user_response(self, response: str):
-        """Receive user response - sets flag for run_agent to detect."""
+        """Receive user response - sets flag and stores response for approval checks."""
         workflow.logger.info(f"💬 Received user response (length={len(response)})")
+        self._last_signal_response = response
         self._has_new_messages = True
     
     @workflow.signal
@@ -777,11 +779,9 @@ class AgentWorkflow:
                 manager = APPROVAL_REQUIRED_TOOLS[tool_name]()
                 if manager.requires_approval:
                     question = manager.get_approval_question({"tool": tool_name, **tool_args})
-                    try:
-                        await request_user_approval_direct(self, question=question, metadata={"toolApproval": True})
-                    except UserRejectedError:
-                        workflow.logger.info(f"User rejected {tool_name}, skipping tool execution")
-                        return {"success": False, "rejected": True, "message": f"User rejected {tool_name}. The action was not performed."}
+                    # Let UserRejectedError bubble up to outer Exception handler
+                    # which posts ERROR for tool_call_id_A
+                    await request_user_approval_direct(self, question=question, metadata={"toolApproval": True})
 
             executor = TOOL_EXECUTORS[tool_name]
 
