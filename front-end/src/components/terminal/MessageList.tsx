@@ -10,6 +10,12 @@
  *     v (animation complete)
  * [IDLE]
  *
+ * MESSAGE FILTERING:
+ * ├─ Filter by subAgentId (main chat vs sub-agent panels)
+ * ├─ Filter out SYSTEM role messages
+ * ├─ Filter out hidden messages (metadata.hidden === true, e.g., custom system prompt)
+ * └─ Deduplicate tool messages by toolCallId
+ *
  * THINKING DISPLAY:
  * Show when ALL conditions met (with 500ms debounce):
  * ├─ agent.status is active (not PAUSED/COMPLETED/FAILED/OUT_OF_CREDITS/COST_LIMIT_REACHED)
@@ -252,7 +258,7 @@ export function MessageList({
   
   const filteredMessages = useMemo(() => {
     const targetSubAgentId = subAgentId ?? null;
-    
+
     // Filter messages for this subAgentId
     const filtered = messages.filter(m => {
       const msgSubAgentId = m.metadata?.subAgentId ?? null;
@@ -263,12 +269,15 @@ export function MessageList({
       }
       return msgSubAgentId === targetSubAgentId;
     });
-    
+
     // Filter out SYSTEM messages
     const withoutSystem = filtered.filter(m => m.role !== 'SYSTEM');
-    
+
+    // Filter out hidden messages (e.g., custom system prompt injection)
+    const withoutHidden = withoutSystem.filter(m => !m.metadata?.hidden);
+
     // Deduplicate tool messages
-    return deduplicateToolMessages(withoutSystem);
+    return deduplicateToolMessages(withoutHidden);
   }, [messages, subAgentId]);
 
   // ═══════════════════════════════════════════════════════════════════════════

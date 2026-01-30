@@ -13,7 +13,7 @@ import { prisma } from '../lib/prisma';
 import { createSignupBonusCredit, createInitialCredit } from '../lib/credits';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { sendMms } from '../lib/smsQueue';
-import { SMS_TEMPLATES, ROSE_VCARD_URL } from '../lib/smsTemplates';
+import { SMS_TEMPLATES, getPersonalizedVcardUrl } from '../lib/smsTemplates';
 
 // Twilio Verify response types
 interface TwilioVerifyResponse {
@@ -661,13 +661,14 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
 
     console.log(`✅ Marked onboarding complete for user ${userId}`);
 
-    // Send welcome MMS with vCard if user has a phone number
+    // Send welcome MMS with personalized vCard if user has a phone number
     if (user.phone) {
       const firstName = user.name?.split(' ')[0] || 'there';
-      sendMms(user.phone, SMS_TEMPLATES.welcome(firstName), ROSE_VCARD_URL).catch((error) => {
+      const personalizedVcardUrl = getPersonalizedVcardUrl(userId);
+      sendMms(user.phone, SMS_TEMPLATES.welcome(firstName), personalizedVcardUrl).catch((error) => {
         console.error(`⚠️ Failed to send welcome MMS to user ${userId}:`, error);
       });
-      console.log(`✅ Sending welcome MMS with vCard to user ${userId}`);
+      console.log(`✅ Sending welcome MMS with personalized vCard to user ${userId}`);
     }
 
     res.json({

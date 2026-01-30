@@ -625,9 +625,44 @@ def format_messages_for_simulation(messages: List[dict], user_name: str = "User"
 async def get_user_context(user_id: str) -> str:
     """
     Temporal activity wrapper for fetch_user_context.
-    
+
     Can be called as a standalone activity from workflows.
     """
     activity.heartbeat(f"Getting user context for {user_id[:8]}...")
     return await fetch_user_context(user_id)
+
+
+@activity.defn
+async def get_user_system_name(user_id: str) -> str:
+    """
+    Fetch the user's custom system name (or default to "Rose").
+
+    Used for dynamic name replacement in approval messages and SMS notifications.
+    """
+    try:
+        config = load_config()
+        async with httpx.AsyncClient() as client:
+            user_settings = await _fetch_user_settings(client, config, user_id)
+            return user_settings.get('systemName') or 'Rose'
+    except Exception as e:
+        logger.warning("Failed to fetch system name, using default", user_id=user_id[:8], error=str(e))
+        return 'Rose'
+
+
+@activity.defn
+async def get_user_custom_system_prompt(user_id: str) -> Optional[str]:
+    """
+    Fetch the user's custom system prompt.
+
+    Used for injecting personality/behavior customization at chat start.
+    Returns None if no custom prompt is set.
+    """
+    try:
+        config = load_config()
+        async with httpx.AsyncClient() as client:
+            user_settings = await _fetch_user_settings(client, config, user_id)
+            return user_settings.get('customSystemPrompt') or None
+    except Exception as e:
+        logger.warning("Failed to fetch custom system prompt", user_id=user_id[:8], error=str(e))
+        return None
 

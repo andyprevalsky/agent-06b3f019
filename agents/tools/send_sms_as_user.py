@@ -56,11 +56,12 @@ class SendSmsAsUserManager(ToolManager):
         """Build approval question showing recipient and message preview."""
         phone = tool_call.get("phone_number", "unknown")
         message = tool_call.get("message", "")
+        system_name = tool_call.get("system_name", "Rose")
 
         formatted_phone = format_phone_number(phone)
         message_preview = message if len(message) <= 200 else message[:197] + "..."
 
-        return f"""Rose wants to send an **iMessage** from your phone
+        return f"""{system_name} wants to send an **iMessage** from your phone
 
 **To:** {formatted_phone}
 

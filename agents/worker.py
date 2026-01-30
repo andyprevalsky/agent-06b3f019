@@ -69,6 +69,8 @@ from helpers import (
     fetch_agent_config,
     check_user_usage,
     get_user_context,
+    get_user_system_name,
+    get_user_custom_system_prompt,
     fetch_model_pricing,
 )
 from helpers.llm import call_planner_llm_activity, set_response_schema_activity
@@ -236,6 +238,8 @@ async def main():
             fetch_model_pricing,
             check_user_usage,
             get_user_context,
+            get_user_system_name,
+            get_user_custom_system_prompt,
             update_agent_tokens_activity,
             update_agent_tree_cost_activity,
             update_agent_tree_state,

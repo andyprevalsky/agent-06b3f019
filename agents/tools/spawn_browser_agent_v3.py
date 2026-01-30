@@ -1040,6 +1040,7 @@ async def execute_action(
     current_url: str = "",
     write_lock_enabled: bool = True,
     write_lock_approvals: Optional[Dict[str, Dict]] = None,
+    system_name: str = "Rose",
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1122,7 +1123,8 @@ async def execute_action(
                             "question": get_write_lock_approval_question(
                                 action_type="social_post",
                                 url=current_url,
-                                element_text=element_text[:100]
+                                element_text=element_text[:100],
+                                system_name=system_name,
                             ),
                             "element_text": element_text[:100],
                             "url": current_url,
@@ -1194,7 +1196,8 @@ async def execute_action(
                                 "question": get_write_lock_approval_question(
                                     action_type="social_post",
                                     url=current_url,
-                                    element_text=coord_element_text[:100]
+                                    element_text=coord_element_text[:100],
+                                    system_name=system_name,
                                 ),
                                 "element_text": coord_element_text[:100],
                                 "url": current_url,
@@ -1290,7 +1293,8 @@ async def execute_action(
                             "question": get_write_lock_approval_question(
                                 action_type="payment",
                                 url=current_url,
-                                field_description=field_desc
+                                field_description=field_desc,
+                                system_name=system_name,
                             ),
                             "field_description": field_desc,
                             "url": current_url,
@@ -1856,6 +1860,7 @@ async def spawn_browser_agent_activity_v3(
     write_lock_enabled: bool = True,
     start_url: str = "",
     write_lock_resume_state: Optional[Dict[str, Any]] = None,
+    system_name: str = "Rose",
 ) -> Dict[str, Any]:
     """
     Browser agent activity using browser-use BrowserSession + Rose API.
@@ -1872,6 +1877,7 @@ async def spawn_browser_agent_activity_v3(
         write_lock_enabled: Whether to require approval for high-risk actions (payments, social posts)
         start_url: URL to navigate to automatically before starting the agent loop
         write_lock_resume_state: State to resume from after write lock approval (contains pending_action, etc.)
+        system_name: Custom system name for approval messages (default "Rose")
     """
     from helpers.llm import check_progress
     from tools.knowledge_base import query_blueprints_activity
@@ -2371,6 +2377,7 @@ async def spawn_browser_agent_activity_v3(
                     current_url=current_url,
                     write_lock_enabled=write_lock_enabled,
                     write_lock_approvals=write_lock_approvals,
+                    system_name=system_name,
                 )
 
                 # Log result and continue to next iteration
@@ -2888,12 +2895,13 @@ Based on this feedback, I need to continue working on the task and address the i
                 current_url=current_url,
                 write_lock_enabled=write_lock_enabled,
                 write_lock_approvals=write_lock_approvals,
+                system_name=system_name,
             )
 
             # Handle write lock approval request - return to workflow for signal-based approval
             if result.get("status") == "needs_write_approval":
                 approval_type = result.get("approval_type", "unknown")
-                question = result.get("question", "Rose wants to perform a write action. Approve?")
+                question = result.get("question", f"{system_name} wants to perform a write action. Approve?")
 
                 logger.info(
                     "Write lock approval required - returning to workflow",
@@ -3183,6 +3191,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         try:
             # Get write_lock_enabled from workflow (defaults to True if not available)
             write_lock_enabled = getattr(workflow_instance, 'write_lock_enabled', True)
+            # Get system_name from workflow for dynamic approval messages (defaults to "Rose")
+            system_name = getattr(workflow_instance, 'system_name', 'Rose')
 
             # Loop to handle write lock approvals - activity may return needing approval,
             # we handle it at workflow level (signal-based), then resume activity
@@ -3191,7 +3201,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
             while True:
                 # Start activity with limited retries (expensive/long-running)
-                # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema, attachments, write_lock_enabled, start_url, write_lock_resume_state
+                # Args: user_id, agent_id, goal, tool_call_id, task_id, session_id, cdp_url, is_resume, output_schema, attachments, write_lock_enabled, start_url, write_lock_resume_state, system_name
                 activity_handle = workflow.start_activity(
                     spawn_browser_agent_activity_v3,
                     args=[
@@ -3205,6 +3215,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         write_lock_enabled,
                         start_url,
                         write_lock_resume_state,  # write_lock_resume_state
+                        system_name,  # system_name for dynamic approval messages
                     ],
                     start_to_close_timeout=timedelta(minutes=15),
                     heartbeat_timeout=timedelta(seconds=120),

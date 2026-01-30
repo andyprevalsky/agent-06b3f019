@@ -28,6 +28,8 @@ with workflow.unsafe.imports_passed_through():
         get_model_context_window,
         mark_finished,
         get_user_context,
+        get_user_system_name,
+        get_user_custom_system_prompt,
         check_user_usage,
         fetch_agent_config,
         fetch_model_pricing,
@@ -187,6 +189,10 @@ class AgentWorkflow:
         self.input_cents_per_1k: float = 0.0  # Price per 1k input tokens in cents
         self.output_cents_per_1k: float = 0.0  # Price per 1k output tokens in cents
         self.model_pricing_cache: Dict[str, Dict[str, float]] = {}  # model -> {input_cents_per_1k, output_cents_per_1k}
+
+        # User customization (fetched at workflow start for dynamic name in approvals/SMS)
+        self.system_name: str = "Rose"  # Default to "Rose", fetched from user settings
+        self.custom_system_prompt: Optional[str] = None  # Custom personality prompt to inject
     
     # =========================================================================
     # SIGNALS
@@ -440,6 +446,47 @@ class AgentWorkflow:
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
+
+        # Fetch user's custom system name (for approval messages and SMS)
+        try:
+            self.system_name = await workflow.execute_activity(
+                get_user_system_name,
+                args=[user_id],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+            workflow.logger.info(f"Using system name: {self.system_name}")
+        except Exception as e:
+            workflow.logger.warning(f"Failed to fetch system name, using default 'Rose': {e}")
+
+        # Fetch user's custom system prompt (for personality injection)
+        try:
+            self.custom_system_prompt = await workflow.execute_activity(
+                get_user_custom_system_prompt,
+                args=[user_id],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+            if self.custom_system_prompt:
+                workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
+        except Exception as e:
+            workflow.logger.warning(f"Failed to fetch custom system prompt: {e}")
+
+        # Inject custom system prompt as hidden USER message for new agents
+        # Only inject if: 1) custom prompt exists, 2) this is not a resume (no context passed)
+        if self.custom_system_prompt and not context:
+            try:
+                await self._post_message(
+                    f"Personality instructions: {self.custom_system_prompt}",
+                    "USER",
+                    metadata={
+                        "hidden": True,
+                        "isCustomSystemPrompt": True,
+                    }
+                )
+                workflow.logger.info("Injected custom system prompt as hidden USER message")
+            except Exception as e:
+                workflow.logger.warning(f"Failed to inject custom system prompt: {e}")
 
         # Fetch response schema and write_lock_enabled from agent config
         response_schema = None
@@ -778,7 +825,8 @@ class AgentWorkflow:
             if tool_name in APPROVAL_REQUIRED_TOOLS:
                 manager = APPROVAL_REQUIRED_TOOLS[tool_name]()
                 if manager.requires_approval:
-                    question = manager.get_approval_question({"tool": tool_name, **tool_args})
+                    # Pass system_name for dynamic name in approval messages
+                    question = manager.get_approval_question({"tool": tool_name, "system_name": self.system_name, **tool_args})
                     # Let UserRejectedError bubble up to outer Exception handler
                     # which posts ERROR for tool_call_id_A
                     await request_user_approval_direct(self, question=question, metadata={"toolApproval": True})
@@ -1572,7 +1620,7 @@ class AgentWorkflow:
                         # Truncate summary for SMS (200 char limit to leave room for URL)
                         sms_summary = summary[:200] + "..." if len(summary) > 200 else summary
                         agent_url = f"https://roselabs.ai?agent-id={self.agent_id}"
-                        completion_message = f"Rose completed your task: {sms_summary}\n\nView the full conversation: {agent_url}"
+                        completion_message = f"{self.system_name} completed your task: {sms_summary}\n\nView the full conversation: {agent_url}"
                         await workflow.execute_activity(
                             send_direct_sms_activity,
                             args=[self.user_id, completion_message],

@@ -15,6 +15,10 @@ const updateUserSchema = z.object({
   postalCode: z.string().optional(),
   country: z.string().optional(),
   encryptedPaymentInformation: z.string().optional().nullable(),
+  // Customization fields
+  systemName: z.string().max(50).optional().nullable(),
+  profilePicture: z.string().max(500).optional().nullable(),
+  customSystemPrompt: z.string().max(2000).optional().nullable(),
 });
 
 // GET /api/user-settings - Get user data
@@ -47,6 +51,10 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
         country: 'United States',
         encryptedPaymentInformation: null,
         onboardingCompletedAt: null,
+        // Customization defaults
+        systemName: null,
+        profilePicture: null,
+        customSystemPrompt: null,
       });
     }
 
@@ -61,6 +69,10 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
       country: user.country,
       encryptedPaymentInformation: user.encryptedPaymentInformation,
       onboardingCompletedAt: user.onboardingCompletedAt,
+      // Customization fields
+      systemName: user.systemName,
+      profilePicture: user.profilePicture,
+      customSystemPrompt: user.customSystemPrompt,
     });
   } catch (error) {
     console.error('Failed to fetch user data:', error);
@@ -85,6 +97,9 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
         postalCode: body.postalCode,
         country: body.country,
         encryptedPaymentInformation: body.encryptedPaymentInformation,
+        systemName: body.systemName,
+        profilePicture: body.profilePicture,
+        customSystemPrompt: body.customSystemPrompt,
       },
       create: {
         userId,
@@ -96,6 +111,9 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
         postalCode: body.postalCode,
         country: body.country,
         encryptedPaymentInformation: body.encryptedPaymentInformation,
+        systemName: body.systemName,
+        profilePicture: body.profilePicture,
+        customSystemPrompt: body.customSystemPrompt,
       },
     });
 
@@ -108,6 +126,9 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
       postalCode: user.postalCode,
       country: user.country,
       encryptedPaymentInformation: user.encryptedPaymentInformation,
+      systemName: user.systemName,
+      profilePicture: user.profilePicture,
+      customSystemPrompt: user.customSystemPrompt,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -142,6 +163,9 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
           postalCode: body.postalCode,
           country: body.country,
           encryptedPaymentInformation: body.encryptedPaymentInformation,
+          systemName: body.systemName,
+          profilePicture: body.profilePicture,
+          customSystemPrompt: body.customSystemPrompt,
         },
       });
 
@@ -154,6 +178,9 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
         postalCode: user.postalCode,
         country: user.country,
         encryptedPaymentInformation: user.encryptedPaymentInformation,
+        systemName: user.systemName,
+        profilePicture: user.profilePicture,
+        customSystemPrompt: user.customSystemPrompt,
       });
     }
 
@@ -167,6 +194,9 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
     if (body.postalCode !== undefined) updateData.postalCode = body.postalCode;
     if (body.country !== undefined) updateData.country = body.country;
     if (body.encryptedPaymentInformation !== undefined) updateData.encryptedPaymentInformation = body.encryptedPaymentInformation;
+    if (body.systemName !== undefined) updateData.systemName = body.systemName;
+    if (body.profilePicture !== undefined) updateData.profilePicture = body.profilePicture;
+    if (body.customSystemPrompt !== undefined) updateData.customSystemPrompt = body.customSystemPrompt;
 
     const user = await prisma.user.update({
       where: { userId },
@@ -182,6 +212,9 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
       postalCode: user.postalCode,
       country: user.country,
       encryptedPaymentInformation: user.encryptedPaymentInformation,
+      systemName: user.systemName,
+      profilePicture: user.profilePicture,
+      customSystemPrompt: user.customSystemPrompt,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

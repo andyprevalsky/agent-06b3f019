@@ -10,7 +10,7 @@ from .model_info import get_model_context_window
 from .finished import mark_finished
 from .fetch_config import fetch_agent_config
 from .check_usage import check_user_usage
-from .get_user_context import get_user_context
+from .get_user_context import get_user_context, get_user_system_name, get_user_custom_system_prompt
 from .model_pricing import fetch_model_pricing
 
 __all__ = [
@@ -29,5 +29,7 @@ __all__ = [
     "fetch_agent_config",
     "check_user_usage",
     "get_user_context",
+    "get_user_system_name",
+    "get_user_custom_system_prompt",
     "fetch_model_pricing",
 ]

@@ -261,6 +261,7 @@ def get_write_lock_approval_question(
     url: str,
     element_text: Optional[str] = None,
     field_description: Optional[str] = None,
+    system_name: str = "Rose",
 ) -> str:
     """Generate an approval question for a write lock violation.
 
@@ -269,6 +270,7 @@ def get_write_lock_approval_question(
         url: Current page URL
         element_text: Text of the element being interacted with
         field_description: Description of the field (for payment)
+        system_name: Custom system name (default "Rose")
 
     Returns:
         Formatted approval question string
@@ -276,7 +278,7 @@ def get_write_lock_approval_question(
     if action_type == "payment":
         return (
             f"**Payment Input Detected**\n\n"
-            f"Rose wants to enter payment details.\n\n"
+            f"{system_name} wants to enter payment details.\n\n"
             f"**Field:** {field_description or 'Payment field'}\n"
             f"**Page:** {url}"
         )
@@ -284,13 +286,13 @@ def get_write_lock_approval_question(
         domain = urlparse(url).netloc if url else "unknown"
         return (
             f"**Social Media Post Detected**\n\n"
-            f"Rose wants to post content to **{domain}**.\n\n"
+            f"{system_name} wants to post content to **{domain}**.\n\n"
             f"**Button:** {element_text or 'Submit'}\n"
             f"**Page:** {url}"
         )
     else:
         return (
             f"**Write Action Detected**\n\n"
-            f"Rose wants to perform a write action.\n\n"
+            f"{system_name} wants to perform a write action.\n\n"
             f"**Page:** {url}"
         )

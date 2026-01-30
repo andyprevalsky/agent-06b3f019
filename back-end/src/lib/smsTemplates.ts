@@ -10,6 +10,11 @@ export const ROSE_LABS_URL = 'https://roselabs.ai';
 // vCard URL - always use production since Twilio needs a publicly accessible URL
 export const ROSE_VCARD_URL = 'https://navi-j9a9.onrender.com/api/vcard/rose.vcf';
 
+// Personalized vCard URL for specific user
+export function getPersonalizedVcardUrl(userId: string): string {
+  return `https://navi-j9a9.onrender.com/api/vcard/${userId}.vcf`;
+}
+
 export function getAgentUrl(agentId: string): string {
   return `${ROSE_LABS_URL}?agent-id=${agentId}`;
 }

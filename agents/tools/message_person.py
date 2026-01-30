@@ -103,15 +103,16 @@ class MessagePersonManager(ToolManager):
         email = tool_call.get("email")
         message = tool_call.get("message", "")
         subject = tool_call.get("subject")
-        
+        system_name = tool_call.get("system_name", "Rose")
+
         # Determine recipient
         recipient = phone or email or "unknown recipient"
-        
+
         # Truncate message for preview
         message_preview = message if len(message) <= 200 else message[:197] + "..."
-        
+
         if channel == "EMAIL" and subject:
-            return f"""Rose wants to send an **email**
+            return f"""{system_name} wants to send an **email**
 
 **To:** {recipient}
 **Subject:** {subject}
@@ -121,7 +122,7 @@ class MessagePersonManager(ToolManager):
 
 Reply to approve, or say "no" to cancel."""
         else:
-            return f"""Rose wants to send a **{channel}**
+            return f"""{system_name} wants to send a **{channel}**
 
 **To:** {recipient}
 

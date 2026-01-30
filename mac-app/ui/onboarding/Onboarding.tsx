@@ -2,12 +2,13 @@ import { useState, useEffect } from 'react';
 import { ChevronLeft } from 'lucide-react';
 import { signOut } from '@/lib/supabase';
 import OnboardingAuth from './OnboardingAuth';
+import OnboardingCustomization from './OnboardingCustomization';
 import OnboardingData from './OnboardingData';
 import OnboardingShortcut from './OnboardingShortcut';
 import OnboardingWelcome from './OnboardingWelcome';
 import OnboardingPayment from './OnboardingPayment';
 
-export type OnboardingStep = 'auth' | 'data' | 'shortcut' | 'welcome' | 'payment';
+export type OnboardingStep = 'auth' | 'customization' | 'data' | 'shortcut' | 'welcome' | 'payment';
 
 interface OnboardingProps {
   onComplete: () => void;
@@ -44,45 +45,45 @@ const StepDots = ({
 };
 
 const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: OnboardingProps) => {
-  // Always use full steps array for navigation - we handle skipAuth separately
-  const fullSteps: OnboardingStep[] = ['auth', 'data', 'shortcut', 'welcome', 'payment'];
+  // Navigation steps - exclude auth if skipAuth is true
+  const navSteps: OnboardingStep[] = skipAuth
+    ? ['customization', 'data', 'shortcut', 'welcome', 'payment']
+    : ['auth', 'customization', 'data', 'shortcut', 'welcome', 'payment'];
 
-  // Steps for display (dots) - exclude auth if skipping
-  const displaySteps: OnboardingStep[] = skipAuth
-    ? ['data', 'shortcut', 'welcome', 'payment']
-    : fullSteps;
+  // Steps for dots display - always exclude auth (dots only show after auth)
+  const dotSteps: OnboardingStep[] = ['customization', 'data', 'shortcut', 'welcome', 'payment'];
 
-  const [currentStep, setCurrentStep] = useState<OnboardingStep>(skipAuth ? 'data' : 'auth');
+  const [currentStep, setCurrentStep] = useState<OnboardingStep>(navSteps[0]);
 
   // Update step if skipAuth changes
   useEffect(() => {
     if (skipAuth && currentStep === 'auth') {
-      setCurrentStep('data');
+      setCurrentStep('customization');
     }
   }, [skipAuth, currentStep]);
 
   const goToNext = () => {
-    const currentIndex = fullSteps.indexOf(currentStep);
-    if (currentIndex < fullSteps.length - 1) {
-      setCurrentStep(fullSteps[currentIndex + 1]);
+    const currentIndex = navSteps.indexOf(currentStep);
+    if (currentIndex < navSteps.length - 1) {
+      setCurrentStep(navSteps[currentIndex + 1]);
     }
   };
 
   const goBack = async () => {
-    const currentIndex = fullSteps.indexOf(currentStep);
+    const currentIndex = navSteps.indexOf(currentStep);
     if (currentIndex > 0) {
-      const prevStep = fullSteps[currentIndex - 1];
-      // If going back to auth from data, sign out first
-      if (currentStep === 'data' && prevStep === 'auth') {
+      const prevStep = navSteps[currentIndex - 1];
+      // If going back to auth, sign out first
+      if (prevStep === 'auth') {
         await signOut();
       }
       setCurrentStep(prevStep);
     }
   };
 
-  // Show back button when not on auth step (data can go back to auth via sign out)
-  // Also hide back button on payment step (can't go back from payment)
-  const canGoBack = currentStep !== 'auth' && currentStep !== 'payment';
+  // Can go back if not on first step and not on payment
+  const currentIndex = navSteps.indexOf(currentStep);
+  const canGoBack = currentIndex > 0 && currentStep !== 'payment';
 
   const handleGetStarted = () => {
     goToNext(); // Go to payment step
@@ -90,8 +91,6 @@ const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: Onboar
 
   // Don't show dots on auth page
   const showDots = currentStep !== 'auth';
-  // For dots, show all steps except auth
-  const dotSteps = displaySteps.filter(s => s !== 'auth');
 
   // Show footer on all steps except welcome and payment
   const showFooter = currentStep !== 'welcome' && currentStep !== 'payment';
@@ -113,6 +112,9 @@ const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: Onboar
       <div className="flex-1 flex flex-col">
         {currentStep === 'auth' && (
           <OnboardingAuth onComplete={goToNext} />
+        )}
+        {currentStep === 'customization' && (
+          <OnboardingCustomization onComplete={goToNext} />
         )}
         {currentStep === 'data' && (
           <OnboardingData onComplete={goToNext} />

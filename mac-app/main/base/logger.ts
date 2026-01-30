@@ -97,10 +97,7 @@ export function logConsoleError(component: string, message: string, error?: unkn
 }
 
 export function logIpc(direction: 'IN' | 'OUT', channel: string, data?: unknown): void {
-  const truncatedData = data !== undefined
-    ? JSON.stringify(data).slice(0, 200)
-    : undefined;
-  const formatted = formatLogMessage(direction, 'IPC', channel, truncatedData ? JSON.parse(truncatedData) : undefined);
+  const formatted = formatLogMessage(direction, 'IPC', channel, data);
   ipcStream?.write(formatted);
 }
 

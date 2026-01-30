@@ -4,28 +4,30 @@
  *                    [LOADING]
  *                        |
  *                        v (loadSettings + loadSubscription + loadApiKeys)
- *         +---------[READY]----------------------------------+
- *         |              |               |                   |
- *    [TAB:INFO]    [TAB:PAYMENT]   [TAB:BILLING]      [TAB:KEYS]
- *         |              |               |                   |
- *    (save info)   (save payment)  (redirect to       (gen/del keys)
- *         |              |          Stripe portal)          |
- *         v              v               |                   v
- *    [SAVING]      [SAVING_PAY]          |          [SUBSCRIPTION_MODAL]
- *         |              |               |           (if no subscription)
- *         v              v               |                   |
- *    [SAVED]       [SAVED_PAY]           |           [Subscribe] → Stripe
- *         |              |               |                   |
- *         +──────────────+───────────────+───────────────────+
+ *         +---------[READY]----------------------------------------------+
+ *         |              |               |               |               |
+ *    [TAB:CUSTOM]  [TAB:INFO]    [TAB:PAYMENT]   [TAB:BILLING]    [TAB:KEYS]
+ *         |              |               |               |               |
+ *    (save custom) (save info)   (save payment)  (redirect to     (gen/del keys)
+ *         |              |               |        Stripe portal)        |
+ *         v              v               v               |               v
+ *    [SAVING_CUST]  [SAVING]      [SAVING_PAY]          |        [SUBSCRIPTION_MODAL]
+ *         |              |               |               |         (if no subscription)
+ *         v              v               v               |               |
+ *    [SAVED_CUST]   [SAVED]       [SAVED_PAY]           |         [Subscribe] → Stripe
+ *         |              |               |               |               |
+ *         +──────────────+───────────────+───────────────+───────────────+
  *                        |
  *                        v
  *                    [READY]
  *
  * States:
  * - loading: true → LOADING
- * - activeTab: 'info' | 'payment' | 'billing' | 'keys'
+ * - activeTab: 'customization' | 'info' | 'payment' | 'billing' | 'keys'
  * - saving: true → SAVING (personal info)
  * - saved: true → SAVED (success indicator)
+ * - savingCustomization: true → SAVING_CUSTOMIZATION
+ * - savedCustomization: true → customization saved success
  * - savingPayment: true → SAVING_PAYMENT
  * - savedPayment: true → payment saved success
  * - showSubscriptionModal: true → subscription required modal
@@ -49,7 +51,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../components/ui/dialog';
-import { Loader2, Save, Check, CreditCard, HelpCircle, Pencil, Key, Trash2, Plus, ExternalLink, Copy, Receipt, ShieldAlert } from 'lucide-react';
+import { Loader2, Save, Check, CreditCard, HelpCircle, Pencil, Key, Trash2, Plus, ExternalLink, Copy, Receipt, ShieldAlert, Sparkles } from 'lucide-react';
+import SystemCustomization, { type CustomizationData } from '../components/customization/SystemCustomization';
 import {
   encryptPaymentData,
   parsePaymentEnvelope,
@@ -136,7 +139,16 @@ const CardIcons: Record<string, React.ReactNode> = {
 
 export default function Settings() {
   // Tab state
-  const [activeTab, setActiveTab] = useState('info');
+  const [activeTab, setActiveTab] = useState('customization');
+
+  // Customization state
+  const [customization, setCustomization] = useState<CustomizationData>({
+    systemName: 'Rose',
+    profilePicture: null,
+    customSystemPrompt: '',
+  });
+  const [savingCustomization, setSavingCustomization] = useState(false);
+  const [savedCustomization, setSavedCustomization] = useState(false);
 
   // User data state
   const [userData, setUserData] = useState<UserData>({
@@ -250,6 +262,12 @@ export default function Settings() {
         country: data.country || 'United States',
         encryptedPaymentInformation: data.encryptedPaymentInformation || null,
       });
+      // Load customization data
+      setCustomization({
+        systemName: data.systemName || 'Rose',
+        profilePicture: data.profilePicture || null,
+        customSystemPrompt: data.customSystemPrompt || '',
+      });
     } catch (err) {
       console.error('Failed to load settings:', err);
       setError(err instanceof Error ? err.message : 'Failed to load settings');
@@ -342,6 +360,45 @@ export default function Settings() {
       setError(err instanceof Error ? err.message : 'Failed to save settings');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveCustomization = async () => {
+    try {
+      setSavingCustomization(true);
+      setError(null);
+      setSavedCustomization(false);
+
+      const session = getStoredSession();
+      if (!session) {
+        setError('Not authenticated');
+        return;
+      }
+
+      const response = await fetch(`${API_URL}/api/user-settings`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          systemName: customization.systemName || null,
+          profilePicture: customization.profilePicture || null,
+          customSystemPrompt: customization.customSystemPrompt || null,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to save customization');
+      }
+
+      setSavedCustomization(true);
+      setTimeout(() => setSavedCustomization(false), 3000);
+    } catch (err) {
+      console.error('Failed to save customization:', err);
+      setError(err instanceof Error ? err.message : 'Failed to save customization');
+    } finally {
+      setSavingCustomization(false);
     }
   };
 
@@ -631,12 +688,56 @@ export default function Settings() {
         )}
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className="grid w-full grid-cols-5">
+            <TabsTrigger value="customization">Customization</TabsTrigger>
             <TabsTrigger value="info">Personal Info</TabsTrigger>
             <TabsTrigger value="payment">Agent Payment</TabsTrigger>
             <TabsTrigger value="billing">Billing</TabsTrigger>
             <TabsTrigger value="keys">API Keys</TabsTrigger>
           </TabsList>
+
+          {/* Customization Tab */}
+          <TabsContent value="customization">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="w-5 h-5" />
+                  Customize Your Assistant
+                </CardTitle>
+                <CardDescription>
+                  Personalize your AI assistant's name, appearance, and personality
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <SystemCustomization
+                  data={customization}
+                  onChange={setCustomization}
+                  isLoading={loading || savingCustomization}
+                />
+
+                <div className="flex gap-4 pt-4 border-t">
+                  <Button onClick={saveCustomization} disabled={savingCustomization} className="min-w-[160px]">
+                    {savingCustomization ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Saving...
+                      </>
+                    ) : savedCustomization ? (
+                      <>
+                        <Check className="w-4 h-4 mr-2" />
+                        Saved!
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4 mr-2" />
+                        Save Customization
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
 
           {/* Personal Information Tab */}
           <TabsContent value="info">
