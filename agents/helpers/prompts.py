@@ -175,6 +175,9 @@ This state machine governs your tool call execution during the PLAN phase.
 
 NODE: RESEARCH (entry point)
 ────────────────────────────
+Research is only for clarification of the goal.
+If the goal is clear, you may proceed directly to SET_PLAN without any other tool calls.
+
 ENABLED tools
 -> web_search
 -> web_fetch
