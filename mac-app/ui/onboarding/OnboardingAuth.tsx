@@ -269,7 +269,7 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps) => {
                 I authorize SMS communication
               </span>
               <p className="text-xs text-muted-foreground mt-1">
-                By checking this box, you agree to receive automated SMS messages from Rose Labs related to tasks you initiate, including reminders, clarifying questions, and status updates. Message and data rates may apply. Reply STOP to cancel. See our{' '}
+                I authorize Rose Labs to send automated SMS messages to the phone number provided, including task updates, reminders, and status notifications. Message frequency varies. Message and data rates may apply. Text HELP for help or STOP to opt out. Consent is not a condition of purchase. See our{' '}
                 <a
                   href="https://roselabs.ai/privacy"
                   target="_blank"

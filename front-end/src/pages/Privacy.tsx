@@ -22,7 +22,7 @@ const Privacy = () => {
             </h1>
             
             <p className="text-muted-foreground text-center mb-12">
-              Last updated: January 10, 2026
+              Last updated: February 1, 2026
             </p>
             
             <div className="space-y-8">
@@ -91,6 +91,10 @@ const Privacy = () => {
                   <li className="flex items-start space-x-3">
                     <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
                     <span>Our AI provider partners must adhere to strict privacy and security practices.</span>
+                  </li>
+                  <li className="flex items-start space-x-3">
+                    <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
+                    <span>All the above categories exclude text messaging originator opt-in data and consent; this information will not be shared with any third parties.</span>
                   </li>
                 </ul>
               </section>

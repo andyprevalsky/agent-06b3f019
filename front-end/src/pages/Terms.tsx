@@ -22,7 +22,7 @@ const Terms = () => {
             </h1>
             
             <p className="text-muted-foreground text-center mb-12">
-              Last updated: August 5, 2025
+              Last updated: February 1, 2026
             </p>
             
             <div className="space-y-8">
@@ -98,7 +98,45 @@ const Terms = () => {
               <div className="w-full h-px bg-gradient-to-r from-transparent via-border to-transparent"></div>
 
               <section>
-                <h2 className="text-2xl font-semibold mb-4 text-foreground">8. Contact</h2>
+                <h2 className="text-2xl font-semibold mb-4 text-foreground">8. SMS/Text Messaging</h2>
+                <p className="text-muted-foreground mb-4">
+                  By providing your phone number and opting in, you consent to receive text messages from Rose Labs. These messages may include:
+                </p>
+                <ul className="space-y-3 text-muted-foreground mb-4">
+                  <li className="flex items-start space-x-3">
+                    <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
+                    <span>Account verification and authentication codes</span>
+                  </li>
+                  <li className="flex items-start space-x-3">
+                    <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
+                    <span>Service notifications and updates</span>
+                  </li>
+                  <li className="flex items-start space-x-3">
+                    <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground"></div>
+                    <span>Responses from your AI assistant</span>
+                  </li>
+                </ul>
+                <p className="text-muted-foreground mb-4">
+                  <strong>Message frequency varies.</strong> Message and data rates may apply depending on your mobile carrier and plan.
+                </p>
+                <p className="text-muted-foreground mb-4">
+                  <strong>Opt-out:</strong> You can stop receiving text messages at any time by replying STOP to any message. To resume messages, text START.
+                </p>
+                <p className="text-muted-foreground mb-4">
+                  <strong>Help:</strong> For assistance, reply HELP to any message or contact us at <a href="mailto:andy@roselabs.ai" className="text-primary hover:text-primary/80 underline transition-colors">andy@roselabs.ai</a>.
+                </p>
+                <p className="text-muted-foreground mb-4">
+                  <strong>Carrier liability:</strong> Carriers are not liable for delayed or undelivered messages.
+                </p>
+                <p className="text-muted-foreground">
+                  For information on how we handle your data, please see our <a href="/privacy" className="text-primary hover:text-primary/80 underline transition-colors">Privacy Policy</a>.
+                </p>
+              </section>
+
+              <div className="w-full h-px bg-gradient-to-r from-transparent via-border to-transparent"></div>
+
+              <section>
+                <h2 className="text-2xl font-semibold mb-4 text-foreground">9. Contact</h2>
                 <p className="text-muted-foreground mb-2">
                   Questions about these Terms?
                 </p>
