@@ -10,6 +10,24 @@ from helpers.tool_schemas import TOOL_MODELS
 # SHARED PROMPT SECTIONS (deduplicated)
 # ============================================================================
 
+CONDENSOR_PROMPT = """Extract ONLY essential information for the main agent from this tool result.
+
+MAIN AGENT SYSTEM PROMPT:
+{system_prompt}
+
+INSTRUCTIONS:
+1. Extract key information relevant to the agent's task
+2. Preserve critical & relevant data: names, numbers, URLs, facts
+3. Remove verbose formatting, repetition, boilerplate
+4. Be concise but don't lose important data
+5. If no relevant data found, that is ok, just return your reasoning instead of the data
+
+TOOL RESULT:
+{tool_result}
+
+Output the condensed version:"""
+
+
 CRITICAL_CONSTRAINTS_BOX = """
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ PARALLEL EXECUTION: All tool_calls in one response execute IN PARALLEL  │

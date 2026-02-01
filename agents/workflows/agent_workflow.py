@@ -400,6 +400,7 @@ class AgentWorkflow:
         self.user_id = user_id
         self.goal = goal
         self.model = model
+        self.current_phase = "PLAN"  # Track current phase for condensor
         self.reasoning_max_tokens = reasoning_max_tokens
         self.verifier = verifier
         self.parent_workflow_id = parent_workflow_id
@@ -446,6 +447,7 @@ class AgentWorkflow:
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
+        self.user_context_section = user_context_section  # Store for condensor
 
         # Fetch user's custom system name (for approval messages and SMS)
         try:
@@ -553,6 +555,7 @@ class AgentWorkflow:
         # PHASE 1: PLAN (research + create execution plan)
         # =====================================================================
         if not skip_plan:
+            self.current_phase = "PLAN"
             workflow.logger.info(f"▶ PLAN phase: {len(plan_tools)} tools")
 
             plan_result = await run_agent(
@@ -592,6 +595,7 @@ class AgentWorkflow:
         # =====================================================================
         # PHASE 2: EXECUTE (run the plan with full tool access)
         # =====================================================================
+        self.current_phase = "EXECUTE"
         workflow.logger.info(f"▶ EXECUTE phase: {len(execute_tools)} tools")
 
         # Get context from PLAN phase (or poll if skipped)
@@ -846,18 +850,37 @@ class AgentWorkflow:
             }
 
             if tool_name in NEW_SIGNATURE_TOOLS:
+                # Track start time for condensor timing (includes tool + condensor)
+                tool_start_time = workflow.now()
+                tool_call_dict = {"tool": tool_name, **tool_args}
+
                 result = await executor(
                     execute_activity=workflow.execute_activity,
-                    tool_call={"tool": tool_name, **tool_args},
+                    tool_call=tool_call_dict,
                     tool_call_id=tool_call_id,
                     agent_id=self.agent_id,
                     user_id=self.user_id,
                 )
                 # Track usage if returned by tool (standardized format)
+                original_usage = {}
                 if isinstance(result, dict) and "usage" in result:
-                    await self._track_usage(result.get("usage"), tool_name=tool_name)
+                    original_usage = result.get("usage", {})
+                    await self._track_usage(original_usage, tool_name=tool_name)
                     # Extract actual result for caller
                     result = result.get("result", result)
+
+                # Condensor: check tool's condensor_enabled flag and condense result
+                manager = self._get_tool_manager(tool_name)
+                if manager and getattr(manager, 'condensor_enabled', False):
+                    result = await self._condense_tool_result(
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        tool_call=tool_call_dict,
+                        original_usage=original_usage,
+                        start_time=tool_start_time,
+                        result=result,
+                    )
+
                 return {"success": True, "message": f"{tool_name} completed", "result": result}
             else:
                 # Legacy signature: (workflow_instance, tool_call, tool_call_id)
@@ -914,7 +937,158 @@ class AgentWorkflow:
     # =========================================================================
     # HELPERS
     # =========================================================================
-    
+
+    def _get_tool_manager(self, tool_name: str):
+        """Get the ToolManager instance for a tool to check flags like condensor_enabled."""
+        TOOL_MANAGERS = {
+            "web_search": lambda: __import__('tools.web_search', fromlist=['get_manager']).get_manager(),
+            "web_fetch": lambda: __import__('tools.web_fetch', fromlist=['get_manager']).get_manager(),
+        }
+        if tool_name in TOOL_MANAGERS:
+            return TOOL_MANAGERS[tool_name]()
+        return None
+
+    async def _condense_tool_result(
+        self,
+        tool_name: str,
+        tool_call_id: str,
+        tool_call: Dict[str, Any],
+        original_usage: Dict[str, Any],
+        start_time,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Condense tool result using LLM. Called from _execute_tool after tool returns."""
+        from helpers.condensor import condense_tool_result_activity
+        from helpers.prompts import build_system_prompt
+        from helpers.model_pricing import fetch_model_pricing
+        from tools.base import format_tool_message
+        import json
+
+        # Post IN_PROGRESS via self._handle_tool_event (sends to FE)
+        await self._handle_tool_event(
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Condensing {tool_name.replace('_', ' ').title()}",
+                message="Extracting relevant information",
+                status=MessageStatus.IN_PROGRESS
+            ),
+            tool_call_id,
+            tool_name
+        )
+
+        # Build system prompt for condensor context
+        system_prompt = build_system_prompt(
+            phase=self.current_phase,
+            enabled_tools=[],
+            user_context_section=getattr(self, 'user_context_section', "") or "",
+        )
+
+        # Format result for condensing
+        result_str = json.dumps(result, indent=2, default=str)
+
+        # Call condensor activity
+        condensor_result = await workflow.execute_activity(
+            condense_tool_result_activity,
+            args=[result_str, system_prompt, self.model, tool_name, 500],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(
+                maximum_attempts=2,
+                backoff_coefficient=2.0,
+                initial_interval=timedelta(seconds=1),
+            )
+        )
+
+        condensed_message = condensor_result["condensed"]
+        condensor_usage = condensor_result["usage"]
+
+        # Calculate elapsed time (from tool start to condensor finish)
+        elapsed_time = (workflow.now() - start_time).total_seconds()
+
+        # Calculate combined cost
+        # 1. Original tool service cost (e.g., Parallel AI Search)
+        tool_service_cost = sum(
+            s.get("cost_cents", 0)
+            for s in original_usage.get("service", [])
+        )
+
+        # 2. Original tool LLM cost (if tool uses LLM internally)
+        tool_llm_cost = 0
+        for llm_item in original_usage.get("llm", []):
+            tokens_in = llm_item.get("tokens_in", 0)
+            tokens_out = llm_item.get("tokens_out", 0)
+            model = llm_item.get("model", "")
+            if tokens_in or tokens_out:
+                try:
+                    pricing = await workflow.execute_activity(
+                        fetch_model_pricing,
+                        args=[model],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    tool_llm_cost += (
+                        (tokens_in * pricing["input_cents_per_1k"] / 1000) +
+                        (tokens_out * pricing["output_cents_per_1k"] / 1000)
+                    )
+                except Exception:
+                    pass
+
+        tool_cost_cents = tool_service_cost + tool_llm_cost
+
+        # 3. Condensor LLM cost (calculate from tokens using model pricing)
+        condensor_cost_cents = 0
+        if condensor_usage.get("tokens_in") or condensor_usage.get("tokens_out"):
+            try:
+                pricing = await workflow.execute_activity(
+                    fetch_model_pricing,
+                    args=[condensor_usage["model"]],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                condensor_cost_cents = (
+                    (condensor_usage["tokens_in"] * pricing["input_cents_per_1k"] / 1000) +
+                    (condensor_usage["tokens_out"] * pricing["output_cents_per_1k"] / 1000)
+                )
+            except Exception:
+                # If pricing fetch fails, continue without cost
+                pass
+
+            # Track condensor LLM usage
+            await self._track_usage({
+                "llm": [{
+                    "tokens_in": condensor_usage["tokens_in"],
+                    "tokens_out": condensor_usage["tokens_out"],
+                    "model": condensor_usage["model"],
+                    "provider": "Condensor",
+                }],
+                "service": [],
+            }, tool_name=f"{tool_name}_condensor")
+
+        total_cost_cents = tool_cost_cents + condensor_cost_cents
+
+        # Format message using standard tool format (only condensed content in result)
+        formatted_message = format_tool_message(
+            params=tool_call,
+            result={"content": condensed_message},
+            time_elapsed=elapsed_time,
+            cost_cents=total_cost_cents
+        )
+
+        # Post FINISHED with formatted condensed result (sends to FE)
+        await self._handle_tool_event(
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"{tool_name.replace('_', ' ').title()} completed",
+                message=formatted_message,
+                status=MessageStatus.FINISHED
+            ),
+            tool_call_id,
+            tool_name
+        )
+
+        # Return condensed result for context
+        # "message" key is what run_agent.py uses to build context text
+        return {"message": condensed_message, "condensed": True, "original": result}
+
     async def _track_tokens_and_cost(self, result: Dict) -> None:
         """Track context size and token_count from run_agent result.
 

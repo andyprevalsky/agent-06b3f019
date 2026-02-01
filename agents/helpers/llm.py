@@ -294,6 +294,7 @@ async def build_llm_messages(context: List[Dict], system_prompt: str) -> List[Di
     - USER messages with file attachments (images, PDFs, text files)
     - ASSISTANT messages
     - TOOL/SYSTEM messages (converted to user role for context)
+    - Filters TOOL messages: skips IN_PROGRESS, keeps only latest FINISHED per toolCallId
 
     For attachments:
     - Small files (<20MB) are downloaded from storage and resolved to multimodal content
@@ -309,6 +310,64 @@ async def build_llm_messages(context: List[Dict], system_prompt: str) -> List[Di
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
+    # Filter TOOL messages: skip IN_PROGRESS, keep only latest FINISHED per toolCallId
+    # This ensures condensed results replace full results in context
+
+    def parse_timestamp(ts) -> datetime:
+        """Parse timestamp to datetime, return epoch for invalid/missing."""
+        if not ts:
+            return datetime.min
+        if isinstance(ts, datetime):
+            return ts
+        try:
+            # ISO format: 2024-01-15T10:30:00.000Z
+            return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            return datetime.min
+
+    tool_messages_by_id: Dict[str, Dict] = {}  # toolCallId -> latest FINISHED message
+    filtered_context = []
+
+    for msg in context:
+        role = msg.get("role", "").upper()
+        metadata = msg.get("metadata", {}) or {}
+
+        if role == "TOOL":
+            tool_status = metadata.get("toolStatus")
+            tool_call_id = metadata.get("toolCallId")
+
+            # Skip IN_PROGRESS messages
+            if tool_status == "IN_PROGRESS":
+                continue
+
+            # For FINISHED messages, keep only the latest per toolCallId
+            if tool_status == "FINISHED" and tool_call_id:
+                existing = tool_messages_by_id.get(tool_call_id)
+                if existing:
+                    # Compare timestamps properly, keep the later one
+                    existing_ts = parse_timestamp(existing.get("timestamp"))
+                    new_ts = parse_timestamp(msg.get("timestamp"))
+                    if new_ts > existing_ts:
+                        tool_messages_by_id[tool_call_id] = msg
+                else:
+                    tool_messages_by_id[tool_call_id] = msg
+                continue
+
+            # TOOL messages without toolCallId or non-FINISHED status - include as-is
+            filtered_context.append(msg)
+        else:
+            # Non-TOOL messages - include as-is
+            filtered_context.append(msg)
+
+    # Add the deduplicated TOOL FINISHED messages back
+    filtered_context.extend(tool_messages_by_id.values())
+
+    # Sort by timestamp to maintain order (using proper parsing)
+    filtered_context.sort(key=lambda x: parse_timestamp(x.get("timestamp")))
+
+    # Use filtered context for the rest of the function
+    context = filtered_context
+
     # First pass: collect all unique file_pointers from context
     # This builds an explicit list of available files for the LLM
     available_files: Dict[str, str] = {}  # filename -> mime_type

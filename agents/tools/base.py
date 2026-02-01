@@ -360,7 +360,7 @@ def format_tool_message(
     params: Dict[str, Any],
     result: Dict[str, Any],
     time_elapsed: float,
-    cost_cents: int
+    cost_cents: float
 ) -> str:
     """
     Format a standardized tool message with Params, Result, Time Elapsed, and Cost.
@@ -485,9 +485,12 @@ class ToolManager(ABC):
     
     # Set to True in subclass if tool requires user approval before execution
     requires_approval: bool = False
-    
+
     # Set to True in subclass for read-only tools (used in RESEARCH phase)
     read_only: bool = False
+
+    # Set to True in subclass to enable result condensing before adding to context
+    condensor_enabled: bool = False
     
     @property
     @abstractmethod

@@ -76,6 +76,7 @@ from helpers import (
 from helpers.llm import call_planner_llm_activity, set_response_schema_activity
 from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
+from helpers.condensor import condense_tool_result_activity
 from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
 from helpers.sms_activities import (
     get_agent_source,
@@ -229,6 +230,7 @@ async def main():
             update_agent_status,
             compress_context,
             generate_completion_summary,
+            condense_tool_result_activity,
             get_model_context_window,
             fetch_agent_tools,
             query_blueprints_activity,
