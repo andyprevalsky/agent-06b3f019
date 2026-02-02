@@ -251,7 +251,7 @@ router.get('/call/:id', authenticate, async (req: AuthRequest, res) => {
       });
     }
 
-    const result = await response.json();
+    const result = await response.json() as Record<string, unknown>;
 
     // Log full response for debugging
     console.log('Vapi call poll response', {
