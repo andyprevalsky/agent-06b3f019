@@ -1274,6 +1274,7 @@ const updateAgentSchema = z.object({
   price_limit_cents: z.number().int().min(1).optional(), // User sets this (min 1 cent)
   tree_cost_cents: z.number().int().min(0).optional(), // Workflow updates this
   write_lock_enabled: z.boolean().optional(), // Write lock for browser agent actions
+  status: z.enum(['STARTING_UP', 'ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']).optional(), // For tree state status updates
 });
 
 router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
@@ -1321,6 +1322,9 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
     }
     if (body.tree_cost_cents !== undefined) {
       agentUpdateData.treeCostCents = body.tree_cost_cents;
+    }
+    if (body.status !== undefined) {
+      agentUpdateData.status = body.status;
     }
 
     // Handle price_limit_cents with validation and workflow signal

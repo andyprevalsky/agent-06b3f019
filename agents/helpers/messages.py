@@ -437,6 +437,9 @@ async def update_agent_tree_state(
                 update_payload["progress"] = broadcast_payload["progress"]
             if "messageCount" in broadcast_payload:
                 update_payload["message_count"] = broadcast_payload["messageCount"]
+            # Only persist status to DB when explicitly set (not default ACTIVE/PAUSED)
+            if broadcast_payload.get("_statusExplicit") and "status" in broadcast_payload:
+                update_payload["status"] = broadcast_payload["status"]
 
         async with httpx.AsyncClient() as client:
             response = await client.patch(

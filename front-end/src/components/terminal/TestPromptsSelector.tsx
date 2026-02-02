@@ -129,6 +129,85 @@ For any services that require a API Key or Credential, mock the service for now 
     description: 'Tests phone call tool with Vapi voice AI',
     prompt: 'Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.',
   },
+  {
+    title: 'Apply To Grants/Accelerators',
+    description: 'Apply to grants and accelerators for Rose Labs',
+    prompt: `Apply to every relevant grant / accelerator in the United States for my company Rose Labs.
+
+Relevant info here
+- Cofounders
+--> Andy Prevalsky : https://linkedin.com/in/andyprevalsky : +1 972-977-7432 : andy@roselabs.ai
+--> Aadity Shidham : https://www.linkedin.com/in/aaditya-shidham : +1 (614) 747-3277 : aadi@roselabs.ai
+
+Previous Application for Context
+ABOUT YOU
+
+Name
+Andy Prevalsky
+
+Email
+andy@roselabs.ai
+
+Phone
+
+Location
+United States
+
+City
+San Francisco
+
+How would you best describe yourself?
+Generalist
+-
+Self-employed
+
+Where can we find you online?
+https://roselabs.ai
+-
+-
+https://linkedin.com/in/andyprevalsky
+
+-----
+MAIN QUESTIONS
+
+1) List 3 of your most exceptional achievements
+1. Dropped out of College to create my first business, hotplate.com, which is now generating $5M in ARR
+2. 4.0 GPA on the two hardest majors in UT Austin, Electrical Engineering & Math
+3. Internships at Google & Meta AI
+
+2) What will you work on if you were accepted to the program?
+Super Intelligence for everyone
+
+Hours per week you plan to devote to the project
+80
+
+3) Why are you the best person in the world to work on this?
+I have come up with a novel architecture for creating super intelligence which comes from recursive task decomposition. Almost any problem can be decomposed into sub-problems, and I've trained a specific SOTA decomposer model that can take a problem and decompose it into 2-4 independent sub-goals. These sub-goals are context independent and parallelizable, the process is repeated recursively until a single problem is decomposed into 100-10000 sub problems that all can be executed, in parallel, by my AI system. This innovation accounts for the transition of AI systems from unicellular organisms -> massively multi-cellular organisms, a massive evolutionary leap in the field.
+
+4) Please include your pitch in a video format.
+(YouTube, Google Drive or Vimeo link)
+https://www.loom.com/share/44b80d820451453191e5c4fe07938449
+
+5) If selected, what will success look like once the fellowship period ends?
+Success would look like building an AI system that can accomplish 50% > of user requests, the gross majority of people are drowning in problems, and a system that could do this would alleviate a massive amount of pain in the world.
+
+Beyond my wildest dreams, this would look like the birth of super intelligence, and a hard fork in the world from which humanity is no longer subject to deep, unecessary, tragedy.
+
+6) What might failure look like? What could be some of the original mistakes of your project?
+Failure would like
+- hallucinations compounding
+- the AI having structural limitations due to its lack of human identity, and thus can't make meaningful change in the world
+- a lack of a physical body being too large of a limitation
+- government shutdown
+
+Some mistakes could include, error drift compounding as goals get decomposed, the AI accomplishing the goal in a way that is not preferable to the end user, or this AI system being too powerful and it gets shut down because of its geopolitical implications.
+
+7) Please upload a 1 page PDF outlining your action plan for your project.
+OSV 4 Month Action Plan.pdf
+
+8) Describe something that you find beautiful in the world.
+One of the things I find most beautiful in this world is the fractal nature of life itself. From the rhythms of tiniest microbial, to the ebbs and flows of the planets and stars that govern us. The structure which defines life's pushes and pulls from chaos and order are mirrored. This story is displayed in all its different angles in so many things, the climax of a symphony, the movement in a Picasso painting, the story of ones life... this complexity is utterly beautiful to me.`,
+  },
 ];
 
 interface TestPromptsSelectorProps {

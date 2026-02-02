@@ -741,8 +741,8 @@ class AgentWorkflow:
     async def _handle_context_overflow(self, compressed_context: List[Dict]) -> None:
         """Handle context overflow via continue_as_new."""
         workflow.logger.info("Context overflow → continue_as_new")
-        # Must pass args positionally - continue_as_new uses *args, not **kwargs
-        workflow.continue_as_new(
+        # Temporal SDK requires args=[] for multi-param workflows
+        workflow.continue_as_new(args=[
             self.agent_id,
             self.user_id,
             self.goal,
@@ -754,7 +754,10 @@ class AgentWorkflow:
             self.parent_agent_id,
             self.depth,
             self.bus_id,
-        )
+            "execute",  # start_phase: skip PLAN since we already have context
+            self.max_iterations,
+            self.price_limit_cents,
+        ])
     
     async def _check_credits(self) -> None:
         """Check user credits. Sets is_paused=True if depleted."""
@@ -1393,8 +1396,14 @@ class AgentWorkflow:
         tools_list = list(self.tools_in_use)
 
         # Build broadcast payload
-        # Default status: use is_paused flag to determine PAUSED vs ACTIVE
-        default_status = "PAUSED" if self.is_paused else "ACTIVE"
+        # Compute default status from flags, but mark whether it was explicit
+        if self._cost_limit_reached:
+            default_status = "COST_LIMIT_REACHED"
+        elif self.is_paused:
+            default_status = "PAUSED"
+        else:
+            default_status = "ACTIVE"
+
         broadcast_payload = {
             "agentId": self.agent_id,
             "parentAgentId": self.parent_agent_id,
@@ -1403,6 +1412,8 @@ class AgentWorkflow:
             "progress": progress if progress is not None else 0.0,
             "toolsInUse": tools_list,
             "messageCount": self.message_count,
+            # Track if status was explicitly set (for DB persistence decision)
+            "_statusExplicit": status is not None,
         }
 
         # Always include output schema (available from spawn, cached in instance)
@@ -1435,8 +1446,8 @@ class AgentWorkflow:
 
         if result["status"] == "paused":
             await workflow.wait_condition(lambda: not self.is_paused)
-            # Must pass args positionally - continue_as_new uses *args, not **kwargs
-            workflow.continue_as_new(
+            # Temporal SDK requires args=[] for multi-param workflows
+            workflow.continue_as_new(args=[
                 self.agent_id,
                 self.user_id,
                 self.goal,
@@ -1448,7 +1459,10 @@ class AgentWorkflow:
                 self.parent_agent_id,
                 self.depth,
                 self.bus_id,
-            )
+                "execute",  # start_phase: skip PLAN since we already have context
+                self.max_iterations,
+                self.price_limit_cents,
+            ])
             return result
 
         if result["status"] == "max_iterations":
