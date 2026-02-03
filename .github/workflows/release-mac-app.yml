@@ -8,7 +8,7 @@ on:
 jobs:
   build-and-release:
     runs-on: macos-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,13 +18,70 @@ jobs:
         with:
           node-version: '20.10.0'
 
+      # ============================================
+      # CERTIFICATE AND CREDENTIAL SETUP
+      # ============================================
+
+      - name: Install Apple certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create a temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Create keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Decode and import certificate
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          echo -n "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Allow codesign to access the keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add keychain to search list (prepend to existing)
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          # Verify certificate was imported
+          echo "Verifying certificate import..."
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Setup notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Store credentials for notarytool in keychain
+          xcrun notarytool store-credentials "rose-notarize" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD"
+
+          echo "Notarytool credentials stored successfully"
+
+      # ============================================
+      # BUILD STEPS
+      # ============================================
+
       - name: Install frontend dependencies (shared UI)
         working-directory: front-end
         run: npm install --ignore-scripts
 
-      - name: Install dependencies (skip native compilation)
+      - name: Install dependencies
         working-directory: mac-app
-        run: npm install --ignore-scripts
+        run: npm install
 
       - name: Generate production env file
         working-directory: mac-app
@@ -42,7 +99,7 @@ jobs:
             NODE_ENV=production
           EOF
 
-      - name: Build Electron app (rebuilds native modules)
+      - name: Build, sign, and notarize Electron app
         working-directory: mac-app
         run: |
           npm run build:vite
@@ -50,6 +107,21 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=4096
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # electron-builder will find the signing identity from keychain
+
+      # ============================================
+      # VERIFICATION
+      # ============================================
+
+      - name: Verify code signing and notarization
+        working-directory: mac-app
+        run: |
+          chmod +x scripts/verify-signing.sh
+          ./scripts/verify-signing.sh
+
+      # ============================================
+      # RELEASE
+      # ============================================
 
       - name: Upload artifacts to GitHub Release
         uses: softprops/action-gh-release@v1
@@ -65,3 +137,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ============================================
+      # CLEANUP
+      # ============================================
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi

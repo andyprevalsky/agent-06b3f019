@@ -26,6 +26,8 @@ docs/          → API documentation (Mintlify)
 - `mac-app/main/index.ts` - Electron main process
 - `docs/mint.json` - Mintlify docs config
 
+**Mac app releases:** Push a git tag (e.g., `git tag v1.0.14 && git push origin v1.0.14`) to trigger the release workflow which builds, signs, notarizes, and uploads to GitHub Releases.
+
 ## Development
 
 Run all services via Conductor (see `conductor.json`).
