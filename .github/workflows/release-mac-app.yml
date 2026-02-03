@@ -99,31 +99,87 @@ jobs:
             NODE_ENV=production
           EOF
 
-      - name: Build, sign, and notarize Electron app
+      - name: Build and sign Electron app
         working-directory: mac-app
         run: |
           npm run build:vite
-          npx electron-builder --publish=never
+          # Build without notarization (we'll do it separately)
+          SKIP_NOTARIZATION=true npx electron-builder --publish=never
         env:
           NODE_OPTIONS: --max-old-space-size=4096
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # electron-builder will find the signing identity from keychain
 
-      # ============================================
-      # VERIFICATION
-      # ============================================
-
-      - name: Verify code signing and notarization
+      - name: Verify code signing
         working-directory: mac-app
         run: |
-          chmod +x scripts/verify-signing.sh
-          ./scripts/verify-signing.sh
+          echo "Verifying .app signature..."
+          codesign --verify --deep --strict --verbose=2 dist/mac-arm64/Rose.app
+          echo "Verifying DMG signature..."
+          codesign --verify --verbose=2 dist/Rose-mac.dmg || true
 
       # ============================================
-      # RELEASE
+      # BACKUP SIGNED DMG (before notarization)
+      # Stored as artifact in case notarization times out
+      # Download from Actions run page if needed
       # ============================================
 
-      - name: Upload artifacts to GitHub Release
+      - name: Upload signed DMG as artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-dmg-backup
+          path: |
+            mac-app/dist/Rose-mac.dmg
+            mac-app/dist/Rose-mac.zip
+          retention-days: 30
+
+      # ============================================
+      # NOTARIZATION (may take a while)
+      # ============================================
+
+      - name: Submit DMG for notarization
+        id: notarize
+        working-directory: mac-app
+        run: |
+          echo "Submitting DMG for notarization..."
+          RESULT=$(xcrun notarytool submit dist/Rose-mac.dmg \
+            --keychain-profile "rose-notarize" \
+            --output-format json)
+
+          SUBMISSION_ID=$(echo "$RESULT" | jq -r '.id')
+          if [[ -z "$SUBMISSION_ID" || "$SUBMISSION_ID" == "null" ]]; then
+            echo "Failed to extract submission ID from notarytool response:"
+            echo "$RESULT"
+            exit 1
+          fi
+          echo "Submission ID: $SUBMISSION_ID"
+          echo "submission_id=$SUBMISSION_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for notarization (timeout 45min)
+        working-directory: mac-app
+        run: |
+          echo "Waiting for notarization to complete..."
+          echo "Submission ID: ${{ steps.notarize.outputs.submission_id }}"
+          echo ""
+          echo "If this times out, run locally:"
+          echo "  ./mac-app/scripts/finish-release.sh ${{ steps.notarize.outputs.submission_id }}"
+          echo ""
+
+          xcrun notarytool wait ${{ steps.notarize.outputs.submission_id }} \
+            --keychain-profile "rose-notarize" \
+            --timeout 45m
+
+          # Check result
+          xcrun notarytool info ${{ steps.notarize.outputs.submission_id }} \
+            --keychain-profile "rose-notarize"
+
+      - name: Staple notarization ticket
+        working-directory: mac-app
+        run: |
+          echo "Stapling ticket to DMG..."
+          xcrun stapler staple dist/Rose-mac.dmg
+          xcrun stapler validate dist/Rose-mac.dmg
+
+      - name: Upload stapled DMG to release
         uses: softprops/action-gh-release@v1
         with:
           files: |

@@ -42,6 +42,13 @@ async function afterAllArtifactBuild(buildResult) {
     return buildResult.artifactPaths;
   }
 
+  // Skip notarization if SKIP_NOTARIZATION is set (handled separately in CI)
+  if (process.env.SKIP_NOTARIZATION === 'true') {
+    console.log('[staple-dmg] Skipping notarization (SKIP_NOTARIZATION=true)');
+    console.log('[staple-dmg] Notarization will be handled separately.');
+    return buildResult.artifactPaths;
+  }
+
   // Find DMG files
   const dmgFiles = buildResult.artifactPaths.filter(p => p.endsWith('.dmg'));
 
