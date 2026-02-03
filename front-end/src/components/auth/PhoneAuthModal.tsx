@@ -308,6 +308,27 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
                   className="w-full px-3 py-2 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-sm placeholder-navi-black/30 focus:outline-none focus:border-gray-400"
                   disabled={loading}
                 />
+                <p className="text-xs text-gray-500 mt-2">
+                  By submitting, you authorize Rose Labs to send an automated text message containing a one-time password (OTP) to the number you provided. Message/data rates may apply. See{' '}
+                  <a
+                    href="https://roselabs.ai/terms"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:text-navi-black"
+                  >
+                    terms
+                  </a>
+                  {' '}and{' '}
+                  <a
+                    href="https://roselabs.ai/privacy"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:text-navi-black"
+                  >
+                    privacy policy
+                  </a>
+                  .
+                </p>
               </div>
 
               <button
