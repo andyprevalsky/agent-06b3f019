@@ -53,21 +53,65 @@ T = TypeVar('T', bound=BaseModel)
 def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:
     """
     Convert a Pydantic model to a JSON schema ready for OpenAI strict structured outputs.
-    
+
     OpenAI's strict mode requires:
     1. `additionalProperties: false` on EVERY object (root and nested)
     2. All properties must be in the `required` array (no optional fields)
-    
-    This function recursively transforms the schema to meet these requirements.
-    
+    3. No $ref references (some providers like Azure don't resolve them properly)
+
+    This function recursively transforms the schema to meet these requirements,
+    including inlining all $ref references.
+
     Args:
         pydantic_model: A Pydantic BaseModel class
-        
+
     Returns:
         JSON schema dict ready for OpenAI's response_format
     """
     schema = pydantic_model.model_json_schema()
-    
+
+    # Extract $defs for reference resolution
+    defs = schema.get("$defs", {})
+
+    def resolve_ref(ref: str) -> Dict[str, Any]:
+        """Resolve a $ref string to its definition."""
+        # Format: "#/$defs/DefinitionName"
+        if ref.startswith("#/$defs/"):
+            def_name = ref[8:]  # Remove "#/$defs/" prefix
+            if def_name in defs:
+                # Return a deep copy to avoid mutation issues
+                import copy
+                return copy.deepcopy(defs[def_name])
+        raise ValueError(f"Cannot resolve reference: {ref}")
+
+    def inline_refs(obj: Any) -> Any:
+        """Recursively inline all $ref references."""
+        if not isinstance(obj, dict):
+            return obj
+
+        # If this object contains a $ref, resolve it and merge with other properties
+        if "$ref" in obj:
+            resolved = resolve_ref(obj["$ref"])
+            # Recursively inline any refs in the resolved definition
+            resolved = inline_refs(resolved)
+
+            # Merge other properties (like 'default') into the resolved schema
+            for key, value in obj.items():
+                if key != "$ref":
+                    resolved[key] = inline_refs(value) if isinstance(value, (dict, list)) else value
+            return resolved
+
+        # Otherwise, recursively process all values
+        result = {}
+        for key, value in obj.items():
+            if isinstance(value, dict):
+                result[key] = inline_refs(value)
+            elif isinstance(value, list):
+                result[key] = [inline_refs(item) for item in value]
+            else:
+                result[key] = value
+        return result
+
     def add_strict_properties(obj: Dict[str, Any]) -> None:
         """Recursively add additionalProperties: false to all objects."""
         if not isinstance(obj, dict):
@@ -92,22 +136,30 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
                 # Recurse into each property
                 for prop in obj["properties"].values():
                     add_strict_properties(prop)
-        
+
         # Handle anyOf/oneOf/allOf (union types)
         for key in ["anyOf", "oneOf", "allOf"]:
             if key in obj:
                 for item in obj[key]:
                     add_strict_properties(item)
-        
+
         # Handle array items
         if obj.get("type") == "array" and "items" in obj:
             add_strict_properties(obj["items"])
-        
+
         # Handle $defs (schema definitions for nested models)
         if "$defs" in obj:
             for definition in obj["$defs"].values():
                 add_strict_properties(definition)
-    
+
+    # First, inline all $ref references
+    schema = inline_refs(schema)
+
+    # Remove $defs since all refs are now inlined
+    if "$defs" in schema:
+        del schema["$defs"]
+
+    # Then add strict properties
     add_strict_properties(schema)
     return schema
 

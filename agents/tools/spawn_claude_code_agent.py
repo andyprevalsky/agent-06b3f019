@@ -1313,5 +1313,5 @@ async def spawn_claude_code_agent(
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_claude_code_agent")
         # Track usage from final event (included in data field)
-        if event.data and event.data.get("usage"):
+        if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
             await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_claude_code_agent")
