@@ -89,6 +89,7 @@ const NaviHeader = () => {
           >
             {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
           </button>
+          <a href="/research" className="text-muted-foreground hover:text-foreground transition-colors">Research</a>
           <a href="/about" className="text-muted-foreground hover:text-foreground transition-colors">About</a>
         </nav>
         

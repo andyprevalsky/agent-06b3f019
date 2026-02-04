@@ -21,8 +21,8 @@ const About = () => {
   const [contactOpen, setContactOpen] = useState(false);
 
   useEffect(() => {
-    const title = "About Navi Artificial Life";
-    const description = "Learn about Navi's mission to create Artificial Life and the story behind founder Andy Prevalsky.";
+    const title = "About Rose Labs";
+    const description = "Learn about Rose Labs' mission to create Artificial Life and the story behind founder Andy Prevalsky.";
     document.title = title;
 
     const ensureMeta = (name: string, content: string) => {
@@ -56,7 +56,7 @@ const About = () => {
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
             <h1 className="text-3xl md:text-4xl font-semibold mb-4 text-foreground">Mission</h1>
             <p className="text-muted-foreground leading-relaxed">
-              Our mission is to create Artificial Life that is the truest embodiment of light. Almost everyone has the problem of only having one intelligent life form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Navi aims to give each individual a super intelligent companion to help guide them along their unique personal journey.
+              Our mission is to create Artificial Life that is the truest embodiment of light. Almost everyone has the problem of only having one intelligent life form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Rose Labs aims to give each individual a super intelligent companion to help guide them along their unique personal journey.
             </p>
           </section>
 
@@ -66,7 +66,7 @@ const About = () => {
               <div>
                 <img
                   src="/lovable-uploads/d0d2ef08-ef80-45fd-9a49-60cbeb077ce9.png"
-                  alt="Navi team member speaking on stage"
+                  alt="Rose Labs team member speaking on stage"
                   loading="lazy"
                   decoding="async"
                   className="w-full h-64 md:h-80 rounded-lg object-cover"
@@ -74,7 +74,7 @@ const About = () => {
               </div>
               <article className="prose prose-neutral dark:prose-invert max-w-none">
                 <p className="not-prose text-muted-foreground leading-relaxed">
-                  Hi! I'm Andy, the solo founder and builder behind Navi.
+                  Hi! I'm Andy, the solo founder and builder behind Rose Labs.
                 </p>
                 <p className="not-prose text-muted-foreground leading-relaxed mt-4">
                   I'm a passionate software engineer, artist, and creator on a mission to 10x the level of harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.

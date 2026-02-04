@@ -1579,7 +1579,8 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         <button
           onClick={(e) => {
             e.stopPropagation();
-            console.log('Research button clicked');
+            // TODO: Enable when research page is public
+            // navigate('/research');
           }}
           className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors z-10"
         >

@@ -10,7 +10,8 @@
  *   +--> "/terms" --> <Terms />
  *   +--> "/about" --> <About />
  *   +--> "/terminal" --> <Index />
- *   +--> "/research" --> <Research />
+ *   +--> "/research" --> <ResearchBlog />
+ *   +--> "/research/:slug" --> <ResearchBlogPost />
  *   +--> "/download" --> <Download />
  *   +--> "*" --> <NotFound />
  */
@@ -28,7 +29,8 @@ import Terms from "./pages/Terms";
 import NotFound from "./pages/NotFound";
 import About from "./pages/About";
 import Terminal from "./pages/Terminal";
-import Research from "./pages/Research";
+import ResearchBlog from "./pages/ResearchBlog";
+import ResearchBlogPost from "./pages/ResearchBlogPost";
 import Download from "./pages/Download";
 
 const queryClient = new QueryClient();
@@ -47,7 +49,8 @@ const App = () => (
               <Route path="/terms" element={<Terms />} />
               <Route path="/about" element={<About />} />
               <Route path="/terminal" element={<Index />} />
-              <Route path="/research" element={<Research />} />
+              <Route path="/research" element={<ResearchBlog />} />
+              <Route path="/research/:slug" element={<ResearchBlogPost />} />
               <Route path="/download" element={<Download />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
               <Route path="*" element={<NotFound />} />
