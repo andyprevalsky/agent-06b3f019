@@ -698,6 +698,7 @@ export interface AgentTreeNode {
   message_count: number;
   output_schema?: OutputSchema;
   structured_output?: Record<string, unknown>;
+  tree_cost_cents: number;
 }
 
 export interface AncestorNode {

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import multer from 'multer';
+import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../lib/prisma';
 import { AuthRequest, authenticate } from '../middleware/auth';
 import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
@@ -206,6 +207,7 @@ router.get('/tree', hybridAuth, async (req: HybridAuthRequest, res) => {
         messageCount: true,
         responseSchema: true,
         structuredResponse: true,
+        treeCostCents: true,
       },
     });
 
@@ -220,6 +222,7 @@ router.get('/tree', hybridAuth, async (req: HybridAuthRequest, res) => {
         message_count: agent.messageCount,
         output_schema: agent.responseSchema,
         structured_output: agent.structuredResponse,
+        tree_cost_cents: agent.treeCostCents,
       })),
     });
   } catch (error) {
@@ -276,15 +279,21 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
     }
     console.log(`🌍 Proxy geolocation: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country} (IP: ${clientIP || 'unknown'})`);
 
+    // Determine if this is a sub-agent and generate ID upfront
+    const isSubAgent = !!body.parent_agent_id;
+    const agentId = uuidv4();
+
     // Create agent with verifier and tool associations in a transaction
     const agent = await prisma.$transaction(async (tx) => {
       const newAgent = await tx.agent.create({
         data: {
+          id: agentId,
           userId,
           parentAgentId: body.parent_agent_id || null,
           parentWorkflowId: body.parent_workflow_id || null,
           depth: body.depth || 0,
-          busId: body.bus_id || null,
+          // Root agents: busId = own id; Sub-agents: busId from parent
+          busId: isSubAgent ? (body.bus_id || null) : agentId,
           goal: body.goal,
           model: body.model,
           reasoningMaxTokens: body.reasoning_max_tokens,
@@ -341,8 +350,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       return { agent: newAgent, goalMessage };
     });
 
-    // Determine if this is a sub-agent (has parent) or root agent
-    const isSubAgent = !!body.parent_agent_id;
+    // Workflow ID for agent mode (set below)
     let workflowId: string | null = null;
 
     if (isSubAgent) {

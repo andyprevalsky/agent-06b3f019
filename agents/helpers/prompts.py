@@ -111,6 +111,7 @@ def build_system_prompt(
     user_context_section: str = "",
     is_first_call: bool = False,
     response_schema: Optional[Dict[str, Any]] = None,
+    shared_memory_section: str = "",
 ) -> str:
     """
     Build system prompt for the LLM.
@@ -130,6 +131,7 @@ def build_system_prompt(
         user_context_section: Optional user context to include
         is_first_call: True for first iteration (no tools)
         response_schema: Optional structured output schema the agent should return
+        shared_memory_section: Optional shared memory from run to include
     """
     disabled_tools = disabled_tools or []
     current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
@@ -153,6 +155,25 @@ Current time: {current_time}
     # Add user context if provided
     if user_context_section.strip():
         prompt += f"\n\n{user_context_section.strip()}"
+
+    # Add shared memory section if provided (user messages across the run)
+    if shared_memory_section.strip():
+        prompt += f"\n\n# Shared Run Memory\n{shared_memory_section.strip()}"
+
+    # ========================================================================
+    # 1b. REFERENCE BLUEPRINTS (guidance for interpreting injected blueprints)
+    # ========================================================================
+    prompt += dedent("""
+
+REFERENCE BLUEPRINTS
+--------------------
+You may receive REFERENCE BLUEPRINT messages in context showing how similar goals were
+previously completed. These are compressed execution traces. Use them to:
+- Learn which tools and patterns were effective for similar goals
+- Understand plan structure (task decomposition, parallelism)
+- Note failed steps in the trajectory to avoid repeating mistakes
+Do NOT copy blueprints verbatim. Adapt the approach to the current goal.
+    """).rstrip()
 
     # ========================================================================
     # 2. CRITICAL CONSTRAINTS

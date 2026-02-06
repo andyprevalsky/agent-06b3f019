@@ -71,6 +71,7 @@ with workflow.unsafe.imports_passed_through():
     from loop.run_agent import run_agent
     from loop.dag_executor import extract_plan_from_context, TaskDAG, execute_dag
     from helpers.format_tool_display import format_tool_display
+    from activities.shared_memory import get_shared_memory, append_shared_memory
 
 logger = structlog.get_logger()
 
@@ -169,6 +170,10 @@ class AgentWorkflow:
         self.output_schema: Optional[Dict] = None  # Structured output schema (for prompts, verifier, tree, completion)
         self.start_time: Optional[datetime] = None  # Workflow start time for duration tracking
 
+        # System prompt building state (for build_system_prompt callback)
+        self._current_tools: List[str] = []  # Tools enabled for current phase
+        self._disabled_tools: List[str] = []  # Tools disabled for current phase (shown in PLAN)
+
         # Cost limit tracking (hierarchical relay: child → parent → root)
         self.own_cost_cents: int = 0  # This agent's direct cost (LLM + tools)
         self.children_cost_cents: Dict[str, int] = {}  # child_agent_id -> subtree_cost
@@ -193,6 +198,11 @@ class AgentWorkflow:
         # User customization (fetched at workflow start for dynamic name in approvals/SMS)
         self.system_name: str = "Rose"  # Default to "Rose", fetched from user settings
         self.custom_system_prompt: Optional[str] = None  # Custom personality prompt to inject
+
+        # Shared memory state (for cross-agent memory sharing within a run)
+        self.shared_memory_hash: Optional[str] = None  # Current hash for cache invalidation
+        self.shared_memory_content: List[Dict] = []  # Current shared memory entries
+        self.appended_message_ids: Set[str] = set()  # Track message IDs we've already appended
     
     # =========================================================================
     # SIGNALS
@@ -556,12 +566,14 @@ class AgentWorkflow:
         # =====================================================================
         if not skip_plan:
             self.current_phase = "PLAN"
+            self._current_tools = plan_tools
+            self._disabled_tools = execute_tools
             workflow.logger.info(f"▶ PLAN phase: {len(plan_tools)} tools")
 
             plan_result = await run_agent(
                 agent_id=agent_id,
                 user_id=user_id,
-                system_prompt=build_system_prompt("PLAN", plan_tools, disabled_tools=execute_tools, user_context_section=user_context_section, response_schema=response_schema),
+                system_prompt=self.build_system_prompt,
                 verifier_prompt_generator=self._make_verifier_prompt_generator("PLAN", self.verifier.get("llmJudgePrompt", "")),
                 model=model,
                 tools=plan_tools,
@@ -596,6 +608,8 @@ class AgentWorkflow:
         # PHASE 2: EXECUTE (run the plan with full tool access)
         # =====================================================================
         self.current_phase = "EXECUTE"
+        self._current_tools = execute_tools
+        self._disabled_tools = []  # No disabled tools in EXECUTE phase
         workflow.logger.info(f"▶ EXECUTE phase: {len(execute_tools)} tools")
 
         # Get context from PLAN phase (or poll if skipped)
@@ -641,10 +655,11 @@ class AgentWorkflow:
         # LLM-driven execution (after DAG, or if no plan)
         # Note: Don't pass initial_context - run_agent polls from DB each step
         # DAG already posted all results to DB via post_message callback
+
         execute_result = await run_agent(
             agent_id=agent_id,
             user_id=user_id,
-            system_prompt=build_system_prompt("EXECUTE", execute_tools, user_context_section=user_context_section, response_schema=response_schema),
+            system_prompt=self.build_system_prompt,
             verifier_prompt_generator=self._make_verifier_prompt_generator("EXECUTE", self.verifier.get("llmJudgePrompt", "")),
             model=model,
             tools=execute_tools,
@@ -725,6 +740,25 @@ class AgentWorkflow:
 
         return get_schema
 
+    async def build_system_prompt(self) -> str:
+        """Build system prompt with fresh shared memory.
+
+        Called by run_agent before each LLM call to ensure agents see
+        the latest shared memory updates.
+        """
+        # Fetch latest shared memory from API
+        shared_memory_section = await self._fetch_shared_memory()
+
+        # Build prompt using helper
+        return build_system_prompt(
+            phase=self.current_phase,
+            enabled_tools=self._current_tools,
+            disabled_tools=self._disabled_tools,
+            user_context_section=self.user_context_section,
+            response_schema=self.output_schema,
+            shared_memory_section=shared_memory_section,
+        )
+
     async def _wait_for_messages(self) -> bool:
         """Wait for new messages."""
         try:
@@ -794,7 +828,7 @@ class AgentWorkflow:
     
     async def _poll_messages(self, last_checked: datetime) -> List[Dict]:
         """Poll for new messages using the timestamp provided by run_agent.
-        
+
         Args:
             last_checked: The timestamp to poll from (managed by run_agent, not workflow state)
         """
@@ -805,17 +839,106 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
-            
+
             # Update workflow context for tools that check it
             if messages:
                 for msg in messages:
                     if msg not in self.context:
                         self.context.append(msg)
                 self.context.sort(key=lambda x: x.get("timestamp", ""))
-            
+
+                # Append new USER messages to shared memory (with deduplication)
+                await self._append_user_messages_to_shared_memory(messages)
+
             return messages
         except Exception:
             return []
+
+    async def _append_user_messages_to_shared_memory(self, messages: List[Dict]) -> None:
+        """Append new USER messages to shared memory for cross-agent visibility."""
+        if not self.bus_id:
+            return  # No bus_id means no shared memory scope
+
+        for msg in messages:
+            if msg.get("role") != "USER":
+                continue
+
+            msg_id = msg.get("id")
+            if not msg_id or msg_id in self.appended_message_ids:
+                continue  # Skip if no ID or already appended
+
+            # Extract file pointers if present
+            files = []
+            file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+            if file_pointer:
+                files.append({
+                    "original_filename": file_pointer.get("original_filename", ""),
+                    "mime_type": file_pointer.get("mime_type", ""),
+                })
+
+            try:
+                result = await workflow.execute_activity(
+                    append_shared_memory,
+                    args=[
+                        self.bus_id,
+                        "USER_MESSAGE",
+                        msg.get("text", ""),
+                        msg_id,
+                        files if files else None,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3)
+                )
+
+                if result:
+                    self.shared_memory_hash = result.get("hash")
+                    self.appended_message_ids.add(msg_id)
+                    workflow.logger.debug(f"📝 Appended user message {msg_id[:8]} to shared memory")
+            except Exception as e:
+                workflow.logger.warning(f"Failed to append user message to shared memory: {e}")
+
+    async def _fetch_shared_memory(self) -> str:
+        """Fetch shared memory and format it for inclusion in system prompt."""
+        if not self.bus_id:
+            return ""  # No bus_id means no shared memory scope
+
+        try:
+            result = await workflow.execute_activity(
+                get_shared_memory,
+                args=[self.bus_id, self.shared_memory_hash],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3)
+            )
+
+            if result is None:
+                # Hash matched, content unchanged - use cached
+                pass
+            elif result:
+                # New content received
+                self.shared_memory_content = result.get("content", [])
+                self.shared_memory_hash = result.get("hash")
+
+            # Format shared memory for system prompt
+            if not self.shared_memory_content:
+                return ""
+
+            lines = []
+            for entry in self.shared_memory_content:
+                timestamp = entry.get("timestamp", "")[:19]  # Truncate to datetime
+                entry_type = entry.get("type", "")
+                content = entry.get("content", "")
+                files = entry.get("files", [])
+
+                line = f"[{timestamp}] {entry_type}: {content}"
+                if files:
+                    file_names = ", ".join(f.get("original_filename", "") for f in files)
+                    line += f" (files: {file_names})"
+                lines.append(line)
+
+            return "\n".join(lines)
+        except Exception as e:
+            workflow.logger.warning(f"Failed to fetch shared memory: {e}")
+            return ""
     
     async def _execute_tool(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool - supports both new and legacy signatures during migration."""
@@ -899,13 +1022,31 @@ class AgentWorkflow:
         except Exception as e:
             error_msg = extract_error_message(e)
             workflow.logger.error(f"Tool {tool_name} failed: {error_msg}")
+
+            # For spawn_sub_agent, include sub-agent context so frontend renders
+            # as a proper sub-agent failure (SubAgentTree) instead of a raw chip
+            error_metadata = None
+            if tool_name == "spawn_sub_agent":
+                meta = {}
+                # Find the child agent spawned by this tool_call_id
+                for child_id, tid in getattr(self, 'child_tool_ids', {}).items():
+                    if tid == tool_call_id:
+                        meta["subAgentIds"] = [child_id]
+                        break
+                bus_id = getattr(self, 'bus_id', None)
+                if bus_id:
+                    meta["busId"] = bus_id
+                if meta:
+                    error_metadata = meta
+
             # Emit error event so it shows in frontend
             await self._handle_tool_event(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title=f"{tool_name} failed",
+                    title=f"❌ {tool_name.replace('_', ' ').title()} failed",
                     message=error_msg,
-                    status=MessageStatus.ERROR
+                    status=MessageStatus.ERROR,
+                    metadata=error_metadata,
                 ),
                 tool_call_id,
                 tool_name
@@ -1299,6 +1440,9 @@ class AgentWorkflow:
         self.tree_tokens_in = self.tokens_in + sum(self.children_tokens_in.values())
         self.tree_tokens_out = self.tokens_out + sum(self.children_tokens_out.values())
 
+        # Persist subtree cost to DB (for all agents, so frontend can display it)
+        await self._persist_tree_cost()
+
         # Signal parent (if we have one)
         if self.parent_workflow_id:
             try:
@@ -1312,8 +1456,7 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent cost update: {e}")
         else:
-            # We are root - persist cost to DB and check limit
-            await self._persist_tree_cost()
+            # We are root - check cost limit
             await self._check_cost_limit()
 
         # Broadcast updated tree tokens to this agent's channel (for frontend display)
@@ -1412,6 +1555,7 @@ class AgentWorkflow:
             "progress": progress if progress is not None else 0.0,
             "toolsInUse": tools_list,
             "messageCount": self.message_count,
+            "costCents": self.subtree_cost_cents,
             # Track if status was explicitly set (for DB persistence decision)
             "_statusExplicit": status is not None,
         }

@@ -19,70 +19,207 @@ logger = structlog.get_logger()
 
 # These imports are only used in activities (not workflow code), so no sandbox restrictions apply
 from config import load_config
-from helpers.llm import call_llm
 from helpers.utils import extract_goal_from_context
 
 
 # ========================================
-# PROMPT FOR LLM COMPRESSION
+# BLUEPRINT COMPRESSION (deterministic)
 # ========================================
 
-BLUEPRINT_COMPRESSION_PROMPT = """You are compressing a conversation between a user and an AI agent that successfully achieved a specific goal.
 
-Your task is to filter and compress the message history into a concise blueprint while preserving the raw data structure.
+def _build_trajectory_blueprint(context: List[Dict], title: str) -> str:
+    """Build a condensed trajectory-format blueprint from conversation context.
 
-## Input
-- **Goal**: {goal_description}
-- **Outcome**: Successfully completed
-- **Full Conversation**: Array of message objects with role/text/timestamp fields
+    Deterministic extraction (no LLM needed). Produces a compact text format:
+    - Header: STATUS, COST, DURATION
+    - TRAJECTORY: one line per tool call with phase, tool name, key param, result
+    - PLAN: full set_plan payload (if present)
+    - USER MESSAGES: all user messages verbatim
 
-## What to Keep
+    Typical output: 400-900 tokens per blueprint (vs ~12K for old JSON format).
+    """
+    trajectory_lines = []
+    user_messages = []
+    plan_json = None
+    cost_dollars = None
+    duration_seconds = None
+    status = "SUCCESS"
+    step = 0
+    current_phase = "PLAN"
+    seen_tool_calls = set()
 
-Keep messages that show:
-- **User requests and goals**: All USER messages
-- **Important decisions**: ASSISTANT messages explaining strategy or reasoning
-- **Tool calls and results**: TOOL messages showing what actions were taken and their outcomes
-- **Key insights**: ASSISTANT messages with valuable learnings or discoveries
-- **Critical errors or pivots**: Messages showing important course corrections
+    # Internal tools to skip in trajectory
+    SKIP_TOOLS = {"check_progress", "completion_summary"}
 
-## What to Remove
+    for msg in context:
+        role = msg.get("role", "")
+        metadata = msg.get("metadata", {}) or {}
+        text = msg.get("text", "")
 
-Filter out:
-- Greetings, pleasantries, and closing remarks
-- Repetitive confirmations ("I'll do that now", "Working on it...")
-- Status updates that don't add information ("Processing...", "Please wait...")
-- Verbose tool outputs - compress to key data points only
-- Redundant explanations - keep the first, remove repeats
+        # Collect user messages
+        if role == "USER" and text:
+            # Skip hidden/system messages
+            if not metadata.get("hidden") and not metadata.get("isCustomSystemPrompt"):
+                user_messages.append(text)
 
-## How to Compress
+        # Track reasoning steps (ASSISTANT messages without tool calls)
+        if role == "ASSISTANT" and text and not metadata.get("tool_calls"):
+            trajectory_lines.append(f"  t:{step}  [{current_phase}]  reasoning")
+            step += 1
 
-For messages you keep:
-- **Preserve structure**: Keep the role/text format intact
-- **Compress verbose content**: Condense long tool outputs to essential data (e.g., "Found 50 results" instead of listing all 50)
-- **Keep parameters**: Preserve tool call parameters and arguments
-- **Maintain causality**: Keep enough context to understand why actions were taken
+        # Process tool messages
+        if role == "TOOL":
+            tool_name = metadata.get("toolName", "")
+            tool_status = metadata.get("toolStatus", "")
+            tool_call_id = metadata.get("toolCallId", "")
 
-## Output Format
+            # Skip internal tools
+            if tool_name in SKIP_TOOLS:
+                # But extract cost/duration from completion_summary
+                if tool_name == "completion_summary" and tool_status == "FINISHED":
+                    summary_data = metadata.get("completionSummary", {})
+                    cost_dollars = summary_data.get("costDollars")
+                    duration_seconds = summary_data.get("durationSeconds")
+                elif tool_name == "completion_summary" and tool_status == "ERROR":
+                    status = "FAILED"
+                    summary_data = metadata.get("completionSummary", {})
+                    duration_seconds = summary_data.get("durationSeconds")
+                continue
 
-Return a valid JSON array of message objects. Each message must have:
-- `role`: "USER", "ASSISTANT", "TOOL", or "SYSTEM"
-- `text`: The message content (compressed if needed)
-- `timestamp`: ISO 8601 timestamp string (preserve from original or generate if missing)
-- `metadata` (optional): Contains tool execution data like:
-  - For ASSISTANT messages: `tool_calls` array with tool names and arguments
-  - For TOOL messages: `toolCallId`, `toolName`, `toolStatus`, `title`
+            # Skip IN_PROGRESS messages (only care about FINISHED/ERROR)
+            if tool_status not in ("FINISHED", "ERROR"):
+                continue
 
-Example output:
-```json
-[
-  {{"role": "USER", "text": "Search for Python tutorials", "timestamp": "2025-01-15T10:00:00Z"}},
-  {{"role": "ASSISTANT", "text": "I'll search for that", "timestamp": "2025-01-15T10:00:03Z", "metadata": {{"tool_calls": [{{"tool": "web_search", "query": "Python tutorials", "tool_call_id": "abc123"}}]}}}},
-  {{"role": "TOOL", "text": "web_search(query='Python tutorials') → Found RealPython.com (4.8★), LearnPython.org, Official Docs", "timestamp": "2025-01-15T10:00:05Z", "metadata": {{"toolCallId": "abc123", "toolName": "web_search", "toolStatus": "FINISHED", "title": "🔍 Web Search"}}}},
-  {{"role": "ASSISTANT", "text": "Found 3 high-quality resources. RealPython.com is best for beginners.", "timestamp": "2025-01-15T10:00:10Z"}}
-]
-```
+            # Dedupe by tool_call_id
+            if tool_call_id:
+                if tool_call_id in seen_tool_calls:
+                    continue
+                seen_tool_calls.add(tool_call_id)
 
-Return ONLY the JSON array - no explanations, no markdown fences, just the raw JSON."""
+            # Extract key param from tool call
+            key_param = _extract_key_param(tool_name, metadata, text)
+
+            # Build result summary
+            if tool_status == "ERROR" or metadata.get("error"):
+                error_text = text[:80] if text else "error"
+                result_summary = f"FAILED ({error_text})"
+            else:
+                result_summary = _extract_result_summary(tool_name, metadata, text)
+
+            # Handle set_plan specially - extract full plan
+            if tool_name == "set_plan" and tool_status == "FINISHED":
+                plan_data = metadata.get("data", {})
+                if plan_data and plan_data.get("tasks"):
+                    plan_json = json.dumps(plan_data, indent=2, default=str)
+                trajectory_lines.append(
+                    f"  t:{step}  [{current_phase}]  set_plan → {len(plan_data.get('tasks', []))} tasks"
+                )
+                step += 1
+                # After set_plan, we're in EXECUTE phase
+                current_phase = "EXECUTE"
+                continue
+
+            # Regular tool call
+            line = f"  t:{step}  [{current_phase}]  {tool_name}"
+            if key_param:
+                line += f"({key_param})"
+            line += f" → {result_summary}"
+            trajectory_lines.append(line)
+            step += 1
+
+    # Build the blueprint text
+    lines = [f"STATUS: {status}"]
+    if cost_dollars is not None:
+        lines.append(f"COST: ${cost_dollars}")
+    if duration_seconds is not None:
+        minutes = duration_seconds // 60
+        seconds = duration_seconds % 60
+        lines.append(f"DURATION: {minutes}m {seconds}s")
+
+    lines.append("")
+    lines.append("TRAJECTORY:")
+    if trajectory_lines:
+        lines.extend(trajectory_lines)
+    else:
+        lines.append("  (no tool calls)")
+
+    if plan_json:
+        lines.append("")
+        lines.append("PLAN:")
+        lines.append(plan_json)
+
+    if user_messages:
+        lines.append("")
+        lines.append("USER MESSAGES:")
+        for um in user_messages:
+            # Truncate very long user messages
+            truncated = um[:500] + "..." if len(um) > 500 else um
+            lines.append(f'  - "{truncated}"')
+
+    return "\n".join(lines)
+
+
+def _extract_key_param(tool_name: str, metadata: Dict, text: str) -> str:
+    """Extract the most important parameter from a tool call for the trajectory line."""
+    data = metadata.get("data", {}) or {}
+
+    if tool_name == "web_search":
+        return f'"{data.get("query", "")}"' if data.get("query") else ""
+    if tool_name == "web_fetch":
+        url = data.get("url", "")
+        if url:
+            # Truncate long URLs to domain
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(url)
+                return parsed.netloc or url[:50]
+            except Exception:
+                return url[:50]
+        return ""
+    if tool_name in ("spawn_browser_agent", "spawn_sub_agent", "spawn_claude_code_agent"):
+        goal = data.get("goal", "")
+        return f'"{goal[:60]}"' if goal else ""
+    if tool_name == "send_message_to_user":
+        return ""  # Don't expose message content
+    if tool_name == "find_all":
+        return f'"{data.get("entity_type", "")}"' if data.get("entity_type") else ""
+    if tool_name == "enrich":
+        return f'"{data.get("query", "")}"' if data.get("query") else ""
+    if tool_name == "monitor":
+        return f'"{data.get("description", "")[:40]}"' if data.get("description") else ""
+    if tool_name == "people_search":
+        return f'"{data.get("query", "")}"' if data.get("query") else ""
+
+    # Fallback: try title from metadata
+    title = metadata.get("title", "")
+    if title and len(title) < 60:
+        return ""  # Title goes in result_summary
+    return ""
+
+
+def _extract_result_summary(tool_name: str, metadata: Dict, text: str) -> str:
+    """Extract a concise result summary for the trajectory line."""
+    title = metadata.get("title", "")
+    data = metadata.get("data", {}) or {}
+
+    if tool_name in ("spawn_browser_agent", "spawn_sub_agent", "spawn_claude_code_agent"):
+        return "SUCCESS" if metadata.get("toolStatus") == "FINISHED" else "completed"
+    if tool_name == "web_search":
+        # Try to get result count from text
+        if "results" in text.lower():
+            return text[:60]
+        return "results returned"
+    if tool_name == "web_fetch":
+        return "200" if metadata.get("toolStatus") == "FINISHED" else "fetched"
+    if tool_name == "attempt_completion":
+        return "SUCCESS"
+    if tool_name == "send_message_to_user":
+        return "sent"
+
+    # Fallback: use title if short enough
+    if title and len(title) < 50:
+        return title
+    return "completed"
 
 
 class QueryBlueprintsManager(ToolManager):
@@ -200,7 +337,7 @@ class SaveBlueprintManager(ToolManager):
             status=MessageStatus.IN_PROGRESS
         )
         
-        # 2. Execute save activity (does LLM compression and returns usage)
+        # 2. Execute save activity (deterministic trajectory compression)
         try:
             result = await workflow.execute_activity(
                 save_blueprint_activity,
@@ -391,115 +528,50 @@ async def save_blueprint_activity(
     blueprint: List[Dict]
 ) -> Dict:
     """
-    Activity: Save a new blueprint with LLM compression.
-    
-    Uses LLM to compress the conversation history by filtering noise and condensing
-    verbose content while preserving the raw message structure.
-    
+    Activity: Save a condensed trajectory blueprint from conversation context.
+
+    Deterministically extracts a compact trajectory format from the conversation
+    messages — no LLM call needed. Typical output is 400-900 tokens per blueprint
+    (vs ~12K for the old JSON format).
+
     Args:
         user_id: User ID
         blueprint: List of messages (execution trace, first USER message is the goal)
-        
+
     Returns:
-        Dict with 'saved_blueprint' and 'usage' (token counts)
+        Dict with 'saved_blueprint'
     """
     try:
-        activity.heartbeat("Compressing blueprint with LLM")
-        
+        activity.heartbeat("Building trajectory blueprint")
+
         # Extract goal from first USER message to use as title
         title = extract_goal_from_context(blueprint)
-        
-        # Format conversation history as JSON for the LLM
-        conversation_json = json.dumps(blueprint, indent=2)
-        
-        # Build the compression prompt
-        system_prompt = BLUEPRINT_COMPRESSION_PROMPT.format(
-            goal_description=title
+
+        # Build condensed trajectory format (deterministic, no LLM)
+        compressed_text = _build_trajectory_blueprint(blueprint, title)
+
+        # Estimate tokens (~4 chars per token)
+        estimated_tokens = len(compressed_text) // 4
+        logger.info(
+            "Blueprint compressed (trajectory format)",
+            goal=title,
+            original_messages=len(blueprint),
+            compressed_chars=len(compressed_text),
+            estimated_tokens=estimated_tokens,
         )
-        
-        # Call LLM to compress blueprint
-        logger.info("Calling LLM to compress blueprint", goal=title, original_messages=len(blueprint))
-        result = await call_llm(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": conversation_json}
-            ],
-            model="google/gemini-2.5-flash",
-            temperature=0.3,
-            max_tokens=4000,
-            response_format={"type": "json_object"}
-        )
-        
-        # Parse the compressed blueprint from LLM response
-        compressed_blueprint_str = result.get("content", "")
-        usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-        
-        if not compressed_blueprint_str:
-            logger.warning("LLM returned empty blueprint, falling back to raw messages")
-            compressed_blueprint = blueprint
-        else:
-            try:
-                # Parse JSON response
-                compressed_blueprint = json.loads(compressed_blueprint_str)
-                
-                # Validate it's a list
-                if not isinstance(compressed_blueprint, list):
-                    logger.warning("LLM returned non-list JSON, falling back to raw messages")
-                    compressed_blueprint = blueprint
-                else:
-                    logger.info(
-                        "Blueprint compressed",
-                        goal=title,
-                        original_messages=len(blueprint),
-                        compressed_messages=len(compressed_blueprint),
-                        compression_ratio=f"{len(compressed_blueprint)/len(blueprint)*100:.1f}%",
-                        tokens_used=usage.get("total_tokens", 0)
-                    )
-            except json.JSONDecodeError as e:
-                logger.warning(
-                    "Failed to parse LLM JSON response, falling back to raw messages",
-                    error=str(e),
-                    response_preview=compressed_blueprint_str[:200]
-                )
-                compressed_blueprint = blueprint
 
-        # Estimate tokens in compressed blueprint (~4 chars per token)
-        blueprint_text = json.dumps(compressed_blueprint)
-        estimated_tokens = len(blueprint_text) // 4
-
-        MAX_BLUEPRINT_TOKENS = 40000
-        if estimated_tokens > MAX_BLUEPRINT_TOKENS:
-            logger.error(
-                "🚨 BLUEPRINT TOO LARGE - This will cause context overflow when loaded! "
-                "The blueprint exceeds 40k tokens and will crash agents that try to use it. "
-                "Consider: (1) reducing conversation length before completion, "
-                "(2) improving LLM compression, or (3) truncating large tool outputs.",
-                goal=title,
-                estimated_tokens=estimated_tokens,
-                max_allowed=MAX_BLUEPRINT_TOKENS,
-                blueprint_chars=len(blueprint_text),
-                compressed_messages=len(compressed_blueprint),
-            )
-        else:
-            logger.info(
-                "Blueprint size check passed",
-                goal=title,
-                estimated_tokens=estimated_tokens,
-                max_allowed=MAX_BLUEPRINT_TOKENS,
-            )
-
-        # Save the compressed blueprint via backend API
+        # Save the blueprint via backend API (as text string, not JSON array)
         activity.heartbeat(f"Saving blueprint: {title}")
-        
+
         config = load_config()
-        
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/blueprints",
                 json={
                     "user_id": user_id,
                     "title": title,
-                    "blueprint": compressed_blueprint
+                    "blueprint": compressed_text
                 },
                 headers={
                     "X-API-Key": config.backend.api_key,
@@ -509,53 +581,16 @@ async def save_blueprint_activity(
             )
             response.raise_for_status()
             saved_blueprint = response.json()
-        
+
         logger.info(
             "Blueprint saved",
             blueprint_id=saved_blueprint.get("id"),
             title=title
         )
         
-        # Return both the saved blueprint and usage data
-        return {
-            "saved_blueprint": saved_blueprint,
-            "usage": usage
-        }
-        
+        return {"saved_blueprint": saved_blueprint}
+
     except Exception as e:
-        logger.error(
-            "Blueprint save failed, attempting fallback to raw messages",
-            error=str(e)
-        )
-        # Fallback: save raw messages if compression fails (no token usage)
-        try:
-            activity.heartbeat("Fallback: saving raw messages")
-            title = extract_goal_from_context(blueprint)
-            
-            config = load_config()
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{config.backend.api_url}/api/blueprints",
-                    json={
-                        "user_id": user_id,
-                        "title": title,
-                        "blueprint": blueprint
-                    },
-                    headers={
-                        "X-API-Key": config.backend.api_key,
-                        "Content-Type": "application/json"
-                    },
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                saved_blueprint = response.json()
-            
-            return {
-                "saved_blueprint": saved_blueprint,
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            }
-        except Exception as fallback_error:
-            logger.error("Fallback save also failed", error=str(fallback_error))
-            raise
+        logger.error("Blueprint save failed", error=str(e))
+        raise
 

@@ -17,6 +17,7 @@ export interface TreeNode {
   progress: number;
   toolsInUse: string[];
   messageCount: number;
+  costCents: number;
   outputSchema?: OutputSchema;
   structuredOutput?: Record<string, unknown>;
   failureContext?: FailureContext;
@@ -32,6 +33,7 @@ function apiToTreeNode(node: AgentTreeNode): TreeNode {
     progress: node.progress,
     toolsInUse: node.tools_in_use,
     messageCount: node.message_count,
+    costCents: node.tree_cost_cents,
     outputSchema: node.output_schema,
     structuredOutput: node.structured_output,
   };
@@ -148,6 +150,7 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
             progress: data.progress,
             toolsInUse: data.toolsInUse || [],
             messageCount: data.messageCount || 0,
+            costCents: data.costCents || 0,
             outputSchema: data.outputSchema,
             structuredOutput: data.structuredOutput,
             failureContext: data.failureContext,

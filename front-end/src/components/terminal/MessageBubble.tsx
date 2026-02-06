@@ -949,7 +949,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         {/* Empty space where icon would be to align with agent messages */}
-  
+
         <div className="flex-1">
           <SubAgentToolBubble
             toolCallId={message.metadata.toolCallId || ''}

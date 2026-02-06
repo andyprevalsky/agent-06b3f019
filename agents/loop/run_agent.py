@@ -43,7 +43,7 @@ async def run_agent(
     user_id: str,
     
     # Configuration
-    system_prompt: str,
+    system_prompt: Callable[[], Awaitable[str]],  # Called each iteration to build prompt with fresh shared memory
     verifier_prompt_generator: Callable[[], Awaitable[str]],  # Called at verification time to build prompt (allows schema polling)
     model: str,
     tools: List[str],  # Tool names (schemas from Pydantic models)
@@ -184,9 +184,7 @@ async def run_agent(
     
     # Main loop
     while iteration < max_iterations:
-        iteration += 1
-        
-        # 1. Check if paused
+        # 1. Check if paused (BEFORE incrementing iteration - don't count paused loops as steps)
         if check_paused and await check_paused():
             logger.info("Agent paused, waiting...")
             if wait_for_messages:
@@ -198,6 +196,9 @@ async def run_agent(
             else:
                 await asyncio.sleep(1)
             continue
+
+        # Only increment iteration when we're actually going to do work
+        iteration += 1
         
         # 1.5. Check credits periodically (callback sets is_paused if depleted)
         if check_credits and (iteration % CREDIT_CHECK_INTERVAL == 0):
@@ -267,13 +268,14 @@ async def run_agent(
                     # Add blueprints to context
                     if blueprints:
                         for idx, bp in enumerate(blueprints, 1):
+                            blueprint_text = bp.get('blueprint', '')
                             formatted = (
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📋 REFERENCE EXAMPLE #{idx}\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"Similar Goal: {bp.get('title', '')}\n\n"
-                                f"{bp.get('blueprint', '')}\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"REFERENCE BLUEPRINT #{idx}\n"
+                                f"Goal: {bp.get('title', '')}\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"{blueprint_text}\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                             )
                             context.append({
                                 "role": "SYSTEM",
@@ -303,12 +305,15 @@ async def run_agent(
             # Activity: just use compressed context
             context = compressed
         
-        # 6. Build messages for LLM
+        # 6. Build system prompt (calls API for fresh shared memory each iteration)
+        current_system_prompt = await system_prompt()
+
+        # 7. Build messages for LLM
         # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
         if build_messages:
-            messages = build_messages(context, system_prompt)
+            messages = build_messages(context, current_system_prompt)
         else:
-            messages = await build_llm_messages(context, system_prompt)
+            messages = await build_llm_messages(context, current_system_prompt)
         
         # 7. Call LLM with structured streaming
         try:

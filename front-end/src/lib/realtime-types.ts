@@ -700,6 +700,8 @@ export interface AgentStateChangedPayload {
   toolsInUse: string[];
   /** Total message count */
   messageCount: number;
+  /** Subtree cost in cents (this agent + all children) */
+  costCents?: number;
   /** Optional output schema for structured responses */
   outputSchema?: OutputSchema;
   /** Structured output if available */

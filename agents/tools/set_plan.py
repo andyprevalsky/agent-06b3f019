@@ -326,7 +326,7 @@ class SetPlanManager(ToolManager):
             if attempt < self.MAX_RETRIES - 1:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Regenerating plan",
+                    title="Retrying plan generation...",
                     message=f"Validation error: {validation_error}\n\nRetrying with correction...",
                     status=MessageStatus.IN_PROGRESS
                 )

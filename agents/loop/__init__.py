@@ -7,7 +7,7 @@ This module provides the core agent loop that is used by both:
 
 The same `run_agent` function is used, parameterized by:
 - tools: List of tool schemas
-- system_prompt: Pre-built prompt (includes user context, phase-specific instructions)
+- system_prompt: Async callback that builds prompt fresh each iteration (includes user context, phase-specific instructions, shared memory)
 - is_inside_temporal_activity: Controls how activities are executed
 
 Key behaviors (shared by all agents):

@@ -620,6 +620,20 @@ function TreeNodeRow({
         {/* Circle progress state */}
         <span className="w-4 text-center select-none transition-all duration-300">{circle}</span>
 
+        {/* Cost display */}
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="text-xs text-muted-foreground tabular-nums cursor-help">
+                ${(node.costCents / 100).toFixed(2)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              <span className="text-xs">Cumulative cost including all sub-agents</span>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+
         {/* Output chip for agents with schema (shows output values when completed, partial data when failed) */}
         {node.outputSchema?.fields?.length ? (
           <OutputChip
@@ -818,6 +832,20 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
 
         {/* Circle progress state */}
         <span className="w-4 flex-shrink-0 text-center select-none transition-all duration-300">{circle}</span>
+
+        {/* Cost display */}
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="text-xs text-muted-foreground tabular-nums cursor-help">
+                ${(node.costCents / 100).toFixed(2)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              <span className="text-xs">Cumulative cost including all sub-agents</span>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
 
         {/* Output chip for agents with schema (shows output values when completed, partial data when failed) */}
         {node.outputSchema?.fields?.length ? (

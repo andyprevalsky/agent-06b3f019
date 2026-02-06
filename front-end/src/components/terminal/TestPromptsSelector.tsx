@@ -130,45 +130,66 @@ For any services that require a API Key or Credential, mock the service for now 
     prompt: 'Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.',
   },
   {
-    title: 'Apply To Grants/Accelerators',
-    description: 'Apply to grants and accelerators for Rose Labs',
-    prompt: `Apply to every relevant grant / accelerator in the United States for my company Rose Labs.
+    title: 'Raise My Round',
+    description: 'Fundraising outreach with VC/angel CSV and application references',
+    prompt: `Raise me my round
+I've also attached a list of angels & vcs to contact, it is not comprehensive though so please make sure the process is exhaustive.
 
-Relevant info here
-- Cofounders
---> Andy Prevalsky : https://linkedin.com/in/andyprevalsky : +1 972-977-7432 : andy@roselabs.ai
---> Aadity Shidham : https://www.linkedin.com/in/aaditya-shidham : +1 (614) 747-3277 : aadi@roselabs.ai
+=== REFERENCE MATERIALS ===
+https://roselabs.ai/research
 
-Previous Application for Context
-ABOUT YOU
+=== REFERENCE: SPC APPLICATION ===
 
-Name
-Andy Prevalsky
+What is your financing history to date?
+Haven't raised yet
 
-Email
-andy@roselabs.ai
+About the Founders
+Share the most impressive personal or professional accomplishment for each founder.
+Andy: Built out Hotplate.com (YC S20, backed by Michael Seibel and a16z GP Connie Chan), found PMF in our niche market, led product, distribution, and strategy, company is now generating 5M ARR, highly profitable, and growing steadily and organically.
+Aadi: Bootstrapped Apex Labs - ML tooling for foreign federal governments to detect corporate tax evasion; built a deep learning mini-version of Palantir. Recruited, interviewed, and managed a data science team; scaled the team from zero to eight engineers. Managed pilot program which green-lit a large pending contract with federal agencies.
 
-Phone
+What is the riskiest decision each of you have made?
+Andy: Renegged my Meta AI internship to go full time on my company Hotplate (YC S20)
+Aadi: Dropped out of medical school (where I was on track to be a neurosurgeon) to go 100% on my dream of building a massive startup
 
-Location
-United States
+Who are three people you would recruit regardless of what you do? What makes them special?
+Daniel Reynaud - https://www.linkedin.com/in/danielreynaud/
+Built lightweight formal methods, and mid-level compiler passes on LLVM and C++. Currently a member of technical staff at OpenAI.
+Henry Williams - https://www.linkedin.com/in/henwilliams/
+The best executor I have met, routinely puts in 16 hour work days at top notch speeds and is extremely well connected.
+Willie Abu - https://www.linkedin.com/in/willie-aboumrad/
+Aadi's prior employee at Apex, focused on topological quantum computing. One of the smartest people I've ever worked with.
 
-City
-San Francisco
+Ideas
+List out the specific idea(s) / area(s) you are interested in. Rank them in order of interest.
+1. Consumer Super-intelligence via Mass Agent Networks (MANs)
+2. A geospatial foundation model (this can allow for more accurate OpenDoor, Nuclear powerplant positioning algorithms and multi-planetary inhabitation frameworks)
+3. Stripe for Ai Agents, focused on real-time proprietary data exchange
+
+Which idea from the list above would you be able to share more about?
+A system that can take in long-term user goals and drive them to completion via MANs. OAI is leaving a massive gap here as they move up stream to GPU creation & Enterprise Customers, Anthropic is too focused on e2e code automation, Meta doesn't have the necessary consumer trust, Google is focused on continual learning, world models, and AGI through pre & post training. There is also a massive gap between what is technologically possible today, and what consumers are given. It is technologically feasible to have agents complete long-term, open-ended tasks autonomously, but there is no product on the market today which satisfies that. MANs are the solution because they maximally decompose user tasks, which minimizes context needed per agent and enables the effective parallelization of work. The question of how to maintain AI memory is also elegantly solved. Run-time memory is maintained via the state of the network, and because each agent is decomposed according to the same type of prompt (a goal), RAG systems are perfect to serve as the memory layer where they would otherwise perform poorly.
+
+(Optional) If you are applying with the same ideas from a previous application, did anything change?
+Andy previously applied with an application on creating artificial life. Since then, he has found a stellar cofounder, Aadi, that compliments his skillsets and he loves working with. The team has pivoted away from a physical-first approach to creating artificial life, and focused instead on creating a 10x better autonomous agent via MANs.
+
+(Optional) If none of your current ideas or explorations work out, are there others you would consider?
+Blind auction block-building for Ethereum blocks
+Stripe for AI Agents, agent payment layer for the internet
+AI Codecs that reduce bandwidth cost for video & audio streaming by 10x
+Decentralized network of stablecoin issuance
+
+=== REFERENCE: OSV APPLICATION ===
+
+Name: Andy Prevalsky
+Email: andy@roselabs.ai
+Location: San Francisco, United States
 
 How would you best describe yourself?
-Generalist
--
-Self-employed
+Generalist, Self-employed
 
 Where can we find you online?
 https://roselabs.ai
--
--
 https://linkedin.com/in/andyprevalsky
-
------
-MAIN QUESTIONS
 
 1) List 3 of your most exceptional achievements
 1. Dropped out of College to create my first business, hotplate.com, which is now generating $5M in ARR
@@ -178,15 +199,12 @@ MAIN QUESTIONS
 2) What will you work on if you were accepted to the program?
 Super Intelligence for everyone
 
-Hours per week you plan to devote to the project
-80
+Hours per week you plan to devote to the project: 80
 
 3) Why are you the best person in the world to work on this?
 I have come up with a novel architecture for creating super intelligence which comes from recursive task decomposition. Almost any problem can be decomposed into sub-problems, and I've trained a specific SOTA decomposer model that can take a problem and decompose it into 2-4 independent sub-goals. These sub-goals are context independent and parallelizable, the process is repeated recursively until a single problem is decomposed into 100-10000 sub problems that all can be executed, in parallel, by my AI system. This innovation accounts for the transition of AI systems from unicellular organisms -> massively multi-cellular organisms, a massive evolutionary leap in the field.
 
-4) Please include your pitch in a video format.
-(YouTube, Google Drive or Vimeo link)
-https://www.loom.com/share/44b80d820451453191e5c4fe07938449
+4) Pitch video: https://www.loom.com/share/44b80d820451453191e5c4fe07938449
 
 5) If selected, what will success look like once the fellowship period ends?
 Success would look like building an AI system that can accomplish 50% > of user requests, the gross majority of people are drowning in problems, and a system that could do this would alleviate a massive amount of pain in the world.
@@ -202,11 +220,31 @@ Failure would like
 
 Some mistakes could include, error drift compounding as goals get decomposed, the AI accomplishing the goal in a way that is not preferable to the end user, or this AI system being too powerful and it gets shut down because of its geopolitical implications.
 
-7) Please upload a 1 page PDF outlining your action plan for your project.
-OSV 4 Month Action Plan.pdf
-
 8) Describe something that you find beautiful in the world.
-One of the things I find most beautiful in this world is the fractal nature of life itself. From the rhythms of tiniest microbial, to the ebbs and flows of the planets and stars that govern us. The structure which defines life's pushes and pulls from chaos and order are mirrored. This story is displayed in all its different angles in so many things, the climax of a symphony, the movement in a Picasso painting, the story of ones life... this complexity is utterly beautiful to me.`,
+One of the things I find most beautiful in this world is the fractal nature of life itself. From the rhythms of tiniest microbial, to the ebbs and flows of the planets and stars that govern us. The structure which defines life's pushes and pulls from chaos and order are mirrored. This story is displayed in all its different angles in so many things, the climax of a symphony, the movement in a Picasso painting, the story of ones life... this complexity is utterly beautiful to me.
+
+=== 4 MONTH ACTION PLAN ===
+January -> 10K
+- Complete a semi-functional version of super intelligence that can accomplish a set of low complexity, long time-horizon, high value tasks.
+-- Get me refunds on all my subscriptions
+-- Apply to every grant & accelerator in NA
+-- Find me all the emails of customers in X demographic
+- Launch the product for public use
+
+February -> 10K
+- Refine the product with 10-20 design partners to even out the rough edges of the product, get the product to the point where 10 people LOVE it, and are using it as their main AI system on a daily basis
+- Get Rose Labs to be able to handle fundraising for the project (emailing, follow-ups, writing in my voice)
+
+March -> 20K
+- Hire our first engineers
+- Create novel benchmarks for task decomposition
+- Set up a repeatable experimentation system that makes running experiments to improve our model quick and easy, akin to how Renaissance Technologies built a system to allow quants to rapidly experiment (the key to their insane investment returns)
+- Get to 100 people that love the product
+
+April -> 30K
+- At 100 people that love the product, the system starts to reach a phase transition, where the product grows exponentially and organically. Most of the work in this month will be in ensuring that the entire company can scale efficiently.
+- Build out a robust system for ensuring that the super intelligence can operate safely and in alignment with user intention.`,
+    attachmentUrl: '/test-assets/vcs-and-angels.csv',
   },
 ];
 

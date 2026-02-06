@@ -31,6 +31,7 @@ EXECUTE_PHASE_TOOLS = [
     "spawn_sub_agent",
     "wait_seconds",
     "web_search",
+    "web_fetch",
     "people_search",
     "send_message_to_user_execute_phase",
     "call_phone_number",
@@ -45,6 +46,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "spawn_sub_agent",
     "wait_seconds",
     "web_search",
+    "web_fetch",
     "people_search",
     "call_phone_number",
     "send_sms_as_user",
@@ -59,6 +61,7 @@ class PlanToolName(str, Enum):
     spawn_sub_agent = "spawn_sub_agent"
     wait_seconds = "wait_seconds"
     web_search = "web_search"
+    web_fetch = "web_fetch"
     people_search = "people_search"
     call_phone_number = "call_phone_number"
     send_sms_as_user = "send_sms_as_user"

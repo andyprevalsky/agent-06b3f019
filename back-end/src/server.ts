@@ -32,6 +32,7 @@ import vcardRouter from './routes/vcard';
 import uploadRouter from './routes/upload';
 import feedbackRouter from './routes/feedback';
 import imessageRouter from './routes/imessage';
+import memoryRouter from './routes/memory';
 import { prisma } from './lib/prisma';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
@@ -247,6 +248,7 @@ app.use('/api/billing', billingRouter);
 app.use('/api/api-keys', apiKeysRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
+app.use('/api/memory', memoryRouter);
 
 // Catch-all authenticated route (must be AFTER x402 routes)
 app.use('/api', authenticate, formatRouter);

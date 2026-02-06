@@ -87,6 +87,8 @@ from helpers.sms_activities import (
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
 from activities.reasoning import execute_reasoning_activity
+# Shared memory activities
+from activities.shared_memory import get_shared_memory, append_shared_memory
 from health_server import run_health_server, set_worker_status
 
 # Configure structured logging
@@ -253,6 +255,9 @@ async def main():
             # DAG executor activities
             populate_tool_params_activity,
             execute_reasoning_activity,
+            # Shared memory activities
+            get_shared_memory,
+            append_shared_memory,
         ],
         max_concurrent_activities=config.temporal.max_concurrent_activities,
         max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,
