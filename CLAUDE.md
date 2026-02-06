@@ -73,9 +73,7 @@ Check these when errors occur:
 
 8. **Frontend state diagrams required** - All frontend components must have a state machine diagram as a comment at the top of the file; reference and keep this diagram up to date when modifying state flow
 
-9. **Code changes require `**` in latest message** - Do NOT edit/write/delete files unless the user's most recent message contains `**`. Authorization expires after each response—if the next message lacks `**`, no file modifications allowed. Git operations (commits, PRs, pushes) and DB writes, .env reads, exploration are always allowed.
-
-10. **Feature changes require diagrams** - When implementing any feature, include a diagram showing how the change fits into the system context before writing code.
+9. **Feature changes require diagrams** - When implementing any feature, include a diagram showing how the change fits into the system context before writing code.
 
 11. **Pauses are user-initiated, not fixes** - When debugging, NEVER assume a pause caused a bug/crash. The user sends a pause AFTER noticing something wrong. Pauses are the symptom reporter, not the cause.
 
