@@ -1171,6 +1171,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             # Poll for pause while activity runs
             was_cancelled = False
             while not activity_handle.done():
+                await workflow_instance._check_parent_state()
                 if workflow_instance.is_paused:
                     logger.info(
                         "[ClaudeCode] Cancelling due to pause",

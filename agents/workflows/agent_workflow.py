@@ -140,6 +140,7 @@ class AgentWorkflow:
         self.tokens_out: int = 0
         self.context_size: int = 0  # Current context window usage (from last LLM call)
         self.is_paused: bool = False
+        self._paused_by_parent: bool = False  # Track if pause was inherited from parent
         self._has_new_messages: bool = False
         self._last_signal_response: Optional[str] = None  # Stores response from receive_user_response signal
         self._has_credits: bool = True  # Cached credit status
@@ -175,9 +176,10 @@ class AgentWorkflow:
         self._disabled_tools: List[str] = []  # Tools disabled for current phase (shown in PLAN)
 
         # Cost limit tracking (hierarchical relay: child → parent → root)
-        self.own_cost_cents: int = 0  # This agent's direct cost (LLM + tools)
-        self.children_cost_cents: Dict[str, int] = {}  # child_agent_id -> subtree_cost
-        self.subtree_cost_cents: int = 0  # own + sum(children) - what we report to parent
+        # Uses float to avoid int truncation losing sub-cent costs on cheap models
+        self.own_cost_cents: float = 0.0  # This agent's direct cost (LLM + tools)
+        self.children_cost_cents: Dict[str, float] = {}  # child_agent_id -> subtree_cost
+        self.subtree_cost_cents: float = 0.0  # own + sum(children) - what we report to parent
         self.price_limit_cents: int = 100  # Default price limit (100 cents = $1.00)
         self._cost_limit_reached: bool = False  # Flag for cost limit status
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
@@ -215,12 +217,38 @@ class AgentWorkflow:
         self.is_paused = True
         await self._update_tree_state(status="PAUSED")
 
+        # Cascade to children (pull-based checks cover spawn race conditions)
+        for child_wf_id in self._get_pending_child_workflow_ids():
+            try:
+                handle = workflow.get_external_workflow_handle(child_wf_id)
+                await handle.signal("pause")
+            except Exception as e:
+                workflow.logger.warning(f"Failed to cascade pause to child: {e}")
+
     @workflow.signal
     async def resume(self):
-        """Resume workflow execution."""
+        """Resume workflow execution. Blocked if parent is still paused/cost-limited."""
+        if self.parent_workflow_id:
+            try:
+                parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                state = await parent.query("parent_state_query")
+                if state.get("is_cost_limit_reached") or state.get("is_paused"):
+                    workflow.logger.warning("Cannot resume — parent is still paused/cost-limited")
+                    return
+            except Exception as e:
+                workflow.logger.warning(f"Parent state check failed on resume, allowing: {e}")
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
+        self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
+
+        # Cascade to children (pull-based checks cover spawn race conditions)
+        for child_wf_id in self._get_pending_child_workflow_ids():
+            try:
+                handle = workflow.get_external_workflow_handle(child_wf_id)
+                await handle.signal("resume")
+            except Exception as e:
+                workflow.logger.warning(f"Failed to cascade resume to child: {e}")
     
     @workflow.signal
     async def receive_user_response(self, response: str):
@@ -350,38 +378,50 @@ class AgentWorkflow:
 
     @workflow.signal
     async def cost_limit_reached(self):
-        """Cascades down from parent when cost limit exceeded."""
+        """Received from parent when cost limit exceeded."""
         workflow.logger.warning("⚠️ Cost limit reached signal received - pausing")
         self.is_paused = True
         self._cost_limit_reached = True
+        self._paused_by_parent = True
         await self._update_tree_state(status="COST_LIMIT_REACHED")
 
-        # Cascade to all children
+        # Cascade to children (pull-based checks cover spawn race conditions)
         for child_wf_id in self._get_pending_child_workflow_ids():
             try:
                 handle = workflow.get_external_workflow_handle(child_wf_id)
                 await handle.signal("cost_limit_reached")
             except Exception as e:
-                workflow.logger.warning(f"Failed to signal child cost_limit_reached: {e}")
+                workflow.logger.warning(f"Failed to cascade cost_limit_reached to child: {e}")
 
     @workflow.signal
     async def price_limit_increased(self, data: dict):
-        """Cascades down from parent when price limit increased."""
+        """Price limit increased. Cascades to children."""
+        if self.parent_workflow_id:
+            try:
+                parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                state = await parent.query("parent_state_query")
+                if state.get("is_cost_limit_reached"):
+                    workflow.logger.warning("Cannot accept price_limit_increased — parent still cost-limited")
+                    return
+            except Exception as e:
+                workflow.logger.warning(f"Parent state check failed on price_limit_increased, allowing: {e}")
+
         new_limit = data.get("new_limit_cents", 25)
         workflow.logger.info(f"💰 Price limit increased to {new_limit} cents")
 
         self.price_limit_cents = new_limit
         self._cost_limit_reached = False
         self.is_paused = False
+        self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
-        # Cascade to all children
+        # Cascade to children (pull-based checks cover spawn race conditions)
         for child_wf_id in self._get_pending_child_workflow_ids():
             try:
                 handle = workflow.get_external_workflow_handle(child_wf_id)
                 await handle.signal("price_limit_increased", data)
             except Exception as e:
-                workflow.logger.warning(f"Failed to signal child price_limit_increased: {e}")
+                workflow.logger.warning(f"Failed to cascade price_limit_increased to child: {e}")
 
     # =========================================================================
     # MAIN RUN
@@ -542,13 +582,16 @@ class AgentWorkflow:
         if self.parent_workflow_id:
             try:
                 parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                if await parent_handle.query("is_paused_query"):
+                state = await parent_handle.query("parent_state_query")
+                if state.get("is_paused"):
                     workflow.logger.info("Parent is paused - inheriting pause state")
                     self.is_paused = True
-                if await parent_handle.query("is_cost_limit_reached_query"):
+                    self._paused_by_parent = True
+                if state.get("is_cost_limit_reached"):
                     workflow.logger.info("Parent hit cost limit - inheriting cost limit state")
                     self._cost_limit_reached = True
                     self.is_paused = True
+                    self._paused_by_parent = True
             except Exception as e:
                 workflow.logger.warning(f"Failed to query parent state: {e}")
 
@@ -578,7 +621,7 @@ class AgentWorkflow:
                 model=model,
                 tools=plan_tools,
                 is_inside_temporal_activity=False,
-                check_paused=lambda: asyncio.sleep(0, result=self.is_paused),
+                check_paused=self._check_paused,
                 wait_for_messages=self._wait_for_messages,
                 on_context_overflow=self._handle_context_overflow,
                 check_credits=self._check_credits,
@@ -665,7 +708,7 @@ class AgentWorkflow:
             tools=execute_tools,
             initial_context=None,  # Don't pass - run_agent polls from DB
             is_inside_temporal_activity=False,
-            check_paused=lambda: asyncio.sleep(0, result=self.is_paused),
+            check_paused=self._check_paused,
             wait_for_messages=self._wait_for_messages,
             on_context_overflow=self._handle_context_overflow,
             check_credits=self._check_credits,
@@ -793,6 +836,13 @@ class AgentWorkflow:
             self.price_limit_cents,
         ])
     
+    async def _check_paused(self) -> bool:
+        """Check if paused, querying parent state first (non-root only)."""
+        await self._check_parent_state()
+        # Yield to event loop so Temporal processes any pending signals before we read is_paused
+        await asyncio.sleep(0)
+        return self.is_paused
+
     async def _check_credits(self) -> None:
         """Check user credits. Sets is_paused=True if depleted."""
         try:
@@ -1262,16 +1312,16 @@ class AgentWorkflow:
         self.tokens_in += tokens_in
         self.tokens_out += tokens_out
 
-        # Calculate cost from tokens using stored pricing
+        # Calculate cost from tokens using stored pricing (fractional cents)
         if self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0:
-            cost_cents = int(
+            cost_cents = (
                 (tokens_in * self.input_cents_per_1k / 1000) +
                 (tokens_out * self.output_cents_per_1k / 1000)
             )
             if cost_cents > 0:
                 self.own_cost_cents += cost_cents
                 workflow.logger.info(
-                    f"💰 LLM cost (non-run_agent): +{cost_cents}c (total: {self.own_cost_cents}c, "
+                    f"💰 LLM cost (non-run_agent): +{cost_cents:.2f}c (total: {self.own_cost_cents:.1f}c, "
                     f"in={tokens_in}, out={tokens_out})"
                 )
 
@@ -1311,14 +1361,14 @@ class AgentWorkflow:
                 workflow.logger.warning(f"⚠️ No pricing for model {model}, skipping cost for {tokens_in}/{tokens_out} tokens")
                 continue
 
-            cost_cents = int(
+            cost_cents = (
                 (tokens_in * pricing["input_cents_per_1k"] / 1000) +
                 (tokens_out * pricing["output_cents_per_1k"] / 1000)
             )
             if cost_cents > 0:
                 total_cost_cents += cost_cents
                 workflow.logger.info(
-                    f"💰 LLM cost: +{cost_cents}c ({provider}, in={tokens_in}, out={tokens_out})"
+                    f"💰 LLM cost: +{cost_cents:.2f}c ({provider}, in={tokens_in}, out={tokens_out})"
                 )
                 usage_items_for_db.append({
                     "type": "llm",
@@ -1394,6 +1444,45 @@ class AgentWorkflow:
     # COST LIMIT HELPERS
     # =========================================================================
 
+    async def _check_parent_state(self) -> None:
+        """Pull-based parent state check. Mirrors parent's pause/cost-limit state.
+
+        Handles both directions:
+        - Parent paused → child inherits pause (sets _paused_by_parent)
+        - Parent unpaused → child unpauses (only if _paused_by_parent, not manual/credits)
+        """
+        if not self.parent_workflow_id:
+            return
+        try:
+            parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
+            state = await parent.query("parent_state_query")
+            parent_cost_limited = state.get("is_cost_limit_reached", False)
+            parent_paused = state.get("is_paused", False)
+
+            if parent_cost_limited:
+                if not self._cost_limit_reached:
+                    workflow.logger.warning("Parent hit cost limit — inheriting state")
+                    self._cost_limit_reached = True
+                    self.is_paused = True
+                    self._paused_by_parent = True
+                    await self._update_tree_state(status="COST_LIMIT_REACHED")
+            elif parent_paused:
+                if not self.is_paused:
+                    workflow.logger.warning("Parent is paused — inheriting state")
+                    self.is_paused = True
+                    self._paused_by_parent = True
+                    await self._update_tree_state(status="PAUSED")
+            else:
+                # Parent is running — unpause if we were paused by parent
+                if self._paused_by_parent:
+                    workflow.logger.info("Parent resumed — clearing inherited pause")
+                    self._cost_limit_reached = False
+                    self.is_paused = False
+                    self._paused_by_parent = False
+                    await self._update_tree_state(status="ACTIVE")
+        except Exception as e:
+            workflow.logger.warning(f"Failed to check parent state: {e}")
+
     def _get_pending_child_workflow_ids(self) -> List[str]:
         """Get workflow IDs of pending children for signaling."""
         return [self.child_workflow_ids[cid] for cid in self.pending_children
@@ -1415,16 +1504,16 @@ class AgentWorkflow:
         self.tokens_in += tokens_in_delta
         self.tokens_out += tokens_out_delta
 
-        # Calculate cost from tokens using stored pricing
+        # Calculate cost from tokens using stored pricing (fractional cents to avoid truncation)
         if self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0:
-            cost_cents = int(
+            cost_cents = (
                 (tokens_in_delta * self.input_cents_per_1k / 1000) +
                 (tokens_out_delta * self.output_cents_per_1k / 1000)
             )
             if cost_cents > 0:
                 self.own_cost_cents += cost_cents
                 workflow.logger.info(
-                    f"💰 LLM cost: +{cost_cents}c (total own: {self.own_cost_cents}c, "
+                    f"💰 LLM cost: +{cost_cents:.2f}c (total own: {self.own_cost_cents:.1f}c, "
                     f"in={tokens_in_delta}, out={tokens_out_delta})"
                 )
 
@@ -1461,8 +1550,8 @@ class AgentWorkflow:
 
         # Broadcast updated tree tokens to this agent's channel (for frontend display)
         # This applies to all agents (root and non-root) when receiving child updates
-        # Skip if cost limit was just reached (we already broadcast COST_LIMIT_REACHED status)
-        if not self._cost_limit_reached:
+        # Skip if paused or cost-limited (don't overwrite PAUSED/COST_LIMIT_REACHED DB status with ACTIVE)
+        if not self._cost_limit_reached and not self.is_paused:
             try:
                 await workflow.execute_activity(
                     update_agent_status,
@@ -1499,13 +1588,13 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.error(f"Failed to update status to COST_LIMIT_REACHED: {e}")
 
-            # Signal all children to pause
+            # Cascade to children (pull-based checks cover spawn race conditions)
             for child_wf_id in self._get_pending_child_workflow_ids():
                 try:
                     handle = workflow.get_external_workflow_handle(child_wf_id)
                     await handle.signal("cost_limit_reached")
-                except Exception:
-                    pass
+                except Exception as e:
+                    workflow.logger.warning(f"Failed to cascade cost_limit_reached to child: {e}")
 
     async def _persist_tree_cost(self) -> None:
         """Persist subtree cost to DB (root only, for frontend display)."""
@@ -1513,7 +1602,7 @@ class AgentWorkflow:
         try:
             await workflow.execute_activity(
                 update_agent_tree_cost_activity,
-                args=[self.agent_id, self.subtree_cost_cents],
+                args=[self.agent_id, int(self.subtree_cost_cents)],
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=RetryPolicy(maximum_attempts=2)
             )
@@ -1555,7 +1644,7 @@ class AgentWorkflow:
             "progress": progress if progress is not None else 0.0,
             "toolsInUse": tools_list,
             "messageCount": self.message_count,
-            "costCents": self.subtree_cost_cents,
+            "costCents": int(self.subtree_cost_cents),
             # Track if status was explicitly set (for DB persistence decision)
             "_statusExplicit": status is not None,
         }
@@ -2012,3 +2101,8 @@ class AgentWorkflow:
     def is_cost_limit_reached_query(self) -> bool:
         """Query if cost limit has been reached."""
         return self._cost_limit_reached
+
+    @workflow.query
+    def parent_state_query(self) -> Dict:
+        """Combined query for children to check parent's pause/cost-limit state."""
+        return {"is_paused": self.is_paused, "is_cost_limit_reached": self._cost_limit_reached}

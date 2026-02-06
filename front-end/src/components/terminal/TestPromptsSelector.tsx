@@ -135,6 +135,11 @@ For any services that require a API Key or Credential, mock the service for now 
     prompt: `Raise me my round
 I've also attached a list of angels & vcs to contact, it is not comprehensive though so please make sure the process is exhaustive.
 
+Raising 500k -> 3M
+Angels / Family Offices > Tier 1 VCs > Accelerators > Tier 2 VCs, but we should apply to all
+Starting from pretty much a cold start, although Aman & Aadi have mentioned they have warm intros to some people who are potentially interested
+Trying to close by end of feb
+
 === REFERENCE MATERIALS ===
 https://roselabs.ai/research
 

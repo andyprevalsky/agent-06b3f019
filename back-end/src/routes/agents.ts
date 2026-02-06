@@ -1112,18 +1112,12 @@ router.delete('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
 });
 
 // Helper function to recursively pause all child agents
-async function pauseAgentRecursive(agentId: string): Promise<void> {
+// Pause a single agent. Children discover parent's paused state via pull-based queries.
+async function pauseAgent(agentId: string): Promise<void> {
   const agent = await prisma.agent.findFirst({
     where: {
       id: agentId,
       deletedAt: null,
-    },
-    include: {
-      children: {
-        where: {
-          deletedAt: null,
-        },
-      },
     },
   });
 
@@ -1134,10 +1128,6 @@ async function pauseAgentRecursive(agentId: string): Promise<void> {
   // Skip agents that are already in a terminal state
   if (agent.status === 'COMPLETED' || agent.status === 'FAILED') {
     console.log(`⏭️ Skipping pause for ${agentId} - already ${agent.status}`);
-    // Still recurse to children in case any are still running
-    for (const child of agent.children) {
-      await pauseAgentRecursive(child.id);
-    }
     return;
   }
 
@@ -1157,11 +1147,6 @@ async function pauseAgentRecursive(agentId: string): Promise<void> {
     } catch (error) {
       console.warn(`Pause signal failed for agent ${agentId}, but DB updated. Workflow will sync next iteration:`, error);
     }
-  }
-
-  // Recursively pause all children
-  for (const child of agent.children) {
-    await pauseAgentRecursive(child.id);
   }
 }
 
@@ -1185,8 +1170,8 @@ router.post('/:id/pause', hybridAuth, async (req: HybridAuthRequest, res) => {
       return;
     }
 
-    // Recursively pause this agent and all its children
-    await pauseAgentRecursive(agentId);
+    // Pause this agent only — children discover via pull-based parent queries
+    await pauseAgent(agentId);
 
     res.json({ success: true });
   } catch (error) {
@@ -1195,19 +1180,12 @@ router.post('/:id/pause', hybridAuth, async (req: HybridAuthRequest, res) => {
   }
 });
 
-// Helper function to recursively resume all child agents
-async function resumeAgentRecursive(agentId: string): Promise<void> {
+// Resume a single agent. Children discover parent's resumed state via pull-based queries.
+async function resumeAgent(agentId: string): Promise<void> {
   const agent = await prisma.agent.findFirst({
     where: {
       id: agentId,
       deletedAt: null,
-    },
-    include: {
-      children: {
-        where: {
-          deletedAt: null,
-        },
-      },
     },
   });
 
@@ -1232,11 +1210,6 @@ async function resumeAgentRecursive(agentId: string): Promise<void> {
       console.warn(`Resume signal failed for agent ${agentId}, but DB updated. Workflow will sync next iteration:`, error);
     }
   }
-
-  // Recursively resume all children
-  for (const child of agent.children) {
-    await resumeAgentRecursive(child.id);
-  }
 }
 
 // POST /api/agents/:id/resume - Resume workflow
@@ -1259,8 +1232,22 @@ router.post('/:id/resume', hybridAuth, async (req: HybridAuthRequest, res) => {
       return;
     }
 
-    // Recursively resume this agent and all its children
-    await resumeAgentRecursive(agentId);
+    // Guard: if this is a child agent, check if parent is still paused/cost-limited
+    if (agent.parentAgentId) {
+      const parentAgent = await prisma.agent.findFirst({
+        where: { id: agent.parentAgentId, deletedAt: null },
+        select: { status: true },
+      });
+      if (parentAgent && (parentAgent.status === 'PAUSED' || parentAgent.status === 'COST_LIMIT_REACHED')) {
+        res.status(400).json({
+          error: `Cannot resume agent — parent agent is ${parentAgent.status === 'COST_LIMIT_REACHED' ? 'cost-limited' : 'paused'}. Resume the root agent first.`,
+        });
+        return;
+      }
+    }
+
+    // Resume this agent only — children discover via pull-based parent queries
+    await resumeAgent(agentId);
 
     res.json({ success: true });
   } catch (error) {

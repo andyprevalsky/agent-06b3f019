@@ -13,8 +13,8 @@ load_dotenv()
 
 from tools.spawn_sub_agents import (
     get_manager,
-    SpawnSubAgentsManager,
-    spawn_sub_agents_activity
+    SpawnSubAgentManager,
+    spawn_sub_agent_activity
 )
 from tools.base import EventType, MessageStatus
 
@@ -24,7 +24,7 @@ def test_manager_singleton():
     manager1 = get_manager()
     manager2 = get_manager()
     assert manager1 is manager2
-    assert isinstance(manager1, SpawnSubAgentsManager)
+    assert isinstance(manager1, SpawnSubAgentManager)
     print("✅ test_manager_singleton passed")
 
 
@@ -226,7 +226,7 @@ async def test_spawn_sub_agents_empty_list():
     print("✅ test_spawn_sub_agents_empty_list passed")
 
 
-async def test_spawn_sub_agents_activity_exception():
+async def test_spawn_sub_agent_activity_exception():
     """Test exception handling in spawn activity."""
     manager = get_manager()
     
@@ -261,11 +261,11 @@ async def test_spawn_sub_agents_activity_exception():
             assert events[-1].status == MessageStatus.ERROR
             assert "Backend API error" in events[-1].message
     
-    print("✅ test_spawn_sub_agents_activity_exception passed")
+    print("✅ test_spawn_sub_agent_activity_exception passed")
 
 
 async def test_spawn_agents_activity_http_success():
-    """Test spawn_sub_agents_activity with mocked HTTP calls."""
+    """Test spawn_sub_agent_activity with mocked HTTP calls."""
     
     # Mock HTTP responses
     mock_response_1 = MagicMock()
@@ -297,7 +297,7 @@ async def test_spawn_agents_activity_http_success():
         mock_client_class.return_value = mock_client
         
         with patch('tools.spawn_sub_agents.activity.heartbeat'):
-            result = await spawn_sub_agents_activity(
+            result = await spawn_sub_agent_activity(
                 user_id="test-user",
                 sub_agents=[
                     {"goal": "Research AI", "verifier": {"type": "FLOAT_LLM_JUDGE"}},
@@ -355,7 +355,7 @@ async def test_spawn_agents_activity_http_partial_failure():
             mock_client_class.return_value = mock_client
             
             with patch('tools.spawn_sub_agents.activity.heartbeat'):
-                result = await spawn_sub_agents_activity(
+                result = await spawn_sub_agent_activity(
                     user_id="test-user",
                     sub_agents=[
                         {"goal": "Task 1", "verifier": {"type": "FLOAT_LLM_JUDGE"}},
@@ -392,7 +392,7 @@ async def run_all_tests():
         await test_spawn_sub_agents_success()
         await test_spawn_sub_agents_partial_failure()
         await test_spawn_sub_agents_empty_list()
-        await test_spawn_sub_agents_activity_exception()
+        await test_spawn_sub_agent_activity_exception()
         await test_spawn_agents_activity_http_success()
         await test_spawn_agents_activity_http_partial_failure()
         
