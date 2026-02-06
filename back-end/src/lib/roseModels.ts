@@ -6,7 +6,7 @@ export const ROSE_MODEL_POOLS = {
     'x-ai/grok-4-fast',
   ],
   'rose-1-ultra': [
-    'anthropic/claude-opus-4-6',
+    'anthropic/claude-opus-4.6',
     'openai/gpt-5.2',
     'google/gemini-3-pro-preview',
     'moonshotai/kimi-k2.5',
