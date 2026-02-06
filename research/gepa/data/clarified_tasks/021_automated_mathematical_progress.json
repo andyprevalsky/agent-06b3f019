@@ -1,0 +1,27 @@
+{
+  "id": "275a0502-997f-4dde-92c5-9a939e5c3829",
+  "raw_seed": "Automated mathematical progress",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Automated mathematical progress"
+    },
+    {
+      "role": "assistant",
+      "content": "**Seeking clarification**\n\nThe user's goal seems a bit ambiguous to me. I really want to understand what they mean. Maybe they\u2019re looking for a system to automate math learning or track progress? It could be helpful to ask them some questions to get a clearer picture of what they truly need. I'm curious about their specific objectives and ideas, so I hope to clarify this soon!\n\nYour goal is too underspecified to execute well. \u201cAutomated mathematical progress\u201d could mean (a) an automated study plan that steadily advances your math skills, (b) automating the act of doing math (CAS/proofs), (c) auto-generating practice + grading + progress tracking, or (d) something like a spaced-repetition/Anki pipeline for math.\n\nTo lock the target and then fully execute, I need a few specifics:\n1) What does \u201cprogress\u201d mean for you: learning math, solving problems faster, passing an exam, research, or automating computations?\n2) Your current level + target level (examples: Algebra \u2192 Calculus; Calc \u2192 Linear Algebra; undergrad \u2192 grad; contest prep, etc.).\n3) Time budget (minutes/day, days/week) and timeline (weeks/months).\n4) Preferred format: fully self-study (free), paid platforms OK, or you want a DIY system (Notion/Anki/GitHub + scripts)?\n5) Do you want the system to automatically: (i) generate problem sets, (ii) grade, (iii) adapt difficulty, (iv) track mastery, (v) schedule reviews?\n\nReply with quick bullet answers and I\u2019ll produce a concrete, automated plan/system (tools + workflow + templates), optimized for steady measurable gains."
+    },
+    {
+      "role": "user",
+      "content": "- Pass the SOA Exam P (Probability) in November \u2013 first actuarial exam  \n- Just finished Calc III (B+) \u2192 need undergrad prob to exam level in 4 months  \n- 90 min/night, 5 nights/week, plus 3-hr Sunday session (total 8 hrs/wk)  \n- Free or one-time <$50 tools only \u2013 happy to script (Python/Anki)  \n- Want auto: (i) generate problem sets, (ii) grade numeric/MC instant, (iii) bump difficulty after 3-in-a-row, (iv) dashboard mastery per topic, (v) Anki-schedule the card stack I missed  \n\nGitHub repo + Anki deck + simple Python script is perfect; no subscription apps."
+    },
+    {
+      "role": "assistant",
+      "content": "Researching SOA Exam P requirements and free resources to build your automated study system."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SOA Exam P syllabus topics probability actuarial exam 2024\"]:\n\n\nSources: https://www.soa.org/4ae412/globalassets/assets/files/edu/2024/2024-01-exam-p-syllabus.pdf, https://www.soa.org/education/exam-req/edu-exam-p-detail/, https://www.soa.org/education/exam-req/edu-exam-p-detail/study/, https://www.coachingactuaries.com/exam-p, https://www.theactuarialnexus.com/syllabus/examP"
+    }
+  ],
+  "set_plan_args": {}
+}

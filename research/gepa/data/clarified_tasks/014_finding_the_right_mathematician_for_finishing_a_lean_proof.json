@@ -1,0 +1,39 @@
+{
+  "id": "8d86259a-61f9-4539-8e86-1483b29a5aba",
+  "raw_seed": "Finding the right mathematician for finishing a lean proof",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Finding the right mathematician for finishing a lean proof"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand your goal better before creating a plan. You're looking for help finding a mathematician to complete a Lean proof, but I need clarification on a few key points to move forward effectively.\n\nLet me ask some clarifying questions:\n\n1. Do you have a specific Lean proof or project in mind that needs completion, or are you looking for general guidance on how to find mathematicians who work with Lean?\n2. Are you looking to hire/commission someone, collaborate with someone, or find an existing expert in your network?\n3. What is the mathematical domain or complexity level of the proof you need help with?\n4. Do you have a budget or timeline in mind?\n5. Are there specific platforms, communities, or networks where you'd like to search (e.g., Lean Zulip, academia, freelance platforms)?\n\nOnce I understand your specific situation, I can help you create a targeted plan to find the right person."
+    },
+    {
+      "role": "user",
+      "content": "1. **Scope**: Yes, it\u2019s a specific Lean4/mathlib proof I need help finishing. I have a branch with most of the lemmas done; it\u2019s just one stubborn theorem + some refactoring to get it accepted.\n\n2. **Engagement type**: Prefer **paid help** (contract) for 5\u201310 hours to unblock me. If the person is interested, I\u2019m also open to an ongoing collaborator, but the immediate need is \u201cget this proof over the finish line\u201d.\n\n3. **Proof details**: Domain is **measure theory / integration in mathlib**. Concretely it\u2019s about proving a lemma relating `lintegral` to an indicator/truncation step (I keep getting stuck in rewriting and typeclass inference around `Measurable`, `ae_measurable`, and `ENNReal`). It\u2019s not new math, more \u201cmathlib-idiomatic\u201d proof engineering.\n\n4. **Resources**: Budget ~**$800\u2013$1500 USD** depending on speed/experience. Timeline: ideally **within 2 weeks** (by Feb 20"
+    },
+    {
+      "role": "assistant",
+      "content": "\n\nI'll help you find the right mathematician for your Lean4/mathlib proof completion. Let me create a targeted search and outreach plan based on your specific requirements (measure theory/integration, paid contract, ~$800-1500 budget, 2-week timeline).\n\nMy plan will focus on: 1) Identifying active Lean/mathlib contributors who specialize in measure theory, 2) Crafting a compelling outreach message with your budget and timeline, 3) Targeting the most responsive communities (Lean Zulip, mathlib contributors, academic networks), and 4) Setting up efficient vetting/payment processes.\n\nLet me start by researching the current state of measure theory contributors in the Lean ecosystem and their typical engagement patterns."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I now have a clear picture: you need a specialized Lean 4/mathlib contractor with measure theory expertise to finish a specific integration proof involving `lintegral`, measurability typeclass issues, and ENNReal handling. Budget is $800\u20131500 USD, timeline is 2 weeks. This is a well-scoped, paid engagement.\n\nMy plan will be to:\n1. Research the active Lean 4 / mathlib communities and identify the best channels for finding experienced contractors\n2. Identify specific high-signal platforms and communities where measure theory / integration experts congregate\n3. Create a targeting strategy for outreach (who to contact, what to say, where to post)\n4. Prepare a job posting / brief that you can use to recruit\n\nLet me gather intelligence on the current landscape of Lean contractors and where they hang out."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Lean 4 mathlib contractors freelance 2024 2025\"]:\n\n\nSources: https://leanprover-community.github.io/archive/stream/284757-job-postings/, https://mathlib-initiative.org/careers/, https://www.reddit.com/r/haskell/comments/1e9mezr/what_are_the_thoughts_about_the_lean4_language_by/, https://lean-lang.org/doc/reference/latest/releases/v4.24.0/, https://lean-lang.org/doc/reference/latest/releases/v4.23.0/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Lean proof verification expert hire measure theory\"]:\n\n\nSources: https://terrytao.wordpress.com/2023/12/05/a-slightly-longer-lean-4-proof-tour/, https://www.indeed.com/q-theorem-proving-jobs.html, https://www.linkedin.com/business/talent/blog/talent-acquisition/how-to-measure-quality-of-hire, https://lean-lang.org/, https://www.linkedin.com/jobs/theorem-proving-jobs"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Lean Zulip community measure theory integration lintegral\"]:\n\n\nSources: https://leanprover-community.github.io/mathematics_in_lean3/09_Integration_and_Measure_Theory.html, https://leanprover-community.github.io/mathlib_docs/measure_theory/integral/lebesgue.html, https://www.youtube.com/watch%3Fv%3DyH3-zE0bYCU, https://arxiv.org/pdf/1910.09336, https://leanprover-community.github.io/mathlib4_docs/Mathlib/MeasureTheory/Measure/MeasureSpaceDef.html"
+    }
+  ],
+  "set_plan_args": {}
+}

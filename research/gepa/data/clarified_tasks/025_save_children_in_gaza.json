@@ -1,0 +1,23 @@
+{
+  "id": "703e08b3-081f-48ba-bac2-cdf9e597a7dc",
+  "raw_seed": "Save children in Gaza",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Save children in Gaza"
+    },
+    {
+      "role": "assistant",
+      "content": "I understand you want to help save children in Gaza. This is a significant humanitarian goal that requires clarity on your specific intent and resources. Let me ask some clarifying questions before we develop an execution plan."
+    },
+    {
+      "role": "user",
+      "content": "Okay, thanks for asking!\n\n1. My primary intent is to *donate to established humanitarian organizations* and *raise awareness/fundraise*.\n\n2. I can commit about $100-$200 per month. I'm also good at social media, so I can definitely help with awareness there. I have a decent following on Instagram and TikTok (around 5k followers combined).\n\n3. I prefer *International NGOs* like Doctors Without Borders or Save the Children, but I'm also open to *UNICEF*. I want to make sure the money gets directly to the kids.\n\n4. I'd like to start with *immediate action today* and continue with *ongoing involvement*. This is really important to me."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. You've given me clear parameters: monthly donations ($100-200) to vetted NGOs with strong track records in Gaza, plus social media awareness campaigns leveraging your 5k combined following. You want both immediate action today and sustainable ongoing involvement. This is very doable.\n\nI'll create a plan that includes:\n1. Researching current donation opportunities and impact metrics for Doctors Without Borders, Save the Children, and UNICEF in Gaza\n2. Identifying the most effective giving channels (direct donation links, matching programs, etc.)\n3. Creating a social media strategy template you can use immediately\n4. Setting up a sustainable monthly giving structure\n5. Providing content ideas and resources for your awareness campaigns\n\nI'm ready to build the execution plan now."
+    }
+  ],
+  "set_plan_args": {}
+}

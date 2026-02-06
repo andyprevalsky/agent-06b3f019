@@ -1,0 +1,23 @@
+{
+  "id": "f086bdff-79a4-4c05-b0f8-56d69c61905a",
+  "raw_seed": "Ensure my friends are well supported",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Ensure my friends are well supported"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you create a plan to ensure your friends are well supported. Let me start by understanding what kind of support would be most valuable."
+    },
+    {
+      "role": "user",
+      "content": "1) Mostly emotional support + social connection, with a bit of practical help (rides, meal drop-offs, helping them get organized). Not really financial support beyond the occasional \u201cI\u2019ll grab coffee\u201d kind of thing.\n\n2) It\u2019s about 4 close friends:\n- Maya (32) \u2014 going through a breakup and seems pretty isolated lately.\n- Jordan (31) \u2014 stressed/burnt out at work, sleeping badly.\n- Priya (30) \u2014 new mom (baby is 3 months), overwhelmed and hasn\u2019t been out much.\n- Luis (33) \u2014 job hunting after a layoff in December; could use career/accountability support.\n\n3) \u201cWell supported\u201d to me looks like: consistent check-ins (not just when there\u2019s a crisis), making plans that actually happen (walks/dinner), being someone they can text if they\u2019re having a rough day, and offering specific help (\u201cWant me to bring food Tuesday?\u201d) rather than vague \u201clet me know.\u201d\n\n4) Immediate stuff: Maya has to move apartments by the end of this month. Priya\u2019s partner is traveling for work next week so she\u2019ll be solo. Luis has a couple interviews coming up in the next 2\u20133 weeks. Also Jordan has a big deadline mid-month and tends to spiral around those."
+    },
+    {
+      "role": "assistant",
+      "content": "I understand your goal clearly. You want to create a sustainable support system for four close friends with different needs, combining emotional connection, practical help, and accountability. The key is moving from reactive crisis support to proactive, consistent presence.\n\nLet me create a comprehensive plan that covers:\n1. Immediate actions for each friend's current situation (Maya's move, Priya's solo week, Luis's interviews, Jordan's deadline)\n2. A sustainable check-in and connection system\n3. Specific, actionable support offers\n4. A tracking mechanism so you don't drop the ball\n\nI'm ready to generate a detailed execution plan with concrete steps, timelines, and follow-up strategies."
+    }
+  ],
+  "set_plan_args": {}
+}

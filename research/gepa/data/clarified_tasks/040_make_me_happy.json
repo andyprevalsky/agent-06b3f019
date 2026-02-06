@@ -1,0 +1,23 @@
+{
+  "id": "3efd3790-e222-4372-b15d-1530e38761eb",
+  "raw_seed": "Make me happy",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Make me happy"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand what would make you happy before I can help. Let me ask a few quick questions to get us moving."
+    },
+    {
+      "role": "user",
+      "content": "I\u2019m feeling kinda stressed and low-energy tonight. A short funny story (nothing dark) and maybe a feel-good song recommendation would help\u2014something upbeat like 2000s pop or indie (I like Taylor Swift, The Killers, and Phoenix)."
+    },
+    {
+      "role": "assistant",
+      "content": "Great! I have what I need. You want a short, funny (non-dark) story plus an upbeat feel-good song recommendation in the vein of 2000s pop/indie\u2014artists like Taylor Swift, The Killers, and Phoenix. This is straightforward and I can deliver both right now without needing to research anything. Let me create these for you."
+    }
+  ],
+  "set_plan_args": {}
+}

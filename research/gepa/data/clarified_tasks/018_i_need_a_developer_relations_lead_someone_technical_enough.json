@@ -1,0 +1,35 @@
+{
+  "id": "2b5306bc-9d94-4a35-9943-5f4fda8208c9",
+  "raw_seed": "I need a developer relations lead. Someone technical enough to earn respect from senior engineers, but who actually enjoys being on Twitter. We sell to platform teams. Go.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "I need a developer relations lead. Someone technical enough to earn respect from senior engineers, but who actually enjoys being on Twitter. We sell to platform teams. Go."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you find a developer relations lead with the right technical credibility and social media presence for your platform team audience. Let me research the current DevRel landscape and create a targeted search strategy."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"developer relations lead platform teams technical background Twitter social media 2024\"]:\n\n\nSources: https://automationpanda.com/2022/11/17/what-does-developer-relations-actually-do/, https://www.youtube.com/watch?v=_q_bWATVJTg, https://in.linkedin.com/in/atulpriyasharma, https://x.com/gradypb/status/2011491957730918510, https://www.linkedin.com/pulse/developer-community-manager-role-might-rarest-realest-david-dewald-mwyve"
+    },
+    {
+      "role": "assistant",
+      "content": "The goal is to find a Developer Relations Lead. This requires a multi-faceted approach, including defining the key skills and experiences, identifying potential channels for recruitment, and crafting a compelling job description. I will start by researching common job descriptions and desired qualifications for DevRel Leads, especially those focused on platform teams and with a strong social media presence. This research will inform the criteria for the search."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"developer relations lead job description platform teams social media technical requirements\"]:\n\n\nSources: https://www.productmarketingalliance.com/developer-marketing/types-of-devrel-jobs/, https://devsdata.com/devrel-developer-relations-specialist-job-description-template/, https://www.pluralsight.com/resources/blog/tech-operations/developer-relations-getting-a-devrel-job, https://nkeise.medium.com/3-core-skills-you-need-to-kick-start-your-career-in-developer-relations-5d31854bd893, https://opennetworking.org/wp-content/uploads/2019/09/Job-Description-Devrel-August-2019.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best practices for hiring developer relations lead\"]:\n\n\nSources: https://amplifypartners.com/blog-posts/how-do-i-hire-a-developer-advocate-4da3b, https://calyx.substack.com/p/devrel-what-to-avoid-when-to-hire, https://draft.dev/learn/finding-and-hiring-developer-relations-professionals, https://avocadobytes.substack.com/p/the-zero-to-one-developer-advocate, https://developerrelations.com/guides/how-to-get-a-job-in-devrel/"
+    },
+    {
+      "role": "assistant",
+      "content": "My initial research has provided a good overview of the Developer Relations Lead role, especially concerning technical requirements, platform team focus, and the importance of social media presence. I've gathered information on typical job descriptions and best practices for hiring in this space. Now, I need to synthesize this information to define the core requirements for *your specific* role and then formulate a plan to find suitable candidates. I will create a detailed plan outlining how I will identify, attract, and evaluate candidates for this specialized DevRel Lead position."
+    }
+  ],
+  "set_plan_args": {}
+}

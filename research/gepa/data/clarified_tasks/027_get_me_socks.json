@@ -1,0 +1,31 @@
+{
+  "id": "a6a963ff-b39b-47cf-b709-f8bcbd21f7d9",
+  "raw_seed": "Get me socks",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Get me socks"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify your sock preference to execute this purchase effectively. Let me ask a few quick questions to ensure I get exactly what you want."
+    },
+    {
+      "role": "user",
+      "content": "1. **Quantity:** 12 pairs  \n2. **Type:** Everyday **crew** socks (cotton blend), not too thick  \n3. **Size:** Men\u2019s shoe size **10\u201311** (usually \u201cLarge\u201d)  \n4. **Color/Pattern:** Mostly **black** and **dark gray**, plain (no loud logos/patterns)  \n5. **Budget/Brand:** Ideally **$25\u2013$40 total**; Hanes or Fruit of the Loom is fine (Bombas is too pricey)  \n6. **Delivery:** **Amazon** preferred, delivered by **this Friday** if possible (to my usual address on file)"
+    },
+    {
+      "role": "assistant",
+      "content": ":socks: 12 pairs of men\u2019s crew socks inbound\u2014black/charcoal, L (10\u201311), Hanes/Fruit-of-the-Loom, <$40, Amazon, Friday delivery. Plan locked; executing now."
+    },
+    {
+      "role": "assistant",
+      "content": "Error: You must call set_plan before attempt_completion."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have all the details I need: 12 pairs of men's crew socks (size Large), cotton blend, black/dark gray, plain, budget $25-40 total, from Amazon with delivery by Friday. I'm ready to execute the purchase plan."
+    }
+  ],
+  "set_plan_args": {}
+}

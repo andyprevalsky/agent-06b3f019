@@ -1,0 +1,19 @@
+{
+  "id": "e63f2c6d-f237-4fa2-b3b8-8ce152b2b519",
+  "raw_seed": "Get me a girlfriend",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Get me a girlfriend"
+    },
+    {
+      "role": "user",
+      "content": "Okay, so I'm 26, living in Austin, Texas. I work in software development at a mid-size tech company. I'm looking for something genuine - ideally someone I can actually connect with, not just casual dating.\n\nI've tried Hinge and Bumble for like 6 months, but honestly I get maybe one or two matches a week and conversations usually fizzle out after a few messages. I've gone on like 3 actual dates from apps, but nothing clicked. I also tried going to some meetup groups and bars with friends, but I'm pretty introverted so it's hard for me to approach people or keep conversations going naturally.\n\nThe main thing is I struggle with confidence and knowing what to say. I'm decent looking I think, but I feel like I come across as awkward or boring. My friends say I need to \"get out more\" but I'm not sure where to even start. I spend a lot of time gaming and coding in my free time, which I enjoy, but I know that's probably not helping my situation.\n\nWhat would actually help?"
+    },
+    {
+      "role": "assistant",
+      "content": "**Analyzing the Approach**\n\nI've been mapping out the challenges. The dating apps haven't panned out, and the in-person scene is tough, especially with my introversion. I'm focusing on identifying the core roadblocks - confidence and the struggle to initiate. I think I need to develop a proactive strategy, beyond just showing up.\n\n\n**Developing the Strategy**\n\nI'm now formulating a plan. I'm focusing on actionable steps. Researching resources is key, so I can provide concrete suggestions for building confidence and practicing social skills. Considering the user's introversion, I'm thinking about recommending activities that fit this personality, as well as digital and real-world options.\n\nThis is a deeply personal and meaningful goal. While I cannot directly 'get you a girlfriend,' I can absolutely help you strategize and provide resources to improve your chances of finding a genuine connection, addressing the specific challenges you've mentioned. My plan will focus on actionable steps you can take to build confidence, enhance your social interactions, and identify suitable avenues for meeting people who align with your desire for a genuine connection.\n\nI'll start by researching effective strategies for introverted individuals to meet people, confidence-building techniques, and specific communities or activities in Austin that might align with your interests (gaming, coding) but also foster social interaction. I'll also look into advice for improving online dating profiles and conversation starters, as well as offline social skills.\n\nMy research will aim to provide you with concrete, practical steps and resources, rather than broad, unhelpful advice. The goal is to empower you with tools and knowledge to navigate this journey more effectively."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,23 @@
+{
+  "id": "af7a7f8c-7a1f-41cd-9184-c53142c243bf",
+  "raw_seed": "Launch my business",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Launch my business"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand what kind of business you want to launch before I can help you create an execution plan. Let me ask some clarifying questions to scope this properly."
+    },
+    {
+      "role": "user",
+      "content": "1) **Type:** Service business \u2014 a local **residential cleaning company** with an option for recurring weekly/biweekly cleans (later add small-office cleaning).  \n2) **Stage:** I\u2019m past the idea stage. I\u2019ve got the name picked (**\u201cHarbor Home Cleaning\u201d**), a rough list of services/prices, and I\u2019ve done a couple paid cleanings for friends/neighbors ($150\u2013$220 jobs). Not formally set up yet.  \n3) **Timeline:** I want to be fully launched in **4\u20136 weeks**, and aiming for **10 recurring customers within 90 days**.  \n4) **Blockers/next steps:** Need help with **LLC + insurance**, deciding on pricing/packages, a simple **website + Google Business Profile**, setting up **booking/invoicing**, and a basic marketing plan (local SEO + flyers + Nextdoor). Also not sure whether to hire 1099 help right away or start solo.  \n5) **Budget:** **Bootstrapped**, I can put in about **$2,000 upfront** and maybe **$300/month** ongoing for software/ads. I\u2019m not looking for outside funding."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have a clear picture now. You're launching a local residential cleaning service (Harbor Home Cleaning) with proven demand signals (paid gigs already), a tight 4\u20136 week timeline, and a bootstrapped budget of $2K upfront + $300/month. You need: legal structure (LLC + insurance), pricing strategy, web presence (site + Google Business), booking/invoicing systems, and a local marketing playbook.\n\nThis is highly decomposable and execution-ready. I'll create a detailed plan that sequences these tasks with proper dependencies, prioritizes quick wins (Google Business Profile before website), and keeps you under budget. The plan will cover LLC formation, insurance quotes, pricing optimization, DIY website setup, booking system selection, and a phased marketing approach.\n\nMoving to plan generation now."
+    }
+  ],
+  "set_plan_args": {}
+}

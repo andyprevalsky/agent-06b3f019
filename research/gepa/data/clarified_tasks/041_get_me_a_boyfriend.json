@@ -1,0 +1,43 @@
+{
+  "id": "c1e1b510-9c66-46fd-88d4-88cfe6e20351",
+  "raw_seed": "Get me a boyfriend",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Get me a boyfriend"
+    },
+    {
+      "role": "assistant",
+      "content": "I appreciate the goal, but I need to clarify what you're actually looking for here. \"Get me a boyfriend\" could mean several different things, and I want to make sure I'm helping with what you actually need.\n\nAre you asking for:\n\n1. **Relationship advice or tips** - strategies for meeting people, dating advice, how to attract a partner?\n2. **A list of dating platforms/apps** - recommendations for where to meet potential partners?\n3. **Help with a dating profile** - writing/optimizing a dating app profile to increase matches?\n4. **Something else entirely** - perhaps a creative/humorous request?\n\nI'm here to help, but I want to make sure I'm solving the right problem. What specifically would be most useful for you?"
+    },
+    {
+      "role": "user",
+      "content": "Mostly help improving my dating profile + some strategy.\n\nI\u2019m 29F in Austin, TX, straight, looking for a monogamous relationship (not casual). I\u2019m on Hinge and Bumble right now but not getting great matches/conversations. I\u2019d love help rewriting my bio/prompts and picking what kinds of photos to use, plus a few message openers and a plan for meeting people IRL too.\n\nI\u2019m into live music, hiking, cooking, and coffee shops. I prefer guys 28\u201336, kind/communicative, not big partiers, and who want something serious."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect, now I have clarity. You want a comprehensive dating profile optimization plus IRL strategy. This is very actionable. Let me break down what I'll help with:\n\n1. **Profile Analysis & Rewrite** - I'll research what works on Hinge/Bumble in 2026, then create optimized bios and prompt responses that highlight your interests authentically while attracting serious, compatible men.\n\n2. **Photo Strategy** - Guidance on what types of photos perform best and what to feature.\n\n3. **Message Openers** - A few conversation starters tailored to your vibe and what you're looking for.\n\n4. **IRL Meeting Strategy** - Specific, actionable ways to meet people in Austin aligned with your interests (live music venues, hiking groups, coffee culture, etc.).\n\nI have enough context to move forward. Let me research current best practices for dating profiles on Hinge and Bumble, then I'll create a concrete plan with ready-to-use content and strategies."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Hinge profile tips 2026 what works best bios prompts\"]:\n\n\nSources: https://www.cosmopolitan.com/relationships/a43806999/hinge-prompt-answers/, https://www.reddit.com/r/hingeapp/comments/1pg27hn/a_ruthless_ranking_of_the_2025_hinge_prompts/, https://www.lovegenius.io/tips/best-hinge-prompts, https://medium.com/i-thought-this-was-worth-sharing/hinge-prompt-answers-2025-edition-3134395dff43, https://www.emlovz.com/best-hinge-prompt-responses-for-guys/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Bumble profile optimization 2026 women serious relationships\"]:\n\n\nSources: https://www.youtube.com/watch%3Fv%3DJLXZer4RG3U, https://www.facebook.com/groups/772176299056817/posts/910725015201944/, https://shannonkathleenphotography.com/2025/06/06/best-dating-apps-for-long-term-relationships-2025-guide/, https://www.instagram.com/reel/DUHbxnID3RR/, https://mashable.com/roundup/best-dating-apps-for-serious-relationships"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best dating profile photos 2026 women tips\"]:\n\n\nSources: https://www.artofher.com/dating-profile-photographer/, https://www.lovegenius.io/tips/profile-photos, https://www.gq-magazine.co.uk/article/dating-app-pictures-tips, https://www.lenscherry.com/blog/best-photos-for-dating-apps, https://www.photomaxxer.com/blog/best-pictures-for-dating-profiles"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin Texas meet people hiking live music coffee shops 2026\"]:\n\n\nSources: https://www.facebook.com/groups/1849708505144343/, https://www.acllive.com/, https://www.instagram.com/p/DTROAZiAEHb/, https://www.meetup.com/austin-hiking-group/, https://www.austintexas.org/things-to-do/music/concerts-in-austin/"
+    },
+    {
+      "role": "assistant",
+      "content": "I've gathered current dating profile best practices for 2026. Now I'll create a comprehensive plan with optimized profiles for both apps, photo guidance, message strategies, and specific IRL meeting opportunities in Austin tailored to your interests and relationship goals."
+    }
+  ],
+  "set_plan_args": {}
+}

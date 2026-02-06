@@ -1,0 +1,43 @@
+{
+  "id": "0c70d45d-599c-4301-8e4b-447317dc042b",
+  "raw_seed": "Map out the entire generative ai market and identify underserved opportunities",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Map out the entire generative ai market and identify underserved opportunities"
+    },
+    {
+      "role": "assistant",
+      "content": "**Charting the Course**\n\nI'm currently planning to fulfill this request. It's a vast undertaking, so I'm focusing on defining the scope and methodology. A comprehensive market map requires identifying key players, trends, and unexplored niches. The research phase will be extensive.\n\n\n**Formulating Initial Approach**\n\nI'm now prioritizing the initial phases. First, research: I will start by using web searches to survey the current generative AI landscape, focusing on its core components: key companies, different tech types, and varied applications. Then, I'll analyze to pinpoint the gaps.\n\nI will begin by researching the current landscape of the generative AI market to understand its various segments, key technologies, major players, and applications. This initial research will provide the necessary foundation to identify underserved opportunities within this rapidly evolving field."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI market landscape 2024 overview\"]:\n\n\nSources: https://iot-analytics.com/leading-generative-ai-companies/, https://hai.stanford.edu/ai-index/2025-ai-index-report, https://www.berginsight.com/the-global-generative-ai-market-surpassed-us-130-billion-in-2024, https://www.grandviewresearch.com/industry-analysis/generative-ai-market-report, https://www.precedenceresearch.com/generative-ai-market"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"emerging trends and opportunities in generative AI\"]:\n\n\nSources: https://www.forrester.com/technology/generative-ai/, https://www.valtech.com/en-us/blog/genai-10-trends-to-watch-in-2025/, https://www.mckinsey.com/capabilities/tech-and-ai/our-insights/the-economic-potential-of-generative-ai-the-next-productivity-frontier, https://www.deloitte.com/us/en/insights/topics/emerging-technologies/gen-ai-industry-product-innovation.html, https://news.microsoft.com/source/features/ai/whats-next-in-ai-7-trends-to-watch-in-2026/"
+    },
+    {
+      "role": "assistant",
+      "content": ", let me gather more specific data on market segments and underserved areas."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI underserved markets niches 2024 venture capital opportunities\"]:\n\n\nSources: https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://www.mossadams.com/getmedia/3f63f599-fc2b-47d7-b65c-85ef5ba8df28/2024generativeaispotlight.pdf, https://hbr.org/2025/11/how-generative-ai-is-reshaping-venture-capital, https://medium.com/@reveation-labs/top-generative-ai-trends-in-2024-59e517631529, https://menlovc.com/2024-the-state-of-generative-ai-in-the-enterprise/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI enterprise adoption barriers pain points 2024\"]:\n\n\nSources: https://www.deloitte.com/ce/en/services/consulting/research/state-of-generative-ai-in-enterprise.html, https://www.altmansolon.com/thought-leadership/2024-enterprise-adoption-generative-ai, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai-2024, https://menlovc.com/2024-the-state-of-generative-ai-in-the-enterprise/, https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/content/state-of-ai-in-the-enterprise.html"
+    },
+    {
+      "role": "assistant",
+      "content": "Now I'm synthesizing the research to create a comprehensive plan that maps the generative AI market and identifies underserved opportunities. The research reveals a fragmented landscape with significant white space in vertical applications, compliance tools, and SME-focused solutions."
+    },
+    {
+      "role": "assistant",
+      "content": "My initial research has provided a good overview of the generative AI market, including key players, emerging trends, and some initial insights into underserved areas and adoption barriers. I've gathered information from various sources to understand the current landscape. I will now synthesize this information and formulate a comprehensive plan to map the market and pinpoint specific underserved opportunities. This will involve structuring the collected data to identify patterns, gaps, and potential areas for innovation."
+    }
+  ],
+  "set_plan_args": {}
+}

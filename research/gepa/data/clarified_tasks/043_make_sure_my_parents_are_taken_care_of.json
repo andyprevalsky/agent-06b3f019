@@ -1,0 +1,23 @@
+{
+  "id": "218bec53-15f5-445d-a794-8d55fb21b627",
+  "raw_seed": "Make sure my parents are taken care of",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Make sure my parents are taken care of"
+    },
+    {
+      "role": "assistant",
+      "content": "I appreciate the care you have for your parents. To help you effectively, I need to understand what \"taken care of\" means in your specific situation. This could involve many different things, and clarifying your intent will help me create a focused plan."
+    },
+    {
+      "role": "user",
+      "content": "Dad's 78, mom's 75 - both still drive and live in their house but dad's COPD is getting worse and mom's memory is slipping. I'm two hours away, only child. \n\nMain worries: \n1) Their house - yardwork's too much, stairs getting hard for dad\n2) Healthcare - dad's new inhaler costs $280/month and neither remembers appointments\n3) Money - dad says they're \"fine\" but won't show me numbers and I saw a past-due bill on their counter\n\nNot urgent-urgent but feels like we're at the tipping point. They'll listen to me about small stuff (I set up their grocery delivery) but shut down when I mention \"getting help.\"\n\nNeed a plan for the next 6 months to make things safer without them feeling like I'm taking over."
+    },
+    {
+      "role": "assistant",
+      "content": "This is a clear, well-articulated situation with concrete pain points. You're describing a gradual care transition that needs both immediate safety measures and longer-term structural support. I understand the delicate balance\u2014they need help but will resist if it feels like loss of autonomy. Let me develop a comprehensive 6-month plan that addresses all three areas (home, healthcare, finances) with tactful escalation strategies."
+    }
+  ],
+  "set_plan_args": {}
+}

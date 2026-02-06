@@ -1,0 +1,27 @@
+{
+  "id": "81d98af9-1a9c-402d-acf2-32a9a073a36e",
+  "raw_seed": "Raise me 1 million dollars",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Raise me 1 million dollars"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the specifics of this fundraising goal to create an effective plan. Let me ask some clarifying questions before we proceed."
+    },
+    {
+      "role": "user",
+      "content": "Okay, great.\n\n1.  **Funding for:** It's for my startup, \"GreenCycle,\" an app that connects users with local recycling centers for hard-to-recycle items like electronics and textiles.\n2.  **Stage:** We have a working MVP (Minimum Viable Product) and are currently in private beta testing with about 200 users in the Seattle area.\n3.  **Intended Investors:** Primarily looking at angel investors and early-stage venture capital firms that focus on sustainability or tech.\n4.  **Existing Materials:** Yes, we have a detailed business plan, a pitch deck, and financial projections for the next three years.\n5.  **Timeline:** Ideally, I'd like to close this round within the next 3-4 months.\n6.  **Funding Structures:** Open to equity or convertible debt. Equity is preferred."
+    },
+    {
+      "role": "assistant",
+      "content": "User provided comprehensive details about their GreenCycle startup fundraising goal. Key points: MVP stage recycling app, 200 beta users in Seattle, targeting angels/VCs focused on sustainability, has pitch deck and financials, wants to close within 3-4 months, prefers equity funding. Ready to proceed with plan creation."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have clear context now. GreenCycle is a sustainability-focused app with MVP and beta users, seeking $1M in equity funding from angels and early-stage VCs within 3-4 months. You have pitch deck, business plan, and financials ready. This is a well-defined fundraising goal with concrete deliverables and timeline.\n\nI'm now generating an execution plan that will cover: investor research and targeting, pitch materials optimization, outreach strategy, relationship building, due diligence preparation, and closing mechanics. Moving to plan generation."
+    }
+  ],
+  "set_plan_args": {}
+}

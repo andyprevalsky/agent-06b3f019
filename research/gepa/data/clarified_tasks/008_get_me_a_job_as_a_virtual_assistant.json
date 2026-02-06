@@ -1,0 +1,39 @@
+{
+  "id": "5f7a7d7b-6220-4cee-b2ef-26bdbc8bcfd8",
+  "raw_seed": "Get me a job as a Virtual Assistant",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Get me a job as a Virtual Assistant"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing your goal to get a job as a Virtual Assistant. This is a significant career objective that requires research into current market conditions, positioning strategies, and execution steps. Let me gather information about the virtual assistant job market and best practices for landing this role."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to get hired as virtual assistant 2026 job market\"]:\n\n\nSources: https://www.wishup.co/blog/virtual-assistant-industry-trends/, https://www.linkedin.com/pulse/how-become-virtual-assistant-2026-get-hired-by-linkedin-news-roxre, https://thereistalent.com/virtual-assistant-statistics-insights-trends/, https://gigabpo.com/virtual-assistant-niches/, https://kongusto.co/virtual-assistant-trends-in-2026/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"virtual assistant job requirements skills needed\"]:\n\n\nSources: https://www.upwork.com/resources/virtual-assistant-skills, https://www.reddit.com/r/VirtualAssistant/comments/1d9r1bk/skills_required_to_become_virtual_assistant/, https://www.indeed.com/career-advice/career-development/become-a-virtual-assistant, https://www.mykelly.com/career-advice/job-search/virtual-administrative-assistant-top-9-in-demand-skills-for-your-resume, https://www.coursera.org/articles/how-to-become-a-virtual-assistant"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best platforms to find virtual assistant jobs 2026\"]:\n\n\nSources: https://www.wishup.co/blog/best-virtual-assistant-companies/, https://gigabpo.com/virtual-assistant-hiring-sites/, https://www.upwork.com/freelance-jobs/virtual-assistant/, https://virtualwizards.io/the-5-best-virtual-assistant-companies-2026/, https://www.upwork.com/hire/virtual-assistants/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing your goal to get a job as a Virtual Assistant. To create the most effective plan, I need to understand your current situation better. Let me ask some clarifying questions before we proceed."
+    },
+    {
+      "role": "user",
+      "content": "Okay, great! Here's my info:\n\n1.  **Current experience**: I don't have formal VA experience, but I was an office manager for 5 years at a small law firm, handling scheduling, client communication, and basic bookkeeping. So, I guess I'm starting fresh as a *VA*, but I have transferable skills.\n2.  **Skills**: Definitely administrative, communication, and I'm pretty good with basic tech stuff like Microsoft Office, Google Workspace, and some social media platforms (Instagram, Facebook). I'm organized and a quick learner.\n3.  **Timeline**: I'd ideally like to be employed within the next 2-3 months.\n4.  **Work preferences**: I'm open to company size, but I'd prefer a smaller, more personal team if possible. Industry-wise, I'm interested in lifestyle, health & wellness, or creative businesses, but I'm flexible. Fully remote setup is a must. For hourly rate, I'm hoping for $20-$25/hour to start.\n5.  **Location/timezone**: I'm in EST (New York).\n6.  **Current status**: Actively job searching. I've sent out a few resumes but haven't gotten much traction yet."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have a clear picture of your situation. You have solid transferable skills from your office manager background, you're in a desirable timezone, and you have a realistic timeline and rate expectation. The challenge is positioning yourself effectively in the VA market and getting in front of the right employers. Let me create a comprehensive execution plan to land you a VA job within 2-3 months."
+    }
+  ],
+  "set_plan_args": {}
+}

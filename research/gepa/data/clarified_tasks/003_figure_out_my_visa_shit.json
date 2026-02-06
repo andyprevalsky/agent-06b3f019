@@ -1,0 +1,79 @@
+{
+  "id": "5ad33825-d276-4a90-8ddc-48e96b66b043",
+  "raw_seed": "Figure out my Visa shit",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Figure out my Visa shit"
+    },
+    {
+      "role": "assistant",
+      "content": "I need some clarification to help you sort out your visa situation. Let me ask a few quick questions to understand what we're dealing with."
+    },
+    {
+      "role": "user",
+      "content": "Okay, thanks!\n\n1.  **Country:** Canada\n2.  **Citizenship:** India\n3.  **Visa Type:** Work permit (specifically, an Intra-Company Transfer)\n4.  **Process Stage:** I've been approved for the transfer internally at my company, and the Canadian employer has already submitted the LMIA-exempt offer of employment. I'm about to start preparing my application for the actual work permit.\n5.  **Urgency:** Yes, my company wants me to be in Toronto by October 15th."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect - I have the key details. Let me research the current ICT work permit process and requirements for you, then create a step-by-step plan to get you to Toronto by October 15th."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit application 2024 processing times requirements documents India\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://kpmg.com/xx/en/our-insights/gms-flash-alert/flash-alert-2024-209.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/check-processing-times.html, https://brownimmigrationlaw.com/breaking-news-further-changes-to-canadas-work-permit-pprograms/"
+    },
+    {
+      "role": "assistant",
+      "content": "Got it. You're an Indian citizen applying for a Canadian work permit via Intra-Company Transfer (ICT) route, employer has submitted the LMIA-exempt offer, and you need to be in Toronto by October 15th, 2026. That's about 8 months out, which is reasonable timeline. Let me research the current ICT work permit application process, requirements, and timelines to build a solid execution plan."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada Intra-Company Transfer ICT work permit application process 2026 requirements\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/iec.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit processing time 2026 Indian citizens\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/check-processing-times.html, https://www.visahq.com/news/2026-01-30/ca/ircc-processing-update-indian-visitor-visa-wait-times-fall-but-work-permit-and-super-visa-backlogs-grow/, https://www.cicnews.com/2026/01/new-ircc-wait-times-visitor-visas-speed-up-for-some-work-permits-drag-on-0170997.html, https://www.reddit.com/r/ImmigrationCanada/comments/1q6vmbo/megathread_processing_times_work_permits_2026/, https://www.ackahlaw.com/news/ircc-processing-times-update-and-what-they-mean-for-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Intra-Company Transfer LMIA exempt Canada documents required application\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://immigration.ca/intra-company-transferees/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/find-need-labour-market-impact-assessment.html"
+    },
+    {
+      "role": "assistant",
+      "content": "Got it. You're an Indian citizen applying for a Canadian work permit via Intra-Company Transfer (ICT) route, which is LMIA-exempt. You need to be in Toronto by October 15th, 2026 (about 8.5 months away). The employer has already filed the offer of employment. Now you need to prepare your work permit application. Let me research the current ICT work permit requirements, processing times, and what documents you'll need to gather."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT intra-company transfer work permit requirements 2026 Indian citizen\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit processing time 2026 India\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/check-processing-times.html, https://www.cicnews.com/2026/01/new-ircc-wait-times-visitor-visas-speed-up-for-some-work-permits-drag-on-0170997.html, https://www.visahq.com/news/2026-01-30/ca/ircc-processing-update-indian-visitor-visa-wait-times-fall-but-work-permit-and-super-visa-backlogs-grow/, https://www.reddit.com/r/ImmigrationCanada/comments/1q6vmbo/megathread_processing_times_work_permits_2026/, https://www.instagram.com/reel/DUEUycPDDH8/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT work permit application checklist documents required Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://immigration.ca/intra-company-transferees/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5556.html, https://cifile.org/immigration-to-canada/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "Got it. You're an Indian citizen applying for a Canadian work permit via Intra-Company Transfer (ICT) route, which is LMIA-exempt. You need to be in Toronto by October 15th, 2026 (about 8.5 months away). The employer has already filed the offer of employment. Now you need to prepare your work permit application. Let me research the current ICT work permit requirements, processing times, and what documents you'll need to gather."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT intra-company transfer work permit requirements 2026 Indian citizen\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions.html, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.visahq.com/news/2026-01-06/in/over-one-million-indian-workers-in-canada-risk-losing-status-as-permits-expire/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit processing time 2026 India\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/check-processing-times.html, https://www.cicnews.com/2026/01/new-ircc-wait-times-visitor-visas-speed-up-for-some-work-permits-drag-on-0170997.html, https://www.visahq.com/news/2026-01-30/ca/ircc-processing-update-indian-visitor-visa-wait-times-fall-but-work-permit-and-super-visa-backlogs-grow/, https://www.youtube.com/watch?v=N7P96OCW2go, https://www.instagram.com/reel/DUEUycPDDH8/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT work permit application checklist documents required Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5488.html, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://visaserve.com/a-comprehensive-guide-to-the-intra-company-transfer-ict-work-permit-in-canada/"
+    },
+    {
+      "role": "assistant",
+      "content": "Research complete. Moving to plan generation."
+    }
+  ],
+  "set_plan_args": {}
+}

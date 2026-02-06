@@ -1,0 +1,23 @@
+{
+  "id": "c41605e5-34b5-4ebd-a39e-84005b2cd4b8",
+  "raw_seed": "Find me my first 10 customers",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Find me my first 10 customers"
+    },
+    {
+      "role": "assistant",
+      "content": "**Clarifying business details**\n\nI need to clarify several aspects for the user\u2019s request: specifically, what business or product they\u2019re referring to, the target market, geography, ideal customer profile (ICP), pricing, and distribution channel. Without this information, I can't effectively move forward. It\u2019s essential to ask targeted questions to gather all the necessary details. I\u2019ll use the `send_message_to_user` function to pose these questions in a clear and straightforward manner.\n\nTo get you your first 10 customers, I need a few specifics so I can build a concrete lead list + outreach plan (and then execute it). Answer these as briefly as possible:\n\n1) What are you selling? (1\u20132 sentence description + link if any)\n2) Who is the ideal customer? (industry, job title, company size, geography)\n3) What problem do you solve + your main promise/result?\n4) Price point and model? (one-time, monthly, contract size)\n5) What\u2019s your current proof? (case studies, portfolio, demo, beta users\u2014anything)\n6) Delivery capacity: can you onboard 10 customers this month? (yes/no, constraints)\n7) Where can you sell? (website domain, LinkedIn profile, email domain; any restrictions)\n8) Do you want customers via: (A) cold email, (B) LinkedIn, (C) Upwork/Fiverr, (D) local/networking, (E) ads, (F) partnerships) \u2014 pick up to 2.\n\nIf you reply with just #1 and #2, I can already start generating a targeted list of 30\u201350 prospects to convert the first 10."
+    },
+    {
+      "role": "user",
+      "content": "1) I build custom Notion dashboards that auto-pull data from Shopify, Stripe, and Google Analytics\u2014essentially a lightweight, founder-friendly \u201cdata warehouse\u201d without the dev time. Live demo at notionmetrics.co\n\n2) E-commerce founders (Shopify store owners) doing $50k\u2013$2 M/month, US/Canada, 1\u201320 employees, Founder/CEO title.\n\n3) You stop juggling a dozen CSV exports and can see real-time revenue, top SKUs, and ad spend ROI in one place. Promise: \u201cKnow your numbers in 5 min/week and save 4 hrs/month of spreadsheet hell.\u201d\n\n4) One-time setup $1,200 (paid 50 % up front, 50 % on delivery). Optional $99/month for data-source maintenance.\n\n5) Built 12 dashboards for founders in my indie-hacker circle; two testimonials on the site (notionmetrics.co/case-studies). One user (PawPaw Pet Supplies) says it saved them $700/month on a BI tool.\n\n6) Yes\u2014max 2 dashboards/week, so 10 customers = 5-week backlog; I\u2019m solo but can handle it.\n\n7) Sell via my domain (notionmetrics.co), LinkedIn (/in/daniel-kim-notion), and Gmail (daniel@notionmetrics.co). No platform restrictions.\n\n8) Cold email + LinkedIn"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have everything I need. You're selling high-touch custom Notion dashboards to e-commerce founders at $1,200/setup. You can handle 10 customers over 5 weeks. I'll build a plan to:\n\n1. Research and identify 30\u201350 qualified Shopify store owners in your ICP (US/Canada, $50k\u2013$2M/mo revenue, 1\u201320 employees)\n2. Validate them (LinkedIn, company signals, engagement potential)\n3. Create a cold email + LinkedIn outreach sequence\n4. Execute outreach to convert 10 customers\n5. Track pipeline and close rate\n\nI'm ready to move to execution. Calling set_plan now."
+    }
+  ],
+  "set_plan_args": {}
+}

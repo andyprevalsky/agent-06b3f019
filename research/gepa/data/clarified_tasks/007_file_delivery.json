@@ -1,0 +1,23 @@
+{
+  "id": "6710d296-28e3-40e9-a481-2131425c9ee0",
+  "raw_seed": "File delivery",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "File delivery"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm ready to help with file delivery. I need to understand what you're trying to accomplish.\n\nPlease clarify:\n1. What file(s) do you want to deliver?\n2. Where should they be delivered to (email, cloud storage, FTP, etc.)?\n3. Who is the recipient or what is the destination?\n4. Do you have the file(s) ready, or do they need to be created/processed first?\n\nOnce I understand the specifics, I'll create a plan to execute the delivery."
+    },
+    {
+      "role": "user",
+      "content": "Thanks for asking! Here are the details:\n\n1. **Files**: I need to deliver the Q4 financial report (PDF, about 8MB) and the supporting Excel spreadsheet with raw data. Both are ready to go.\n\n2. **Where**: Email delivery to our client's shared inbox - reports@acmecorp.com\n\n3. **Who**: Acme Corporation's finance team. They're expecting it by end of business today.\n\n4. **Status**: The files are already prepared and saved on my local drive. I just need to get them sent out.\n\nCan you help me package and send these? Also, should I add a cover email or just attach them directly?"
+    },
+    {
+      "role": "assistant",
+      "content": "User has provided clear requirements for file delivery. Files are ready, destination is set, and deadline is today. Moving to set plan for email delivery with professional cover message."
+    }
+  ],
+  "set_plan_args": {}
+}

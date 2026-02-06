@@ -1,0 +1,43 @@
+{
+  "id": "95d6ac10-1c11-4146-b048-4a5cea3c6e7e",
+  "raw_seed": "Get me into Stanford",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Get me into Stanford"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify your goal before proceeding. 'Get me into Stanford' could mean several things:\n\n1. **Undergraduate admission** - applying for a bachelor's degree\n2. **Graduate admission** - applying for a master's or PhD program\n3. **Executive/professional programs** - MBA, certificate programs, etc.\n4. **Visiting scholar or research position**\n5. **Enrollment in online courses** (Stanford offers many free online options)\n\nI also need to understand your current situation:\n- What is your educational background? (high school student, college student, working professional, etc.)\n- What field/major are you interested in?\n- What is your timeline? (applying this cycle, next year, etc.)\n- Do you have any specific constraints or advantages I should know about?\n\nOnce I understand which type of admission and your context, I can create a concrete plan to maximize your chances."
+    },
+    {
+      "role": "user",
+      "content": "Undergraduate (bachelor\u2019s).\n\nI\u2019m a junior at Lincoln High in San Jose (CA), graduating May 2027. Unweighted GPA 3.92 (weighted 4.38). Taking AP Calc BC, AP CS A, AP Physics 1 this year; planning AP Physics C + AP Stats senior year. SAT: 1510 (770 math / 740 verbal) from Oct 2025\u2014aiming to retake once.\n\nIntended major: Computer Science (maybe AI) or Symbolic Systems.\n\nTimeline: planning to apply Restrictive Early Action to Stanford in Nov 2026.\n\nStrengths/special circumstances: first-gen college student, low-income (free/reduced lunch). I\u2019ve been captain of our robotics team for 2 years, built a small app for a local food pantry to manage inventory (used by ~6 volunteers weekly), and I\u2019ve done a summer research internship at SJSU on ML for traffic prediction (poster + GitHub). ECs also include varsity soccer and tutoring math at the library.\n\nMain concern: my school doesn\u2019t offer a ton of APs and I don\u2019t have \u201cbig-name\u201d awards yet."
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing your Stanford REA application strategy. You have a genuinely strong profile with legitimate hooks (first-gen, low-income, demonstrated impact through the food pantry app, research experience). Let me research Stanford's current CS/Symbolic Systems admission landscape and create a concrete execution plan to maximize your chances by November 2026."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Stanford undergraduate computer science admission requirements 2024 2025 acceptance rate\"]:\n\n\nSources: https://www.cs.stanford.edu/admissions, https://www.thecoderschool.com/college/computer-science-acceptance-rates/, https://www.crimsoneducation.org/us/blog/stanford-acceptance-rate, https://www.cs.stanford.edu/bachelors/degree-requirements, https://blog.collegevine.com/what-does-it-really-take-to-get-into-stanford"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Stanford Symbolic Systems major admission requirements\"]:\n\n\nSources: https://symsys.stanford.edu/undergraduates/major-policies-requirements, https://symsys.stanford.edu/graduates/ms-admissions/what-we-look, https://symsys.stanford.edu/, https://symsys.stanford.edu/undergraduates/bs-program, https://symsys.stanford.edu/graduates/ms-admissions/external-admissions"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Stanford REA restrictive early action deadline 2026 application timeline\"]:\n\n\nSources: https://admission.stanford.edu/apply/first-year/decision_process.html, https://admission.stanford.edu/apply/first-year/, https://stanfordsummer.zendesk.com/hc/en-us/articles/34091236717971-What-are-the-application-deadlines, https://admission.stanford.edu/, https://www.ivywise.com/blog/how-to-get-into-stanford-all-you-need-to-know/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Stanford first generation low income student support recruitment\"]:\n\n\nSources: https://flissc.stanford.edu/, https://vpge.stanford.edu/partners/first-generation-andor-low-income-student-success-center, https://advising.stanford.edu/current-students/advising-student-handbook/fli-students, https://stanforddaily.com/2026/02/05/university-diversity-graduate-program/, https://www.gsb.stanford.edu/insights/caroline-hoxby-new-tools-help-smart-low-income-kids-realize-great-college-opportunities"
+    },
+    {
+      "role": "assistant",
+      "content": "."
+    }
+  ],
+  "set_plan_args": {}
+}

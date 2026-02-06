@@ -1,0 +1,23 @@
+{
+  "id": "6c51fe0e-362b-41bd-a45a-a80bfaa8558d",
+  "raw_seed": "Finding the best head of marketing for your Fortune 500",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Finding the best head of marketing for your Fortune 500"
+    },
+    {
+      "role": "assistant",
+      "content": ", Fortune 500 companies typically hire marketing leaders with 15+ years of progressive experience, including P&L responsibility and digital transformation expertise. They usually recruit through retained executive search firms like Spencer Stuart, Russell Reynolds, or Korn Ferry. Let me gather more specific data on current market trends and compensation benchmarks to create a comprehensive search strategy."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Fortune 500 CMO head of marketing hiring trends 2024 executive search compensation requirements\"]:\n\n\nSources: https://adage.com/article/marketing-news-strategy/cmo-hiring-rise-behind-ad-employment-trends/2598556/, https://cowenpartners.com/setting-the-right-compensation-for-your-cmo-in-2022/, https://www.warc.com/content/feed/cmo-tenure-ticks-up-across-fortune-500/10396, https://marketsearchrecruiting.com/executive-search-for-marketing-leaders/, https://www.equilar.com/the-highest-paid-chief-marketing-officers-cmos/"
+    },
+    {
+      "role": "assistant",
+      "content": "The goal is to find the best Head of Marketing for a Fortune 500 company. This is a highly strategic and complex task that requires careful consideration of various factors beyond just a simple web search. I need to establish a clear plan that addresses the critical aspects of such a search: defining the 'best' for a specific Fortune 500 company, understanding market trends, identifying key skills and experience, and outlining the recruitment process."
+    }
+  ],
+  "set_plan_args": {}
+}

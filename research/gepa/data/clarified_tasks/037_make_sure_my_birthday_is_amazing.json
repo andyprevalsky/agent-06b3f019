@@ -1,0 +1,23 @@
+{
+  "id": "0b9167e5-9604-416f-a336-498a2a0d8b7c",
+  "raw_seed": "Make sure my birthday is amazing",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Make sure my birthday is amazing"
+    },
+    {
+      "role": "assistant",
+      "content": "**Clarifying trip details**\n\nI need to clarify several details for our plan, like the date, location, budget, preferences, and any constraints. I should also think about who will be involved and whether it's supposed to be a surprise. Okay, it seems like I must use the send_message_to_user function to ask these questions and get the necessary information without missing anything important. This will help ensure everything is well-planned!\n\nTo make your birthday \u201camazing\u201d in a way that actually fits you, I need a few specifics (then I\u2019ll build a complete plan you can execute or delegate)."
+    },
+    {
+      "role": "user",
+      "content": "- Saturday, May 11, 2024 \u2013 I live in Portland, OR (Pacific)  \n- Vibe: cozy foodie day that turns into a low-key dance-y night  \n- Who: me + my girlfriend + 6\u20138 close friends  \n- Budget: around $600 total  \n- Must-haves: (1) killer brunch with great coffee, (2) sunset picnic on the Gorge, (3) Polaroids/instax wall for guests to snap and leave notes  \n- Hard no\u2019s: no shellfish (allergy), no club-level noise, no stripper or \u201csurprise\u201d parties  \n- Surprise? No thanks\u2014I like knowing the plan but want someone else to handle bookings"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have all the details I need. Let me create a comprehensive execution plan for an amazing Portland birthday celebration. You want a cozy foodie day transitioning to a low-key dance night with 8-10 people total, centered around brunch, a Gorge sunset picnic, and a Polaroid wall. Budget is $600, no shellfish, no surprises, and you want someone else handling bookings.\n\nI'm ready to generate the detailed plan with specific venue recommendations, timing, budget breakdown, and delegation tasks."
+    }
+  ],
+  "set_plan_args": {}
+}

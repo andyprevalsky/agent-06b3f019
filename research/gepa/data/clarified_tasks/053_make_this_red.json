@@ -1,0 +1,23 @@
+{
+  "id": "bcf98661-ec5e-40b0-b1d0-dc8a62e2673b",
+  "raw_seed": "make this red",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "make this red"
+    },
+    {
+      "role": "assistant",
+      "content": "I need clarification on what you'd like to make red. Could you provide more details? For example:\n\n- Are you referring to a file, image, document, or code?\n- Do you have a file you'd like me to modify?\n- Is this about styling, design, or something else?\n\nPlease share the file or describe what needs to be changed to red."
+    },
+    {
+      "role": "user",
+      "content": "Oh, sorry! I meant the \"Approved\" text on the invoice. It's a PDF file, `invoice_1029.pdf`. Just make the word \"Approved\" bright red, like `#FF0000`."
+    },
+    {
+      "role": "assistant",
+      "content": "I understand - you want me to modify the PDF file `invoice_1029.pdf` and change the word 'Approved' to bright red (#FF0000). Let me proceed with this task."
+    }
+  ],
+  "set_plan_args": {}
+}

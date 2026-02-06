@@ -1,0 +1,31 @@
+{
+  "id": "e886a0a4-c4fc-47d9-86d1-0450866d806b",
+  "raw_seed": "Get my family Christmas gifts",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Get my family Christmas gifts"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand your gift-giving needs better before creating a comprehensive plan. Let me ask a few clarifying questions to ensure I can help you find the perfect Christmas gifts for your family."
+    },
+    {
+      "role": "user",
+      "content": "Okay, this is great!\n\n1.  **Family members**:\n    *   My wife, Sarah (40)\n    *   My son, Leo (12)\n    *   My daughter, Maya (8)\n    *   My parents, Richard and Susan (both 70s)\n    *   My sister, Emily (38)\n\n2.  **Budget**: Overall, around $1000-$1200. I'm flexible on individual amounts, but maybe $200 for Sarah, $100-150 for each kid, $150-200 for my parents (combined), and $50-75 for my sister.\n\n3.  **Preferences/interests**:\n    *   **Sarah**: Loves reading (fiction, thrillers), gardening, coffee, and anything cozy.\n    *   **Leo**: Video games (especially Nintendo Switch), LEGO, anything science-related or tech gadgets.\n    *   **Maya**: Arts and crafts, anything unicorn or glitter, reading (fantasy), playing outside.\n    *   **Parents**: My dad loves history books, golf, and grilling. My mom loves puzzles, baking, and gardening. They both enjoy travel.\n    *   **Emily**: Fashion, cooking, trying new restaurants, fitness.\n\n4.  **Timeline**: Need everything by December 20th.\n\n5"
+    },
+    {
+      "role": "assistant",
+      "content": "\ud83c\udf81 Christmas gift planning for 6 family members with $1000-1200 budget. Let me research current gift ideas and prices to create a comprehensive shopping plan."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best Christmas gifts 2024 for women who love reading gardening coffee cozy gifts under $200\"]:\n\n\nSources: https://www.nytimes.com/wirecutter/gifts/best-gifts-for-coffee-lovers/, https://www.amazon.com/Onebttl-Gardening-Gardener-Gardeners-Stainless/dp/B0BC11PWTQ, https://www.amazon.com/plant-book-lover-gifts/s?k=plant+and+book+lover+gifts, https://www.cosmopolitan.com/lifestyle/g69206266/unique-christmas-gift-ideas/, https://www.etsy.com/listing/1531204878/gnome-blanket-for-book-lovers-cozy"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have all the details I need. Let me create a comprehensive plan to find and acquire thoughtful Christmas gifts for your entire family within your budget and timeline. I'm ready to move forward with research and recommendations."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,23 @@
+{
+  "id": "6f949b2b-9f2f-4bdd-b9ea-192074a946c9",
+  "raw_seed": "Apply to jobs",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Apply to jobs"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify your job application goal before proceeding. To create an effective execution plan, I need to understand:\n\n1. **Which jobs or companies** are you targeting? (specific roles, companies, or job boards?)\n2. **What's your job search focus?** (industry, role type, location, seniority level?)\n3. **Do you have application materials ready?** (resume, cover letter, LinkedIn profile?)\n4. **What's the scope?** (apply to 5 jobs? 50? All matching positions on a specific platform?)\n5. **Any specific job boards or platforms?** (LinkedIn, Indeed, company websites, specialized boards?)\n\nOnce I understand your parameters, I can build a plan to systematically find and apply to relevant positions."
+    },
+    {
+      "role": "user",
+      "content": "Looking for data analyst positions - specifically \"Data Analyst\", \"Business Intelligence Analyst\", or \"Marketing Analyst\" roles. I'm open to tech companies, consulting firms, or even retail companies with strong data teams. No preference really, just want to learn.\n\nRemote or hybrid in Chicago area. Entry-level or 1-2 years experience. Full-time only.\n\nI have my resume ready but it's pretty generic - haven't tailored it yet. No cover letter template.\n\nLet's start with 20 applications this week and see how it goes.\n\nFocus on LinkedIn and Indeed - that's where I see most postings. I check company career pages too when I find ones I like."
+    },
+    {
+      "role": "assistant",
+      "content": "I understand your goal clearly now. You want to apply to 20 data analyst-adjacent roles this week (entry-level to 2 years experience, remote/hybrid in Chicago area) on LinkedIn and Indeed. You have a resume but it's generic and no cover letter template yet.\n\nHere's my strategy:\n\n1. **Research phase**: Find 20+ relevant job postings across LinkedIn and Indeed matching your criteria\n2. **Preparation phase**: Create a tailored resume template and basic cover letter template for data analyst roles\n3. **Application phase**: Execute applications with customized materials\n\nBefore I proceed, one clarification: Should I focus on finding the jobs first and presenting them to you for review, or should I go end-to-end and actually submit applications on your behalf (which would require your LinkedIn/Indeed credentials)?\n\nFor now, I'll assume you want me to:\n- Find 20+ matching positions\n- Help you customize your resume and create a cover letter template\n- Then you'll apply directly through LinkedIn/Indeed yourself\n\nLet me start researching the job market to find these positions and understand what these roles typically require."
+    }
+  ],
+  "set_plan_args": {}
+}

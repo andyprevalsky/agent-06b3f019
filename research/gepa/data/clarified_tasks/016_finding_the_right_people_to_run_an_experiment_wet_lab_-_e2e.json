@@ -1,0 +1,51 @@
+{
+  "id": "af7df7b4-9ab7-4dc7-8ebc-503b6e7c6ae3",
+  "raw_seed": "Finding the right people to run an experiment wet lab -> e2e automation for drug discovery, automating northern blots -> e2e clinical trials, 100k per clinical. Agent negotiate on the wet labs",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Finding the right people to run an experiment wet lab -> e2e automation for drug discovery, automating northern blots -> e2e clinical trials, 100k per clinical. Agent negotiate on the wet labs"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the goal here before proceeding. You're looking to find people and negotiate for running a wet lab experiment with the following pipeline: wet lab automation \u2192 drug discovery automation \u2192 northern blot automation \u2192 end-to-end clinical trials (at 100k per clinical trial). You want an agent to handle negotiations with wet labs.\n\nBefore I create a plan, I need to understand:\n\n1. **Scope of \"finding people\"**: Are you looking for wet lab operators, lab managers, PIs, or entire lab facilities/contract research organizations (CROs)?\n\n2. **Geographic/institutional preference**: Any particular region, country, or type of institution (academic, biotech startup, established CRO)?\n\n3. **Timeline**: When do you need to start? Is this for immediate execution or future planning?\n\n4. **Budget reality-check**: You mention 100k per clinical trial\u2014is that your budget constraint, or is that what you're willing to pay? What's your total budget for the wet lab automation phase?\n\n5. **Current assets**: Do you have protocols/SOPs ready, or are you starting from scratch? Do you have preliminary data?\n\n6. **Negotiation scope**: What are the key terms you want the agent to optimize for? (cost, timeline, IP ownership, exclusivity?)\n\nOnce I understand these dimensions, I can build a concrete plan to source the right partners and structure the negotiation strategy."
+    },
+    {
+      "role": "user",
+      "content": "1. **Small-molecule CROs with automation capacity**\u2014think WuXi, Evotec, or similar tier. Need partners who already run high-throughput assays, not academic labs.\n\n2. **EU (preferably Basel/Z\u00fcrich corridor or Cambridge UK)**\u2014regulatory familiarity, time-zone overlap with my team in Geneva.\n\n3. **First compound needs to hit the wet-lab by 1 October**; two follow-ons queued for Q1-2024.\n\n4. **\u20ac2.5 M total for the full wet-lab package** (three programs, hit-to-lead through GLP tox). The 100 k is my internal target **per future Phase I**, not for this stage.\n\n5. **Starting from validated targets**\u2014we have crystal structures, in-house SAR, and a 200-compound pilot set with \u00b5M activity. Need scale-up, ADME, automated northern-blot confirmation for off-target RNA hits, and rapid in-vivo PoC.\n\n6. **Speed first, cost second, then IP**. I\u2019ll trade 5 % equity for a 3-month faster timeline. Exclusivity only in CNS\u2014otherwise they can monetize the platform however they want."
+    },
+    {
+      "role": "assistant",
+      "content": ": Researching EU CROs with automation capacity in your target regions and checking their service offerings for high-throughput screening, ADME, northern blot automation, and in-vivo capabilities."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"WuXi AppTec Evotec automation drug discovery CRO Europe Basel Zurich Cambridge high throughput screening ADME northern blot\"]:\n\n\nSources: https://www.evotec.com/solutions/drug-discovery-preclinical-development/discovery/hit-identification-services/high-throughput-screening-hts-services, https://wuxibiology.com/discovery-development-europe-2025/, https://labtesting.wuxiapptec.com/dmpk-services/invitro-adme/, https://www.wuxiapptec.com/, https://wuxibiology.com/drug-discovery-services/hit-finding-and-screening-services/"
+    },
+    {
+      "role": "assistant",
+      "content": "The goal is now very clear. I need to identify suitable small-molecule CROs in the specified EU regions (Basel/Z\u00fcrich corridor, Cambridge UK) that possess high-throughput automation capabilities, including northern blot automation, and can handle hit-to-lead through GLP tox, with a focus on speed. The budget is \u20ac2.5M for three programs, with the first compound hitting the wet-lab by October 1st. I'll prioritize speed, then cost, then IP, even trading equity for faster timelines.\n\nMy next step is to research these specific CROs to understand their capabilities in detail, focusing on their automation platforms, specific services (HTS, ADME, northern blot automation, in-vivo PoC), and presence in the target regions. I will also look for any information regarding their typical project timelines and engagement models."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"WuXi AppTec small molecule drug discovery services automation high-throughput EU Basel Zurich Cambridge\"]:\n\n\nSources: https://wuxibiology.com/drug-discovery-services/hit-finding-and-screening-services/, https://wuxibiology.com/discovery-development-europe-2025/, https://www.wuxiapptec.com/services/drug, https://www.wuxiapptec.com/, https://labtesting.wuxiapptec.com/new-modalities/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Evotec small molecule drug discovery services automation high-throughput EU Basel Zurich Cambridge\"]:\n\n\nSources: https://www.evotec.com/solutions/drug-discovery-preclinical-development/discovery/hit-identification-services/high-throughput-screening-hts-services, https://www.evotec.com/solutions/drug-discovery-preclinical-development/discovery, https://www.evotec.com/sciencepool/small-molecule-drug-discovery, https://www.evotec.com/page/whitepaper-accelerating-chemistry-innovation-with-evotecs-hte-platform, https://www.evotec.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Other small molecule CROs with automation capacity Europe Basel Zurich Cambridge drug discovery services\"]:\n\n\nSources: https://oxfordglobal.com/discovery-development/events/discovery-development-europe-2025/archive, https://oxfordglobal.com/discovery-development/events/discovery-development-europe, https://www.labiotech.eu/best-biotech/small-molecule-drug-discovery-companies/, https://www.bio2bevents.com/bosbasel2022/programme, https://www.contractresearchmap.com/places/switzerland"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Northern blot automation services CRO drug discovery\"]:\n\n\nSources: https://www.aurigeneservices.com/services/discovery/protac-synthesis-and-screening, https://www.bio-techne.com/p/simple-western/jess-automated-western-blot-system_004-650, https://www.avancebio.com/tecchnology/genomic-services/southern-northern-blotting/, https://tribioscience.com/northern-blot-service/?srsltid=AfmBOopnT960Mkaw4TlKNHrWw9EcFNq4acdXk6jEb3pru7w6jXOgQjrU, https://www.promega.com/applications/small-molecule-drug-discovery/cro-support-cdmo-support/"
+    },
+    {
+      "role": "assistant",
+      "content": "The goal is clear. I need to identify suitable small-molecule CROs in the specified EU regions (Basel/Z\u00fcrich corridor, Cambridge UK) that possess high-throughput automation capabilities, including northern blot automation, and can handle hit-to-lead through GLP tox, with a focus on speed. The budget is \u20ac2.5M for three programs, with the first compound hitting the wet-lab by October 1st. I'll prioritize speed, then cost, then IP, even trading equity for faster timelines.\n\nMy next step is to compile a list of potential CROs based on the initial search results and then delve deeper into their specific service offerings, especially regarding northern blot automation, which seems to be a more niche capability. I will then outline a plan to engage with these CROs."
+    }
+  ],
+  "set_plan_args": {}
+}

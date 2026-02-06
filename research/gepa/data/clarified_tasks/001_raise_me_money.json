@@ -1,0 +1,23 @@
+{
+  "id": "66b2fced-7517-4576-98b4-3f5c3afcf80d",
+  "raw_seed": "Raise me money",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Raise me money"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand your fundraising goal better before I can create an execution plan. Let me ask some clarifying questions so I can help you effectively."
+    },
+    {
+      "role": "user",
+      "content": "Okay, thanks for asking!\n\n1.  I need to raise **$50,000**.\n2.  It's for my **small business**, \"The Daily Grind,\" a coffee shop. I want to open a second location.\n3.  My main target is **local investors** or potentially a **small business loan**. I'm open to crowdfunding too, but prefer investors.\n4.  Ideally, I need the funds by **October 1st** of this year to secure the new lease.\n5.  Yes, I have a **business plan**, a basic **pitch deck**, and my existing coffee shop's **sales figures** and **profit/loss statements** for the last three years. I also have a simple website for the current location.\n6.  \"The Daily Grind\" is a **registered LLC**. We've been operating successfully for three years with a strong local customer base and a good profit margin. I don't have significant collateral beyond the business itself."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have a clear picture now. You need to raise $50,000 for a second location of The Daily Grind coffee shop by October 1st, 2026. You have solid fundamentals: 3 years of operating history, financial statements, a business plan, pitch deck, and an existing customer base. Your strategy is local investors first, with small business loans and crowdfunding as backup options.\n\nI'm ready to create a comprehensive execution plan that covers:\n1. Investor prospecting and outreach (local networks, angel investors, local investment groups)\n2. Small business loan applications (SBA loans, local lenders)\n3. Pitch refinement and materials optimization\n4. Crowdfunding setup (as a parallel track)\n5. Timeline management to hit your October 1st deadline\n6. Follow-up and closing strategies\n\nMoving to plan generation now."
+    }
+  ],
+  "set_plan_args": {}
+}
