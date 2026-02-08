@@ -1,0 +1,131 @@
+{
+  "id": "83a44a31-42e7-4964-aa68-a581cc3688a8",
+  "raw_seed": "Research best practices for sustainable weight loss accountability and habit formation. Cover: how to use MyFitnessPal optimally (what to track, frequency, common mistakes), weekly check-in routines (weigh-ins, measurements, progress photos), how to handle plateaus (diet breaks, refeed days, workout adjustments), recovery and rest day strategies especially for someone with knee sensitivity, sleep and stress management for fat loss, and motivation strategies for maintaining consistency over 4-5 months. Compile into actionable tips.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research best practices for sustainable weight loss accountability and habit formation. Cover: how to use MyFitnessPal optimally (what to track, frequency, common mistakes), weekly check-in routines (weigh-ins, measurements, progress photos), how to handle plateaus (diet breaks, refeed days, workout adjustments), recovery and rest day strategies especially for someone with knee sensitivity, sleep and stress management for fat loss, and motivation strategies for maintaining consistency over 4-5 months. Compile into actionable tips."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research comprehensive best practices for sustainable weight loss accountability and habit formation, covering all the specific areas you mentioned. Let me gather current, evidence-based information on each topic."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"MyFitnessPal optimal tracking practices weight loss 2024 what to track frequency common mistakes\"]:\n\n\nSources: https://www.myfitnesspal.com/, https://blog.myfitnesspal.com/how-to-use-myfitnesspal-for-weight-loss/, https://www.reddit.com/r/Myfitnesspal/comments/1e3wfkx/those_who_have_lost_weight_with_mfp_what_are_your/, https://www.youtube.com/watch%3Fv%3D4i2gaWu84uw, https://blog.myfitnesspal.com/mistakes-people-make-when-using-myfitnesspal-for-weight-loss/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"weekly weight loss check-in routine weigh-ins measurements progress photos best practices\"]:\n\n\nSources: https://natolambert.medium.com/cutting-weight-101-for-athletes-cc2cca0ecd9b, https://www.medicalnewstoday.com/articles/exercise-schedule-for-weight-loss, https://www.reddit.com/r/progresspics/, https://www.healthline.com/health/weight-loss/weigh-yourself-guidelines, https://www.scribd.com/document/883755196/Weekly-Weight-Loss-Checklist"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"weight loss plateau strategies diet breaks refeed days workout adjustments 2024\"]:\n\n\nSources: https://www.mayoclinic.org/healthy-lifestyle/weight-loss/in-depth/weight-loss-plateau/art-20044615, https://levelsprotein.com/blogs/nutrition/refeed-day?srsltid=AfmBOoo0mQkv8h5dgr-TA86UD9g1V8IlNU4Z6wl74qQ1xVcucDTkjJnd, https://www.healthline.com/nutrition/weight-loss-plateau, https://www.ncbi.nlm.nih.gov/books/NBK576400/, https://www.healthline.com/nutrition/refeed-day"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knee sensitive workout recovery rest day strategies weight loss exercise modifications\"]:\n\n\nSources: https://www.totalorthosportsmed.com/preventing-knee-pain-after-rest-days/, https://www.woodlandssportsmedicine.com/blog/tips-for-working-out-when-you-have-a-knee-injury, https://resources.healthgrades.com/right-care/arthritis/8-exercises-for-weight-loss-that-wont-impact-the-knees, https://www.lowcountryortho.com/6-steps-to-faster-recovery-from-knee-injuries-3/, https://workpartnersusa.com/start-working-out-after-knee-injury-safe-exercises-recovery-tips/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sleep stress management fat loss cortisol weight loss optimization research 2024\"]:\n\n\nSources: https://pmc.ncbi.nlm.nih.gov/articles/PMC10746495/, https://pubmed.ncbi.nlm.nih.gov/38232528/, https://pmc.ncbi.nlm.nih.gov/articles/PMC12742212/, https://www.truthaboutweight.global/global/en/managing-your-weight/eight-ways-to-manage-stress-and-mental-barriers-to-weight-loss.html, https://www.sciencedirect.com/science/article/abs/pii/S0306453023009307"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustainable weight loss motivation strategies 4-5 month consistency habit formation psychology\"]:\n\n\nSources: https://www.mayoclinic.org/healthy-lifestyle/weight-loss/in-depth/weight-loss/art-20047752, https://www.cdc.gov/healthy-weight-growth/losing-weight/index.html, https://www.veri.co/learn/how-to-build-healthy-habits-for-weight-loss, https://www.ncbi.nlm.nih.gov/books/NBK221839/, https://pmc.ncbi.nlm.nih.gov/articles/PMC3505409/"
+    },
+    {
+      "role": "assistant",
+      "content": "Completed comprehensive research on sustainable weight loss accountability and habit formation best practices. Gathered current evidence-based information on MyFitnessPal optimization, weekly check-in routines, plateau strategies, knee-friendly recovery approaches, sleep/stress management, and long-term motivation techniques. Ready to compile actionable tips."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research comprehensive best practices for sustainable weight loss accountability and habit formation, covering all the specific areas you've outlined. Let me gather current evidence-based information on these topics."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"MyFitnessPal optimal tracking best practices weight loss 2025\"]:\n\n\nSources: https://blog.myfitnesspal.com/mistakes-people-make-when-using-myfitnesspal-for-weight-loss/, https://blog.myfitnesspal.com/food-trends-2025/, https://blog.myfitnesspal.com/set-the-right-calorie-goal-for-weight-loss/, https://blog.myfitnesspal.com/healthy-weekly-weight-change/, https://www.instagram.com/p/DMcqiXisIHe/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"weekly weigh-in check-in routine best practices weight loss accountability\"]:\n\n\nSources: https://www.bryanhealth.com/services/weight-loss-options/weight-loss-surgery/bryan-bariatrics-newsletter-articles/10-ways-stay-accountable-weight-loss/, https://www.weightwatchers.com/us/blog/health-wellness/how-often-to-weigh-yourself, https://natolambert.medium.com/cutting-weight-101-for-athletes-cc2cca0ecd9b, https://www.heart.org/en/news/2019/01/02/the-pros-and-cons-of-weighing-yourself-every-day, https://evidation.com/blog/weight-loss-accountability"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"plateau breaking diet breaks refeed days weight loss strategies\"]:\n\n\nSources: https://www.reddit.com/r/loseit/comments/7a3k31/stuck_in_a_plateau_try_a_refeed_day_it_worked_for/, https://againfaster.eu/it/blog/breaking-weight-loss-plateaus.html, https://blog.nasm.org/refeeding-101, https://www.healthline.com/nutrition/refeed-day, https://www.getzealthy.com/post/how-to-break-through-a-weight-loss-plateau"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knee sensitive recovery rest days low impact exercise\"]:\n\n\nSources: https://orthoinfo.aaos.org/en/recovery/knee-conditioning-program/, https://www.arthritis-uk.org/information-and-support/living-with-arthritis/health-and-wellbeing/exercising-with-arthritis/exercises-for-healthy-joints/exercises-for-the-knees/, https://alignedortho.com/10-low-impact-exercises-to-relieve-knee-pain/, https://thedacare.org/slow-down-to-speed-up-the-importance-of-rest-days/, https://www.nhs.uk/live-well/exercise/knee-exercises-for-runners/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sleep stress management fat loss weight loss 2025\"]:\n\n\nSources: https://healthcare.utah.edu/weight-management/stress-weight-loss, https://www.sleepfoundation.org/physical-health/weight-loss-and-sleep, https://agurgentcare.com/5-best-ways-to-lose-weight-in-2025/, https://everythingsleepidaho.com/a-new-year-a-new-you-in-2025-how-sleep-can-help-you-achieve-your-health-goals-in-2025/, https://www.theguardian.com/society/2026/jan/18/sleep-stress-and-sunshine-endocrinologists-on-11-ways-to-look-after-your-metabolism"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"motivation consistency habit formation weight loss 4-5 months\"]:\n\n\nSources: https://www.mayoclinic.org/healthy-lifestyle/weight-loss/in-depth/weight-loss/art-20047752, https://www.lesmills.com/articles/habit-forming-advice-e3d5a, https://www.reddit.com/r/loseit/comments/xumyj6/how_do_you_lose_weight_when_you_simply_dont_have/, https://www.cdc.gov/healthy-weight-growth/losing-weight/index.html, https://pmc.ncbi.nlm.nih.gov/articles/PMC11641623/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research comprehensive best practices for sustainable weight loss accountability and habit formation, covering all the areas you've specified. This is a clear, well-defined goal that requires gathering current evidence-based information on multiple topics. Let me start by researching these key areas in parallel."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"MyFitnessPal optimal tracking best practices common mistakes weight loss\"]:\n\n\nSources: https://blog.myfitnesspal.com/mistakes-people-make-when-using-myfitnesspal-for-weight-loss/, https://blog.myfitnesspal.com/essential-guide-to-food-logging/, https://www.reddit.com/r/Myfitnesspal/comments/1e3wfkx/those_who_have_lost_weight_with_mfp_what_are_your/, https://www.youtube.com/watch?v=4i2gaWu84uw, https://blog.myfitnesspal.com/set-the-right-calorie-goal-for-weight-loss/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"weekly weigh-in routine measurements progress photos weight loss tracking\"]:\n\n\nSources: https://www.reddit.com/r/progresspics/, https://apps.apple.com/bb/app/body-measurement-tracker-bmi/id583840813, https://www.teladochealth.com/library/article/weighing-in-with-confidence-building-your-weigh-in-routine, https://8fit.com/lifestyle/how-to-take-progress-pictures-to-help-you-reach-your-fitness-goals/, https://www.kim-pearson.com/tracking-weight-loss-how-to-measure-yourself/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"weight loss plateau diet breaks refeed days workout adjustments\"]:\n\n\nSources: https://onlinedoctor.superdrug.com/weight-loss-plateau.html, https://www.reddit.com/r/loseit/comments/7a3k31/stuck_in_a_plateau_try_a_refeed_day_it_worked_for/, https://www.zing.coach/fitness-library/how-to-break-through-weight-loss-plateau, https://blog.nasm.org/refeeding-101, https://getzealthy.com/post/how-to-break-through-a-weight-loss-plateau"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knee-friendly rest day recovery strategies weight loss training\"]:\n\n\nSources: https://www.dcknee.com/obesity-knee-pain/, https://www.orthobethesda.com/blog/how-to-lose-weight-with-knee-pain/, https://www.youtube.com/watch?v=i96SEOqyAjU, https://resources.healthgrades.com/right-care/arthritis/8-exercises-for-weight-loss-that-wont-impact-the-knees, https://www.youtube.com/watch?v=PsfmoQsFoy0"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sleep stress management fat loss sustainable weight loss\"]:\n\n\nSources: https://healthcare.utah.edu/weight-management/stress-weight-loss, https://pmc.ncbi.nlm.nih.gov/articles/PMC9031614/, https://pmc.ncbi.nlm.nih.gov/articles/PMC3519150/, https://www.sleepfoundation.org/physical-health/weight-loss-and-sleep, https://www.uclahealth.org/news/article/surprising-connection-between-sleep-and-weight-management"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"motivation strategies consistency 4-5 months weight loss habit formation\"]:\n\n\nSources: https://www.mayoclinic.org/healthy-lifestyle/weight-loss/in-depth/weight-loss/art-20047752, https://www.veri.co/learn/how-to-build-healthy-habits-for-weight-loss, https://www.reddit.com/r/loseit/comments/1by7zq8/if_you_had_36_months_to_fully_focus_on_weight/, https://pmc.ncbi.nlm.nih.gov/articles/PMC5764193/, https://pmc.ncbi.nlm.nih.gov/articles/PMC5300101/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research comprehensive best practices for sustainable weight loss accountability and habit formation, covering all the specific areas you've outlined. This is a detailed research task that requires gathering current evidence-based information across multiple topics. Let me begin by searching for best practices in these key areas."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"MyFitnessPal best practices optimal tracking what to track frequency 2025\"]:\n\n\nSources: https://blog.myfitnesspal.com/winter-release/, https://support.myfitnesspal.com/hc/en-us/articles/360032272992-How-often-should-I-record-my-weight-and-other-measurements, https://stayfitmom.com/the-ultimate-guide-to-tracking-macros-with-myfitnesspal/, https://www.youtube.com/watch?v=-kx-vwH-C3Y, https://blog.myfitnesspal.com/nutrition-trend-update-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustainable weight loss weekly check-in routine weigh-ins measurements progress photos\"]:\n\n\nSources: https://www.bluecrossnc.com/blog/healthy-living/fitness/5-ways-to-measure-progress-that-have-nothing-to-do-with-pounds, https://pmc.ncbi.nlm.nih.gov/articles/PMC4380831/, https://www.emoryhealthcare.org/stories/wellness/Practical-Goals-for-Weight-Loss, https://www.uclahealth.org/news/article/a-healthy-road-to-weight-loss-measuring-progress, https://www.sydney.edu.au/news-opinion/news/2024/07/09/how-often-should-you-really-weigh-yourself-.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"weight loss plateaus diet breaks refeed days workout adjustments strategies\"]:\n\n\nSources: https://www.mayoclinic.org/healthy-lifestyle/weight-loss/in-depth/weight-loss-plateau/art-20044615, https://againfaster.eu/it/blog/breaking-weight-loss-plateaus.html, https://www.ncbi.nlm.nih.gov/books/NBK576400/, https://www.reddit.com/r/loseit/comments/7a3k31/stuck_in_a_plateau_try_a_refeed_day_it_worked_for/, https://www.healthline.com/nutrition/weight-loss-plateau"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knee-friendly recovery rest day strategies exercise modifications\"]:\n\n\nSources: https://orthoinfo.aaos.org/en/recovery/knee-conditioning-program/, https://r3physio.com/how-to-start-working-out-again-after-a-knee-injury/, https://alignedortho.com/10-low-impact-exercises-to-relieve-knee-pain/, https://www.healthline.com/health/exercises-for-knee-pain, https://www.totalorthosportsmed.com/preventing-knee-pain-after-rest-days/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sleep stress management fat loss weight loss cortisol 2025\"]:\n\n\nSources: https://www.bswhealth.com/blog/cortisol-belly-how-stress-can-impact-your-weight-and-what-you-can-do-about-it, https://www.stamfordhealth.org/healthflash-blog/nutrition/should-i-try-a-cortisol-diet, https://www.ctcd.edu/sites/myctcd/detail/?p=cortisol-supplements-in-2026-what-really-helps-what-s-hype-and-when-they-make-sense-6976042f6c4a5, https://onlinedoctor.boots.com/weight-loss/10-week-weight-loss-programme/week-9, https://www.gssiweb.org/research/article/fueling-performance-starts-with-sleep--how-sleep-loss-undermines-nutritional-goals"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"long-term weight loss motivation strategies 4-5 months consistency habit formation\"]:\n\n\nSources: https://www.mayoclinic.org/healthy-lifestyle/weight-loss/in-depth/weight-loss/art-20047752, https://hoffa.medium.com/data-driven-weight-loss-how-i-shed-35-pounds-in-4-months-a4271581510a, https://pmc.ncbi.nlm.nih.gov/articles/PMC5300101/, https://www.wikihow.com/Lose-Weight-in-4-Months, https://www.ucsfhealth.org/education/behavior-modification-ideas-for-weight-management"
+    },
+    {
+      "role": "assistant",
+      "content": "**Synthesizing Search Results**\n\nI've been sifting through the search results, focusing on distilling actionable tips. My goal is to synthesize the information on accountability and habit formation for the user. I'm prioritizing practical strategies across several key areas of sustainable weight loss.\n\n\n**Organizing the Compiled Tips**\n\nI'm now outlining the presentation strategy. I will be compiling all research into a structured and easily digestible format. My plan is to process the gathered data, create actionable advice, and then use `send_message_to_user` to provide the end result. The user's request is very clear, and I have completed all the necessary research, so no further clarification is necessary.\n\nI have completed comprehensive research on all the specified topics related to sustainable weight loss accountability and habit formation. My next step is to synthesize this information into actionable tips, addressing MyFitnessPal usage, weekly check-in routines, plateau handling, knee-sensitive recovery, sleep/stress management, and motivation strategies. I will then present these compiled tips."
+    }
+  ],
+  "set_plan_args": {}
+}

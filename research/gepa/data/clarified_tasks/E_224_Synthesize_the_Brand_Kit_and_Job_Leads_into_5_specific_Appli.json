@@ -1,0 +1,23 @@
+{
+  "id": "6b2095f5-f6f5-46de-a45b-512cf6f6aacd",
+  "raw_seed": "Synthesize the Brand Kit and Job Leads into 5 specific Application Packages. For the top 5 opportunities found, write tailored email pitches or cover letters that map the user's law firm skills to the specific requirements of those job descriptions.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Synthesize the Brand Kit and Job Leads into 5 specific Application Packages. For the top 5 opportunities found, write tailored email pitches or cover letters that map the user's law firm skills to the specific requirements of those job descriptions."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand your current situation before I can create tailored application packages. Let me ask some clarifying questions to gather the necessary context."
+    },
+    {
+      "role": "user",
+      "content": "Brand Kit:\n- 6th year associate at Kirkland & Ellis NYC (2018-present)\n- M&A/PE transactions, $500M-$3B range, 40+ deals closed\n- Dual-qualified NY & UK (moved here from Magic Circle)\n- Tech sector focus - led 3 unicorn acquisitions in 2023\n- JD Columbia, BA Oxford, published in Columbia Law Review\n- Value prop: cross-border execution speed + UK regulatory knowledge\n\nJob Leads:\n1. Stripe - Corporate Counsel, M&A (SF) - needs 5+ yrs tech M&A, fintech experience preferred\n2. Silver Lake - VP, Portfolio Operations (NYC) - wants lawyer with PE deal experience for portfolio value creation  \n3. Coinbase - Associate General Counsel, Corporate (Remote) - crypto exchange looking for public company + M&A background\n4. Blackstone - Associate, Private Equity (London) - needs UK-qualified lawyer for European tech investments\n5. Anthropic - Commercial Counsel (SF) - AI company wants lawyer with complex commercial negotiations, some M&A\n\nAll posted in last 2 weeks. Let me know what else you need."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have all the information needed to create 5 tailored application packages mapping your law firm credentials to these specific opportunities. I can see clear angles for each role:\n\n1. **Stripe** - M&A depth + fintech positioning\n2. **Silver Lake** - PE deal experience + value creation track record\n3. **Coinbase** - Public company readiness + crypto-adjacent M&A\n4. **Blackstone** - UK qualification + European tech focus (direct match)\n5. **Anthropic** - Commercial negotiations + M&A flexibility\n\nI'll now create a comprehensive plan to research any recent updates on these roles, then synthesize 5 polished application packages with tailored cover letters/pitches that directly map your credentials to each company's stated needs."
+    }
+  ],
+  "set_plan_args": {}
+}

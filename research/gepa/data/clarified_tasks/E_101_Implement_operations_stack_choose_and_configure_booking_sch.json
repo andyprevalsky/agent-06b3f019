@@ -1,0 +1,23 @@
+{
+  "id": "95ab4386-d840-4531-be83-1f15dedd3563",
+  "raw_seed": "Implement operations stack: choose and configure booking/scheduling, invoicing/payments, customer intake form, quote checklist, and core SOPs (pre-clean, on-site, post-clean, restock, quality control).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Implement operations stack: choose and configure booking/scheduling, invoicing/payments, customer intake form, quote checklist, and core SOPs (pre-clean, on-site, post-clean, restock, quality control)."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the scope and delivery format for this operations stack implementation before proceeding. This is a comprehensive systems project with multiple components, and I want to ensure I build exactly what you need."
+    },
+    {
+      "role": "user",
+      "content": "Great, thanks for breaking this down. Here's what I need:\n\n## My Answers:\n\n**1. Delivery Format:** Both - give me live tool setups I can start using immediately, plus templates/checklists I can customize as we grow.\n\n**2. Booking/Scheduling:** Calendly for now (simple, I'm solo right now). But build it so I can scale to team management later. Just single-user for now.\n\n**3. Invoicing/Payments:** Stripe preferred - I like the dashboard. Need both recurring (monthly maintenance contracts) and one-time payments. Yes, auto-generate invoices from quotes if possible.\n\n**4. Customer Intake Form:** Google Forms is fine - we're already in Google Workspace. Keep it separate from booking but make sure the data flows into my CRM eventually. For now, manual is okay.\n\n**5. Quote Checklist:** Auto-generate from intake data would be ideal. I need quote templates (residential vs. commercial rates are different) and a simple approval workflow before sending to customers.\n\n**6. SOPs Documentation:** Notion - that's where I'm building everything else. Granular step-by-step for on-site procedures (I want to train contractors eventually), but high-level overviews for pre/post-clean planning.\n\n**7. Integration Preference:** Tight integration where"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have all the details I need to implement your complete operations stack. Let me set up the full system for you right now."
+    }
+  ],
+  "set_plan_args": {}
+}

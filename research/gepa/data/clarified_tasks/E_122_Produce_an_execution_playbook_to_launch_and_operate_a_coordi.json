@@ -1,0 +1,27 @@
+{
+  "id": "eb91955c-0b55-4ce8-bf6a-c4b41b4b046a",
+  "raw_seed": "Produce an execution playbook to launch and operate a coordinating initiative (coalition structure, decision rights, legal/entity options, country-entry criteria, comms narrative, fundraising materials outline, and monitoring & evaluation dashboard specification).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Produce an execution playbook to launch and operate a coordinating initiative (coalition structure, decision rights, legal/entity options, country-entry criteria, comms narrative, fundraising materials outline, and monitoring & evaluation dashboard specification)."
+    },
+    {
+      "role": "assistant",
+      "content": "I understand the goal: create a comprehensive execution playbook for launching and operating a coordinating initiative. This is a strategic planning document that requires research into best practices for coalition structures, governance models, legal entity options, and operational frameworks.\n\nLet me clarify the scope before proceeding:\n\n1. Is this initiative focused on a specific sector (e.g., climate, health, development, tech) or is it sector-agnostic?\n2. What geographic scope are we targeting? (Global, regional, specific countries?)\n3. Are there specific existing coalition models you'd like me to reference or avoid?\n4. What's the anticipated initial budget/funding level?\n5. Who are the primary stakeholder types? (NGOs, governments, private sector, academia?)\n6. Timeline: When does this need to launch?\n\nI can proceed with general best-practice frameworks applicable across sectors, but these details will help me tailor the playbook to your specific context."
+    },
+    {
+      "role": "user",
+      "content": "1. **Sector**: Critical mineral supply chains for EV batteries - specifically cobalt, lithium, nickel. Focus on responsible sourcing standards and supply chain transparency.\n\n2. **Geographic**: Starting with DRC-DRC, Chile, Indonesia triangle, then expand to Australia, Canada. Target 12 countries by Year 3.\n\n3. **Stakeholders**: \n   - Core: Tesla, VW, CATL, Glencore, Huayou\n   - NGOs: Pact, Global Witness\n   - Governments: DRC mining ministry, Chile's copper commission, Indonesian energy ministry\n   - Multilaterals: World Bank, EITI\n   - Add academics from Columbia's CCSI and University of Queensland\n\n4. **Timeline**: Soft launch at COP29 (November), full operational by March 2025\n\n5. **Budget**: $8M launch, $25M Year 1. $15M already pledged by Ford Foundation and BMW Foundation. Need to raise remainder.\n\n6. **Models**: Like IRMA (Initiative for Responsible Mining Assurance) but with actual enforcement teeth. Different from RCI (Responsible Cobalt Initiative) by including producer country governments as voting members, not just observers.\n\nNeed this to be implementable - not another talking shop."
+    },
+    {
+      "role": "assistant",
+      "content": ": "
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"IRMA Initiative for Responsible Mining Assurance governance structure legal entity enforcement mechanisms\"]:\n\n\nSources: https://responsiblemining.net/about/governance/, https://responsiblemining.net/about/funding/, https://responsiblemining.net/wp-content/uploads/2023/10/Chapter-1.1-Legal-Compliance.pdf, https://earthworks.org/issues/the-initiative-for-responsible-mining-assurance/, https://b2bhint.com/en/company/us-ca/irma-llc--202355219177"
+    }
+  ],
+  "set_plan_args": {}
+}

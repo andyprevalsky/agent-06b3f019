@@ -1,0 +1,187 @@
+{
+  "id": "b91da3a8-2ced-422e-a968-a33fd8899506",
+  "raw_seed": "Research the complete document checklist for a Canada ICT work permit application from India: passport requirements, photos, biometrics, proof of intra-company relationship, employment letters, education credentials, financial documents, police clearance, medical exam requirements, and any India-specific requirements (e.g., VFS Global process).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research the complete document checklist for a Canada ICT work permit application from India: passport requirements, photos, biometrics, proof of intra-company relationship, employment letters, education credentials, financial documents, police clearance, medical exam requirements, and any India-specific requirements (e.g., VFS Global process)."
+    },
+    {
+      "role": "assistant",
+      "content": "**Examining Requirements Thoroughly**\n\nI'm now fully immersed in dissecting the Canadian Intra-Company Transfer (ICT) work permit application process from India. My current focus is on pinpointing all requisite document categories, encompassing general needs and those unique to India. The research is underway, and I am cross-referencing information to ensure complete accuracy.\n\n\n**Gathering Document Lists**\n\nI'm presently building upon my preliminary search. I'm now delving into the intricacies of both standard and India-specific document requirements for the ICT permit, leveraging web searches. The aim is to create a robust checklist; thus, the focus is now on meticulously organizing and categorizing the documents. My immediate task involves refining search queries and verifying the sources to minimize uncertainty.\n\nI will start by searching for the official document checklist for a Canada ICT work permit application, focusing on requirements for applicants from India. I'll prioritize information from official Canadian government sources (like IRCC) and VFS Global, as specified."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit document checklist India IRCC\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5488.html, https://ircc.canada.ca/english/pdf/kits/forms/IMM5905E.pdf, https://www.y-axis.com/visa/work/canada/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit biometrics requirements India\"]:\n\n\nSources: https://ircc.canada.ca/english/visit/biometrics.asp, https://www.canada.ca/en/immigration-refugees-citizenship/services/biometrics/where-to-give.html, https://visa.vfsglobal.com/ind/en/can/, https://www.canadavisa.com/visiting-canada-biometrics.html, https://visa.vfsglobal.com/ind/en/can/book-an-appointment"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit VFS Global India process\"]:\n\n\nSources: https://visa.vfsglobal.com/ind/en/can/, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://visa.vfsglobal.com/ind/en/can/attend-centre/what-happens-at-centre, https://www.vfsglobal.com/en/individuals/index.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit employment letter requirements\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://iccimmigration.ca/intra-company-transfer/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit.html, https://cifile.org/immigration-to-canada/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit education credentials requirements\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://iccimmigration.ca/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit financial documents requirements\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/documents/proof-funds.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.lbimmigration.ca/info/ict, https://bwimmigration.com/canada-intra-company-transfer-visa-processing-time-costs-and-documentation/, https://schunglaw.com/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit police clearance certificate India\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/police-certificates/how/india.html, https://www.cgitoronto.gov.in/page/pcc-indian-citizen-application/, https://www.blsindia-canada.com/toronto-jurisdiction/pdf/Police-Clearance-Certificate-For-INDIAN-CITIZENS-Toronto.pdf, https://www.cgivancouver.gov.in/public_files/assets/pdf/Final_checklist_PCC_March22.pdf, https://services.vfsglobal.com/usa/en/ind/apply-for-pcc"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit medical exam requirements India\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams/requirements-temporary-residents.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams/requirements-temporary-residents/country-requirements.html, https://www.canadavisa.com/visiting-canada-find-out-if-you-need-a-medical-exam.html, https://www.kansalclinicmohali.com/index.php/canadian-medical-examination/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the complete document checklist for a Canada ICT work permit application from India, covering all the requirements you've specified. Let me gather comprehensive information from official sources."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit application requirements from India 2024 2025\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.y-axis.com/visa/invest/canada/intra-company-transfer/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada intra-company transfer ICT work permit documents checklist\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5488.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://smithstonewalters.com/global-immigration/the-americas/canada-intracompany-transfer-visa"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit passport photo requirements specifications\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/temporary-resident-visa-application-photograph-specifications.html, https://www.canada.ca/content/dam/ircc/migration/ircc/english/pdf/photospecs-e.pdf, https://www.sac-isc.gc.ca/eng/1333474227679/1572461782133, https://www.vfsglobal.com/Norway/Canada/pdf/photo-specifications.pdf, https://www.rrc.ca/international/work-and-immigration/co-op-work-permit/document-checklist/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit biometrics requirements India VFS Global\"]:\n\n\nSources: https://visa.vfsglobal.com/ind/en/can/book-an-appointment, https://visa.vfsglobal.com/ind/en/can/, https://visa.vfsglobal.com/ind/en/can/attend-centre/what-happens-at-centre, https://www.canada.ca/en/immigration-refugees-citizenship/services/biometrics/where-to-give.html, https://ircc.canada.ca/english/visit/biometrics.asp"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit police clearance certificate requirements India\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/police-certificates/how/india.html, https://www.cgitoronto.gov.in/page/pcc-indian-citizen-application/, https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/documents/police-certificates.html, https://www.blsindia-canada.com/toronto-jurisdiction/pdf/Police-Clearance-Certificate-For-INDIAN-CITIZENS-Toronto.pdf, https://www.canadavisa.com/canadian-immigration-police-clearance.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit medical exam requirements IME panel physician India\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams/requirements-temporary-residents.html, https://www.cic.gc.ca/pp-md/pp-list.aspx, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams/requirements-temporary-residents/country-requirements.html, https://www.panelphysician.ca/blog/immigration-medical-exams-in-canada-faq, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit employment letter requirements employer\"]:\n\n\nSources: https://ircc.canada.ca/english/helpcentre/answer.asp?qnum=164&top=17, https://www.canadavisa.com/job-offer-canadian-employer.html, https://ircc.canada.ca/english/helpcentre/answer.asp?qnum=1200&top=17, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit.html, https://www.rippling.com/blog/work-permits-for-employees-in-canada-a-complete-guide-for-employers"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit education credentials assessment requirements\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/documents/education-assessment.html, https://www.wes.org/eca/, https://www.canadavisa.com/educational-credential-assessment.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/atlantic-immigration/education-assessment.html, https://mcc.ca/credentials-and-services/services/educational-credential-assessment/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the complete document checklist for a Canada ICT work permit application from India, covering all the requirements you've specified. Let me gather current information on this process."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit application document checklist requirements 2024 2025\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5488.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://gowlingwlg.com/en/insights-resources/articles/2024/major-changes-to-canadas-intra-company-transferee-work-permit-guidelines, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit passport requirements photo specifications\"]:\n\n\nSources: https://www.canada.ca/content/dam/ircc/migration/ircc/english/pdf/photospecs-e.pdf, https://www.sac-isc.gc.ca/eng/1333474227679/1572461782133, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/temporary-resident-visa-application-photograph-specifications.html, https://www.propassportphoto.com/canada-visa-photo-specification/, https://publications.gc.ca/collections/collection_2022/ircc/Ci4-131-1-2021-eng.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit biometrics requirements India\"]:\n\n\nSources: https://ircc.canada.ca/english/visit/biometrics.asp, https://visa.vfsglobal.com/ind/en/can/, https://www.canada.ca/en/immigration-refugees-citizenship/services/biometrics/where-to-give.html, https://www.canadavisa.com/visiting-canada-biometrics.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/biometrics.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT intra-company transfer work permit proof requirements\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://smithstonewalters.com/global-immigration/the-americas/canada-intracompany-transfer-visa, https://wolfsdorf.com/canada-alert-significant-changes-to-intra-company-transfer-work-permits/, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://iccimmigration.ca/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit employment letter requirements\"]:\n\n\nSources: https://cifile.org/immigration-to-canada/intra-company-transfer/, https://iccimmigration.ca/intra-company-transfer/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/extend/change-jobs-employers.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://yalaw.ca/2025/03/02/what-is-the-intra-company-transfer-ict-program/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit education credentials requirements\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/documents/education-assessment.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit financial documents proof of funds\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/documents/proof-funds.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/caregivers/home-care-worker-immigration-pilots/child-care-home-support/eligibility/proof-funds.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit.html, https://www.canadavisa.com/canada-immigration-settlement-funds.html, https://www.canadavisa.com/intra-company-transfer-program.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit police clearance certificate requirements\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/police-certificates/how.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/police-certificates.html, https://moving2canada.com/immigration/iec/iec-police-certificate/, https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/documents/police-certificates.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/police-certificates/how/united-states.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit medical examination requirements\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams/requirements-temporary-residents.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams/requirements-temporary-residents/country-requirements.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams.html, https://www.mcgill.ca/internationalstudents/work/medical-requirements, https://www.canadavisa.com/visiting-canada-find-out-if-you-need-a-medical-exam.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit India VFS Global application process\"]:\n\n\nSources: https://visa.vfsglobal.com/ind/en/can/, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.vfsglobal.ca/IRCC-GPTWave1/Track/Index?q=shSA0YnE4pLF9Xzwon/x/CQ1P0LBKn66dLdNUfueK+zXVvfCaQtqf4wkl10oKbwhActUUQpLseDw/c2V80Cpow==, https://visa.vfsglobal.com/ind/en/can/attend-centre/what-happens-at-centre, https://www.vfsglobal.com/en/individuals/index.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit India-specific requirements documents\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5488.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the complete document checklist for a Canada ICT (Intra-Company Transfer) work permit application from India. This requires gathering official information from IRCC, VFS Global procedures, and India-specific requirements."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT intra-company transfer work permit document checklist requirements 2024 2025\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5488.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html, https://www.gands.com/blog/2024/02/29/the-canadian-intra-company-transfer-work-permit-explained/, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit passport requirements photo specifications biometrics\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/temporary-resident-visa-application-photograph-specifications.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/biometrics.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/prepare-arrival.html, https://www.canada.ca/content/dam/ircc/migration/ircc/english/pdf/photospecs-e.pdf, https://www.canada.ca/en/immigration-refugees-citizenship/services/biometrics/how-to-give.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT work permit proof of intra-company relationship employment letter requirements Canada\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://iccimmigration.ca/intra-company-transfer/, https://cifile.org/immigration-to-canada/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit education credentials financial documents requirements\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/study-canada/work/after-graduation/eligibility/field-of-study.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/documents/proof-funds.html, https://www.educanada.ca/live-work-vivre-travailler/work-travail/after-apres.aspx%3Flang%3Deng, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit police clearance medical exam requirements IRCC\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/police-certificates/how.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/police-certificates.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/medical-police/medical-exams/requirements-temporary-residents.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit application India VFS Global process requirements\"]:\n\n\nSources: https://visa.vfsglobal.com/ind/en/can/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://visa.vfsglobal.com/ind/en/can/apply-visa, https://www.vfsglobal.com/en/individuals/index.html, https://www.canada.ca/en/immigration-refugees-citizenship/corporate/contact-ircc/offices/find-visa-application-centre.html"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the complete document checklist for a Canada ICT work permit application from India. This requires gathering current information on federal requirements, India-specific processes, and VFS Global procedures."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT Intra-Company Transfer work permit document checklist requirements 2024 2025\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5488.html, https://bwimmigration.com/canada-intra-company-transfer-visa-processing-time-costs-and-documentation/, https://wolfsdorf.com/canada-alert-significant-changes-to-intra-company-transfer-work-permits/, https://www.gands.com/blog/2024/02/29/the-canadian-intra-company-transfer-work-permit-explained/, https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit application from India VFS Global process requirements\"]:\n\n\nSources: https://visa.vfsglobal.com/ind/en/can/, https://visa.vfsglobal.com/ind/en/can/apply-visa, https://www.bankbazaar.com/visa/how-can-i-get-canadian-work-visa-form-india.html, https://visa.vfsglobal.com/ind/en/can/book-an-appointment, https://visa.vfsglobal.com/ind/en/can/attend-centre/what-happens-at-centre"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit passport photo biometric requirements specifications\"]:\n\n\nSources: https://www.canada.ca/content/dam/ircc/migration/ircc/english/pdf/photospecs-e.pdf, https://www.sac-isc.gc.ca/eng/1333474227679/1572461782133, https://www.canada.ca/en/immigration-refugees-citizenship/services/canadian-passports/photos.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/biometrics.html, https://publications.gc.ca/collections/collection_2022/ircc/Ci4-131-1-2021-eng.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT work permit proof of intra-company transfer relationship documents\"]:\n\n\nSources: https://www.canadavisa.com/intra-company-transfer-program.html, https://wolfsdorf.com/canada-alert-significant-changes-to-intra-company-transfer-work-permits/, https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://immigration.ca/intra-company-transferees/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada work permit employment letter financial documents requirements India\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry/documents/proof-funds.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/study-canada/study-permit/get-documents/financial-support.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit.html, https://www.greentreeimmigration.com/proof-of-funds.php"
+    },
+    {
+      "role": "assistant",
+      "content": "I have conducted extensive web research to gather information on the complete document checklist for a Canada ICT work permit application from India. I have focused on official Canadian government sources (IRCC), VFS Global, and other reputable immigration resources. \n\nThe next step is to synthesize this information into a structured plan that covers all the requested document categories, including India-specific requirements and processes."
+    }
+  ],
+  "set_plan_args": {}
+}

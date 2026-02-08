@@ -1,0 +1,23 @@
+{
+  "id": "14e762b3-5917-4582-ba49-93581c3e26b9",
+  "raw_seed": "Execute outreach and conduct initial negotiations with priority CROs. Present technical package, negotiate timeline guarantees for October 1st start, finalize equity/cost trade-offs, and secure term sheet LOIs from 2-3 finalists. Focus on scientific leadership engagement to validate northern blot automation workflow integration.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Execute outreach and conduct initial negotiations with priority CROs. Present technical package, negotiate timeline guarantees for October 1st start, finalize equity/cost trade-offs, and secure term sheet LOIs from 2-3 finalists. Focus on scientific leadership engagement to validate northern blot automation workflow integration."
+    },
+    {
+      "role": "assistant",
+      "content": ","
+    },
+    {
+      "role": "user",
+      "content": "1. Rare neurodegenerative - we're targeting ALS with a SOD1 antisense oligo.  \n2. Just closed Series A ($22 M) last month, so we have cash but need to show runway discipline.  \n3. Deck + data package is 90 % ready - I\u2019ll add the northern-blot SOP this week.  \n4. Budget cap $1.2 M for the full program; willing to carve out up to 0.75 % equity for the right CRO if they hit October start and Q1 proof-of-concept milestone.  \n5. No existing CRO relationships; please short-list ones that have run antisense programs and can handle high-throughput northern for splice-variant quantification.  \n6. We need automated northern for PK/PD read-out - quantify SOD1 mRNA knock-down in murine CNS tissue; 96-well capillary transfer, LICOR imaging, \u22645 % CV between replicates."
+    },
+    {
+      "role": "assistant",
+      "content": "I understand the full context now. This is a precision execution play: identify CROs with antisense + automated northern blot capability, validate scientific fit, negotiate hard on October 1st start + Q1 milestone equity sweeteners, and land 2-3 LOI term sheets with binding timeline guarantees.\n\nKey constraints:\n- $1.2M budget cap, 0.75% equity carve-out as incentive\n- October 1st hard start date (non-negotiable)\n- Q1 proof-of-concept milestone tied to equity\n- Technical requirement: 96-well capillary northern, \u22645% CV, automated, CNS PK/PD quantification\n- No existing relationships\u2014cold outreach required\n- Deck 90% ready + northern SOP incoming this week\n\nStrategy:\n1. Identify 5-7 CROs with published antisense + capillary northern experience\n2. Validate scientific leadership (who runs their bioanalysis/PK division?)\n3. Pre-call positioning: brief technical package + timeline guardrails\n4. Negotiate sequence: scope/timeline \u2192 cost \u2192 equity structure \u2192 LOI terms\n5. Parallel tracks with 3-4 finalists to create competitive tension\n6. Close 2-3 LOIs with binding October start + milestone clauses\n\nI'm ready to execute. Moving to SET_PLAN to structure the outreach campaign."
+    }
+  ],
+  "set_plan_args": {}
+}

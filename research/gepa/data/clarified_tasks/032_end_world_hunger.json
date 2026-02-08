@@ -12,7 +12,7 @@
     },
     {
       "role": "user",
-      "content": "Thanks for breaking this down. Here's what I'm thinking:\n\n**Scope**: Honestly, I want all three combined. Give me current solutions that actually work, then help me build a strategic framework around the most promising ones, and identify realistic funding sources.\n\n**Timeline**: Medium-term is my sweet spot\u20145-10 years. Short-term emergency stuff is important but others are handling it. I want to focus on the systemic changes that'll stick.\n\n**My role**: I'm planning to advocate and potentially fundraise. I work in tech/consulting right now, so I'm not inside an NGO, but I have some connections and could probably mobilize funding from my network if there's a compelling case. I'm not trying to start my own org\u2014I'd rather partner with existing groups doing this well.\n\n**Geographic focus**: Start with Sub-Saharan Africa and South Asia\u2014that's where the hunger concentration is worst. But I want a framework that could scale globally eventually.\n\nSo basically: give me the top 3-5 evidence-backed interventions that work in those regions, show me how they interconnect, and then help me build a pitch deck for potential donors. Make it realistic and actionable\u2014not a white paper that sits on a shelf.\n\nDoes that help narrow it down?"
+      "content": "I want you to accomplish this large task fully autonomously. Giving me a \"plan\" is NOT what i want. I want you to champion this task without any intervention on my part, until it is completed.\n"
     },
     {
       "role": "assistant",

@@ -1,0 +1,35 @@
+{
+  "id": "2f1bf327-23c3-4441-a25e-fff9147d0b41",
+  "raw_seed": "Run the fundraising process playbook through close: sequencing (angels \u2192 funds), meeting prep scripts, objection handling, term-sheet comparison framework, negotiation points, and closing checklist/timeline",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Run the fundraising process playbook through close: sequencing (angels \u2192 funds), meeting prep scripts, objection handling, term-sheet comparison framework, negotiation points, and closing checklist/timeline"
+    },
+    {
+      "role": "assistant",
+      "content": "I understand you want a comprehensive fundraising playbook that covers the entire process from angel investors through institutional funds. This includes meeting preparation, objection handling, term sheet analysis, negotiation strategy, and a closing checklist with timeline. Let me research current best practices and frameworks to build this for you."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"fundraising playbook 2025 2026 angel investors to institutional funds sequencing\"]:\n\n\nSources: https://altss.com/blog/fund-of-funds-the-institutional-lp-guide-for-fund-managers-2026, https://www.angelinvestmentnetwork.net/the-angel-investors-playbook/, https://www.angellist.com/blog/raising-institutional-capital, https://fundraisingplaybooks.substack.com/p/angel-investor-mappping, https://www.angellist.com/blog/insights-from-institutional-lps"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"startup fundraising meeting prep scripts objection handling\"]:\n\n\nSources: https://wrap-text.equals.com/p/how-to-run-a-startup-board-meeting, https://www.brettjfox.com/how-do-you-overcome-investor-objections-in-one-slide/, https://www.cloudtalk.io/blog/cold-calling-scripts-for-fundraising/, https://bloomerang.com/blog/fundraising-script/, https://www.linkedin.com/posts/anshumansinha1_startups-entrepreneurship-venturecapital-activity-7370168919183015937-JKJ-"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"term sheet comparison framework negotiation points\"]:\n\n\nSources: https://seedlegals.com/us/resources/negotiating-your-term-sheet/, https://www.cooleygo.com/negotiating-term-sheets/, https://www.reddit.com/r/startups/comments/c64oxe/the_ultimate_term_sheet_guide_all_terms_and/, https://openviewpartners.com/blog/how-to-pick-a-term-sheet-openviews-5-step-framework/, https://carta.com/learn/startups/fundraising/term-sheets/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"fundraising closing checklist timeline legal requirements\"]:\n\n\nSources: https://www.pwc.be/en/services/small-medium-or-family-business-for-the-future/start-ups-scale-ups/venture-deals/closing-phase.html, https://bloomerang.com/blog/master-your-year-end-fundraising-plan-calendar-checklist/, https://mercury.com/blog/ultimate-pitch-guide-closing-your-round, https://pro.gofundme.com/c/blog/end-of-year-fundraising-checklist/, https://qubit.capital/blog/close-startup-investment-deal"
+    },
+    {
+      "role": "assistant",
+      "content": "The goal is clear. I will now create a plan to generate a comprehensive fundraising playbook. This will involve synthesizing information from the web searches to cover sequencing (angels to funds), meeting prep scripts, objection handling, term-sheet comparison, negotiation points, and a closing checklist/timeline. I will structure this information into a coherent playbook."
+    }
+  ],
+  "set_plan_args": {}
+}

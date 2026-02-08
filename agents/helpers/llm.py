@@ -547,6 +547,7 @@ async def call_llm_structured_streaming(
     on_chunk: Callable[[str, int], Awaitable[None]],
     reasoning_max_tokens: Optional[int] = None,
     model_preference: Optional[str] = None,
+    model_seed: Optional[int] = None,  # Index into Rose model pool (bypasses racing)
     agent_id: Optional[str] = None,  # For cancellation checking
     on_tool_detected: Optional[Callable[[str, str], Awaitable[None]]] = None,  # Called when any tool detected (tool_name, tool_call_id)
     on_attention_stream: Optional[Callable[[str, str, bool], Awaitable[None]]] = None,  # Called with (tool_call_id, message, is_question) for send_message_to_user
@@ -607,6 +608,10 @@ async def call_llm_structured_streaming(
         if model_preference:
             request_body["model_preference"] = model_preference
             logger.info(f"🎯 Streaming with model_preference: {model_preference}")
+
+        if model_seed is not None:
+            request_body["model_seed"] = model_seed
+            logger.info(f"🎯 Streaming with model_seed: {model_seed}")
         
         # Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
         if reasoning_max_tokens:

@@ -1,0 +1,51 @@
+{
+  "id": "183cfea6-34fb-4322-bd82-ab0c41a7e1be",
+  "raw_seed": "Search for currently open, fully remote Virtual Assistant job listings that match these criteria: entry-level or transferable-skills-welcome, $20-25/hr range, lifestyle/health & wellness/creative industries preferred but flexible, smaller teams preferred, EST-friendly timezone. Search across Indeed, LinkedIn, FlexJobs, Upwork, Belay, Time Etc, and other major VA job boards. Compile a list of at least 15-20 specific job listings with links, company names, pay rates, and application deadlines.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Search for currently open, fully remote Virtual Assistant job listings that match these criteria: entry-level or transferable-skills-welcome, $20-25/hr range, lifestyle/health & wellness/creative industries preferred but flexible, smaller teams preferred, EST-friendly timezone. Search across Indeed, LinkedIn, FlexJobs, Upwork, Belay, Time Etc, and other major VA job boards. Compile a list of at least 15-20 specific job listings with links, company names, pay rates, and application deadlines."
+    },
+    {
+      "role": "assistant",
+      "content": "I understand the goal: find 15-20 specific virtual assistant job listings matching your criteria (entry-level/transferable skills, $20-25/hr, remote, EST-friendly, lifestyle/health/wellness/creative industries preferred, smaller teams). I'll search across the major job boards you mentioned to compile a comprehensive list with links, company names, pay rates, and deadlines.\n\nLet me start by researching current openings across these platforms."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"virtual assistant jobs entry level $20-25/hr remote 2026 Indeed\"]:\n\n\nSources: https://www.indeed.com/q-virtual-assistant-$25-hour-l-remote-jobs.html, https://www.indeed.com/q-hourly-$25-l-remote-jobs.html, https://www.indeed.com/q-entry-level-remote-virtual-assistant-jobs.html, https://www.indeed.com/q-$20-per-hour-work-from-home-jobs.html, https://www.indeed.com/q-remote-10-hours-a-week-remote-jobs.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"virtual assistant jobs remote flexible skills LinkedIn 2026\"]:\n\n\nSources: https://www.linkedin.com/jobs/remote-virtual-assistant-jobs, https://hr.linkedin.com/jobs/virtual-assistant-jobs, https://www.linkedin.com/jobs/flexible-schedule-work-from-home-jobs, https://www.linkedin.com/pulse/how-become-virtual-assistant-2026-get-hired-by-linkedin-news-roxre, https://www.linkedin.com/jobs/virtual-assistant-jobs-sacramento-ca"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"FlexJobs virtual assistant entry level remote positions\"]:\n\n\nSources: https://www.flexjobs.com/remote-jobs/virtual-assistant, https://www.flexjobs.com/remote-jobs/entry-level/virtual-assistant, https://www.flexjobs.com/remote-jobs/assistant, https://www.upwork.com/freelance-jobs/virtual-assistant/, https://www.flexjobs.com/remote-jobs/part-time/virtual-assistant"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Upwork virtual assistant jobs $20-25 hourly remote\"]:\n\n\nSources: https://www.upwork.com/hire/virtual-assistants/cost/, https://www.upwork.com/freelance-jobs/virtual-assistant/, https://www.upwork.com/hire/virtual-assistants/, https://www.upwork.com/resources/upwork-hourly-rates, https://www.upwork.com/freelance-jobs/virtual-assistant/atlanta-ga/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Belay virtual assistant jobs entry level remote positions\"]:\n\n\nSources: https://belaysolutions.com/jobs/, https://belaysolutions.com/work-with-us/, https://www.indeed.com/q-belay-l-remote-jobs.html, https://web.fountain.com/apply/belay/opening/virtual-executive-assistant, https://www.ziprecruiter.com/Jobs/Belay-Solutions"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Time Etc virtual assistant job openings remote 2026\"]:\n\n\nSources: https://www.timeetc.com/work-for-us, https://www.timeetc.com/be-a-virtual-assistant/apply, https://www.timeetc.com/careers/positions, https://www.timeetc.com/be-a-virtual-assistant/, https://www.timeetc.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"virtual assistant jobs health wellness lifestyle companies remote\"]:\n\n\nSources: https://www.indeed.com/q-health-wellness-virtual-assistant-l-remote-jobs.html, https://www.upwork.com/freelance-jobs/virtual-assistant/, https://www.simplyhired.com/search?q=virtual+assistant+remote+wellness&l=remote, https://www.ziprecruiter.com/Jobs/Virtual-Medical-Assistant/-in-Cary,NC, https://remote.co/remote-jobs/virtual-assistant"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"creative industry virtual assistant jobs remote entry level\"]:\n\n\nSources: https://www.indeed.com/q-creative-virtual-assistant-l-remote-jobs.html, https://www.glassdoor.com/Job/remote-creative-assistant-jobs-SRCH_IL.0,6_IS11047_KO7,25.htm, https://www.upwork.com/freelance-jobs/virtual-assistant/, https://www.indeed.com/q-remote-creative-assistant-l-remote-jobs.html, https://dailyremote.com/remote-virtual-assistant-jobs"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the initial broad web searches across the specified job boards and for the preferred industries. The next step is to visit these job boards and specific company career pages, filter for the criteria, and extract the relevant job listing details. This will involve a series of web_fetch calls to gather the necessary information.\n\nI will focus on extracting the following for each listing:\n- Job Title\n- Company Name\n- Link to the Job Posting\n- Pay Rate (or range, if specified)\n- Application Deadline (if specified)\n- Key requirements matching 'entry-level or transferable-skills-welcome', 'lifestyle/health & wellness/creative industries preferred', 'smaller teams preferred', 'EST-friendly timezone'.\n\nI will then compile these into the requested list of at least 15-20 specific job listings."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,55 @@
+{
+  "id": "125a2f18-3da8-437a-ae7c-88d37d03b722",
+  "raw_seed": "Research successful sustainability/cleantech startup fundraises in the $500K-$2M range from the past 2 years. Find 5-10 case studies of comparable companies (app-based, circular economy, recycling) - what worked in their pitch, what investors funded them, and lessons learned. Also identify relevant startup accelerators/programs (e.g., Techstars Sustainability, Climate-focused programs) that could provide funding + connections.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research successful sustainability/cleantech startup fundraises in the $500K-$2M range from the past 2 years. Find 5-10 case studies of comparable companies (app-based, circular economy, recycling) - what worked in their pitch, what investors funded them, and lessons learned. Also identify relevant startup accelerators/programs (e.g., Techstars Sustainability, Climate-focused programs) that could provide funding + connections."
+    },
+    {
+      "role": "assistant",
+      "content": ", I'll research successful sustainability/cleantech startup fundraises in the $500K-$2M range from the past 2 years, focusing on app-based, circular economy, and recycling companies. Let me gather comprehensive information on their fundraising strategies, investors, and relevant accelerator programs."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustainability cleantech startup fundraising $500K $2M 2024 2023 app-based circular economy recycling case studies pitch deck investors\"]:\n\n\nSources: https://growthlist.co/india-startups/, https://news.crunchbase.com/clean-tech-and-energy/venture-funding-ends-year-up-eoy-2025/, https://www.startus-insights.com/innovators-guide/top-circular-economy-startups/, https://www.nyserda.ny.gov/-/media/Project/Nyserda/Files/Publications/PPSER/NYSERDA/CEF-2024-annual-Final-Report.pdf, https://qubit.capital/blog/navigate-emerging-cleantech-investment-trends"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Techstars Sustainability accelerators cleantech startup funding programs 2024 2025 Climate Tech accelerator programs\"]:\n\n\nSources: https://www.techstars.com/accelerators, https://www.techstars.com/accelerators/watertech-sustainability, https://www.nature.org/en-us/about-us/who-we-are/how-we-work/technology-and-innovation/techstars-sustainability-accelerator/, https://www.techstars.com/, https://www.techstars.com/techstars-founder-catalyst-watertech-and-sustainability"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"circular economy app startups fundraising success stories $1M seed round investors pitch deck examples 2023 2024\"]:\n\n\nSources: https://www.youtube.com/watch?v=iDyI0oHEZuw, https://circulareconomy.europa.eu/platform/sites/default/files/2024-02/SMART-CIRCUIT_Circular-Success-Stories_brochure_fv.pdf, https://www.olyns.com/press-release/olyns-raises-1m-seed-round-to-accelerate-expansion-of-consumer-recycling-solution, https://bestpitchdeck.com/, https://www.linkedin.com/top-content/innovation/cross-industry-innovation-case-studies/circular-economy-success-stories/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you research successful sustainability/cleantech startup fundraises in the $500K-$2M range. This is a clear research goal with good decomposability. I'll search for case studies of comparable companies and relevant accelerator programs to give you actionable insights."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustainability cleantech startup fundraising $500K-$2M case studies 2024 2025\"]:\n\n\nSources: https://initiatives.weforum.org/financing-transition-community/case-studies/ifc-startup-catalyst/aJYTG0000000abN4AQ, https://qubit.capital/blog/secure-cleantech-funding-strategies-for-startups-key-challenges, https://www.vcsheet.com/sheet/deeptech-funds, https://socialtargeter.com/blogs/case-studies-in-sustainability-how-eco-friendly-startups-are-driving-change-in-the-industry, https://news.crunchbase.com/clean-tech-and-energy/sustainability-funding-falling-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"app-based circular economy startup funding rounds 2024 2025\"]:\n\n\nSources: https://www.startus-insights.com/innovators-guide/top-circular-economy-startups/, https://techcrunch.com/2026/01/19/here-are-the-49-us-ai-startups-that-have-raised-100m-or-more-in-2025/, https://www.seedtable.com/best-circular-economy-startups, https://tracxn.com/d/explore/circular-economy-startups-in-san-francisco-united-states/__t7XzOwrgoCVVkIF6OmRVsig5lKSB_LN3BLr-nwYmPoo/companies, https://growthlist.co/list-of-funded-mobile-app-startups/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"recycling tech startup Series A seed funding successful pitch 2024 2025\"]:\n\n\nSources: https://www.failory.com/startups/recycling, https://www.cdpventurecapital.it/en/news.page%3FcontentId%3DCOM36640, https://www.seedtable.com/best-recycling-startups, https://vestbee.com/insights/articles/climate-tech-market-in-2025-funding-slows-while-europe-doubles-down-on-decarbonization-and-ai, https://techfundingnews.com/supercircle-24m-series-a-textile-waste/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Techstars Sustainability accelerator climate tech funding program\"]:\n\n\nSources: https://www.nature.org/en-us/about-us/who-we-are/how-we-work/technology-and-innovation/techstars-sustainability-accelerator/, https://www.techstars.com/accelerators, https://www.techstars.com/vertical-sustainability, https://www.techstars.com/accelerators/watertech-sustainability, https://accelerate.techstars.com/startup"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"climate tech accelerator programs funding $500K-$2M 2024 2025\"]:\n\n\nSources: https://qubit.capital/blog/navigate-emerging-cleantech-investment-trends, https://startupbootcamp.org/energy-climate-2, https://www.f6s.com/programs/united-states/clean-energy, https://www.cleantechopen.org/en/challenge/2024-cto-accelerator, https://www.vestbee.com/insights/articles/climate-tech-market-in-2025-funding-slows-while-europe-doubles-down-on-decarbonization-and-ai"
+    },
+    {
+      "role": "assistant",
+      "content": "**Seeking Fundraise Success Stories**\n\nI've begun the hunt for those critical case studies. My focus is on app-based ventures, circular economy models, and recycling initiatives. Digging into the $500K-$2M fundraising space, I'm aiming for at least five examples from the last two years. The goal is to isolate winning pitch elements, identify the backers, and extract key lessons learned.\n\n\n**Synthesizing Research Findings**\n\nI'm now sorting through the initial web search data. My goal is to extract key details. First, I'm identifying companies within the specified parameters. Then, for each, I'll extract the pitch highlights, investors, and any relevant lessons. I'll also be pinpointing suitable accelerator programs to build out a useful resource.\n\nI have performed initial web searches to gather information on successful sustainability/cleantech startup fundraises, relevant accelerators, and case studies. I will now process these search results to extract the specific details required for the case studies (pitch, investors, lessons learned) and identify relevant accelerator programs. This will involve synthesizing the information from the various search queries."
+    }
+  ],
+  "set_plan_args": {}
+}

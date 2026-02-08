@@ -1,0 +1,151 @@
+{
+  "id": "690cc229-6862-48ab-9df6-6f959d01b793",
+  "raw_seed": "Determine ICT Work Permit eligibility, application location options (Inside vs Outside Canada), and Global Skills Strategy (GSS) qualification.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Determine ICT Work Permit eligibility, application location options (Inside vs Outside Canada), and Global Skills Strategy (GSS) qualification."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to gather current information about ICT Work Permit eligibility requirements, application locations, and GSS qualifications. Let me search for the latest details from official Canadian immigration sources."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit Canada eligibility requirements 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.canadavisa.com/intra-company-transfer-program.html, https://libertyimmigration.ca/canada-intra-company-transfer-ict-work-permit-2026-requirements-for-executives-managers-specialized-knowledge-c61c62c63/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit application location inside outside Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://bwimmigration.com/canada-intra-company-transfer-visa-processing-time-costs-and-documentation/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Global Skills Strategy GSS qualification ICT Work Permit Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy.html, http://www.ontario.ca/page/global-skills-strategy-fast-referral-service-foreign-talent, https://www.canadavisa.com/global-talent-stream.html, https://www.nortonrosefulbright.com/en/knowledge/publications/15227e13/canada-launches-new-global-skills-strategy"
+    },
+    {
+      "role": "assistant",
+      "content": "Now I have comprehensive information about ICT Work Permit eligibility, application locations, and GSS qualifications. Let me compile this into a detailed response covering all aspects requested."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research current Canadian ICT Work Permit eligibility requirements, application location options, and Global Skills Strategy qualification criteria. This will help create a comprehensive plan for determining eligibility and options."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT Work Permit eligibility requirements 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://www.canadavisa.com/intra-company-transfer-program.html, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/eligibility.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT Work Permit application location inside outside Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.canadim.com/work/work-permits-without-lmia/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Global Skills Strategy GSS ICT Work Permit qualification\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy/eligibility.html, https://www.canadavisa.com/global-talent-stream.html, https://www.visasavenue.com/canada-work/Global-Skills-Strategy-GSS-Visa-of-Canada/"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research current ICT Work Permit eligibility requirements, application location options, and GSS qualification criteria. This is a clear information-gathering task about Canadian immigration policy. Let me search for the most current details."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT Work Permit eligibility requirements 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://bartlaw.ca/2025-09-30-2/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit application location inside outside Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.gands.com/blog/2024/02/29/the-canadian-intra-company-transfer-work-permit-explained/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Global Skills Strategy GSS qualification ICT Work Permit\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy.html, https://cifile.org/immigration-to-canada/intra-company-transfer/, http://www.ontario.ca/page/global-skills-strategy-fast-referral-service-foreign-talent, https://visaserve.ca/global-skills-strategy-work-permits/"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to gather current information about ICT Work Permit eligibility requirements, application locations, and Global Skills Strategy qualifications. Let me search for the official Canadian government resources on this topic."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit eligibility requirements Canada 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://www.canadavisa.com/intra-company-transfer-program.html, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.envoyglobal.com/news-alert/canada-changes-for-intra-company-transfer-permits/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit application location inside outside Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://cifile.org/immigration-to-canada/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Global Skills Strategy GSS qualification ICT Work Permit\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy.html, http://www.ontario.ca/page/global-skills-strategy-fast-referral-service-foreign-talent, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://stip.oecd.org/stip/interactive-dashboards/policy-initiatives/2023%252Fdata%252FpolicyInitiatives%252F16258"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research Canada's ICT Work Permit eligibility requirements, application location options, and Global Skills Strategy (GSS) qualification criteria to provide comprehensive information."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT Work Permit eligibility requirements 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://bartlaw.ca/2025-09-30-2/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions.html, https://iccimmigration.ca/canada-work-permit-rules-changed-new-requirements-faster-extensions-what-applicants-must-know/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit application location inside outside Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.gands.com/blog/2024/02/29/the-canadian-intra-company-transfer-work-permit-explained/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Global Skills Strategy GSS ICT Work Permit qualification\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy/eligibility.html, https://visaserve.ca/global-skills-strategy-work-permits/, http://www.ontario.ca/page/global-skills-strategy-fast-referral-service-foreign-talent"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research the current ICT Work Permit requirements, application locations, and GSS qualifications to provide you with accurate, up-to-date information. Let me gather this information from official Canadian sources."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit Canada eligibility requirements 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.envoyglobal.com/news-alert/canada-changes-for-intra-company-transfer-permits/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit application location inside outside Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Global Skills Strategy GSS ICT Work Permit qualification\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy/eligibility.html, http://www.ontario.ca/page/global-skills-strategy-fast-referral-service-foreign-talent, https://visaserve.ca/global-skills-strategy-work-permits/"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to gather current information about ICT Work Permit eligibility requirements, application locations (inside vs outside Canada), and Global Skills Strategy qualifications. Let me search for the most up-to-date details from official Canadian sources."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Canada ICT Work Permit eligibility requirements 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.envoyglobal.com/news-alert/canada-changes-for-intra-company-transfer-permits/, https://www.canadavisa.com/intra-company-transfer-program.html, https://libertyimmigration.ca/canada-intra-company-transfer-ict-work-permit-2026-requirements-for-executives-managers-specialized-knowledge-c61c62c63/"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research the current ICT Work Permit eligibility requirements, application location options, and Global Skills Strategy qualifications. This is a factual research task about Canadian immigration programs."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit Canada eligibility requirements 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.envoyglobal.com/news-alert/canada-changes-for-intra-company-transfer-permits/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit application location inside outside Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/apply.html, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.garfinkelimmigration.com/2024/10/24/new-guidance-published-about-canadian-ict-work-permits-what-to-know-about-adjudication-location-of-employment-physical-premises-requirement-and-more/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html, https://www.gands.com/blog/2024/02/29/the-canadian-intra-company-transfer-work-permit-explained/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Global Skills Strategy GSS ICT Work Permit qualification requirements\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy.html, https://cifile.org/immigration-to-canada/intra-company-transfer/, http://www.ontario.ca/page/global-skills-strategy-fast-referral-service-foreign-talent, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/global-skills-strategy/eligibility.html"
+    },
+    {
+      "role": "assistant",
+      "content": "Researching ICT Work Permit eligibility, application locations, and GSS qualifications..."
+    },
+    {
+      "role": "assistant",
+      "content": "Researching ICT Work Permit eligibility, application locations, and GSS qualifications..."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT Work Permit eligibility requirements Canada 2026\"]:\n\n\nSources: https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.envoyglobal.com/news-alert/canada-changes-for-intra-company-transfer-permits/, https://immigration.ca/intra-company-transferees/"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the research phase by performing several web searches to gather information on ICT Work Permit eligibility, application location options, and Global Skills Strategy qualifications. I have reviewed the search results to ensure I have a comprehensive understanding of these topics from official and reputable sources. Now I am ready to compile this information into a structured plan."
+    }
+  ],
+  "set_plan_args": {}
+}

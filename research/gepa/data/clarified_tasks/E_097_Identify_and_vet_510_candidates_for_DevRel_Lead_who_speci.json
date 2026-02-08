@@ -1,0 +1,15 @@
+{
+  "id": "6fe28443-b42a-4920-bf7d-611868758368",
+  "raw_seed": "Identify and vet 5-10 candidates for 'DevRel Lead' who specialize in Platform Engineering/Infrastructure and have an active, authentic Twitter presence.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Identify and vet 5-10 candidates for 'DevRel Lead' who specialize in Platform Engineering/Infrastructure and have an active, authentic Twitter presence."
+    },
+    {
+      "role": "assistant",
+      "content": "**Considering Candidate Identification**\n\n\\n\\n\n\nI'm currently focused on the initial phase. I need to figure out the best methods for finding suitable candidates. I'm leaning toward using Twitter search operators and perhaps LinkedIn, focusing on keywords related to Platform Engineering and Infrastructure. After that, I will check the authenticity of their Twitter accounts.\n\n\n**Outlining the Strategy**\n\n\\n\\n\n\nMy current thinking involves a systematic approach. First, I will execute keyword-based searches using `web_search` across LinkedIn, Twitter, and potentially relevant forums to generate a preliminary list. Then, I will use `web_fetch` to scrutinize the profiles and any associated content to confirm their specializations and authenticity. I am focusing on building the search queries now to optimize for precision.\n\nThe goal is to identify and vet 5-10 DevRel Lead candidates with Platform Engineering/Infrastructure specialization and an active, authentic Twitter presence. This will involve searching for relevant profiles, assessing their expertise and Twitter activity, and compiling a concise list. I will start by using web search to find potential candidates and then refine the list based on the specified criteria."
+    }
+  ],
+  "set_plan_args": {}
+}

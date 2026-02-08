@@ -1,0 +1,51 @@
+{
+  "id": "f6a364bd-5c62-4d4f-a47c-7746a2b04933",
+  "raw_seed": "Survey available verifier tools/libraries and services for automated image quality checking (open-source and commercial), noting capabilities, integration points, and limitations",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Survey available verifier tools/libraries and services for automated image quality checking (open-source and commercial), noting capabilities, integration points, and limitations"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research available verifier tools, libraries, and services for automated image quality checking. This is a research goal to gather comprehensive information about both open-source and commercial solutions. Let me search for current offerings in this space."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"open-source image quality verification tools libraries 2024 2025\"]:\n\n\nSources: https://opencv.org/, https://unstract.com/blog/best-opensource-ocr-tools-in-2025/, https://photographylife.com/free-open-source-photo-editors, https://sourceforge.net/directory/image-processing-libraries/, https://www.superannotate.com/blog/computer-vision-libraries"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"commercial image quality checking services automated verification\"]:\n\n\nSources: https://www.veriff.com/, https://www.globalvision.co/, https://www.overview.ai/, https://www.identomat.com/, https://www.parascript.com/products-technology-solutions/payments-processing/checkusability/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"image quality assessment metrics BRISQUE NIQE PSNR SSIM tools\"]:\n\n\nSources: https://github.com/chaofengc/IQA-PyTorch, https://www.mathworks.com/help/images/image-quality-metrics.html, https://www.reddit.com/r/computervision/comments/1hzleql/image_quality_metrics_close_to_human_perception/, https://pmc.ncbi.nlm.nih.gov/articles/PMC11122086/, https://www.researchgate.net/figure/Using-the-six-metrics-PSNR-SSIM-PI-RMSE-BRISQUE-NIQE-to-evaluate-the-average_tbl2_365931461"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research available verifier tools, libraries, and services for automated image quality checking. This is a factual research goal with clear decomposability. I'll search for both open-source and commercial solutions, documenting their capabilities, integration points, and limitations."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"open source image quality assessment tools libraries 2024 2025\"]:\n\n\nSources: https://github.com/chaofengc/IQA-PyTorch, https://www.reddit.com/r/MachineLearning/comments/1h3qcon/whats_the_best_open_source_imageupscaling_model/, https://github.com/topics/image-quality-assessment, https://photographylife.com/free-open-source-photo-editors, https://medium.com/@mayurkoshti12/what-tools-are-best-for-image-processing-in-2024-d4ee8e4cbc81"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"commercial image quality verification services APIs\"]:\n\n\nSources: https://www.globalvision.co/verifyapi, https://marketplace.apilayer.com/image_quality-api, https://imagevision.ai/applications/quality-verification/, https://www.ximilar.com/, https://github.com/chaofengc/Awesome-Image-Quality-Assessment"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"automated image quality checking tools capabilities comparison\"]:\n\n\nSources: https://www.biocompare.com/Bio-Imaging-Microscopy/19333-Image-Analysis-Software-Image-Processing-Software/, https://www.functionize.com/automated-testing/visual-testing-tools, https://www.sciencedirect.com/science/article/pii/S0031320325015535, https://forum.image.sc/t/image-analysis-software-alternatives-and-pricing/76822, https://applitools.com/blog/top-10-visual-testing-tools/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"image quality metrics PSNR SSIM LPIPS open source implementations\"]:\n\n\nSources: https://github.com/SayedNadim/Image-Quality-Evaluation-Metrics, https://www.reddit.com/r/FOSSPhotography/comments/xzjjlv/os_libraries_for_assessing_image_quality/, https://www.reddit.com/r/computervision/comments/1hzleql/image_quality_metrics_close_to_human_perception/, https://github.com/JunyaoHu/common_metrics_on_video_quality, https://github.com/ocampor/image-quality"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed initial research into open-source and commercial tools and services for automated image quality checking. I've gathered information on various tools, libraries, and services, including some common metrics used for image quality assessment (e.g., PSNR, SSIM, BRISQUE, NIQE, LPIPS). I also have some initial leads on their capabilities and potential integration points. My next step is to synthesize this information into a structured plan to fulfill the request. I will outline how I intend to categorize and present the findings."
+    }
+  ],
+  "set_plan_args": {}
+}

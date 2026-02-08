@@ -1,0 +1,23 @@
+{
+  "id": "b3ddd5cd-86c8-419e-99c5-bc1bdeaef391",
+  "raw_seed": "Develop negotiation materials and deal structure options tailored to CROs: speed-for-value levers (incl. 5% equity-for-3-month acceleration option), CNS-only exclusivity stance, IP/data ownership positions, milestone/payment schedule, capacity reservation, penalties/credits for slips, and redline checklist for MSA/SOW",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Develop negotiation materials and deal structure options tailored to CROs: speed-for-value levers (incl. 5% equity-for-3-month acceleration option), CNS-only exclusivity stance, IP/data ownership positions, milestone/payment schedule, capacity reservation, penalties/credits for slips, and redline checklist for MSA/SOW"
+    },
+    {
+      "role": "assistant",
+      "content": "**Understanding the Brief**\n\nI'm now diving deeper into the user's request, specifically the meaning of \"negotiation materials.\" It's clear this is a key component. I'm considering what kinds of documents, presentations, or even strategies might be required for effective negotiations with CROs.\n\n\n**Defining the Core Task**\n\nI'm presently focusing on what constitutes 'negotiation materials' in the context of CRO deals. I've begun compiling a list of potential components, including presentation templates, term sheets, and model contracts. I\u2019m leaning towards a structured approach, addressing each element requested by the user, incorporating the speed-for-value equity option, and then refining for CNS exclusivity.\n\nThe goal is to develop comprehensive negotiation materials and deal structure options for CROs, covering various critical aspects. To ensure I deliver the most effective and practical materials, I need to understand the desired format and depth. Specifically, are the 'negotiation materials' expected to be a strategic document, a template, or a set of talking points?"
+    },
+    {
+      "role": "user",
+      "content": "I need a practical toolkit I can hand to our BD lead Sarah for our meeting with Synapse CRO next Tuesday. Give me: (1) a one-page battlecard with talking points and fallback positions, (2) a redline-ready MSA/SOW template with our preferred language in track-changes and their likely pushback in comments, and (3) a simple Excel sheet showing three deal structures\u2014standard 12-month, accelerated 9-month with 5% equity kicker, and capacity-reservation model with 20% prepayment\u2014so she can model cash impact on the fly."
+    },
+    {
+      "role": "assistant",
+      "content": "Creating practical negotiation toolkit for Sarah's Synapse CRO meeting"
+    }
+  ],
+  "set_plan_args": {}
+}

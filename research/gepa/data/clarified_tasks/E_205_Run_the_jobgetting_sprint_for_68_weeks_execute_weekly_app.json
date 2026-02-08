@@ -1,0 +1,23 @@
+{
+  "id": "2701de2a-1b6c-4a3a-abea-b5c1bc88ab8d",
+  "raw_seed": "Run the job-getting sprint for 6\u20138 weeks: execute weekly applications (10\u201315/wk), targeted cold outreach (20/wk), systematic follow-ups, and tracker updates until interviews/offers are secured",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Run the job-getting sprint for 6\u20138 weeks: execute weekly applications (10\u201315/wk), targeted cold outreach (20/wk), systematic follow-ups, and tracker updates until interviews/offers are secured"
+    },
+    {
+      "role": "assistant",
+      "content": "**Analyzing the Strategy**\n\nI'm currently breaking down the proposed job-getting sprint. It's clear that weekly application volume is key, alongside strategic outreach and persistent follow-ups. The tracker updates appear critical for measuring progress and identifying areas for improvement throughout the process. I am keen to see how we can optimize for the best results.\n\n\n**Formulating a Framework**\n\nI am now focusing on setting up the underlying structure for this sprint. Before I can provide any tangible deliverables, I must determine the current state of the project. I'll need to know whether the user has the foundational elements already in place, such as resume, cover letters, and a target list. Then, I can begin to define the specific outputs.\n\nThe goal is to 'run' a 6-8 week job-getting sprint, which involves managing weekly applications (10-15/wk), targeted cold outreach (20/wk), systematic follow-ups, and tracker updates until interviews/offers are secured. This is a continuous process that requires significant input and execution from the user. My role will be to help set up the necessary infrastructure and provide guidance for this sprint. Before I can plan the execution, I need to clarify what resources and systems are currently in place, and what the user expects me to directly 'run' vs. 'facilitate'.\n\nI'll start by asking some clarifying questions to understand the current situation and the user's expectations for my involvement in this ongoing process."
+    },
+    {
+      "role": "user",
+      "content": "Okay, glad to provide more details!\n\n1.  **Resume/Cover Letter:** Yes, I have a solid resume for a Senior Product Manager role, updated last month. I also have a basic cover letter template, but it definitely needs tailoring for each application.\n2.  **Target List:** I have a rough list of about 15-20 companies I'm really interested in (mostly tech, mid-to-large size, like Google, Microsoft, Adobe, Salesforce). Beyond that, I'm open, but I haven't done a deep dive into other specific roles or companies yet.\n3.  **Tracking Tools:** Right now, I'm just using a basic Google Sheet for tracking. For outreach, I've used LinkedIn messages and some cold emails, but it's pretty ad-hoc. No dedicated CRM or anything.\n4.  **My Expectations:** I'd like you to help with setting up a more robust tracking system (maybe a better G-sheet or suggest something else), refining my cold outreach messages, and definitely systematic follow-up strategies. I'll execute the applications and outreach myself, but guidance on *what* to send and *when* for follow-ups would be huge. Also, any help identifying more companies/roles would be great."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect \u2014 you\u2019ve got the raw material.  I\u2019ll set up the infrastructure (tracker, outreach scripts, company expansion list) and give you a week-by-week playbook so you can focus on execution.  Stand by for the full sprint kit."
+    }
+  ],
+  "set_plan_args": {}
+}

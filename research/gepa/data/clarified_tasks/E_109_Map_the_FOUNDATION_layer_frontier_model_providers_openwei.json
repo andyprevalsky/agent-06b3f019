@@ -1,0 +1,63 @@
+{
+  "id": "4d9e0f5d-5ae8-437a-bb22-d5d73158d6df",
+  "raw_seed": "Map the FOUNDATION layer: frontier model providers, open-weight ecosystems, fine-tuning providers, model licensing/pricing, distribution channels (cloud marketplaces), and key differentiators (context, multimodal, cost/latency, safety). Output as structured tables aligned to the taxonomy.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Map the FOUNDATION layer: frontier model providers, open-weight ecosystems, fine-tuning providers, model licensing/pricing, distribution channels (cloud marketplaces), and key differentiators (context, multimodal, cost/latency, safety). Output as structured tables aligned to the taxonomy."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll map the FOUNDATION layer of the AI model ecosystem by researching current frontier model providers, open-weight ecosystems, fine-tuning providers, and distribution channels. This requires gathering current data on the landscape as of February 2026."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"frontier model providers 2026 GPT Claude Gemini Llama\"]:\n\n\nSources: https://zapier.com/blog/best-llm/, https://medium.com/thedeephub/six-ai-nuggets-raised-differently-how-gpt-gemini-claude-llama-grok-and-deepseek-think-alike-f2ba803c7554, https://www.reddit.com/r/SaaS/comments/1qvhr5y/15_ai_development_companies_dominating_2026_i/, https://medium.com/%40future_agi/top-11-llm-api-providers-in-2026-7eb5d235ef27, https://www.crn.com/news/ai/2026/the-10-ai-startup-companies-to-watch-in-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"open-weight AI models 2026 Llama Mistral Phi ecosystem\"]:\n\n\nSources: https://mistral.ai/news/mistral-3, https://ai.meta.com/blog/meta-llama-3/, https://vertu.com/lifestyle/navigating-the-world-of-open-source-large-language-models-a-comprehensive-guide/?srsltid=AfmBOopW9DWP6fUT093u3oLWlp9Lxxyqfnz9mZvzh3nKQDKh-Hd_tAkN, https://www.wired.com/story/mistral-voxtral-real-time-ai-translation/, https://ultraaiguide.com/llama-3-1-master-guide-2026/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI fine-tuning providers 2026 modal replicate together\"]:\n\n\nSources: https://www.siliconflow.com/articles/en/the-cheapest-model-fine-tuning-provider, https://modal.com/blog/llm-fine-tuning-overview, https://www.youtube.com/watch?v=xzXeb9b3nIk, https://futureagi.substack.com/p/top-11-llm-api-providers-in-2026, https://www.cio.com/article/4128177/the-rise-of-genai-in-decision-intelligence-trends-and-tools-for-2026-and-beyond.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"model licensing pricing 2026 commercial open source\"]:\n\n\nSources: https://www.flexsin.com/blog/what-are-the-most-sought-after-open-source-licences-in-2026/, https://www.swfte.com/blog/open-source-llm-cost-savings-guide, https://www.openbom.com/blog/product-feature-updates/press-release-openbom-announces-new-2026-pricing-model-designed-to-scale-with-customer-growth, https://thenewstack.io/forks-clouds-and-the-new-economics-of-open-source-licensing/, https://aarambhdevhub.medium.com/open-source-ai-vs-paid-ai-for-coding-the-ultimate-2026-comparison-guide-ab2ba6813c1d"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI model distribution cloud marketplaces AWS Azure Hugging Face 2026\"]:\n\n\nSources: https://www.synergylabs.co/blog/ai-marketplaces-distribution-new-product-2026, https://aws.amazon.com/blogs/apn/powering-partner-success-2026-innovations/, https://azure.microsoft.com/en-us/blog/design-your-ai-and-agent-strategy-with-microsoft-marketplace/, https://www.forbes.com/sites/rscottraynovich/2026/01/22/how-ai-will-shape-cloud-services--infrastructure-in-2026/, https://aws.amazon.com/bedrock/marketplace/"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research the current state of the FOUNDATION layer of AI/ML infrastructure to map frontier model providers, open-weight ecosystems, fine-tuning providers, licensing, distribution channels, and key differentiators. This requires current data on model providers, their offerings, and market positioning as of early 2026."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"frontier model providers 2026 OpenAI Anthropic Google DeepMind\"]:\n\n\nSources: https://openai.com/index/introducing-openai-frontier/, https://red.anthropic.com/2026/zero-days/, https://openai.com/business/frontier/, https://www.eesel.ai/blog/openai-frontier-alternatives, https://www.anthropic.com/news/claude-opus-4-6"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"open-weight models 2026 Llama Mistral ecosystem\"]:\n\n\nSources: https://kairntech.com/blog/articles/top-open-source-llm-models-in-2026/, https://dev.to/lightningdev123/top-5-local-llm-tools-and-models-in-2026-1ch5, https://www.bentoml.com/blog/navigating-the-world-of-open-source-large-language-models, https://vertu.com/lifestyle/navigating-the-world-of-open-source-large-language-models-a-comprehensive-guide/?srsltid=AfmBOopKU_saakmRJEWmRZ7FbHyzwI9cXZyh4KG7nE9LpOQP6PU74H2o, https://vapi.ai/blog/mistral-vs-llama-3"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"fine-tuning providers 2026 modal replicate together ai\"]:\n\n\nSources: https://medium.com/@whyamit101/replicate-vs-together-ai-a-practical-guide-c73bf0600420, https://www.siliconflow.com/articles/en/the-most-reliable-enterprise-fine-tuning-service, https://www.together.ai/, https://getdeploying.com/replicate-vs-together-ai, https://www.digitalrealty.com/resources/blog/ai-predictions"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"model licensing pricing 2026 open source commercial\"]:\n\n\nSources: https://saigontechnology.com/blog/software-pricing-models/, https://aarambhdevhub.medium.com/open-source-ai-vs-paid-ai-for-coding-the-ultimate-2026-comparison-guide-ab2ba6813c1d, https://www.openbom.com/blog/product-feature-updates/openbom-2026-pricing-subscription-model, https://sciative.com/research-articles/12-pricing-trends-to-watch-in-2026, https://www.truefoundry.com/blog/solo-ai-gateway-pricing-a-complete-breakdown-for-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cloud model marketplaces 2026 AWS SageMaker Hugging Face\"]:\n\n\nSources: https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-marketplace.html, https://aws.amazon.com/ai/hugging-face/, https://huggingface.co/spaces/Sanbear12/ai-model-marketplace-deluxe, https://aws.amazon.com/marketplace/resources/seller-conference-2024, https://docs.aws.amazon.com/sagemaker/latest/dg/hugging-face.html"
+    },
+    {
+      "role": "assistant",
+      "content": "I've gathered comprehensive data on the AI model ecosystem foundation layer. Let me structure this into organized tables covering frontier model providers, open-weight ecosystems, fine-tuning providers, licensing/pricing models, distribution channels, and key differentiators."
+    }
+  ],
+  "set_plan_args": {}
+}

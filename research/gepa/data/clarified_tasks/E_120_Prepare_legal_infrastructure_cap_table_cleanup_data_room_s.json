@@ -1,0 +1,43 @@
+{
+  "id": "9549be2a-1835-41a5-a3bf-e20e82624533",
+  "raw_seed": "Prepare legal infrastructure: cap table cleanup, data room setup, SAFE/equity docs, and due diligence materials",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Prepare legal infrastructure: cap table cleanup, data room setup, SAFE/equity docs, and due diligence materials"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the scope and context of this legal infrastructure preparation task before creating an execution plan.\n\nThis is a substantial project that typically involves creating or organizing multiple document types and systems. To plan effectively, I need to understand:\n\n1. **Current state**: Do you have existing cap table data, SAFE agreements, or equity documents that need cleaning up? Or are we starting from scratch?\n\n2. **Company stage**: Are you preparing for a specific funding round, acquisition, or general compliance?\n\n3. **Scope specifics**: \n   - Cap table: How many shareholders/option holders?\n   - Data room: Should this be physical, digital (e.g., VDR), or both?\n   - SAFE/equity docs: Do you have templates, or need custom drafting?\n   - Due diligence materials: What type (financial, legal, operational)?\n\n4. **Timeline**: When do you need this completed?\n\n5. **Resources**: Do you have legal counsel, or should the plan include recommendations for templates/tools?\n\n6. **Deliverables format**: Do you want templates, actual documents, a system setup guide, or all three?\n\nLet me know these details so I can create a precise, actionable plan rather than a generic one."
+    },
+    {
+      "role": "user",
+      "content": "1. **Current State**: We have a messy cap table in Excel - 3 founders, 8 employees with options, 2 angel investors. One SAFE from 2022 ($250k) and a convertible note from 2021 ($150k) that needs converting. Definitely cleanup mode.\n\n2. **Company Stage**: Raising $3M seed round. Targeting first closes by end of Q1 2025.\n\n3. **Scope**: \n   - 13 total stakeholders (3 founders, 8 employees, 2 angels)\n   - Data room: Google Drive is fine for now, upgrade to Carta if needed\n   - SAFE docs: Need new ones - raising $500k on SAFE before seed\n   - Due diligence: Full package - financials, legal, IP, employment, cap table\n\n4. **Timeline**: Need everything buttoned up by January 15th\n\n5. **Legal Support**: Have Wilson Sonsini for the round but want to prep everything before engaging them (save on billable hours)\n\n6. **Deliverables**: Need the actual documents organized, templates for new SAFEs, and a setup guide for maintaining going forward\n\nWe incorporated in Delaware in 2020, 83(b)s filed for founders. Have standard IP assignments but need to check if all employees signed."
+    },
+    {
+      "role": "assistant",
+      "content": "\nI'll research the current best practices for seed round legal preparation and gather specific requirements for your situation, then create a comprehensive execution plan."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"seed round legal preparation checklist 2025 cap table cleanup data room\"]:\n\n\nSources: https://www.cakeequity.com/guides/clean-cap-table, https://raisetalks.com/blog/data-room-checklist-pre-seed-startups-2025/, https://www.lazo.us/blog/legal-data-room-for-startups-2025-guide, https://seedlegals.com/resources/clean-cap-table/, https://www.foundercatalyst.com/blog/the-ultimate-guide-to-data-rooms-for-pre-seed-fundraising"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SAFE agreement templates 2024 Y Combinator post-money valuation cap\"]:\n\n\nSources: https://www.ycombinator.com/documents, https://www.gilion.com/basics/simple-agreement-for-future-equity-safe, https://www.cooleygo.com/generate-y-combinator-safe/, https://www.wallstreetprep.com/knowledge/safe-note/, https://velawood.com/post-money-safe-does-not-mean-founders-equity-is-safe/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"convertible note conversion mechanics seed round legal requirements\"]:\n\n\nSources: https://www.sjkplawfirm.com/insights/convertible-note-agreement-in-new-york, https://www.vcstack.io/blog/deep-dive-convertible-notes, https://www.law.upenn.edu/clinic/entrepreneurship/startupkit/convertible-note.pdf, https://spzlegal.com/blog/safes-convertible-notes-pre-seed-funding, https://velawood.com/the-mechanics-of-converting-convertible-notes/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Wilson Sonsini seed round due diligence package requirements\"]:\n\n\nSources: https://www.wsgr.com/a/web/pCVpBbH4fm4HEFDtgD3Mt4/ir-checklist.pdf, https://www.wsgr.com/en/services/practice-areas/corporate/u-s-expansion/us-expansion-library-and-resources.html, https://www.wsgr.com/email/college-for-clients-series/2024/VC-Financing/PPT-2024-C4C-VC-Financing-Fundamentals.pdf, https://ecvc.wsgr.com/neuron, https://www.wsgr.com/a/web/n8n4y3YDvQaFEtFxnUR4xP/start-up-toolkit.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have enough clarity to build a comprehensive execution plan. This is a well-scoped legal infrastructure project with real commercial constraints (Q1 2025 closes, pre-seed SAFE raise, WilsonSonsini engagement). Let me structure the work into parallel and sequential phases.\n\nKey observations:\n- Cap table cleanup + convertible note conversion are blocking items for everything else\n- SAFE docs and DD materials can proceed in parallel once cap table is solid\n- IP assignment verification is a quick audit that runs parallel\n- Data room setup is a mechanical task that follows document completion\n- You're smart to prep before WilsonSonsini engagement - this saves significant legal fees\n\nI'm ready to generate an execution plan that will deliver: (1) cleaned cap table with note conversion modeled, (2) new SAFE templates and pre-seed SAFE docs, (3) complete DD materials organized, (4) Google Drive data room structure with maintenance guide, and (5) IP assignment audit results."
+    }
+  ],
+  "set_plan_args": {}
+}

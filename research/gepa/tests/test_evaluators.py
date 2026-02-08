@@ -18,7 +18,7 @@ class TestMEStub:
 
     @pytest.mark.asyncio
     async def test_stub_returns_eval_result(self):
-        result = await evaluate_me('Book a flight', VALID_LINEAR_2)
+        result, _ = await evaluate_me('Book a flight', VALID_LINEAR_2)
         assert hasattr(result, 'passed')
         assert hasattr(result, 'score')
         assert hasattr(result, 'reasoning')
@@ -29,7 +29,7 @@ class TestCEStub:
 
     @pytest.mark.asyncio
     async def test_stub_returns_eval_result(self):
-        result = await evaluate_ce('Book a flight', VALID_LINEAR_2)
+        result, _ = await evaluate_ce('Book a flight', VALID_LINEAR_2)
         assert hasattr(result, 'passed')
         assert hasattr(result, 'score')
         assert hasattr(result, 'reasoning')
@@ -40,7 +40,7 @@ class TestComplexityStub:
 
     @pytest.mark.asyncio
     async def test_stub_returns_eval_result(self):
-        result = await evaluate_complexity('Book a flight', VALID_LINEAR_2)
+        result, _ = await evaluate_complexity('Book a flight', VALID_LINEAR_2)
         assert hasattr(result, 'passed')
         assert hasattr(result, 'score')
         assert hasattr(result, 'reasoning')
@@ -56,7 +56,7 @@ class TestMEBehavioral:
     @pytest.mark.xfail(reason='STUB: awaiting LLM evaluator implementation')
     async def test_independent_tasks_pass(self):
         """Two independent tasks should be mutually exclusive."""
-        result = await evaluate_me('Book a flight and reserve a hotel', VALID_DIAMOND_4)
+        result, _ = await evaluate_me('Book a flight and reserve a hotel', VALID_DIAMOND_4)
         assert 'STUB' not in result.reasoning
         assert result.passed is True
         assert result.score >= 0.9
@@ -70,7 +70,7 @@ class TestMEBehavioral:
             {'goal': 'Search for flights', 'tool_name': 'web_search', 'depends_on': []},
             {'goal': 'Search for flights', 'tool_name': 'web_search', 'depends_on': []},
         ])
-        result = await evaluate_me('Book a flight', duplicate)
+        result, _ = await evaluate_me('Book a flight', duplicate)
         assert 'STUB' not in result.reasoning
         assert result.passed is False
         assert result.score < 0.5
@@ -81,7 +81,7 @@ class TestCEBehavioral:
     @pytest.mark.asyncio
     @pytest.mark.xfail(reason='STUB: awaiting LLM evaluator implementation')
     async def test_full_coverage(self):
-        result = await evaluate_ce('Search and compare flights', VALID_LINEAR_2)
+        result, _ = await evaluate_ce('Search and compare flights', VALID_LINEAR_2)
         assert 'STUB' not in result.reasoning
         assert result.passed is True
         assert result.score >= 0.9
@@ -95,7 +95,7 @@ class TestCEBehavioral:
             {'goal': 'Search for flights', 'tool_name': 'web_search', 'depends_on': []},
             {'goal': 'Search again', 'tool_name': 'web_search', 'depends_on': []},
         ])
-        result = await evaluate_ce('Search, compare, and book the cheapest flight', incomplete)
+        result, _ = await evaluate_ce('Search, compare, and book the cheapest flight', incomplete)
         assert 'STUB' not in result.reasoning
         assert result.passed is False
         assert result.score < 0.8
@@ -106,7 +106,7 @@ class TestComplexityBehavioral:
     @pytest.mark.asyncio
     @pytest.mark.xfail(reason='STUB: awaiting LLM evaluator implementation')
     async def test_simple_children_pass(self):
-        result = await evaluate_complexity(
+        result, _ = await evaluate_complexity(
             'Plan a complete international trip with flights, hotels, and activities',
             VALID_DIAMOND_4,
         )
@@ -121,6 +121,6 @@ class TestComplexityBehavioral:
             {'goal': 'Plan entire international trip with flights hotels activities and dining', 'tool_name': 'web_search', 'depends_on': []},
             {'goal': 'Confirm booking', 'tool_name': 'web_search', 'depends_on': [0]},
         ])
-        result = await evaluate_complexity('Book a hotel', complex_child)
+        result, _ = await evaluate_complexity('Book a hotel', complex_child)
         assert 'STUB' not in result.reasoning
         assert result.passed is False

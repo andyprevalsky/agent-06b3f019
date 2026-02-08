@@ -1,0 +1,15 @@
+{
+  "id": "a0bfdcd3-3d85-493a-bdf1-3045b1982f8f",
+  "raw_seed": "Research and compile 20+ data analyst job postings from LinkedIn and Indeed matching criteria (Data Analyst, BI Analyst, Marketing Analyst; remote/hybrid Chicago; entry-level/1-2 years; full-time). Capture job titles, companies, application URLs, and key requirements in organized format.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research and compile 20+ data analyst job postings from LinkedIn and Indeed matching criteria (Data Analyst, BI Analyst, Marketing Analyst; remote/hybrid Chicago; entry-level/1-2 years; full-time). Capture job titles, companies, application URLs, and key requirements in organized format."
+    },
+    {
+      "role": "assistant",
+      "content": "**Gathering Job Postings**\n\nI've begun the task of sourcing data analyst job postings. My primary focus is on LinkedIn and Indeed, filtering for remote or hybrid roles in the Chicago area. I'm targeting entry-level positions and those requiring one to two years of experience. I'm focusing on \"Data Analyst,\" \"BI Analyst,\" and \"Marketing Analyst\" job titles. I aim to collect at least 20 full-time postings that meet these parameters.\n\n\n**Refining Data Extraction Methods**\n\nI've moved on to the next phase, which is figuring out how to efficiently get the data. Considering my limited tools, I'll need to use `web_search` and `web_fetch`. My plan is to start with highly specific search queries on both platforms, targeting Chicago, remote roles, and the initial job titles. Then I will scrape the results. From each, I'll extract and store the title, company, application URL, and crucial requirements.\n\nThe goal is clear. I need to gather at least 20 job postings from LinkedIn and Indeed based on the specified criteria. I will use web search to find relevant job listings and then fetch details from individual job pages. The extracted information will include job titles, companies, application URLs, and key requirements. I will then compile this into an organized format. I will start by crafting search queries for both platforms and then fetching the results."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,75 @@
+{
+  "id": "4b598446-081d-4437-994f-ad4740190fdc",
+  "raw_seed": "Research best practices for supporting a friend experiencing work burnout and sleep issues \u2014 focusing on how to be supportive without being preachy, stress-relief activities to do together, and how to help someone through a high-pressure deadline period without adding to their stress.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research best practices for supporting a friend experiencing work burnout and sleep issues \u2014 focusing on how to be supportive without being preachy, stress-relief activities to do together, and how to help someone through a high-pressure deadline period without adding to their stress."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research best practices for supporting a friend with work burnout and sleep issues, focusing on practical, non-judgmental approaches and concrete activities you can do together."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to support friend work burnout without being preachy\"]:\n\n\nSources: https://cliniclesalpes.com/blog/how-to-help-someone-with-burnout/, https://www.workplacestrategiesformentalhealth.com/resources/Someone-you-care-about-may-be-experiencing-burnout, https://introspectivecounselingllc.com/signs-burnout-strong-friend-detroit-mi/, https://www.reddit.com/r/socialwork/comments/lmcg8r/how_do_you_give_support_to_struggling_friends/, https://www.teale.io/en/blog/how-to-support-someone-experiencing-burnout"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"stress relief activities to do with friend together\"]:\n\n\nSources: https://www.healthhub.sg/well-being-and-lifestyle/mental-wellness/surprisingly-healthy-activities-fun-with-friends, https://www.henryford.com/Blog/2020/06/Fun-Calming-Activities-Relieve-Stress, https://thriveworks.com/blog/date-night-ideas-anxious-depressed-partner/, https://www.goodhousekeeping.com/health/wellness/g32226840/stress-relief-activities/, https://www.reddit.com/r/AskReddit/comments/5le6dj/what_are_some_fun_creative_budget_friendly/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to help friend through high pressure deadline without adding stress\"]:\n\n\nSources: https://thriveglobal.com/articles/12-ways-to-comfort-a-friend-or-co-worker-going-through-a-hard-time, https://www.reddit.com/r/IWantToLearn/comments/gaeliy/iwtl_how_to_helpsupport_someone_who_is_going/, https://www.quora.com/If-you-see-your-friend-stressed-out-and-need-help-because-his-her-parents-have-high-expectations-in-him-her-in-what-way-would-you-help-the-person-step-by-step, https://valla.uk/guides/how-to-support-friends-having-a-tough-time-at-work, https://brandongordon75.medium.com/how-to-make-stress-your-friend-and-get-things-done-on-time-39ffc783453f"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"supporting someone with sleep deprivation burnout best practices\"]:\n\n\nSources: https://www.sleephealthfoundation.org.au/sleep-topics/burnout-and-sleep, https://www.teale.io/en/blog/how-to-support-someone-experiencing-burnout, https://www.nhlbi.nih.gov/health/sleep-deprivation/healthy-sleep-habits, https://www.helpguide.org/mental-health/stress/burnout-prevention-and-recovery, https://www.psychiatry.org/news-room/apa-blogs/preventing-burnout-protecting-your-well-being"
+    },
+    {
+      "role": "assistant",
+      "content": "Researching best practices for supporting a friend with work burnout and sleep issues, focusing on non-judgmental approaches and practical activities."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research best practices for supporting a friend through work burnout and sleep issues, focusing on practical, non-judgmental approaches. This is a clear goal with good decomposability\u2014I can gather evidence-based information on supportive communication, shared stress-relief activities, and deadline-period support strategies."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to support friend with work burnout without being preachy compassionate approach\"]:\n\n\nSources: https://cliniclesalpes.com/blog/how-to-help-someone-with-burnout/, https://ctrinstitute.com/blog/5-pathways-healing-compassion-fatigue/, https://headsupguys.org/help-friend-manage-stress/, https://pmc.ncbi.nlm.nih.gov/articles/PMC7225246/, https://www.wondermind.com/article/how-to-help-someone-with-anxiety/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"stress relief activities to do with a friend during burnout\"]:\n\n\nSources: https://notesbythalia.com/burnout-activities/, https://mypacifichealth.com/10-fun-activities-to-relieve-stress/, https://www.henryford.com/Blog/2020/06/Fun-Calming-Activities-Relieve-Stress, https://health.ucdavis.edu/blog/cultivating-health/feeling-burned-out-how-hobbies-laughter-and-enjoying-community-can-help/2024/02, https://positivepsychology.com/self-care-activities-groups/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to help friend through high pressure deadline without adding stress\"]:\n\n\nSources: https://www.studenthealth.virginia.edu/news/how-support-friend-who-struggling, https://brandongordon75.medium.com/how-to-make-stress-your-friend-and-get-things-done-on-time-39ffc783453f, https://www.youtube.com/watch?v=q6L_xKrTuq8, https://headsupguys.org/help-friend-manage-stress/, https://www.mind.org.uk/information-support/types-of-mental-health-problems/stress/helping-someone-whos-stressed/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"supporting someone with sleep issues and work stress best practices\"]:\n\n\nSources: https://sleepeducation.org/war-between-job-stress-sleep/, https://www.apa.org/topics/healthy-workplaces/work-stress, https://bbrfoundation.org/blog/how-get-good-night-sleep-when-stressed, https://www.michiganmedicine.org/health-lab/6-tips-quality-sleep-after-going-back-workplace, https://www.hopkinsmedicine.org/health/wellness-and-prevention/sleepless-nights-try-stress-relief-techniques"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm researching best practices for supporting a friend with work burnout and sleep issues. This is a clear goal with three distinct focus areas: non-preachy support, shared stress-relief activities, and deadline period help. I'll gather current evidence-based guidance on these topics."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to support friend work burnout without being preachy advice\"]:\n\n\nSources: https://www.reddit.com/r/socialwork/comments/lmcg8r/how_do_you_give_support_to_struggling_friends/, https://cliniclesalpes.com/blog/how-to-help-someone-with-burnout/, https://www.workplacestrategiesformentalhealth.com/resources/Someone-you-care-about-may-be-experiencing-burnout, https://www.helpguide.org/mental-health/stress/burnout-prevention-and-recovery, https://www.teale.io/en/blog/how-to-support-someone-experiencing-burnout"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"stress relief activities to do with friend together\"]:\n\n\nSources: https://www.henryford.com/Blog/2020/06/Fun-Calming-Activities-Relieve-Stress, https://www.goodhousekeeping.com/health/wellness/g32226840/stress-relief-activities/, https://thriveworks.com/blog/date-night-ideas-anxious-depressed-partner/, https://www.healthhub.sg/well-being-and-lifestyle/mental-wellness/surprisingly-healthy-activities-fun-with-friends, https://www.reddit.com/r/AskReddit/comments/5le6dj/what_are_some_fun_creative_budget_friendly/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"helping friend through high pressure deadline without adding stress\"]:\n\n\nSources: https://www.reddit.com/r/IWantToLearn/comments/gaeliy/iwtl_how_to_helpsupport_someone_who_is_going/, https://www.orchestratehealth.com/supporting-your-colleagues-in-high-pressure-environments-a-stress-awareness-guide/, https://www.reddit.com/r/AskAcademia/comments/4uidm2/tricks_and_tips_for_dealing_with_the_stress_of/, https://www.forbes.com/councils/forbesbusinesscouncil/2019/12/17/15-recommendations-for-handling-deadline-stress/, https://www.friendshipwithintention.com/blog/60-ways-to-be-a-supportive-friend"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the initial research on best practices for supporting a friend experiencing work burnout and sleep issues, focusing on how to be supportive without being preachy, stress-relief activities to do together, and how to help someone through a high-pressure deadline period without adding to their stress. I now have sufficient information to formulate a plan."
+    }
+  ],
+  "set_plan_args": {}
+}

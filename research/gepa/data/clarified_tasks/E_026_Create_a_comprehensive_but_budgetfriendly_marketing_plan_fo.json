@@ -1,0 +1,15 @@
+{
+  "id": "1c03fe6e-944c-4686-9d1e-94b93a430aa9",
+  "raw_seed": "Create a comprehensive but budget-friendly marketing plan for Harbor Home Cleaning to acquire 10 recurring customers within 90 days. Cover: (1) Local SEO strategy (Google Business Profile optimization, citations, review generation), (2) Nextdoor posting strategy and best practices, (3) Flyer design guidance, distribution strategy, and estimated costs, (4) Other low-cost channels (Facebook local groups, Thumbtack, Yelp, referral program), (5) Paid ads micro-budget allocation from ~$100-150/month. Include a 90-day marketing calendar with specific weekly actions.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create a comprehensive but budget-friendly marketing plan for Harbor Home Cleaning to acquire 10 recurring customers within 90 days. Cover: (1) Local SEO strategy (Google Business Profile optimization, citations, review generation), (2) Nextdoor posting strategy and best practices, (3) Flyer design guidance, distribution strategy, and estimated costs, (4) Other low-cost channels (Facebook local groups, Thumbtack, Yelp, referral program), (5) Paid ads micro-budget allocation from ~$100-150/month. Include a 90-day marketing calendar with specific weekly actions."
+    },
+    {
+      "role": "assistant",
+      "content": "I'm ready to create a comprehensive, budget-friendly marketing plan for Harbor Home Cleaning. The goal is clear: acquire 10 recurring customers within 90 days using low-cost channels with specific tactical guidance. I have all the information needed to develop a detailed plan covering local SEO, Nextdoor, flyers, free channels, micro-budget paid ads, and a 90-day calendar. Let me proceed with planning and execution."
+    }
+  ],
+  "set_plan_args": {}
+}

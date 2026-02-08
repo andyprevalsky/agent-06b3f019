@@ -1,0 +1,23 @@
+{
+  "id": "e41a630d-6405-48ae-b79b-b1e69173abc7",
+  "raw_seed": "Assemble the final submission packet for the booked appointment date: document ordering, photocopy set, photo specs, insurance purchase/verification, booking strategy for flights/accommodation consistent with requirements, and a day-of-appointment checklist (biometrics, consent forms, fee payment, courier options).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Assemble the final submission packet for the booked appointment date: document ordering, photocopy set, photo specs, insurance purchase/verification, booking strategy for flights/accommodation consistent with requirements, and a day-of-appointment checklist (biometrics, consent forms, fee payment, courier options)."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the context of this appointment before I can assemble the submission packet. This appears to be a visa application, immigration procedure, or similar formal appointment process, but I need to understand the specific details to create accurate documentation."
+    },
+    {
+      "role": "user",
+      "content": "Okay, thanks for the quick response!\n\n1.  It's a **UK Spouse Visa application** appointment.\n2.  **United Kingdom**.\n3.  Yes, the appointment is booked for **November 15, 2024**.\n4.  I have my passport, marriage certificate, and my husband's passport. I need to order my police certificate and get an English language test certificate.\n5.  Yes, there's an official checklist on the UKVI website, and the fee is \u00a31,048. I also know there are strict photo specs for digital submissions.\n6.  Yes, I'm booking flights and accommodation to London for the appointment, as I live outside the UK."
+    },
+    {
+      "role": "assistant",
+      "content": ": Researching UK Spouse Visa submission packet requirements and creating comprehensive execution plan"
+    }
+  ],
+  "set_plan_args": {}
+}

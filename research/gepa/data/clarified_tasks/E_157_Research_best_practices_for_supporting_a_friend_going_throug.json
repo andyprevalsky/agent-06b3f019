@@ -1,0 +1,59 @@
+{
+  "id": "494fbaec-302e-41cd-a668-185a557e1efd",
+  "raw_seed": "Research best practices for supporting a friend going through a breakup and apartment move \u2014 focusing on emotional support techniques, how to help someone who is isolating, and practical moving help strategies. Also find ideas for low-pressure social activities that help someone reconnect.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research best practices for supporting a friend going through a breakup and apartment move \u2014 focusing on emotional support techniques, how to help someone who is isolating, and practical moving help strategies. Also find ideas for low-pressure social activities that help someone reconnect."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research comprehensive best practices for supporting a friend through a breakup and apartment move. This is a well-defined goal with clear focus areas: emotional support, addressing isolation, practical moving help, and reconnection activities. Let me gather current best practices and expert guidance."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best practices emotional support friend going through breakup\"]:\n\n\nSources: https://www.wondermind.com/article/how-to-help-a-friend-through-a-breakup/, https://www.reddit.com/r/BreakUps/comments/s67ku5/if_you_could_give_one_piece_of_advice_for_someone/, https://www.psychologytoday.com/us/blog/maybe-maybe-knot/202502/5-real-tips-for-supporting-someone-experiencing-a-breakup, https://letyourdreamsbegin.com/life-skills/things-to-say-to-a-friend-going-through-a-breakup/, https://www.cosmopolitan.com/relationships/a69733903/what-to-say-to-someone-going-through-breakup/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to help friend who is isolating after breakup\"]:\n\n\nSources: https://www.wondermind.com/article/how-to-help-a-friend-through-a-breakup/, https://www.crisistextline.org/blog/2025/02/11/friend-breakup-advice/, https://www.reddit.com/r/BreakUps/comments/1519xbn/how_do_i_deal_with_going_through_a_breakup_when_i/, https://www.reddit.com/r/AskWomenOver30/comments/10vtxg2/how_do_you_overcome_feelings_of_isolationregret/, https://tribecatherapy.com/blog/dont-hide-after-breakup-you-need-your-friends-family-and-therapist"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"practical moving help strategies supporting friend\"]:\n\n\nSources: https://jessicalynnwrites.com/2019/09/help-someone-whos-moving/, https://peoplebloomcounseling.com/blog/2018/3/8/5-tips-to-help-a-friend-move-with-less-frustration, https://www.reddit.com/r/LifeProTips/comments/t1mn6l/lpt_someone_asks_you_to_help_them_move_ive_always/, https://www.quora.com/What-are-some-ways-a-relative-or-friend-can-help-while-you-are-packing-and-moving, https://twomenandatruck.com/how-to/get-out-helping-your-friends-move"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"low pressure social activities reconnect after breakup\"]:\n\n\nSources: https://ahead-app.com/blog/Heartbreak/7-healing-hobbies-to-try-after-breakup-what-to-do-for-emotional-recovery, https://ahead-app.com/blog/Heartbreak/after-breakup-what-to-do-rebuild-your-social-circle-without-awkwardness, https://www.reddit.com/r/lostafriend/comments/1ktkxk8/has_anyone_here_successfully_reconnected_with_a/, https://www.coachinghappiness.ph/50-things-to-do-after-a-breakup-thats-great-for-your-wellbeing/, https://www.reddit.com/r/BreakUps/comments/15hkwuv/please_tell_me_every_single_working_activity/"
+    },
+    {
+      "role": "assistant",
+      "content": "Research completed successfully. Found comprehensive best practices covering emotional support strategies, techniques for helping isolated friends, practical moving assistance tips, and low-pressure social reconnection activities. Ready to create a detailed plan with actionable steps for supporting your friend through this transition."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research best practices for supporting someone through a breakup and apartment move. This involves gathering evidence-based emotional support techniques, strategies for helping isolated friends, practical moving assistance, and low-pressure social activities. Let me start by searching for comprehensive guidance on these topics."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best practices emotional support friend going through breakup\"]:\n\n\nSources: https://www.wondermind.com/article/how-to-help-a-friend-through-a-breakup/, https://www.reddit.com/r/BreakUps/comments/s67ku5/if_you_could_give_one_piece_of_advice_for_someone/, https://www.cosmopolitan.com/relationships/a69733903/what-to-say-to-someone-going-through-breakup/, https://peoplebloomcounseling.com/blog/2018/9/10/friend-this-is-how-to-support-me-during-a-break-up, https://time.com/7310455/friend-breakup-what-to-say/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to help friend who is isolating depression withdrawal\"]:\n\n\nSources: https://www.samhsa.gov/, https://www.mayoclinic.org/diseases-conditions/depression/in-depth/depression/art-20045943, https://www.helpguide.org/mental-health/depression/helping-someone-with-depression, https://guidelighthealth.com/difficult-discussions-5-supportive-ways-to-help-a-friend-with-depression/, https://www.mind.org.uk/information-support/types-of-mental-health-problems/depression/for-friends-and-family/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"practical moving help strategies supporting friend relocation\"]:\n\n\nSources: https://jessicalynnwrites.com/2019/09/help-someone-whos-moving/, https://www.quora.com/What-are-some-ways-a-relative-or-friend-can-help-while-you-are-packing-and-moving, https://twomenandatruck.com/how-to/get-out-helping-your-friends-move, https://www.reddit.com/r/Home/comments/16gotnx/what_are_some_good_tips_life_hacks_to_use_when/, https://greatnationmoving.com/how-to-get-friends-to-help-you-move/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"low-pressure social activities reconnect after breakup isolation\"]:\n\n\nSources: https://www.reddit.com/r/AskWomenOver30/comments/10vtxg2/how_do_you_overcome_feelings_of_isolationregret/, https://www.reddit.com/r/Edmonton/comments/1c5h0qv/i_could_use_a_pep_talk_im_moving_through_a_recent/, https://www.reddit.com/r/BreakUps/comments/15hkwuv/please_tell_me_every_single_working_activity/, https://www.coachinghappiness.ph/50-things-to-do-after-a-breakup-thats-great-for-your-wellbeing/, https://ahead-app.com/blog/Heartbreak/overcoming-loneliness-post-breakup-why-isolation-delays-healing"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the research phase. I've gathered information on emotional support techniques, strategies for helping someone who is isolating, practical moving help, and ideas for low-pressure social activities. I am now ready to compile this information into a structured plan to support your friend."
+    }
+  ],
+  "set_plan_args": {}
+}

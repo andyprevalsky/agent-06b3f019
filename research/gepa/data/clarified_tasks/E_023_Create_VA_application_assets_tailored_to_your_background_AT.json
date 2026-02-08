@@ -1,0 +1,23 @@
+{
+  "id": "67e0b90f-1d2e-4f17-af96-6c894ae35b5f",
+  "raw_seed": "Create VA application assets tailored to your background: ATS-friendly resume, LinkedIn headline/about/experience rewrites, 2 cover letter templates (agency + small team), and a simple portfolio/one-pager outline (services, tools, mini case studies from transferable work)",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create VA application assets tailored to your background: ATS-friendly resume, LinkedIn headline/about/experience rewrites, 2 cover letter templates (agency + small team), and a simple portfolio/one-pager outline (services, tools, mini case studies from transferable work)"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify your background to create tailored VA application assets. You haven't provided information about your professional experience, skills, tools you're proficient with, or the type of VA work you're targeting."
+    },
+    {
+      "role": "user",
+      "content": "Here are the details you asked for!\n\n1.  **Current/Previous Role(s)**: My background is primarily in **office administration** and **event coordination**. My last role was Office Manager for a small tech startup.\n2.  **Years of Experience**: I have 7 years of experience.\n3.  **Core Skills**: My top skills are:\n    *   Calendar Management\n    *   Email Management\n    *   Travel Planning\n    *   Event Logistics & Coordination\n    *   Vendor Management\n    *   Basic Bookkeeping Support\n    *   Document Preparation\n4.  **Tools/Software**: I'm proficient in:\n    *   Google Workspace (Gmail, Calendar, Docs, Sheets, Slides)\n    *   Microsoft Office Suite (Word, Excel, PowerPoint, Outlook)\n    *   Zoom\n    *   Slack\n    *   Asana\n    *   QuickBooks Online (basic data entry/categorization)\n    *   Canva (for simple presentations/invites)\n5.  **VA Specialization**: I'm most interested in an **Administrative VA** or **Executive VA** role. I enjoy supporting busy professionals and handling the day-to-day operations.\n6.  **Transferable Wins**:\n    *   **Reduced office supply spending by 15%** ($500/month average) through vendor negotiation and implementing a new inventory tracking system"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have all the details I need to create comprehensive VA application assets tailored to your administrative background and experience. You have strong foundational skills (7 years in office management/events), clear specialization focus (Administrative/Executive VA), and a quantifiable win to showcase. I'm ready to build:\n\n1. ATS-friendly resume highlighting your office admin + event coordination background with metrics\n2. LinkedIn headline, about section, and experience rewrites optimized for VA positioning\n3. Two cover letter templates (one for agencies, one for small teams)\n4. Portfolio/one-pager outline with services, tools, and case study frameworks\n\nI'll ensure all assets emphasize your ability to manage executive workflows, reduce operational friction, and support busy professionals. Let me proceed with the plan."
+    }
+  ],
+  "set_plan_args": {}
+}

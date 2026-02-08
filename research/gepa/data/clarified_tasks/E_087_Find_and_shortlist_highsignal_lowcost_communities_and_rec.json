@@ -1,0 +1,87 @@
+{
+  "id": "63be6dde-0a6c-4011-b5dc-e2bdeb733440",
+  "raw_seed": "Find and shortlist high-signal, low-cost communities and recurring events (local + online) that fit the user\u2019s city, budget, and goals; produce a 4-weeks event pipeline + outreach/DM templates",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Find and shortlist high-signal, low-cost communities and recurring events (local + online) that fit the user\u2019s city, budget, and goals; produce a 4-weeks event pipeline + outreach/DM templates"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to gather information about the user's location, budget, goals, and preferences before I can create a meaningful community and event pipeline. Let me ask these clarifying questions."
+    },
+    {
+      "role": "user",
+      "content": "1. **Location:** Austin, TX (Central Time). I\u2019m near South Lamar but can drive 20\u201330 mins.  \n2. **Budget:** $50\u2013100/month (prefer free/low-cost; okay paying for 1 good event).  \n3. **Primary goals:** Meet strong builders/operators, find potential collaborators for side projects, and grow my network for future product roles (PM/early-stage).  \n4. **Interests/industries:** Startups/SaaS, product management, AI/ML tooling, analytics/data, no-code automation; also interested in creator economy/marketing but more from a \u201cgrowth for products\u201d angle.  \n5. **Time availability:** ~4\u20136 hours/week. Best times are Tue\u2013Thu evenings and Saturday mornings.  \n6. **Preferred format:** Hybrid\u2014ideally 2 in-person things per month + 1\u20132 online recurring meetups per week."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have all the context I need. You're in Austin with a tight budget and specific time windows, looking for high-signal builder communities and events that lead to collaborations and network growth. I'm going to research Austin's startup/tech ecosystem, identify recurring communities and events that match your interests and availability, then produce a 4-week event pipeline with outreach templates.\n\nLet me search for:\n1. Austin startup/tech communities and recurring meetups\n2. Online communities focused on product, SaaS, and AI tooling\n3. Free or low-cost events in your availability window\n4. Specific recurring events happening now (Feb 2026)"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin TX startup tech meetups communities 2026 free low-cost\"]:\n\n\nSources: https://www.austinstartupmeetup.com/, https://sxsw.com/conference/startups/, https://www.idealist.org/en/nonprofit/1b84a0b127134fc98cd72cdde583a59c-austin-free-net-austin, https://techconglobal.com/techcon-southwest-2026/, https://about.startupgrind.com/startup-mania-2026/?utm_source=website&utm_medium=navigation"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin product management SaaS AI meetups recurring events\"]:\n\n\nSources: https://www.meetup.com/producttank-austin/, https://www.eventbrite.com/d/tx--austin/product-management/, https://www.meetup.com/aittg-austin/, https://www.meetup.com/ai-austin/, https://www.meetup.com/find/us--tx--austin/product-management/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"online communities builders product managers SaaS 2026\"]:\n\n\nSources: https://cpoclub.com/career/best-product-management-communities/, https://saasytrends.com/blog/saas-trends, https://bettermode.com/blog/building-online-community-saas-companies, https://saas.group/communities/, https://www.higherlogic.com/blog/online-community-software/"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have all the context I need. Austin has a vibrant startup and tech community, and with your budget and availability, I can find high-signal, low-cost communities and recurring events that match your goals. Let me research Austin-specific communities, recurring meetups, and online spaces for builders, PMs, and early-stage founders."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin Texas startup founder meetups 2024 2025 free low-cost\"]:\n\n\nSources: https://www.every.io/blog-post/startups-events-texas, https://www.austinstartupmeetup.com/, https://www.austinstartupmeetup.com/november-2025-austin-startup-ecosystem-update/, https://www.thesmallbusinessexpo.com/blog/5-networking-events-in-austin/, https://www.austinstartupmeetup.com/july-2025-austin-startup-ecosystem-update-event-details/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin PM product management meetup groups recurring\"]:\n\n\nSources: https://www.meetup.com/find/us--tx--austin/product-management/, https://www.meetup.com/producttank-austin/, https://www.meetup.com/product-management-austin/, https://austinvop.com/austin-product-events-21c7a9cd297f, https://www.meetup.com/austin-developing-product-managers-meetup/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin AI ML data analytics tech communities South Lamar\"]:\n\n\nSources: https://www.meetup.com/ac-aus/, https://luma.com/austin-tech-scene, https://www.meetup.com/ai-austin/, https://community.databricks.com/t5/events/databricks-austin-meetup/ev-p/61332, https://www.aitxcommunity.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin SaaS founder networking events recurring\"]:\n\n\nSources: https://saastock-usa.com/, https://www.meetup.com/austin-startup-meetup/, https://saas.group/events/, https://www.flowcap.com/post/top-16-virtual-conferences-for-startups-in-2021, https://novelcapital.com/10-networking-events-for-early-stage-b2b-saas/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"online PM product management communities recurring meetups 2025\"]:\n\n\nSources: https://www.productplan.com/learn/product-manager-communities/, https://www.pragmaticinstitute.com/conference/, https://danolsen.substack.com/p/best-product-conferences-of-2025, https://www.prodpad.com/blog/product-management-conferences/, https://airfocus.com/blog/pm-conferences-events-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have clear parameters: Austin-based builder looking to meet strong operators and collaborators, $50-100/month budget, 4-6 hrs/week availability (Tue-Thu evenings, Sat mornings), hybrid preference (2x in-person/month + 1-2x online/week). Goals are network-building for PM/early-stage roles in startups/SaaS/AI/ML/no-code space. Now I'll research Austin's startup ecosystem, identify high-signal communities and recurring events, then build a 4-week pipeline with outreach templates."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin TX startup community meetups 2026 product management founders\"]:\n\n\nSources: https://www.meetup.com/product-management-austin/, https://dev.events/AM/US/TX/Austin/product, https://www.meetup.com/austin-startup-meetup/, https://www.austinstartupmeetup.com/, https://cpoclub.com/career/best-product-management-conferences/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin SaaS AI ML meetups recurring events free low cost\"]:\n\n\nSources: https://www.meetup.com/ai-austin/, https://www.meetup.com/austin-ai-machine-learning-data-science/, https://www.eventbrite.com/d/tx--austin/tech-meetup/, https://www.builtinaustin.com/articles/5-austin-organizations-will-teach-you-code-free, https://www.meetup.com/aittg-austin/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin no-code automation community builders networking\"]:\n\n\nSources: https://networkautomation.forum/autocon4, https://www.eventbrite.com/e/vibe-coding-build-software-without-coding-tickets-1981806668093, https://fueler.io/blog/top-no-code-agencies-in-austin, https://www.meetup.com/coder-austin-network/, https://www.facebook.com/groups/austinstartups/posts/3481643065226458/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin startup founder groups networking events South Lamar area\"]:\n\n\nSources: https://www.meetup.com/austin-connections/, https://luma.com/austin-tech-scene, https://www.austinstartupmeetup.com/, https://www.meetup.com/austin-startup-founder-101/, https://www.reddit.com/r/Austin/comments/1qidwfh/new_to_austin_south_lamar_looking_to_make_friends/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"online communities builders operators SaaS product management 2026\"]:\n\n\nSources: https://cpoclub.com/career/best-product-management-communities/, https://software.brussels/content/uploads/2025/12/final_202512_eyp_hubbrussel_saastrends_brochure_vf.pdf, https://www.higherlogic.com/blog/online-community-software/, https://towardsdatascience.com/why-saas-product-management-is-the-best-domain-for-data-driven-professionals-in-2026/, https://jetbase.io/blog/18-saas-application-ideas-in-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have all the context needed. You're in Austin with a $50-100/month budget, looking for high-signal communities and recurring events that connect you with builders/operators for collaborations and future PM/early-stage roles. Your availability is Tue-Thu evenings and Sat mornings for 4-6 hours/week.\n\nNow I'm creating a comprehensive 4-week event pipeline with:\n1. Austin-specific startup/tech communities and recurring meetups\n2. Online communities focused on product, SaaS, and AI tooling\n3. Free/low-cost events in your availability window\n4. Specific recurring events happening now (Feb 2026)\n5. Outreach and DM templates for each community\n\nThis will give you a concrete roadmap to build your network and find collaborators within your budget and time constraints."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,39 @@
+{
+  "id": "bca4e637-4522-435d-a7c6-ea587392f8ab",
+  "raw_seed": "Draft role artifacts: compelling JD, outreach templates (DM/email), and a lightweight take-home/screen (e.g., tweet thread + technical narrative + 30/60/90) aligned to the scorecard",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Draft role artifacts: compelling JD, outreach templates (DM/email), and a lightweight take-home/screen (e.g., tweet thread + technical narrative + 30/60/90) aligned to the scorecard"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the scope of this goal before proceeding. You've asked me to draft role artifacts (JD, outreach templates, take-home screen) aligned to a scorecard, but I'm missing critical context:\n\n1. **What role/position** are these artifacts for? (e.g., Head of Product, Senior Engineer, Marketing Manager, etc.)\n2. **What scorecard** should these be aligned to? Do you have an existing scorecard you want me to reference, or should I create one?\n3. **Company context**: What industry/stage/size company? What's the hiring philosophy?\n4. **Candidate profile**: What seniority level, background, and skills are you targeting?\n5. **Take-home details**: What should the technical narrative focus on? (e.g., product thinking, code quality, strategic planning)\n\nWith these details, I can create a cohesive package where the JD, outreach, and screen all reinforce the same competencies and signal quality to candidates."
+    },
+    {
+      "role": "user",
+      "content": "Got it\u2014here\u2019s the snapshot:\n\n1. **Head of Product, B2B SaaS** (AI infrastructure tooling)  \n2. **No scorecard yet**\u2014please build one from scratch using the usual KPAE format (Mission \u2192 Outcomes \u2192 Competencies \u2192 Score)  \n3. **Company**: Mid-stage (Series B, 80 people, $12M ARR), remote-first, \u201cdefault open\u201d culture, very engineering-driven  \n4. **Candidate**: 7\u201310 yrs PM exp, 3+ yrs people-leading, shipped technical products to enterprise devs; must have GTM chops (PLG + sales-assist) and SQL fluency  \n5. **Take-home focus**: show how you\u2019d turn a raw research prototype (vector-db auto-tuning) into a shippable, revenue-creating SKU within 90 days. Narrative should cover market frame, pricing, first 3 sprints, GTM motion, and risk kills.  \n\nDeadline for these assets: next Wed so we can post the JD on Thursday."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect\u2014I have the full picture. I'm going to build this as an integrated package: (1) KPAE scorecard from first principles, (2) compelling JD that reflects the scorecard and role, (3) outreach templates (DM + email variants) that signal quality and fit, and (4) a lightweight take-home brief + evaluation rubric. All pieces will reinforce the same signal. Let me start by researching best practices for B2B SaaS PM hiring at this stage, then synthesize into a coherent artifact suite."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"B2B SaaS product manager hiring scorecard KPAE framework Series B\"]:\n\n\nSources: https://www.prodcamp.com/blog/the-best-metrics-and-kpis-to-drive-excellence-in-b2b-saas-product-management, https://payproglobal.com/answers/what-is-saas-team-structure-and-hiring/, https://www.linkedin.com/posts/kylevamvouris_he-interviewed-great-the-whole-team-loved-activity-7356715382239346688-0OSx, https://www.quora.com/What-do-you-look-for-when-hiring-a-VP-of-Product-for-a-B2B-SaaS-In-particular-the-dilemma-Im-facing-is-hiring-between-a-Saas-expert-or-a-target-market-expert, https://www.adasight.com/blog/saas-reporting-guide-for-startups-30-kpis-tools"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Head of Product job description AI infrastructure B2B SaaS template\"]:\n\n\nSources: https://resources.rework.com/libraries/job-description-templates/senior-ai-product-manager, https://www.ziprecruiter.com/c/TaskRay/Job/Head-of-Product,-AI-Driven-B2B-SaaS/-in-Denver,CO?jid=6fb42becf2e9345b, https://producthq.org/career/b2b-product-manager/b2b-product-manager-job-description/, https://productschool.com/blog/artificial-intelligence/guide-ai-product-manager, https://medium.com/@alphadesignglobal/10-best-executive-ai-saas-templates-c5bd268d2c27"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"product manager take-home assignment best practices technical founders\"]:\n\n\nSources: https://www.news.aakashg.com/p/the-ultimate-guide-interview-homework, https://www.dezkr.com/blog/pm-take-home-assignment/, https://www.reddit.com/r/ProductManagement/comments/cn8e0m/struggling_on_product_manager_interview/, https://www.tryexponent.com/blog/ace-the-pm-take-home-assignment, https://www.theproductthinker.com/p/interviewing-product-managers-startup-founders"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect\u2014I have everything I need. I'm going to build a complete package:\n\n1. **Scorecard (KPAE format)**: Mission \u2192 Outcomes \u2192 Competencies \u2192 Scoring rubric for Head of Product role\n2. **Job Description**: Compelling, role-specific, signals what great looks like\n3. **Outreach templates**: DM (LinkedIn/Slack) and email variants to source top talent\n4. **Take-home screen**: Tweet thread teaser + technical narrative prompt + 30/60/90 structure\n\nAll artifacts will be tightly aligned\u2014same competencies, same signal, same bar. I'll design for speed (you can post Thursday) and quality (these will attract strong candidates).\n\nLet me build the full package and have it ready for review by EOD today."
+    }
+  ],
+  "set_plan_args": {}
+}

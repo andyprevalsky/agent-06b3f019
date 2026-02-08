@@ -1,0 +1,55 @@
+{
+  "id": "0a80a2b3-ffd9-4c6a-bf4d-98f5ae6b59ea",
+  "raw_seed": "Research and identify top Head of Marketing candidates across Fortune 500 and adjacent markets, including current high-performing CMOs with proven ROI track records, rising SVP/EVP talent ready for C-suite promotion, and recently available executives from top brands. Analyze their industry experience, transformation credentials, leadership scope, and cultural fit indicators.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research and identify top Head of Marketing candidates across Fortune 500 and adjacent markets, including current high-performing CMOs with proven ROI track records, rising SVP/EVP talent ready for C-suite promotion, and recently available executives from top brands. Analyze their industry experience, transformation credentials, leadership scope, and cultural fit indicators."
+    },
+    {
+      "role": "assistant",
+      "content": "**Pinpointing Ideal Candidates**\n\nI've started to map out the initial steps for this project. My focus is on sourcing, so I've begun compiling the target pools. Currently, I'm thinking about Fortune 500 companies, adjacent market leaders, and the movers and shakers in the CMO space. Next, I\u2019ll refine the criteria needed to analyze their potential for this role.\n\n\n**Formulating the Initial Plan**\n\nI've just done a quick web search to get a handle on the current landscape, focusing on sources that rank top CMOs, rising stars, and ways to assess cultural fit. This initial research phase will directly inform the detailed plan I'm developing, including the specific search queries and data sources. My next step will be to formalize the plan using the gathered insights.\n\nThe goal is to identify top Head of Marketing candidates based on several criteria and sources. This will involve extensive web research to find relevant lists, news, company profiles, and executive bios. I'll need to define a search strategy to cover Fortune 500 companies, adjacent markets, high-performing CMOs, rising SVP/EVP talent, and recently available executives. The analysis will focus on industry experience, transformation credentials, leadership scope, and cultural fit indicators. I will start by using web_search to find common methodologies or resources for identifying top marketing talent and C-suite readiness, which will help refine the subsequent research steps. Then I will set the plan."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to identify top marketing executives for C-suite roles\"]:\n\n\nSources: https://cowenpartners.com/marketing/, https://www.business.com/articles/c-suite-job-titles/, https://cowenpartners.com/marketing-leadership-guide-how-marketing-leaders-drive-c-suite-success/, https://talentfoot.com/top-executive-search-firms-marketing/, https://marketproinc.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"lists of top CMOs with proven ROI track records\"]:\n\n\nSources: https://www.forbes.com/sites/sethmatlins/2025/06/19/the-2025-forbes-worlds-most-influential-cmos-list/, https://www.perceptive.co.nz/blog/master-the-metrics-that-matter-how-to-measure-marketing-roi, https://www.growtal.com/8-best-fractional-cmos-for-fast-growing-e-commerce-companies/, https://breakthrough3x.com/resources/boosting-roi-with-top-tips-for-fractional-cmos/, https://achievecmo.com/articles/the-9-best-fractional-cmo-companies-in-2026/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"indicators of cultural fit for executive roles\"]:\n\n\nSources: https://ccy.com/cultural-fit-vs-skill-set-what-matters-more-in-executive-hiring/, https://executiveeducation.wharton.upenn.edu/thought-leadership/wharton-online-insights/questions-to-ask-during-interview/, https://cowenpartners.com/the-science-of-executive-hiring-why-fit-matters-more-than-qualifications/, https://www.linkedin.com/posts/20-20-foresight_how-to-assess-cultural-fit-2020-foresight-activity-7378417716346376194-Cofg, https://www.trunorthpartners.com/post/screening-for-cultural-fit-in-c-suite-hires-a-step-by-step-guide"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research top Head of Marketing candidates across Fortune 500 companies and adjacent markets. This is a comprehensive executive search task requiring analysis of current CMOs, rising talent, and recently available executives. Let me gather information on high-performing marketing leaders with strong ROI track records and transformation credentials."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"top CMOs Fortune 500 companies 2025 2026 high performing marketing executives\"]:\n\n\nSources: https://www.50pros.com/fortune500, https://fortune.com/2025/12/16/fortune-next-to-lead-most-powerful-rising-executives-accenture-blackstone-disney-jpmorgan-chase-microsoft/, https://fortune.com/2026/02/06/fortune-500-power-moves-jan-31-feb-6-2026/, https://fortune.com/2026/01/09/fortune-500-power-moves-2025-review-jan-9-2026/%3Fitm_source%3Dparsely-api, https://finance.yahoo.com/news/fortune-next-lead-25-most-150100700.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best CMO ROI track record transformation marketing leaders\"]:\n\n\nSources: https://www.forbes.com/sites/sethmatlins/2025/06/19/the-2025-forbes-worlds-most-influential-cmos-list/, https://wearecoandco.com/roi-tales-learning-from-marketing-success-stories, https://www.selectadvisorsinstitute.com/our-perspective/most-influential-cmos-across-industries, https://www.linkedin.com/posts/diamandakis_top-10-ai-marketing-tools-cmos-are-using-activity-7419432926531960832-Gt0n, https://www.forrester.com/client-stories/boost-marketing-roi-red-hat/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SVP EVP marketing executives ready for C-suite promotion 2025\"]:\n\n\nSources: https://setup.us/blog/the-marketing-career-path, https://www.linkedin.com/posts/katy-mcfee-3880b4a_24-clients-got-promoted-this-year-director-activity-7411038308207792128-kSm1, https://www.forbes.com/sites/forbes-research/2025/12/22/whats-next-for-the-c-suite-in-2026/, https://www.productmarketingalliance.com/the-road-to-the-c-suite-five-career-paths-one-journey/, https://fortune.com/2026/01/09/fortune-500-power-moves-2025-review-jan-9-2026/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"recently departed CMOs available executives top brands 2025 2026\"]:\n\n\nSources: https://adage.com/brand-marketing/aa-cmo-hirings-october-2025-mastercard-general-motors-kenvue/, https://fortune.com/2026/01/09/fortune-500-power-moves-2025-review-jan-9-2026/, https://www.bain.com/insights/2026-retail-executive-agenda/, https://www.adweek.com/brand-marketing/why-cmo-tenure-remains-stubbornly-short/, https://www.adweek.com/brand-marketing/the-20-biggest-cmo-shakeups-of-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"rising marketing talent executives Fortune 500 digital transformation leaders\"]:\n\n\nSources: https://www.workato.com/the-connector/fortune-500-digital-transformation/, https://taggd.in/hr-glossary/digital-transformation/, https://www.russellreynolds.com/en/insights/articles/architects-of-change-technology-leadership-in-the-fortune-500, https://ittech-pulse.com/industry-insights/top-digital-transformation-frameworks-used-by-fortune-500/, https://fortune.com/2025/12/16/fortune-next-to-lead-list-2026-new-breed-ceo/"
+    },
+    {
+      "role": "assistant",
+      "content": "I've completed my initial research to identify top Head of Marketing candidates across Fortune 500 and adjacent markets. Based on the research, I've found key sources and criteria for identifying high-performing CMOs with proven ROI track records, rising SVP/EVP talent ready for C-suite promotion, and recently available executives from top brands. The research indicates that the most valuable sources for this type of executive search include Forbes' annual CMO rankings, Fortune's executive power moves lists, and industry-specific executive search firms. The analysis will focus on industry experience, transformation credentials, leadership scope, and cultural fit indicators as requested. I'm now ready to develop a comprehensive execution plan to systematically research and identify these candidates."
+    }
+  ],
+  "set_plan_args": {}
+}

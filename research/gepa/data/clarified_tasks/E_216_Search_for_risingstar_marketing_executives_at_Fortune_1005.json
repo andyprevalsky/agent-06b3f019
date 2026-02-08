@@ -1,0 +1,23 @@
+{
+  "id": "deeba1c6-073a-4535-a179-a46df6d30637",
+  "raw_seed": "Search for rising-star marketing executives at Fortune 100-500 companies who are VP or SVP level and could be ready for a CMO/Head of Marketing role. Use people search and web research to find 8-10 high-potential candidates with strong track records.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Search for rising-star marketing executives at Fortune 100-500 companies who are VP or SVP level and could be ready for a CMO/Head of Marketing role. Use people search and web research to find 8-10 high-potential candidates with strong track records."
+    },
+    {
+      "role": "assistant",
+      "content": "**Charting a Path Forward**\n\nI'm currently focused on the initial phase: defining the scope and mapping out the process. First, I need to choose the Fortune 100-500 companies to consider. Then, it's about devising a system for identifying VP/SVP level marketing executives within those organizations. Finally, I will focus on assessing their suitability as potential CMOs.\n\n\n**Planning the Execution**\n\nNow, I'm delving into the methodological approach. My plan solidifies: First, the Fortune list. Next, web searches targeting VP/SVP marketing roles. Then, I'll scrutinize their profiles. I must evaluate their suitability based on track record and \"rising star\" indicators. Finally, I will compile a concise list, aiming for eight to ten strong candidates.\n\nThe goal is to identify 8-10 high-potential marketing executives at Fortune 100-500 companies who are at the VP or SVP level and are ready for a CMO/Head of Marketing role. This involves several steps:\n\n1.  **Identify Fortune 100-500 Companies:** I will start by finding a current list of Fortune 100-500 companies.\n2.  **Targeted Executive Search:** For a selection of these companies, I will use web search to find marketing executives at the VP or SVP level. This will likely involve searching for terms like \"[Company Name] VP Marketing,\" \"[Company Name] SVP Marketing,\" or \"[Company Name] marketing leadership team.\"\n3.  **Profile Evaluation:** Once potential candidates are identified, I will research their professional profiles (e.g., LinkedIn, company bios, news articles) to assess their track record, accomplishments, and perceived \"rising-star\" potential. I'll look for indicators of leadership, innovation, significant achievements, and career progression.\n4.  **Candidate Compilation:** I will compile a list of 8-10 candidates who best fit the criteria, including their current role, company, and brief notes on why they are considered high-potential.\n\nI will start by getting a list of Fortune 100-500 companies."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"current Fortune 100-500 list\"]:\n\n\nSources: https://www.50pros.com/fortune500, https://fortune.com/ranking/global500/, https://fortune.com/videos/watch/the-2026-world's-most-admired-companies-list/7e514214-adcd-4566-97e6-ef600e98c0a0, https://www.kornferry.com/about-us/press/fortune-and-korn-ferry-reveal-the-2026-worlds-most-admired-companies-list, https://eqvista.com/fortune-500-companies-in-the-us/"
+    },
+    {
+      "role": "assistant",
+      "content": "**Pinpointing Marketing Talent**\n\nI'm focused on identifying the target companies. I'm starting by compiling a list of Fortune 100-500 companies to narrow down my search parameters and create a solid foundation for evaluating potential candidates.\n\n\n**Mapping Out The Search**\n\nI'm solidifying my approach. I've successfully defined the parameters. I will use a definitive, recent list of Fortune 500 companies. Then, I'll move to identifying VP/SVP level marketing executives. I'm focusing on their profile evaluation and creating a targeted search plan. This involves assessing their track records and identifying their potential as future CMOs.\n\nMy initial step is to get a current list of Fortune 500 companies. I'll use this list to identify a subset of companies for targeted executive searches. My current plan is to use web search to find current lists of Fortune 500 companies, then select a few to start searching for marketing executives (VP/SVP level). After identifying potential candidates, I will perform detailed profile evaluations to assess their 'rising star' potential and readiness for a CMO role, ultimately compiling a list of 8-10 high-potential individuals."
+    }
+  ],
+  "set_plan_args": {}
+}

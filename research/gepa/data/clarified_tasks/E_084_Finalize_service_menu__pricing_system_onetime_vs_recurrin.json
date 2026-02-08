@@ -1,0 +1,23 @@
+{
+  "id": "86a41412-72b2-49e1-922f-778d0ae0636a",
+  "raw_seed": "Finalize service menu + pricing system: one-time vs recurring packages, add-ons, minimums, travel fees, deep-clean vs maintenance definitions, and customer policies (cancellations, satisfaction guarantee, lockouts, pets).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Finalize service menu + pricing system: one-time vs recurring packages, add-ons, minimums, travel fees, deep-clean vs maintenance definitions, and customer policies (cancellations, satisfaction guarantee, lockouts, pets)."
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing this goal to understand the scope and create an execution plan. This is a comprehensive service menu and pricing system project for what appears to be a cleaning service business. Let me clarify a few critical details before proceeding to the planning phase."
+    },
+    {
+      "role": "user",
+      "content": "1) **Business context:** Primarily **residential cleaning** (houses/condos/apartments). We also do **small offices/retail** on a limited basis, but the main menu should be residential-first with an optional light commercial section.\n\n2) **Geographic scope:** We\u2019re in **Austin, TX**. Service area is **Austin + surrounding suburbs** (Round Rock, Pflugerville, Cedar Park, Leander, Buda, Kyle, Dripping Springs) \u2014 roughly **within 25 miles of downtown**. I want pricing that\u2019s set for this area but easy to adjust later.\n\n3) **Existing materials:** We have a rough draft, not polished. Current ballpark pricing we\u2019ve been quoting:\n- **Standard/maintenance:** starts around **$150\u2013$"
+    },
+    {
+      "role": "assistant",
+      "content": "I understand the context now. You have a residential cleaning business in Austin, TX with a service area covering Austin and surrounding suburbs. You're building a professional service menu and pricing system with clear package tiers, add-ons, and policies. You've got rough pricing starting around $150 for standard maintenance cleaning. I'm ready to create a comprehensive, finalized system that's professional, Austin-market-appropriate, and easy to adjust as your business evolves.\n\nI'll structure this to include:\n\n1. **Service Menu** - Residential-first with light commercial option\n2. **Pricing Tiers** - One-time, recurring (weekly/bi-weekly/monthly), and packages\n3. **Add-ons & Minimums** - Clear pricing for extras\n4. **Travel Fees** - Distance-based structure for your 25-mile service area\n5. **Service Definitions** - Deep-clean vs maintenance clarity\n6. **Customer Policies** - Cancellations, satisfaction guarantee, lockouts, pets\n\nI'm proceeding to create a detailed, professional execution plan now."
+    }
+  ],
+  "set_plan_args": {}
+}

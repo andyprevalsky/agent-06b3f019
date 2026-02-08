@@ -1,0 +1,35 @@
+{
+  "id": "42eb8b62-746e-4aa1-b399-5ba35f7af544",
+  "raw_seed": "Research best Christmas gift ideas for a 40-year-old woman who loves reading (fiction/thrillers), gardening, coffee, and cozy items. Budget: ~$200. Find specific products with prices and links from major retailers (Amazon, etc.) that can be delivered by Dec 20th. Suggest 3-4 gift ideas that could be combined into a thoughtful gift bundle.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research best Christmas gift ideas for a 40-year-old woman who loves reading (fiction/thrillers), gardening, coffee, and cozy items. Budget: ~$200. Find specific products with prices and links from major retailers (Amazon, etc.) that can be delivered by Dec 20th. Suggest 3-4 gift ideas that could be combined into a thoughtful gift bundle."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the best Christmas gift ideas for a 40-year-old woman with those interests. Let me search for specific products across her hobbies that fit the $200 budget and can be delivered by Dec 20th."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best Christmas gifts 40 year old woman reading thriller fiction 2025\"]:\n\n\nSources: https://bookshop.org/lists/2025-book-gift-guide-mystery-thriller-crime, https://therealbookspy.com/2025/12/04/2025-recap-the-100-best-mysteries-thrillers-from-this-year/, https://www.elle.com/culture/books/g69127582/best-mystery-thriller-books-2025/, https://therealbookspy.com/2024/10/07/25-christmas-themed-mysteries-thrillers-perfect-for-the-holiday-season/, https://www.barnesandnoble.com/b/barnes-noble-holiday-gift-guide/mystery-thrillers/_/N-2ky0Z16g4"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"luxury coffee gifts women 2025 Amazon\"]:\n\n\nSources: https://www.amazon.com/coffee-lovers-gifts-women/s%3Fk%3Dcoffee%2Blovers%2Bgifts%2Bfor%2Bwomen, https://www.wired.com/gallery/gift-ideas-for-coffee-lovers-2025/, https://www.amazon.com/coffee-gifts-women/s%3Fk%3Dcoffee%2Bgifts%2Bfor%2Bwomen, https://www.amazon.com/Coffee-Gifts/b%3Fie%3DUTF8%26node%3D23900459011, https://www.cnn.com/cnn-underscored/gifts/gifts-for-coffee-lovers"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cozy gifts women gardening themed 2025 budget\"]:\n\n\nSources: https://www.nytimes.com/wirecutter/gifts/best-gifts-for-gardeners/, https://www.reddit.com/r/gardening/comments/1j92w19/girlfriend_recently_found_a_love_for_gardening_so/, https://www.uncommongoods.com/interests/gardening%3Fsrsltid%3DAfmBOormZ3MBT8xWWCujVf_Yu7xrWPw1tJDgZgMES6IOTDxw1qxVxUib, https://www.etsy.com/market/garden_gift_for_women, https://harmonyinthegarden.com/2025/12/top-gardening-gifts-for-2025-what-gardeners-really-want-this-year/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"book lover gift bundles women 2025 Amazon\"]:\n\n\nSources: https://www.amazon.com/book-lover-gifts-women/s?k=book+lover+gifts+for+women, https://www.amazon.co.uk/book-lover-gift-set/s%3Fk%3Dbook%2Blover%2Bgift%2Bset, https://www.amazon.com/gifts-book-lovers-women/s?k=gifts+for+book+lovers+women, https://www.amazon.com/book-lovers-gift-box/s?k=book+lovers+gift+box, https://www.amazon.co.uk/book-bundles-women/s%3Fk%3Dbook%2Bbundles%2Bfor%2Bwomen"
+    },
+    {
+      "role": "assistant",
+      "content": "I've researched the best gift ideas for a 40-year-old woman who loves reading thrillers, gardening, and coffee. Here are some top recommendations that fit your $200 budget and can be delivered by Dec 20th:"
+    }
+  ],
+  "set_plan_args": {}
+}

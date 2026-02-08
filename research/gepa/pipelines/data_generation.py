@@ -1,26 +1,52 @@
-"""Data generation pipeline (Step 0): generates candidate decomposition pairs.
+"""Data generation pipeline: generates K candidates per task with evaluations.
 
-Flow:
-  clarified_task → generate N candidates (PlannerResponse)
-                 → validate each (hard gates)
-                 → evaluate each (ME/CE/Complexity)
-                 → store as DecompositionCandidate with metadata
-
-STUB: Returns placeholder candidates. Replace with LLM decomposer in Phase B.
+Wraps decomposer + evaluators into a single call that produces
+fully-evaluated DecompositionCandidates ready for labeling.
 """
 
+import asyncio
+import logging
 from typing import List
 
 from ..types import ClarifiedTask, DecompositionCandidate
+from ..evaluators import evaluate_me, evaluate_ce, evaluate_complexity
+from .decomposer import decompose_k, K_CANDIDATES
+
+logger = logging.getLogger(__name__)
 
 
-async def generate_candidates(task: ClarifiedTask, n: int = 2) -> List[DecompositionCandidate]:
-    """Generate N candidate decompositions for a clarified task.
+async def _evaluate_candidate(goal: str, candidate: DecompositionCandidate) -> DecompositionCandidate:
+    """Run ME/CE/CX evaluations on a candidate in parallel."""
+    if candidate.validation_errors:
+        return candidate
 
-    STUB: Returns empty list. In Phase B, this will:
-    1. Call LLM decomposer N times with task context
-    2. Validate each output
-    3. Run ME/CE/Complexity evaluators
-    4. Return candidates with metadata
+    results = await asyncio.gather(
+        evaluate_me(goal, candidate.planner_response),
+        evaluate_ce(goal, candidate.planner_response),
+        evaluate_complexity(goal, candidate.planner_response),
+    )
+    candidate.me = results[0][0]
+    candidate.ce = results[1][0]
+    candidate.complexity = results[2][0]
+    return candidate
+
+
+async def generate_candidates(
+    task: ClarifiedTask,
+    k: int = K_CANDIDATES,
+) -> List[DecompositionCandidate]:
+    """Generate K candidate decompositions with evaluations.
+
+    1. Generate K candidates via planner LLM (parallel)
+    2. Run ME/CE/CX evaluators on each valid candidate (parallel)
+    3. Return fully-evaluated candidates
     """
-    return []
+    candidates = await decompose_k(task, k=k)
+
+    if not candidates:
+        return []
+
+    evaluated = await asyncio.gather(
+        *[_evaluate_candidate(task.raw_seed, c) for c in candidates]
+    )
+    return list(evaluated)

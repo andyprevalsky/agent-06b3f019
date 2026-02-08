@@ -1,0 +1,107 @@
+{
+  "id": "4c74e750-df74-4e6c-bca2-42514d9e0c26",
+  "raw_seed": "Research and analyze the most effective existing solutions and organizations fighting hunger: what interventions have the highest impact per dollar (e.g., GiveDirectly, GiveWell recommendations, WFP programs, agricultural innovation like golden rice, vertical farming, food waste reduction). Include evidence-based rankings.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research and analyze the most effective existing solutions and organizations fighting hunger: what interventions have the highest impact per dollar (e.g., GiveDirectly, GiveWell recommendations, WFP programs, agricultural innovation like golden rice, vertical farming, food waste reduction). Include evidence-based rankings."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the most effective hunger-fighting solutions and organizations, focusing on impact per dollar and evidence-based rankings. This requires gathering current data on charity effectiveness, intervention costs, and outcomes."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"GiveWell best charities hunger food security 2024 2025\"]:\n\n\nSources: https://www.givewell.org/charities/top-charities, https://www.givewell.org/, https://blog.givewell.org/category/hunger-charity/, https://www.vox.com/future-perfect/388262/giving-tuesday-guide-global-health-malaria-givewell, https://www.givewell.org/international/technical/programs/community-based-management-acute-malnutrition"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"GiveDirectly impact per dollar effectiveness hunger poverty\"]:\n\n\nSources: https://www.givedirectly.org/givewell-2024/, https://www.givedirectly.org/research-on-cash-transfers/, https://www.givedirectly.org/rethinking-efficiency/, https://www.givedirectly.org/wp-content/uploads/2024/11/GiveDirectly-Cost-Effectiveness-Position-Paper.pdf, https://www.givedirectly.org/poverty-relief/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"World Food Programme WFP cost effectiveness hunger interventions\"]:\n\n\nSources: https://www.wfp.org/stories/cost-hunger-vs-power-funding, https://www.wfp.org/ending-hunger, https://news.un.org/en/story/2025/10/1166112, https://www.wfp.org/news/humanitarian-aid-cuts-push-millions-deeper-hunger-amid-rising-violence-and-population, https://www.wfp.org/stories/cost-hunger-vs-power-funding-part-2"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"golden rice impact effectiveness cost per life saved\"]:\n\n\nSources: https://pmc.ncbi.nlm.nih.gov/articles/PMC8713968/, https://onlinelibrary.wiley.com/doi/abs/10.1002/9781394273270.ch02, https://www.nature.com/articles/nbt1006-1200b, https://www.uni-hohenheim.de/uploads/media/GR-suppl.pdf, https://www.project-syndicate.org/commentary/the-costs-of-opposing-gm-foods-by-bj-rn-lomborg"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"vertical farming food production cost effectiveness sustainability\"]:\n\n\nSources: https://www.sciencedirect.com/science/article/pii/S2095809925005806, https://kpsglobal.com/blog/2022/08/02/a-sustainable-solution-vertical-farming-using-grow-rooms/, https://blogs.nicholas.duke.edu/env212/economic-viability-of-vertical-farming-overcoming-financial-obstacles-to-a-greener-future-of-farming/, https://pmc.ncbi.nlm.nih.gov/articles/PMC12373847/, https://kids.frontiersin.org/articles/10.3389/frym.2023.964569"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"food waste reduction programs impact per dollar effectiveness\"]:\n\n\nSources: https://www.wri.org/insights/reducing-food-loss-and-food-waste, https://www.epa.gov/land-research/estimating-cost-food-waste-american-consumers, https://www.sciencedirect.com/science/article/pii/S0921344921000550, https://www.wri.org/news/release-new-research-finds-companies-saved-14-every-1-invested-reducing-food-waste, https://divertinc.com/the-cost-of-wasted-food/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"evidence-based hunger interventions cost-effectiveness analysis meta-analysis\"]:\n\n\nSources: https://www.sciencedirect.com/science/article/pii/S109830152100005X, https://pmc.ncbi.nlm.nih.gov/articles/PMC10260889/, https://pubmed.ncbi.nlm.nih.gov/29315355/, https://www.healthaffairs.org/doi/10.1377/hlthaff.2024.01352, https://tuftsfoodismedicine.org/wp-content/uploads/2023/10/Tufts_True_Cost_of_FIM_Case_Study_Oct_2023.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the most effective solutions and organizations fighting hunger, focusing on impact per dollar and evidence-based rankings. This requires gathering current data on major interventions, their cost-effectiveness, and expert evaluations."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"GiveWell hunger interventions cost effectiveness rankings 2025 2026\"]:\n\n\nSources: https://www.givewell.org/how-we-work/our-criteria/cost-effectiveness/cost-effectiveness-models, https://blog.givewell.org/2025/12/23/december-2025-updates/, https://www.givewell.org/charities/top-charities, https://www.givewell.org/research/funding-cuts, https://www.givewell.org/how-we-work/our-criteria/cost-effectiveness"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"GiveDirectly cash transfers impact per dollar hunger poverty\"]:\n\n\nSources: https://www.givedirectly.org/research-on-cash-transfers/, https://www.impact.upenn.edu/givedirectly/, https://www.givedirectly.org/united-states/, https://www.givedirectly.org/rethinking-efficiency/, https://www.povertyactionlab.org/case-study/giving-directly-support-poor-households"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"World Food Programme WFP cost effectiveness hunger relief\"]:\n\n\nSources: https://www.wfp.org/stories/cost-hunger-vs-power-funding-part-2, https://www.wfp.org/stories/cost-hunger-vs-power-funding, https://www.wfp.org/impact-evaluation, https://www.wfp.org/news/wfp-prioritize-feeding-110-million-hungriest-2026-global-hunger-deepens-amidst-uncertain, https://www.wfp.org/publications/summary-evaluation-evidence-prioritization"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"golden rice effectiveness cost per life saved impact\"]:\n\n\nSources: https://pmc.ncbi.nlm.nih.gov/articles/PMC8713968/, https://geneticliteracyproject.org/2019/06/04/golden-rice-part-4-cost-effective-gmo-crop-can-save-lives-and-dramatically-boost-developing-economies/, https://www.nature.com/articles/nbt1006-1200b, https://onlinelibrary.wiley.com/doi/10.1002/9781394273270.ch02, https://www.uni-hohenheim.de/uploads/media/GR-suppl.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"vertical farming food production cost effectiveness hunger\"]:\n\n\nSources: http://eices.columbia.edu/2017/07/20/is-vertical-farming-an-economically-viable-solution-to-feeding-our-growing-planet/, https://www.forbes.com/councils/forbesbusinesscouncil/2022/10/25/how-vertical-farming-and-agtech-can-help-address-food-insecurity/, https://pmc.ncbi.nlm.nih.gov/articles/PMC12444380/, https://www.frontiersin.org/journals/science/articles/10.3389/fsci.2024.1473141/full, https://www.sciencedirect.com/science/article/pii/S2210670724001859"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"food waste reduction programs impact hunger global\"]:\n\n\nSources: https://wfpusa.org/news/how-food-waste-affects-world-hunger/, https://www.wfp.org/stories/5-facts-about-food-waste-and-hunger, https://www.weforum.org/stories/2025/04/innovations-to-reduce-food-waste/, https://www.wri.org/insights/reducing-food-loss-and-food-waste, https://moveforhunger.org/the-environmental-impact-of-food-waste"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"agricultural innovation impact per dollar hunger malnutrition\"]:\n\n\nSources: https://www.ncbi.nlm.nih.gov/books/NBK599618/, https://www.agweb.com/news/policy/politics/farmers-speak-importance-global-ag-innovation, https://www.shambacentre.org/modelling-the-additional-investment-needed-to-end-hunger, https://jgbc.scholasticahq.com/article/134058-feeding-the-future-ending-world-hunger-through-innovation-and-technology, https://pmc.ncbi.nlm.nih.gov/articles/PMC12525532/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm beginning research on effective hunger-fighting interventions. I'll search for evidence-based rankings, impact metrics, and cost-effectiveness data from leading organizations and research institutions."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"GiveWell highest impact hunger interventions cost effectiveness 2024 2025\"]:\n\n\nSources: https://www.givewell.org/how-we-work/our-criteria/cost-effectiveness, https://www.givewell.org/how-we-work/our-criteria/cost-effectiveness/cost-effectiveness-models, https://www.givewell.org/charities/top-charities, https://www.givewell.org/about/impact, https://www.givewell.org/impact-estimates"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"GiveDirectly impact per dollar hunger poverty evidence\"]:\n\n\nSources: https://www.givedirectly.org/research-on-cash-transfers/, https://www.givedirectly.org/gdresearch/, https://www.givedirectly.org/poverty-relief/, https://www.givedirectly.org/switch-to-cash/, https://committees.parliament.uk/writtenevidence/128584/pdf/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"World Food Programme WFP cost effectiveness impact metrics\"]:\n\n\nSources: https://www.wfp.org/impact-evaluation, https://www.wfp.org/publications/2025-saving-lives-time-and-money-evidence-anticipatory-action, https://executiveboard.wfp.org/document_download/WFP-0000166395, https://www.wfp.org/publications/wfp-impact-evaluation-strategy-2019-2026, https://wfp-evaluation.medium.com/cost-effectiveness-analysis-three-lessons-from-the-pilot-impact-evaluation-in-burundi-87bee95a55fd"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"golden rice impact effectiveness cost per life saved\"]:\n\n\nSources: https://pmc.ncbi.nlm.nih.gov/articles/PMC8713968/, https://www.uni-hohenheim.de/uploads/media/GR-suppl.pdf, https://www.nature.com/articles/nbt1006-1200b, https://geneticliteracyproject.org/2019/06/04/golden-rice-part-4-cost-effective-gmo-crop-can-save-lives-and-dramatically-boost-developing-economies/, https://www.researchgate.net/publication/348550060_Potential_impact_and_cost-effectiveness_of_Golden_Rice_Supplementary_Discussion"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"vertical farming food production cost effectiveness vs traditional agriculture\"]:\n\n\nSources: https://www.ambitas.org/blog/the-cost-of-vertical-farming-why-it-is-pricier-than-traditional-farming-and-still-worth-the-investment, https://agfundernews.com/the-economics-of-local-vertical-and-greenhouse-farming-are-getting-competitive, https://www.sciencedirect.com/science/article/pii/S2772801325000181, https://www.weforum.org/stories/2024/04/vertical-farming-next/, https://cultivatix.com/understanding-vertical-farming-cost-per-acre-with-cultivatix/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"food waste reduction programs impact hunger cost per meal prevented\"]:\n\n\nSources: https://www.wfp.org/stories/5-facts-about-food-waste-and-hunger, https://moveforhunger.org/the-environmental-impact-of-food-waste, https://www.unep.org/topics/food-systems/food-loss-and-waste, https://moveforhunger.org/blog/what-does-food-waste-really-cost-us-missed-opportunity-communities, https://www.wri.org/insights/reducing-food-loss-and-food-waste"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed initial web searches to gather information on the most effective existing solutions and organizations fighting hunger, focusing on impact per dollar. I have searched for data related to GiveWell's recommendations, GiveDirectly, WFP programs, agricultural innovations like Golden Rice, vertical farming, and food waste reduction strategies, along with general evidence-based cost-effectiveness analyses. The next step is to synthesize this information and create a comprehensive plan to analyze and present the findings."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,15 @@
+{
+  "id": "5b207b43-803b-40ff-9da8-8e02600f03c3",
+  "raw_seed": "Book a VFS Global France appointment at the Bengaluru center (choose correct category/center, enter France-Visas reference, select earliest viable slot, confirm fees/optional services), pausing for OTP/payment/user confirmations as needed.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Book a VFS Global France appointment at the Bengaluru center (choose correct category/center, enter France-Visas reference, select earliest viable slot, confirm fees/optional services), pausing for OTP/payment/user confirmations as needed."
+    },
+    {
+      "role": "assistant",
+      "content": "> Starting VFS France appointment booking for Bengaluru center - will research current process and create step-by-step execution plan\n\nLet me research the current VFS Global France visa appointment process for the Bengaluru center to understand the exact steps and requirements."
+    }
+  ],
+  "set_plan_args": {}
+}

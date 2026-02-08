@@ -1,0 +1,63 @@
+{
+  "id": "fbe5a8af-54ed-410f-a8ba-9a435c6d7bc5",
+  "raw_seed": "Research best practices for supporting a new mom who is overwhelmed \u2014 focusing on what specific practical help is most valuable (meal drop-offs, errands, company), how to offer help without being intrusive, activities that work with a 3-month-old, and how to support someone whose partner is traveling for work.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research best practices for supporting a new mom who is overwhelmed \u2014 focusing on what specific practical help is most valuable (meal drop-offs, errands, company), how to offer help without being intrusive, activities that work with a 3-month-old, and how to support someone whose partner is traveling for work."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research best practices for supporting overwhelmed new moms, focusing on practical help, non-intrusive approaches, and specific considerations for when partners travel for work."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best practices supporting new mom overwhelmed practical help meal drop-offs errands non-intrusive 2024\"]:\n\n\nSources: https://alliworthington.com/help-overwhelmed-new-mom/, https://whattocook.substack.com/p/what-to-cook-for-a-meal-train, https://neurowellnessspa.com/therapy-for-new-parents/, https://www.talkspace.com/blog/mom-stress/, https://www.epicurious.com/recipes-menus/best-make-ahead-meals-for-new-moms-gallery"
+    },
+    {
+      "role": "assistant",
+      "content": "I will now research best practices for supporting a new mom who is overwhelmed, specifically looking for practical help, how to offer help without being intrusive, activities suitable for a 3-month-old, and how to support someone whose partner is traveling for work. I will use targeted web searches to gather this information."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best practical help for overwhelmed new mom without being intrusive\"]:\n\n\nSources: https://www.calm.com/blog/overwhelmed-mom, https://www.nami.org/new-parents/mental-health-for-new-parents/, https://www.samhsa.gov/, https://alliworthington.com/help-overwhelmed-new-mom/, https://mchb.hrsa.gov/programs-impact/national-maternal-mental-health-hotline"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"activities for 3-month-old baby and new mom\"]:\n\n\nSources: https://www.reddit.com/r/NewParents/comments/tal3tj/in_search_of_new_activities_with_baby_34_months/, https://www.healthyyoungminds.com/activities-for-3-month-old/, https://www.medela.com/en-us/breastfeeding-pumping/articles/pumping-tips/11-outside-mom-and-baby-activities, https://www.howweelearn.com/learning-activities-3-month-old-babies/, https://www.enfamil.com/articles/activities-for-your-3-month-old/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"support new mom whose partner is traveling for work\"]:\n\n\nSources: https://www.reddit.com/r/Mommit/comments/15mi9w3/any_tips_from_moms_with_spouses_who_travel_for/, https://lllusa.org/solo-parenting-while-a-spouse-travels/, https://www.whattoexpect.com/first-year/you-and-your-health/maternal-loneliness, https://fwmoms.com/relationships/helping-the-mom-whose-spouse-partner-travels-for-work/, https://www.mother.ly/life/to-the-mom-whose-partner-is-traveling-again-this-weeki-am-with-you/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research best practices for supporting overwhelmed new moms, covering practical help, communication approaches, age-appropriate activities, and support for those with traveling partners. Let me gather current information on this topic."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best practices supporting overwhelmed new mom postpartum practical help\"]:\n\n\nSources: https://postpartum.net/, https://ppdil.org/, https://forwhenhelpline.org.au/parent-resources/help-someone-with-postnatal-anxiety/, https://womenshealth.gov/talkingPPD/support, https://chicagofamilydoulas.com/postpartum-support/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"meal delivery help new mothers what works most valuable\"]:\n\n\nSources: https://www.navigatingparenthood.com/the-best-postpartum-meal-delivery-options-for-new-parents/, https://www.bonappetit.com/story/best-post-partum-meal-delivery-services?srsltid=AfmBOorIsNcxd_H_WHlvdmGksSJeX_oWMFWgtfWZoJzAqwo4lG8ejyAj, https://www.bonappetit.com/story/best-post-partum-meal-delivery-services?srsltid=AfmBOopq6cMtxsr08qIeOFz8AHNXZB6zv8ZX0QHqHPBSHJ_kqjyRJ5Qk, https://www.bonappetit.com/story/best-post-partum-meal-delivery-services?srsltid=AfmBOooae6nGKxBg63pM6dxN89Klv796pwPH51QnL-q-zxMMcVn8Y_Y6, https://www.reddit.com/r/BabyBumps/comments/1aicwra/postpartum_meal_delivery/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to offer help new parents without being intrusive tactful\"]:\n\n\nSources: https://tobebright.com/how-to-best-support-a-new-and-or-overwhelmed-parent/, https://nutranshealth.com/blog/support-new-parent-without-overstepping/, https://www.psychologytoday.com/us/blog/complicated-love/202008/what-new-parents-want-us-know, https://blog.ohiohealth.com/supporting-new-parents-essential-tips-for-friends-and-family/, https://theeverymom.com/things-that-are-helpful-to-a-new-mom/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"activities for 3 month old baby development\"]:\n\n\nSources: https://www.reddit.com/r/NewParents/comments/tal3tj/in_search_of_new_activities_with_baby_34_months/, https://blog.lovevery.com/age-range/3-4-months/, https://www.howweelearn.com/learning-activities-3-month-old-babies/, https://www.cdc.gov/act-early/milestones/index.html, https://raisingchildren.net.au/babies/development/development-tracker-3-12-months/3-4-months"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"supporting new mom single parent traveling partner away\"]:\n\n\nSources: https://singleparentswhotravel.com/, https://www.facebook.com/groups/singleparentstravel/, https://www.reddit.com/r/TravelHacks/comments/1equvvd/are_there_services_to_help_a_parent_travel_solo/, https://thelifeofasinglemom.com/national-resource-guide-new/, https://www.oprahdaily.com/life/a40557768/libryia-jones-wandering-moms-helps-moms-travel-without-kids/"
+    },
+    {
+      "role": "assistant",
+      "content": "The plan is ready for execution."
+    }
+  ],
+  "set_plan_args": {}
+}

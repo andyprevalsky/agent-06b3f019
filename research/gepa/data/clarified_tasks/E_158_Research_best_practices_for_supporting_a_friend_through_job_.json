@@ -1,0 +1,87 @@
+{
+  "id": "a020c822-52b0-40e5-bfc7-617ac4e5aaad",
+  "raw_seed": "Research best practices for supporting a friend through job loss and job hunting \u2014 focusing on accountability partnerships, how to help with interview prep, maintaining someone's confidence during a search, and balancing emotional support with practical career help.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research best practices for supporting a friend through job loss and job hunting \u2014 focusing on accountability partnerships, how to help with interview prep, maintaining someone's confidence during a search, and balancing emotional support with practical career help."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research best practices for supporting a friend through job loss and job hunting, focusing on the four key areas you mentioned: accountability partnerships, interview prep help, confidence maintenance, and balancing emotional and practical support. Let me gather current resources and expert guidance on this topic."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best practices supporting friend job loss unemployment\"]:\n\n\nSources: https://www.wondermind.com/article/help-with-job-loss/, https://edd.ca.gov/en/jobs_and_training/Experience_Unlimited_for_Job_Seekers/, https://www.focusonthefamily.ca/content/4-ways-to-help-someone-through-the-storms-of-unemployment, https://www.psychologytoday.com/us/blog/anxiety-files/201008/how-support-someone-who-is-unemployed-seven-steps-making-difference, https://www.reddit.com/r/AskMenOver30/comments/1bp43ek/men_over_30_how_did_you_help_out_a_friend_who/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"accountability partnership job hunting career support\"]:\n\n\nSources: https://www.reddit.com/r/careeradvice/comments/1ddxd0c/seeking_accountability_partners_for_job_search/, https://cdo.som.yale.edu/blog/2025/03/27/spring-accountability-partners/, https://www.resumly.ai/blog/how-to-use-accountability-partners-in-job-hunting, https://www.linkedin.com/posts/hannahmorgan_for-years-i-have-facilitated-accountability-activity-7394728251228782592-Gdtf, https://www.careernetworkministry.com/job-search-teams"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to help friend prepare for job interviews interview coaching\"]:\n\n\nSources: https://interview-boss.captivate.fm/episode/a-crash-course-on-how-to-help-a-friend-prepare-for-an-interview, https://mentoringpartnership.ca/learning_resources/e-learning/Mentor_PD/Module4/story_content/external_files/Coaching%20Your%20Mentee%20for%20Their%20Job%20Interview.pdf, https://www.linkedin.com/pulse/4-smart-simple-tips-friendlier-job-interview-jennifer-shryock, https://www.reddit.com/r/CasualUK/comments/1177t63/trying_to_help_a_friend_out_how_can_they_get/, https://topresume.com/career-advice/how-to-ace-an-interview-with-a-little-help-from-a-friend"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"maintaining confidence during job search motivation\"]:\n\n\nSources: https://www.reddit.com/r/jobsearchhacks/comments/1co5stu/how_do_you_keep_positive_during_your_job_search/, https://www.reddit.com/r/jobs/comments/1cjlblp/how_in_the_world_do_you_keep_your_selfesteem_up/, https://www.reddit.com/r/careerguidance/comments/10td8hb/how_to_stay_motivated_during_job_search/, https://blogs.darden.virginia.edu/executive-education/2025/03/03/4-strategies-to-stay-motivated-during-a-prolonged-or-challenging-job-search/, https://www.cultivitae.com/how-to-find-a-job/how-to-stay-positive-during-job-search/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"emotional support versus practical advice job loss friend\"]:\n\n\nSources: https://www.reddit.com/r/Adulting/comments/158f2m1/how_the_hell_is_one_supposed_to_console_a_friend/, https://www.wondermind.com/article/help-with-job-loss/, https://www.workplacestrategiesformentalhealth.com/resources/someone-you-care-about-is-struggling-with-job-loss, https://letsgrowleaders.com/2025/02/28/help-my-friend-sudden-layoff/, https://www.thegoodtrade.com/features/lay-off-support-advice/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm researching best practices for supporting a friend through job loss and job hunting. I'll gather information on accountability partnerships, interview prep support, confidence maintenance, and balancing emotional and practical support. Let me search for current guidance on these topics."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"supporting friend through job loss best practices\"]:\n\n\nSources: https://www.wondermind.com/article/help-with-job-loss/, https://letsgrowleaders.com/2025/02/28/help-my-friend-sudden-layoff/, https://www.reddit.com/r/AskMenOver30/comments/1bp43ek/men_over_30_how_did_you_help_out_a_friend_who/, https://www.linkedin.com/posts/joshbob_when-someone-loses-their-job-they-dont-activity-7371526789648502784-EryE, https://www.thegoodtrade.com/features/lay-off-support-advice/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"accountability partnership job search helping friend\"]:\n\n\nSources: https://www.reddit.com/r/careeradvice/comments/1ddxd0c/seeking_accountability_partners_for_job_search/, https://www.fastcompany.com/91309097/the-secret-to-a-successful-job-search-an-accountability-buddy, https://apresgroup.com/maximize-potential-accountability-partner/, https://www.forbes.com/sites/cherylrobinson/2024/02/13/how-to-find-the-right-accountability-partner-during-a-career-change/, https://careerpowerup.com/accountability-partner-secret-weapon-in-the-job-search/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to help friend with interview preparation\"]:\n\n\nSources: https://www.reddit.com/r/CasualUK/comments/1177t63/trying_to_help_a_friend_out_how_can_they_get/, https://workplace.stackexchange.com/questions/103327/how-to-best-handle-friends-request-in-helping-with-interview-preparation, https://www.reddit.com/r/interviews/comments/1ndtbi7/as_an_interview_coach_heres_the_one_shift_that/, https://topresume.com/career-advice/how-to-ace-an-interview-with-a-little-help-from-a-friend, https://www.mentorcliq.com/blog/coaching-for-job-interviews"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"maintaining confidence during job search support\"]:\n\n\nSources: https://www.reddit.com/r/jobs/comments/1cjlblp/how_in_the_world_do_you_keep_your_selfesteem_up/, https://medium.com/@yvonneleehawkins/how-to-keep-your-confidence-during-the-job-search-e560f6f87ff5, https://www.reddit.com/r/jobsearchhacks/comments/1co5stu/how_do_you_keep_positive_during_your_job_search/, https://www.yahoo.com/lifestyle/articles/8-expert-job-search-tips-223050139.html, https://hercareerdoctor.com/how-to-become-insanely-confident-during-your-job-search/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"emotional support vs practical help job hunting friend\"]:\n\n\nSources: https://medium.com/illumination-curated/7-ways-to-actually-help-a-friend-thats-job-hunting-957241517b0a, https://www.reddit.com/r/jobs/comments/bs45i5/how_to_help_someone_cope_with_constant_rejection/, https://www.indeed.com/career-advice/finding-a-job/how-to-support-someone-looking-for-a-job, https://www.linkedin.com/posts/janamiller_do-you-know-someone-looking-for-a-job-activity-7419405017859870720-JKSx, https://www.linkedin.com/posts/azizandrew_whats-the-one-thing-every-job-seeker-needs-activity-7372241094513922048-dhcP"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research best practices for supporting a friend through job loss and job hunting, focusing on the specific areas you mentioned: accountability partnerships, interview prep, confidence maintenance, and balancing emotional and practical support."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"supporting friend through job loss best practices\"]:\n\n\nSources: https://www.wondermind.com/article/help-with-job-loss/, https://letsgrowleaders.com/2025/02/28/help-my-friend-sudden-layoff/, https://www.thegoodtrade.com/features/lay-off-support-advice/, https://www.linkedin.com/posts/joshbob_when-someone-loses-their-job-they-dont-activity-7371526789648502784-EryE, https://www.indeed.com/career-advice/resumes-cover-letters/what-to-say-to-someone-who-got-fired"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"accountability partnerships job hunting career support\"]:\n\n\nSources: https://www.indeed.com/career-advice/career-development/accountability-partner, https://www.themuse.com/advice/accountability-partner, https://www.careernetworkministry.com/job-search-teams, https://www.reddit.com/r/careeradvice/comments/1ddxd0c/seeking_accountability_partners_for_job_search/, https://www.uscareerinstitute.edu/blog/why-you-should-consider-an-accountability-partner"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to help friend prepare for job interviews\"]:\n\n\nSources: https://www.reddit.com/r/CasualUK/comments/1177t63/trying_to_help_a_friend_out_how_can_they_get/, https://workplace.stackexchange.com/questions/103327/how-to-best-handle-friends-request-in-helping-with-interview-preparation, https://www.quora.com/What-is-the-best-advice-you-can-give-to-someone-before-a-job-interview, https://www.mentorcliq.com/blog/coaching-for-job-interviews, https://www.linkedin.com/pulse/4-smart-simple-tips-friendlier-job-interview-jennifer-shryock"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"maintaining confidence during job search emotional support\"]:\n\n\nSources: https://www.indeed.com/q-emotional-support-l-chicago,-il-jobs.html, https://www.indeed.com/career-advice/finding-a-job/college-graduate-job-search-anxiety, https://www.reddit.com/r/jobs/comments/1cjlblp/how_in_the_world_do_you_keep_your_selfesteem_up/, https://www.ziprecruiter.com/Jobs/Emotional-Support/--in-Illinois, https://www.reddit.com/r/recruitinghell/comments/wq1f6h/tips_for_mental_health_while_job_searching_and/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"balancing emotional support practical career advice job loss\"]:\n\n\nSources: https://www.helpguide.org/mental-health/stress/job-loss-and-unemployment-stress, https://www.indeed.com/career-advice/career-development/how-to-deal-with-loss-of-job, https://www.careeronestop.org/, https://www.wondermind.com/article/help-with-job-loss/, https://www.theaftd.org/posts/help-and-hope/le-managing-ftd-job-loss/"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the initial research on best practices for supporting a friend through job loss and job hunting, covering accountability partnerships, interview preparation, confidence maintenance, and balancing emotional and practical support. I've gathered several articles and discussions on each topic. Now, I will organize this information into a structured plan to provide a comprehensive answer."
+    }
+  ],
+  "set_plan_args": {}
+}

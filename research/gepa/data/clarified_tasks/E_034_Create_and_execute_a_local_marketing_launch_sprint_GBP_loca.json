@@ -1,0 +1,31 @@
+{
+  "id": "1ebcd2ca-8831-4a3c-8c46-4c4b08ef0cad",
+  "raw_seed": "Create and execute a local marketing launch sprint: GBP/local SEO basics, Nextdoor setup/content, flyer strategy and drop plan, referral offer, and outreach list (realtors, property managers, Airbnb hosts) geared to 10 recurring customers in 90 days.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create and execute a local marketing launch sprint: GBP/local SEO basics, Nextdoor setup/content, flyer strategy and drop plan, referral offer, and outreach list (realtors, property managers, Airbnb hosts) geared to 10 recurring customers in 90 days."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you create and execute a comprehensive local marketing launch sprint to acquire 10 recurring customers in 90 days. Let me start by researching current best practices for local SEO, Nextdoor marketing, and referral strategies to ensure we have the most effective approach."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local SEO GBP optimization 2024 best practices small business customer acquisition\"]:\n\n\nSources: https://support.google.com/business/answer/3038177%3Fhl%3Den, https://helpdesk.rightnetworks.com/s/article/Optimizing-your-GBP, https://www.localfalcon.com/blog/local-seo-best-practices-for-2024, https://support.google.com/business/answer/7091?hl=en, https://www.reachabovemedia.com/google-my-business-best-practices-2024-a-comprehensive-guide/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing this local marketing launch sprint goal. This is a comprehensive multi-channel campaign requiring strategic planning across GBP/SEO, Nextdoor, flyers, referrals, and outreach. Let me clarify a few critical details before I create the execution plan.\n\nThe goal mentions \"10 recurring customers in 90 days\" - I need to understand:\n1. What is your business/service? (This determines messaging, targeting, and channel strategy)\n2. What is your geographic market/service area? (Needed for GBP optimization, Nextdoor targeting, flyer distribution)\n3. Do you have existing GBP/Google Business Profile? (Affects setup vs. optimization strategy)\n4. What's your budget for flyer printing and distribution?\n5. What's your current customer acquisition cost baseline?\n\nThese details will shape the entire campaign structure. Should I proceed with reasonable assumptions for a typical local service business, or would you like to provide specifics?"
+    },
+    {
+      "role": "user",
+      "content": "1. **Business Type:** Residential house cleaning + Airbnb/short-term rental turnover cleaning (recurring weekly/biweekly, plus occasional deep cleans). Business name: **BrightNest Cleaning Co.**  \n2. **Service Area:** **Charlotte, NC** \u2014 mainly **South End, Dilworth, Plaza Midwood, Myers Park, NoDa**, and **Matthews** (within ~15 miles of Uptown).  \n3. **GBP Status:** Already claimed/verified, but it\u2019s pretty barebones (a few photos, hours set). No consistent posts, services list is incomplete, and only a couple reviews.  \n4. **Budget:** Around **$1,200 total** for 90 days \u2014 about **$600** for printing + doorhanger/flyers, **$300** for EDDM or small paid boosts, and **$300** for misc (Canva, small promo offers, etc.).  \n5."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have all the context I need. BrightNest Cleaning Co. in Charlotte targeting affluent neighborhoods (South End, Dilworth, Plaza Midwood, Myers Park, NoDa, Matthews) with a focus on recurring residential + Airbnb/STR cleaning. You have an existing but bare GBP, $1,200 budget over 90 days, and a clear goal: 10 recurring customers.\n\nThis is decomposable and clear. I'm ready to build the execution plan. Moving to SET_PLAN."
+    }
+  ],
+  "set_plan_args": {}
+}
