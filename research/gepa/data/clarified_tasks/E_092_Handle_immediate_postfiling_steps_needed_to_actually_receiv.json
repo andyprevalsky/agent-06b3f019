@@ -1,0 +1,23 @@
+{
+  "id": "951cae5f-4741-462d-b621-78e8e67b1bc0",
+  "raw_seed": "Handle immediate post-filing steps needed to actually receive payments: monitor EDD inbox/mail for notices, complete any ID verification flow if prompted, set up payment method (debit card/direct deposit if available), and note dates for biweekly certifications.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Handle immediate post-filing steps needed to actually receive payments: monitor EDD inbox/mail for notices, complete any ID verification flow if prompted, set up payment method (debit card/direct deposit if available), and note dates for biweekly certifications."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the context of this goal before proceeding. This appears to be about managing unemployment benefits (EDD - Employment Development Department), but I need to understand your specific situation to create an effective plan.\n\nKey questions:\n\n1. Have you already filed an unemployment claim with California EDD, or are you about to file?\n2. Are you asking for general guidance on post-filing steps, or do you need help with a specific claim you've already submitted?\n3. Do you have access to an EDD account/portal, or would you need help setting one up?\n4. Are there specific payment method preferences you want to set up (direct deposit vs. debit card)?\n5. Do you need help understanding the ID verification process, or are you already in that step?\n\nOnce I understand your current status and what specifically needs to be done, I can create a comprehensive plan with actionable steps."
+    },
+    {
+      "role": "user",
+      "content": "Thanks for asking. Here's where I'm at:\n\n1. **Current Status**: I filed my claim last week - got the confirmation number and everything.\n\n2. **Account Access**: Yeah, I can log into my.edd.ca.gov. I've checked it a couple times but haven't seen any notices yet besides the initial confirmation.\n\n3. **Payment Method**: I'd prefer direct deposit to my bank account if that's an option. I have a checking account at Chase I can use.\n\n4. **ID Verification**: I haven't been prompted yet, but I'm worried about it. I've heard it can hold up payments, so I want to know what to expect and be ready.\n\n5. **Timeline**: This is pretty urgent - I'm out of work as of last Monday and I need to make sure I don't miss any steps that could delay my first payment. I'm also not sure when I'm supposed to do the biweekly certifications or how that works.\n\nI'm mainly worried about missing a notice or messing something up that stops my payments. What should I be checking for?"
+    },
+    {
+      "role": "assistant",
+      "content": "\n**IMMEDIATE ACTION PLAN - EDD Post-Filing**\n\n**Phase 1: Daily Monitoring (Next 2-3 weeks)**\n- Check my.edd.ca.gov inbox twice daily (morning/evening)\n- Watch for: ID verification request, benefit determination, payment method notice\n- Set phone/email alerts for EDD communications\n- Monitor physical mail for EDD envelopes (could be time-sensitive)\n\n**Phase 2: ID Verification Prep (Do This Today)**\n- Gather: Driver's license, Social Security card, utility bill, W-2\n- Take clear photos with phone ready for upload\n- If prompted: Complete within 24 hours to avoid delays\n- Common triggers: Name discrepancies, address changes, recent moves\n\n**Phase 3: Payment Setup (When Account Access Available)**\n- Log into UI Online \u2192 \"Payment Options\"\n- Select direct deposit \u2192 Enter Chase checking account/routing numbers\n- Verify amounts: Takes 1-2 business days for test deposits\n- Backup: EDD debit card arrives automatically if direct deposit fails\n\n**Phase 4: Certification Timeline**\n- First certification: Usually 2 weeks after filing (check UI Online for dates)\n- Ongoing: Every 2 weeks on Sunday/Monday\n- Set recurring phone reminder for certification dates\n- Must report: Work search activities, any earnings, availability to work\n\n**Critical Red Flags to Watch For**\n- \"Pending\" status for more than 10 days\n- Request for additional documents\n- Benefit amount showing $0\n- Account lockout or error messages\n\n**Emergency Contacts**\n- 1-800-300-5616 (claims line) - call early morning for shorter wait times\n- Save confirmation numbers for all submissions\n\nReady to execute these steps systematically?"
+    }
+  ],
+  "set_plan_args": {}
+}

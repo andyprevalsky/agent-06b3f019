@@ -1,0 +1,31 @@
+{
+  "id": "60ade565-1f72-491b-a213-d2a890aa6ad8",
+  "raw_seed": "Create a simple tracking system (calendar reminders, note template) to ensure consistent follow-through on check-ins and plans without letting anyone fall through cracks",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create a simple tracking system (calendar reminders, note template) to ensure consistent follow-through on check-ins and plans without letting anyone fall through cracks"
+    },
+    {
+      "role": "assistant",
+      "content": "I understand the goal: create a tracking system for consistent follow-up on check-ins and plans. This is about building a practical tool (likely a template or system structure) to prevent people from being forgotten or missed.\n\nLet me clarify a few things before I plan the execution:\n\n1. **Format preference**: Would you like this as a spreadsheet template (Google Sheets/Excel), a document template (Notion/Google Docs), a calendar system (Google Calendar with reminders), or a combination?\n\n2. **Scope of tracking**: Are you tracking:\n   - Personal relationships (friends, family check-ins)?\n   - Professional relationships (client/colleague follow-ups)?\n   - Project commitments?\n   - All of the above?\n\n3. **Key information to capture**: Beyond dates and names, what data matters? (e.g., reason for check-in, last contact date, priority level, action items)\n\n4. **Reminder mechanism**: Do you want:\n   - Calendar notifications?\n   - Email reminders?\n   - A dashboard to review weekly/monthly?\n   - All of the above?\n\n5. **Integration**: Should this integrate with existing tools you use, or be standalone?\n\nI can proceed with reasonable defaults (e.g., a Google Sheets tracking matrix + Google Calendar template + a note-taking template), but knowing your preferences will help me build exactly what you need."
+    },
+    {
+      "role": "user",
+      "content": "1) **Format/Platform:** All three combined, but keep it lightweight: **Google Sheets + Google Calendar + a Google Docs note template** (I\u2019m in Google Workspace all day).\n\n2) **What I\u2019m tracking:** **Mixed** \u2014 personal (friends/family) + professional (a few clients + collaborators) + a handful of \u201cpromised I\u2019d follow up\u201d commitments.\n\n3) **Key data fields:** More than just names/dates. I\u2019d like:\n- Name + category (personal/pro/client)\n- **Priority** (A/B/C)\n- **Last contact date**\n- **Next check-in date**\n- **Preferred frequency** (weekly/biweekly/monthly/quarterly)\n- **Reason/context** (what\u2019s going on / why I\u2019m checking in)\n- **Next action item**"
+    },
+    {
+      "role": "assistant",
+      "content": "Got it - building a lightweight Google Workspace tracking system with Sheets + Calendar + Docs template, covering mixed personal/professional contacts with the 7 data fields you specified. Creating the complete system now."
+    },
+    {
+      "role": "assistant",
+      "content": "Error: You must call set_plan before attempt_completion."
+    },
+    {
+      "role": "assistant",
+      "content": "Got it - building a lightweight Google Workspace tracking system with Sheets + Calendar + Docs template, covering mixed personal/professional contacts with the 7 data fields you specified. Creating the complete system now."
+    }
+  ],
+  "set_plan_args": {}
+}

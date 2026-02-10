@@ -1,0 +1,15 @@
+{
+  "id": "7c05389a-9bfa-445e-a750-a4261f07b433",
+  "raw_seed": "Research and compile a qualified list of 30-40 active Angel Investors and Seed VCs who specifically invest in Sustainability, Climate Tech, or Circular Economy startups, prioritizing those with a presence in Seattle/PNW.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research and compile a qualified list of 30-40 active Angel Investors and Seed VCs who specifically invest in Sustainability, Climate Tech, or Circular Economy startups, prioritizing those with a presence in Seattle/PNW."
+    },
+    {
+      "role": "assistant",
+      "content": "**Analyzing Investor Profiles**\n\nI've begun compiling a list of potential investors. My focus is narrowing down the search to those with a demonstrated interest in Sustainability, Climate Tech, and Circular Economy ventures. I am cross-referencing activity levels to ensure I get current, active investors.\n\n\n**Prioritizing Search Queries**\n\nI've formulated search queries focused on finding Angel Investors and Seed VCs with an emphasis on the specified investment areas and geographic focus. I'm starting broad, then plan to filter the results. I will start with Seattle and the PNW and then broaden the search if needed. Next step is to execute these queries and start the sifting process!\n\nI will research and compile a qualified list of 30-40 active Angel Investors and Seed VCs. My search will prioritize those with a presence in Seattle/PNW and focus on their investment in Sustainability, Climate Tech, or Circular Economy startups. I will use web search to identify potential investors and then refine the list based on their activity and specific investment focuses."
+    }
+  ],
+  "set_plan_args": {}
+}

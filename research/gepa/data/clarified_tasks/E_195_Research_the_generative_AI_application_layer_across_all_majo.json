@@ -1,0 +1,59 @@
+{
+  "id": "f153a59f-c75f-40fa-9896-555ce0369487",
+  "raw_seed": "Research the generative AI application layer across all major verticals: healthcare, legal, finance, education, marketing/creative, customer service, software development, manufacturing, agriculture, government, real estate, HR/recruiting, media/entertainment, gaming, and others. For each vertical, identify leading startups, adoption maturity, key use cases, and gaps where AI solutions are weak or missing.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research the generative AI application layer across all major verticals: healthcare, legal, finance, education, marketing/creative, customer service, software development, manufacturing, agriculture, government, real estate, HR/recruiting, media/entertainment, gaming, and others. For each vertical, identify leading startups, adoption maturity, key use cases, and gaps where AI solutions are weak or missing."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll conduct comprehensive research on generative AI application layer across all major verticals. This is a large research goal with clear decomposition\u2014I'll search for current information on AI adoption, leading companies, use cases, and gaps across each vertical."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI healthcare startups adoption 2026 use cases\"]:\n\n\nSources: https://cdn.openai.com/pdf/2cb29276-68cd-4ec6-a5f4-c01c5e7a36e9/OpenAI-AI-as-a-Healthcare-Ally-Jan-2026.pdf, https://www.bcg.com/publications/2026/how-ai-agents-will-transform-health-care, https://gohub.vc/healthcare-ai-race-adoption-trends/, https://www.unityai.co/media/healthcare-ai-tools---2026-health-it-predictions, https://www.linkedin.com/pulse/generative-ai-healthcare-whats-actually-working-2026-moving-pathak-phsyf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI legal tech startups 2026 contract review document analysis\"]:\n\n\nSources: https://www.darrow.ai/resources/legal-tech-startups, https://brightflag.com/resources/top-legal-ai-companies/, https://www.spellbook.legal/learn/best-ai-legal-document-comparison-software, https://signeasy.com/blog/business/ai-contract-review-software, https://tezeract.ai/best-ai-legal-tech-companies/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI fintech startups 2026 financial services adoption\"]:\n\n\nSources: https://fintechmagazine.com/news/how-generative-ai-will-transform-financial-services-in-2026, https://linas.substack.com/p/top10aistartups2026, https://www.ideas2it.com/blogs/generative-ai-in-fintech, https://www.fintechweekly.com/magazine/articles/earning-trust-generative-ai-financial-services, https://www.chosun.com/english/industry-en/2026/01/29/D4C5JW6E4NCHTDOXSUV5MIPEOA/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI education startups 2026 learning platforms tutoring\"]:\n\n\nSources: https://www.ycombinator.com/companies/industry/education, https://www.herohunt.ai/blog/top-10-ai-tutor-marketplaces-for-ai-labs, https://teachbetter.ai/10-best-ai-learning-resources-2026/, https://www.facultyfocus.com/articles/teaching-with-technology-articles/designing-the-2026-classroom-emerging-learning-trends-in-an-ai-powered-education-system/, https://www.cleveroad.com/blog/top-ai-education-companies/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI marketing creative tools startups 2026\"]:\n\n\nSources: https://elearningindustry.com/advertise/elearning-marketing-resources/blog/hottest-ai-startups-the-companies-defining-the-next-wave-of-ai, https://www.marketermilk.com/blog/ai-marketing-tools, https://www.averi.ai/how-to/best-ai-marketing-tools-for-startups-in-2026-(ranked-compared), https://www.reddit.com/r/SaaS/comments/1qvhr5y/15_ai_development_companies_dominating_2026_i/, https://www.canto.com/blog/best-ai-marketing-tools/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI customer service chatbots startups 2026\"]:\n\n\nSources: https://www.ema.co/additional-blogs/addition-blogs/ai-customer-service-solutions, https://www.ycombinator.com/companies/industry/generative-ai, https://www.nurix.ai/resources/top-ai-chatbot-companies, https://www.atlantic.net/gpu-server-hosting/fastest-growing-ai-startups-2026/, https://www.seedtable.com/best-generative-ai-startups"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI software development coding tools startups 2026\"]:\n\n\nSources: https://www.technologyreview.com/2026/01/12/1130027/generative-coding-ai-software-2026-breakthrough-technology/, https://www.reddit.com/r/SaaS/comments/1qvhr5y/15_ai_development_companies_dominating_2026_i/, https://www.youtube.com/watch?v=zqiYTXiQq-0, https://www.ycombinator.com/companies/industry/generative-ai, https://thoughtminds.ai/blog/best-ai-for-coding-that-developer-should-know-in-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI manufacturing industrial applications startups 2026\"]:\n\n\nSources: https://f7i.ai/blog/ai-tech-startups-in-manufacturing-moving-beyond-hype-to-roi-in-2026, https://www.atlantic.net/gpu-server-hosting/fastest-growing-ai-startups-2026/, https://elearningindustry.com/advertise/elearning-marketing-resources/blog/hottest-ai-startups-the-companies-defining-the-next-wave-of-ai, https://www.ycombinator.com/companies/industry/generative-ai, https://www.seedtable.com/best-generative-ai-startups"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI agriculture agtech startups 2026\"]:\n\n\nSources: https://farmonaut.com/blogs/ai-agriculture-startup-7-top-agriculture-tech-ideas-2026, https://greyb.com/blog/ai-agriculture-startups/, https://www.icl-group.com/blog/future-of-agtech-2026/, https://www.failory.com/startups/agtech, https://aibusiness.com/verticals/5-agtech-ai-companies-you-need-to-know"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI government public sector startups 2026\"]:\n\n\nSources: https://www.carahsoft.com/blog/carahsoft-top-ai-events-for-government-blog-2026, https://www.forbes.com/sites/josipamajic/2026/02/04/ycs-2026-roadmap-signals-a-shift-from-human-augmented-to-ai-native-startups/, https://datainnovation.org/2026/02/public-sector-ai-adoption-index-2026/, https://www.govtech.com/biz/the-2026-gt100-what-will-it-take-to-scale-ai-in-government, https://www.ycombinator.com/companies/industry/government"
+    },
+    {
+      "role": "assistant",
+      "content": "The initial web searches have provided a good starting point for each vertical. I have gathered numerous sources, including articles, blog posts, and company lists, that discuss generative AI applications, startups, adoption trends, and use cases for most of the specified sectors. I will now process this information to identify the leading startups, adoption maturity, key use cases, and existing gaps for each vertical. Once this data is synthesized, I will present a comprehensive plan."
+    }
+  ],
+  "set_plan_args": {}
+}

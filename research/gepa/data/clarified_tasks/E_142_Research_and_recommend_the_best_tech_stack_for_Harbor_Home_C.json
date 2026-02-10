@@ -1,0 +1,15 @@
+{
+  "id": "237d1c80-9446-49d9-b65d-f811c23a3c69",
+  "raw_seed": "Research and recommend the best tech stack for Harbor Home Cleaning's website, booking, and invoicing needs within a ~$300/month total budget. Cover: (1) Simple website builder (Squarespace vs Wix vs WordPress), (2) Google Business Profile setup steps and optimization for local SEO, (3) Booking/scheduling software (Jobber, Housecall Pro, Launch27, or alternatives), (4) Invoicing/payment processing (Square, Stripe, integrated options). Provide specific cost breakdowns, feature comparisons, and a recommended stack. Also outline the key website pages needed and SEO best practices for a local cleaning company.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research and recommend the best tech stack for Harbor Home Cleaning's website, booking, and invoicing needs within a ~$300/month total budget. Cover: (1) Simple website builder (Squarespace vs Wix vs WordPress), (2) Google Business Profile setup steps and optimization for local SEO, (3) Booking/scheduling software (Jobber, Housecall Pro, Launch27, or alternatives), (4) Invoicing/payment processing (Square, Stripe, integrated options). Provide specific cost breakdowns, feature comparisons, and a recommended stack. Also outline the key website pages needed and SEO best practices for a local cleaning company."
+    },
+    {
+      "role": "assistant",
+      "content": ": I'll research the best tech stack options for Harbor Home Cleaning's website, booking, and invoicing needs within your ~$300/month budget. Let me gather current pricing and feature information for the platforms you mentioned."
+    }
+  ],
+  "set_plan_args": {}
+}

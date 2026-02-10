@@ -1,0 +1,23 @@
+{
+  "id": "43a1ed1d-5555-4a04-b1a9-cec8c83ff053",
+  "raw_seed": "Turn your existing materials into an investor-ready package (tighten pitch narrative, metrics, use-of-funds, expansion plan; create a data-room checklist and doc set; prep FAQ + financial model snapshot suitable for investors/lenders)",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Turn your existing materials into an investor-ready package (tighten pitch narrative, metrics, use-of-funds, expansion plan; create a data-room checklist and doc set; prep FAQ + financial model snapshot suitable for investors/lenders)"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand what existing materials you have before I can create an investor-ready package. This is a critical clarification because the scope and approach depend entirely on what we're working with.\n\nLet me ask the essential questions:\n\n1. **What type of business/venture** are we packaging? (e.g., SaaS, hardware, biotech, real estate, consumer brand, etc.)\n\n2. **What existing materials do you have?** (e.g., business plan, pitch deck, financial spreadsheets, product documentation, market research)\n\n3. **What stage are you at?** (pre-seed, seed, Series A, growth, or something else)\n\n4. **Who is the primary audience?** (VCs, angels, banks/lenders, strategic investors)\n\n5. **Do you have current financial data?** (revenue, burn rate, unit economics, projections)\n\n6. **What's your timeline?** (when do you need this ready)\n\nWithout seeing your actual materials, I can't tighten your narrative, validate your metrics, or create a credible financial model. I'm ready to move fast once you provide these inputs\u2014I can then build a complete investor package with pitch narrative, data room checklist, FAQ, financial model snapshot, and expansion plan.\n\nCan you share or describe what you currently have?"
+    },
+    {
+      "role": "user",
+      "content": "1. **Business type**: B2B SaaS for dental practices\u2014AI scheduling + patient engagement platform that fills last-minute cancellations and reduces no-shows.\n\n2. **Existing docs**: 18-page seed deck from Feb (too wordy), 2024 operating model (Excel), one-pager teaser, cap-table (Carta), 2023 tax return, basic data-room folder with customer contracts & ARR bridge\u2014nothing polished.\n\n3. **Stage**: Seed extension (\u201cseed-plus\u201d)\u2014post-revenue, <$2 M raised, raising $4 M to get to Series A metrics.\n\n4. **Target investors**: US healthcare SaaS VCs (e.g., Bessemer, Healthtech Capital) + a couple strategic dental-group partners; will also pitch Silicon Valley Bank for $1 M venture debt line once term sheet is in hand.\n\n5. **Financial data (2024 YTD actuals)**: $1.05 M ARR, 3 % monthly churn, $4.2 k average ACV, CAC payback 11 months, gross margin 82 %, burn $135 k/month, runway to mid-Jan 2025. Projections: $2.8 M ARR by Dec 25, cash-flow break-even Q3 26.\n\n6. **Timeline**: Partner pitch marathon starts 8/12\u2014need clean deck, data-room index, and 2-year snapshot model by 7/30 so I can pre-market."
+    },
+    {
+      "role": "assistant",
+      "content": ":user question: 1. **Business type**: B2B SaaS for dental practices\u2014AI scheduling + patient engagement platform that fills last-minute cancellations and reduces no-shows.\n\n2. **Existing docs**: 18-page seed deck from Feb (too wordy), 2024 operating model (Excel), one-pager teaser, cap-table (Carta), 2023 tax return, basic data-room folder with customer contracts & ARR bridge\u2014nothing polished.\n\n3. **Stage**: Seed extension (\u201cseed-plus\u201d)\u2014post-revenue, <$2 M raised, raising $4 M to get to Series A metrics.\n\n4. **Target investors**: US healthcare SaaS VCs (e.g., Bessemer, Healthtech Capital) + a couple strategic dental-group partners; will also pitch Silicon Valley Bank for $1 M venture debt line once term sheet is in hand.\n\n5. **Financial data (2024 YTD actuals)**: $1.05 M ARR, 3 % monthly churn, $4.2 k average ACV, CAC payback 11 months, gross margin 82 %, burn $135 k/month, runway to mid-Jan 2025. Projections: $2.8 M ARR by Dec 25, cash-flow break-even Q3 26.\n\n6. **Timeline**: Partner pitch marathon starts 8/12\u2014need clean deck, data-room index, and 2-year snapshot model by 7/30 so I can pre-market."
+    }
+  ],
+  "set_plan_args": {}
+}

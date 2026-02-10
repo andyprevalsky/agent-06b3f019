@@ -1,0 +1,27 @@
+{
+  "id": "61af6ced-3322-4ac2-8992-2c7e551249e7",
+  "raw_seed": "Design 'help-first' networking system: Create templates and tracking system for offering value to 2 people/week (intros, feedback, sharing resources) + map 10 people in network to reconnect with",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Design 'help-first' networking system: Create templates and tracking system for offering value to 2 people/week (intros, feedback, sharing resources) + map 10 people in network to reconnect with"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you design a 'help-first' networking system with templates and tracking. Let me research best practices for value-driven networking and then create a comprehensive system for you."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"help-first networking approach templates value driven relationship building\"]:\n\n\nSources: https://miro.com/templates/value-network-mapping/, https://www.themuse.com/advice/4-email-templates-to-make-networking-way-less-awkward, https://impacttoolbox.org/how-to-network-and-build-value-based-relationships/, https://careerdesign.dartmouth.edu/resources/networking-outreach-templates-sample-questions/, https://www.slidegeeks.com/powerpoint/Value-Creation"
+    },
+    {
+      "role": "assistant",
+      "content": "Based on research of networking best practices, here are key insights for help-first networking:\n\n**Core Principles:**\n- Lead with specific, actionable value (not just \"can I help?\")\n- Make it easy to say yes (low friction)\n- Follow the \"give before you ask\" principle\n- Track your network like a system, not just contacts\n\n**Effective Templates Found:**\n1. **Resource Sharing**: \"I saw this [specific resource] and immediately thought of you because [specific reason]\"\n2. **Introduction Offers**: \"I know someone who could help with [specific need] - would you like an intro?\"\n3. **Feedback Requests**: \"I'd love your 2-minute take on [specific question] because [specific reason why their input matters]\"\n\n**Tracking System Elements:**\n- Contact info with context (how you can help THEM)\n- Last interaction date & method\n- Their current goals/challenges\n- Your offered value vs. received value\n- Next opportunity to help"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing this goal. You want to build a help-first networking system with two components: (1) templates and tracking for proactive value-giving to 2 people/week, and (2) a map of 10 people to reconnect with. This is decomposable and clear. I'll create practical templates, a tracking system, and guide you through mapping your network. Let me proceed with planning."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,71 @@
+{
+  "id": "8ffd6405-7d67-4982-a382-77dcbb48ed77",
+  "raw_seed": "Research current California EDD unemployment benefits requirements for 2026: eligibility criteria for laid-off workers, required documents (SSN, employer info, work history, etc.), weekly benefit amounts, how long benefits last, and any recent policy changes. Focus on first-time filers in Los Angeles.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research current California EDD unemployment benefits requirements for 2026: eligibility criteria for laid-off workers, required documents (SSN, employer info, work history, etc.), weekly benefit amounts, how long benefits last, and any recent policy changes. Focus on first-time filers in Los Angeles."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research current California EDD unemployment benefits requirements for 2026, focusing on eligibility, documentation, benefit amounts, duration, and recent policy changes for first-time filers in Los Angeles."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California EDD unemployment benefits requirements 2026 eligibility laid-off workers\"]:\n\n\nSources: https://edd.ca.gov/en/unemployment/, https://www.maternlawgroup.com/blog/fired-in-california-heres-what-to-know-about-unemployment/, https://edd.ca.gov/en/unemployment/eligibility/, https://edd.ca.gov/en/unemployment/FAQ_-_Eligibility/, https://remotelaws.com/unemployment/us-states/california/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California EDD required documents SSN employer work history 2026\"]:\n\n\nSources: https://edd.ca.gov/en/payroll_taxes/required_notices_and_pamphlets/, https://edd.ca.gov/siteassets/files/pdf_pub_ctr/de44.pdf, https://edd.ca.gov/en/unemployment/eligibility/, https://edd.ca.gov/en/disability/acceptable-document-verification/, https://remotelaws.com/unemployment/us-states/california/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California EDD weekly benefit amounts 2026\"]:\n\n\nSources: https://edd.ca.gov/en/disability/Contribution_Rates_and_Benefit_Amounts/, https://edd.ca.gov/en/unemployment/UI-Calculator/, https://www.prudential.com/legislative-monitor-issue/CA-EDD-2025-Updates, https://edd.ca.gov/en/disability/Calculating_DI_Benefit_Payment_Amounts/, https://edd.ca.gov/siteassets/files/pdf_pub_ctr/de2589.PDF"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California EDD unemployment benefits duration how long 2026\"]:\n\n\nSources: https://edd.ca.gov/en/unemployment/benefit-year-end/, https://www.reddit.com/r/Edd/comments/1m18448/can_anyone_help_will_i_still_get_unemployment_my/, https://edd.ca.gov/en/unemployment/, https://claimyr.com/government-services/california-edd-unemployment/EDD-unemployment-duration-in-California-26-weeks-or-1-year-Confused-about-benefit-period/2025-03-29, https://parris.com/news/employment-law/california-unemployment-extension-or-cares-act"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California EDD policy changes 2026 first-time filers\"]:\n\n\nSources: https://edd.ca.gov/siteassets/files/pdf_pub_ctr/de44.pdf, https://www.cdflaborlaw.com/blog/key-new-2026-employment-laws-for-california-employers, https://www.labor.ca.gov/2025/12/31/new-worker-protections-taking-effect-in-california-on-january-1-2026/, https://www.hunton.com/hunton-employment-labor-perspectives/are-you-ready-five-new-california-employment-laws-for-2026, https://www.mayerbrown.com/en/insights/publications/2025/11/california-enacts-new-employment-laws-for-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Los Angeles California EDD unemployment benefits first-time filers 2026\"]:\n\n\nSources: https://edd.ca.gov/en/unemployment/, https://edd.ca.gov/en/unemployment/step-2-apply/, https://edd.ca.gov/en/unemployment/eligibility/, https://www.calaborlaw.com/ive-lost-my-job-how-do-i-get-unemployment-benefits/, https://edd.ca.gov/en/about_edd/news_releases_and_announcements/unemployment-september-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research current California EDD unemployment benefits requirements for 2026, focusing on eligibility criteria, required documents, benefit amounts, duration, and recent policy changes for first-time filers in Los Angeles."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California EDD unemployment benefits eligibility requirements 2026\"]:\n\n\nSources: https://edd.ca.gov/en/unemployment/eligibility/, https://edd.ca.gov/en/unemployment/, https://edd.ca.gov/en/unemployment/FAQ_-_Eligibility/, https://www.marca.com/en/lifestyle/us-news/personal-finance/2026/01/25/69762bdbe2704eb9398b4589.html, https://nosratilaw.com/blog/what-disqualifies-you-from-unemployment-in-california/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California unemployment benefits required documents SSN employer info\"]:\n\n\nSources: https://edd.ca.gov/en/unemployment/eligibility/, https://edd.ca.gov/en/unemployment/, https://edd.ca.gov/en/unemployment/step-1-get-your-information-in-order/, https://edd.ca.gov/en/unemployment/Employer_Information/, https://edd.ca.gov/en/employers/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California EDD weekly benefit amounts 2026 Los Angeles\"]:\n\n\nSources: https://edd.ca.gov/en/unemployment/UI-Calculator/, https://www.prudential.com/legislative-monitor-issue/CA-EDD-2025-Updates, https://thelarkincompany.com/law-changes/california/, https://edd.ca.gov/en/disability/Contribution_Rates_and_Benefit_Amounts/, https://edd.ca.gov/en/disability/Calculating_DI_Benefit_Payment_Amounts/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California unemployment benefits duration how long 2026\"]:\n\n\nSources: https://edd.ca.gov/en/unemployment/benefit-year-end/, https://edd.ca.gov/en/unemployment/, https://crosnerlegal.com/how-long-do-unemployment-benefits-last-in-california/, https://claimyr.com/government-services/california-edd-unemployment/EDD-unemployment-duration-in-California-26-weeks-or-1-year-Confused-about-benefit-period/2025-03-29, https://www.reddit.com/r/Edd/comments/1m18448/can_anyone_help_will_i_still_get_unemployment_my/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California EDD policy changes 2026 laid-off workers\"]:\n\n\nSources: https://www.labor.ca.gov/2025/12/31/new-worker-protections-taking-effect-in-california-on-january-1-2026/, https://www.cdflaborlaw.com/blog/key-new-2026-employment-laws-for-california-employers, https://edd.ca.gov/en/unemployment/unemployment-benefits-for-federal-workers/, https://www.fennemorelaw.com/new-year-new-rules-key-california-employment-law-updates-for-2026/, https://www.mayerbrown.com/en/insights/publications/2025/11/california-enacts-new-employment-laws-for-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"California first-time unemployment filers requirements 2026\"]:\n\n\nSources: https://edd.ca.gov/en/unemployment/, https://edd.ca.gov/en/unemployment/eligibility/, https://remotelaws.com/unemployment/us-states/california/, https://www.calaborlaw.com/ive-lost-my-job-how-do-i-get-unemployment-benefits/, https://www.marca.com/en/lifestyle/us-news/personal-finance/2026/01/25/69762bdbe2704eb9398b4589.html"
+    },
+    {
+      "role": "assistant",
+      "content": "\nI'll research current California EDD unemployment benefits requirements for 2026, focusing on eligibility criteria, required documents, benefit amounts, duration, and recent policy changes for first-time filers in Los Angeles."
+    }
+  ],
+  "set_plan_args": {}
+}

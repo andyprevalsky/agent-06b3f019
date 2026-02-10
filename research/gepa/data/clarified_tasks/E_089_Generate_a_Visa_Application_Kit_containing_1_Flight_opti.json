@@ -1,0 +1,35 @@
+{
+  "id": "a6747758-957b-4ab8-ae43-106bf5deeb75",
+  "raw_seed": "Generate a 'Visa Application Kit' containing: 1) Flight options (BLR-CDG, May 10-22), 2) Compliant travel insurance options, 3) A professional cover letter tailored for a 'Visiting Friend' application, and 4) A comprehensive document checklist.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Generate a 'Visa Application Kit' containing: 1) Flight options (BLR-CDG, May 10-22), 2) Compliant travel insurance options, 3) A professional cover letter tailored for a 'Visiting Friend' application, and 4) A comprehensive document checklist."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you create a comprehensive Visa Application Kit for your trip from Bangalore to Paris. Let me research the current flight options, travel insurance requirements, and visa documentation needed for a 'Visiting Friend' Schengen visa application."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Bangalore to Paris flights May 10-22 2024 cheapest options BLR CDG\"]:\n\n\nSources: https://www.google.com/travel/flights/flights-from-bengaluru-to-paris.html, https://www.expedia.com/lp/flights/blr/cdg/bengaluru-to-paris, https://www.skyscanner.com/routes/blr/pari/bengaluru-to-paris.html, https://www.skyscanner.com/routes/blr/cdg/bengaluru-to-paris-charles-de-gaulle.html, https://wwws.airfrance.in/en-in/flights-from-bangalore-bengaluru-to-paris"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Schengen visa travel insurance requirements coverage minimum 30000 euros 2024\"]:\n\n\nSources: https://www.insubuy.com/schengen-insurance/, https://www.axa-schengen.com/en/travel-insurance/benefits/schengen-travel-insurance-requirements, https://www.uhcsafetrip.com/tips/schengen-visa-travel-and-insurance-guide/, https://www.axa-schengen.com/en/travel-insurance/benefits/30000-euro-coverage, https://www.worldtrips.com/schengen-area-travel-medical-insurance"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"France Schengen visa visiting friend cover letter template requirements\"]:\n\n\nSources: https://www.axa-schengen.com/en/visa/requirements/documents/invitation-letter, https://france-visas.gouv.fr/en/tourist-or-private-visit, https://www.atlys.com/blog/france-visa-cover-letter, https://www.reddit.com/r/SchengenVisa/comments/1leugh1/invitation_letter_attestation_daccueil_to_stay/, https://www.reddit.com/r/SchengenVisa/comments/1j8m3w9/please_help_cover_letter_template_for_friends_and/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Schengen visa document checklist India French consulate 2024\"]:\n\n\nSources: https://france-visas.gouv.fr/en/india, https://france-visas.gouv.fr/en/visa-application-guidelines, https://www.welcometofrance.com/app/uploads/List-of-documents-to-be-submitted-with-an-application-for-a-short-stay-visa-1.pdf, https://visa.vfsglobal.com/one-pager/lithuania/india/english/pdf/Checklist-March-2024.pdf, https://www.eeas.europa.eu/sites/default/files/documents/2024/Schengen_Common%20Information%20Sheet%20April%202024_0.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing this goal: create a comprehensive Visa Application Kit with flight options, travel insurance, a cover letter, and a document checklist for a BLR-CDG trip (May 10-22). This is a multi-component deliverable requiring research on flights, insurance products, visa requirements, and document standards. I have clarity on the scope. Let me proceed with planning."
+    }
+  ],
+  "set_plan_args": {}
+}

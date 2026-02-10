@@ -1,0 +1,211 @@
+{
+  "id": "46cdf952-13bb-4e42-996a-9f70108f55eb",
+  "raw_seed": "Research small-molecule CROs in Cambridge UK cluster with high-throughput automation capacity, ADME, in-vivo PoC, and GLP tox services. Focus on Charles River (Chesterford), Domainex, Sygnature Discovery, Concept Life Sciences, Pharmaron UK, and similar. Gather: services offered, automation level, capacity/timelines, approximate pricing if public, contact info, and known deal structures.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research small-molecule CROs in Cambridge UK cluster with high-throughput automation capacity, ADME, in-vivo PoC, and GLP tox services. Focus on Charles River (Chesterford), Domainex, Sygnature Discovery, Concept Life Sciences, Pharmaron UK, and similar. Gather: services offered, automation level, capacity/timelines, approximate pricing if public, contact info, and known deal structures."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research small-molecule CROs in the Cambridge UK cluster with the specific capabilities you mentioned. This is a detailed market research task focusing on services, automation, capacity, pricing, and deal structures for the firms you've identified. Let me gather comprehensive information on each organization."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Charles River Chesterford small molecule ADME automation services capacity\"]:\n\n\nSources: https://www.criver.com/molecule-type/small-molecule, https://www.criver.com/products-services/lab-sciences/dmpk, https://www.drugtargetreview.com/news/31830/charles-river-laboratories-expands-services-for-early-discovery-screening/, https://www.criver.com/resources/admedmpk-services, https://www.criver.com/products-services/discovery-services/discovery-facilities/cambridge-and-harlow-uk"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Domainex Cambridge UK CRO services automation high-throughput ADME\"]:\n\n\nSources: https://www.domainex.co.uk/, https://www.domainex.co.uk/services/adme, https://www.domainex.co.uk/services/high-throughput-screening, https://ardigen.com/, https://www.domainex.co.uk/sites/default/files/2022-09/Domainex-Integrated-Drug-Discovery-Brochure.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Sygnature Discovery Cambridge small molecule drug discovery services automation\"]:\n\n\nSources: https://www.sygnaturediscovery.com/, https://www.sygnaturediscovery.com/drug-discovery/, https://www.sygnaturediscovery.com/publications/posters/establishing-humanising-drug-discovery-with-integration-of-automation-workflows/, https://www.sygnaturediscovery.com/news-and-events/news/sygnature-discovery-us-office-cambridge-ma/, https://www.sygnaturediscovery.com/home-2/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Concept Life Sciences Cambridge ADME GLP tox services capacity\"]:\n\n\nSources: https://www.conceptlifesciences.com/services/toxicology, https://www.conceptlifesciences.com/services/admet-dmpk/toxicology, https://www.conceptlifesciences.com/, https://www.conceptlifesciences.com/services/admet-dmpk/in-vivo-pk-bioanalysis, https://www.conceptlifesciences.com/services"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Pharmaron UK Cambridge small molecule CRO services automation\"]:\n\n\nSources: https://www.pharmaron.com/modalities/small-molecule-services/, https://www.pharmaron.com/, https://www.pharmaron.com/services/laboratory-services/in-vitro-biology/compound-management/, https://www.pharmaron.com/services/chemistry-manufacturing-controls/small-molecule-drug-substance/, https://tr.linkedin.com/company/pharmaron"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Cambridge UK small molecule CRO cluster high-throughput automation ADME\"]:\n\n\nSources: https://www.collaborativedrug.com/rxcelerate-case-study, https://pubmed.ncbi.nlm.nih.gov/22074279/, https://www.ukri.org/opportunity/small-molecule-high-throughput-screen-using-astrazeneca-facilities/, https://www.cambridgenetwork.co.uk/directories/companies/262, https://www.cambridge.org/core/books/drug-design/predicting-adme-properties-in-drug-discovery/8A2A6595F64DB7FE228F5B1D34C643FE"
+    },
+    {
+      "role": "assistant",
+      "content": "The initial web searches have provided a good overview of the named CROs and their general capabilities, including some mentions of automation, ADME, and toxicology. However, specific details on the *level* of high-throughput automation, precise capacity/timelines, approximate pricing (which is often not public), and typical deal structures are still largely missing or very high-level. To get a more comprehensive picture, I need to dig deeper into each CRO's offerings, focusing on these specific points. I will use a combination of web search and potentially direct website fetching where broad search results are insufficient. I will also look for mentions of 'in-vivo PoC' specifically for each CRO."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Charles River Chesterford small molecule CRO high-throughput automation capacity pricing deal structures in-vivo PoC GLP tox\"]:\n\n\nSources: https://www.criver.com/molecule-type/small-molecule, https://www.crai.com/insights-events/publications/most-favored-nation-pricing-in-the-us/, https://www.criver.com/products-services/discovery-services/screening-and-profiling-assays/high-throughput-screening, https://www.chesterfordresearchpark.com/media/1458/crp_crl_editorialdec18.pdf, https://ir.criver.com/static-files/50af20bf-a427-45aa-8ffb-936fb9938dd1"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Domainex small molecule CRO high-throughput automation capacity pricing deal structures in-vivo PoC GLP tox\"]:\n\n\nSources: https://www.domainex.co.uk/, https://www.domainex.co.uk/services/high-throughput-screening, https://www.domainex.co.uk/news/domainex-ranked-fastest-growing-drug-discovery-cro-europe, https://www.domainex.co.uk/about-domainex, https://www.domainex.co.uk/news/high-throughput-experimentation-hte-approaches-domainex-advantages-end-user-plates"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Sygnature Discovery small molecule CRO high-throughput automation capacity pricing deal structures in-vivo PoC GLP tox\"]:\n\n\nSources: https://www.sygnaturediscovery.com/, https://www.sygnaturediscovery.com/drug-discovery/bioscience/screening/medium-high-throughput-screening-mts-hts-2/, https://www.sygnaturediscovery.com/news-and-events/blog/all-ftes-are-not-created-equal/, https://www.sygnaturediscovery.com/home-2/, https://www.sygnaturediscovery.com/drug-discovery/bioscience/screening/high-throughput-screening-hts-2/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Concept Life Sciences small molecule CRO high-throughput automation capacity pricing deal structures in-vivo PoC GLP tox\"]:\n\n\nSources: https://www.conceptlifesciences.com/, https://www.aoshearman.com/en/insights/life-sciences-and-healthcare-insights/creative-deal-structures-help-life-sciences-innovators-weather-the-macro-storm, https://www.conceptlifesciences.com/services/therapeutic-modalities/small-molecules, https://www.conceptlifesciences.com/news-and-blog/call-off-contracts-at-concept, https://firstwordpharma.com/story/5949696"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Pharmaron UK Cambridge small molecule CRO high-throughput automation capacity pricing deal structures in-vivo PoC GLP tox\"]:\n\n\nSources: https://www.pharmaron.com/services/chemistry-manufacturing-controls/small-molecule-drug-substance/, https://www.pharmaron.com/knowledge-center/fully-automated-high-throughput-screening-services/, https://www.morganlewis.com/pubs/2025/12/uk-us-pharmaceutical-trade-deal-impact-on-uk-drug-pricing-tariffs-and-investment, https://www.pharmaron.com/, https://www.pharmaron.com/modalities/small-molecule-services/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"List of other small molecule CROs Cambridge UK with high-throughput automation ADME in-vivo PoC GLP tox\"]:\n\n\nSources: https://cn-bio.com/cn-bio-introduces-cross-species-dili-services-to-enhance-in-vitro-to-in-vivo-extrapolation-during-preclinical-drug-development/, https://metrionbiosciences.com/drug-discovery-collaboration-between-japanese-pharma-and-a-uk-sme-cro-successfully-developed-novel-small-molecule-inhibitors-of-the-kv1-3-channel-to-treat-autoimmune-disease/, https://www.cruk.cam.ac.uk/core-facilities/bioanalytical-mass-spectrometry/, https://www.criver.com/products-services/safety-assessment, https://www.domainex.co.uk/sites/default/files/2023-05/Integrated_Drug_Discovery_CNS_Targets_Domainex_Brochure_May23_1.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the Cambridge UK CRO cluster focusing on the six firms you mentioned plus similar players. I need to gather detailed information on their service portfolios, automation capabilities, capacity metrics, pricing, and commercial terms. Let me start with parallel searches across these organizations."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Charles River Chesterford Cambridge small molecule CRO services automation capacity ADME\"]:\n\n\nSources: https://www.criver.com/molecule-type/small-molecule, https://www.chesterfordresearchpark.com/news/2023/chesterford-research-park-begins-construction-of-60-000-sq-ft-fossil-fuel-free-sidney-sussex-building/, https://www.criver.com/products-services/discovery-services/discovery-facilities/cambridge-and-harlow-uk, https://www.criver.com/products-services/discovery-services, https://onenucleus.com/chesterford-research-park-appoints-glencar-continue-construction-60000-sq-ft-sidney-sussex-building"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Domainex Cambridge UK CRO drug discovery services ADME automation\"]:\n\n\nSources: https://www.domainex.co.uk/, https://www.domainex.co.uk/services/adme-and-bioanalytical-sciences, https://www.domainex.co.uk/news/nucleras-eprotein-discovery-system-installed-domainex-streamline-protein-production-services, https://www.domainex.co.uk/Integrated-drug-discovery-services-USA, https://www.news-medical.net/health/Targeting-neuroinflammation-with-C5aR1-negative-allosteric-modulators.aspx"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Sygnature Discovery Cambridge small molecule services automation GLP tox\"]:\n\n\nSources: https://www.sygnaturediscovery.com/, https://www.sygnaturediscovery.com/news-and-events/blog/how-can-correct-form-analysis-de-risk-your-project-ahead-of-pre-clinical-tox/, https://www.sbdrugdiscovery.com/, https://www.sygnaturediscovery.com/news-and-events/blog/navigating-the-physicochemical-maze/, https://www.sygnaturediscovery.com/home-2/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Concept Life Sciences Cambridge CRO services ADME in-vivo PoC\"]:\n\n\nSources: https://www.conceptlifesciences.com/, https://www.criver.com/products-services/lab-sciences/dmpk/in-vivo-adme, https://www.conceptlifesciences.com/services, https://bioivt.com/in-vivo-adme-and-pk-studies, https://www.conceptlifesciences.com/services/admet-dmpk/in-vivo-pk-bioanalysis"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Pharmaron UK Cambridge small molecule CRO automation services pricing\"]:\n\n\nSources: https://www.pharmaron.com/modalities/small-molecule-services/, https://www.pharmaron.com/services/laboratory-services/in-vitro-biology/cell-based-assays/high-throughput-screening-service/, https://www.pharmaron.com/pharmaron-stories/adme-optimisation-2025/, https://www.pharmaron.com/services/chemistry-manufacturing-controls/small-molecule-drug-substance/, https://www.pharmaron.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Cambridge UK CRO cluster small molecule high-throughput automation ADME GLP\"]:\n\n\nSources: https://www.enterprise.cam.ac.uk/10-cambridge-spinouts-changing-the-story-of-cancer/, https://www.domainex.co.uk/services/medicinal-chemistry, https://www.astrazeneca.com/media-centre/press-releases/2021/astrazeneca-unveils-the-discovery-centre-disc-in-cambridge.html, https://www.criver.com/products-services/discovery-services/discovery-facilities/cambridge-and-harlow-uk, https://crukcambridgecentre.org.uk/patient-care/early-phase-trials/research"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research small-molecule CROs in the Cambridge UK cluster with the specific capabilities you've outlined. This is a detailed competitive intelligence task. Let me gather comprehensive information on the key players you mentioned and similar organizations."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Charles River Chesterford laboratory services ADME GLP tox high-throughput automation\"]:\n\n\nSources: https://www.criver.com/products-services/safety-assessment/toxicology-services, https://www.criver.com/products-services/discovery-services/discovery-facilities/cambridge-and-harlow-uk, https://www.criver.com/, https://www.criver.com/products-services/discovery-services/discovery-facilities, https://www.criver.com/resources/drug-metabolism-overview"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Domainex Cambridge drug discovery services automation capacity ADME\"]:\n\n\nSources: https://www.domainex.co.uk/Integrated-drug-discovery-services-USA, https://www.domainex.co.uk/, https://www.domainex.co.uk/news/domainex-expands-analytical-chemistry-capabilities-over-1m-worth-new-waters-equipment, https://www.domainex.co.uk/services/adme-and-bioanalytical-sciences, https://www.domainex.co.uk/news/hm-lord-lieutenant-cambridgeshire-opens-domainexs-new-biology-centre-excellence-and-presents"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Sygnature Discovery UK services automation high-throughput PoC GLP\"]:\n\n\nSources: https://www.sygnaturediscovery.com/, https://www.sygnaturediscovery.com/drug-discovery/bioscience/screening/medium-high-throughput-screening-mts-hts-2/, https://www.sygnaturediscovery.com/publications/posters/establishing-humanising-drug-discovery-with-integration-of-automation-workflows/, https://www.clinicalresearchnewsonline.com/news/2025/07/25/sygnature-discovery-completes-major-enhancement-of-high-throughput-chemistry-facilities-following-1-million-investment, https://www.sygnaturediscovery.com/drug-discovery/integrated-drug-discovery/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Concept Life Sciences Cambridge CRO services ADME in-vivo\"]:\n\n\nSources: https://www.sciencedirect.com/science/article/abs/pii/S1367593104000614, https://www.conceptlifesciences.com/services/admet-dmpk/in-vitro-adme-assays, https://www.conceptlifesciences.com/services/admet-dmpk/in-vivo-pk-bioanalysis, https://www.conceptlifesciences.com/, https://anilocus.com/boston-cambridge-cro-services/?srsltid=AfmBOortxgM1WpybXLW0fdyY97UozZ8qzYnfRPsWx0yJ__Ma5zU2-vRU"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Pharmaron UK Cambridge services small molecule automation GLP\"]:\n\n\nSources: https://www.pharmaron.com/services/chemistry-manufacturing-controls/small-molecule-drug-substance/, https://www.pharmaron.com/knowledge-center/fully-automated-high-throughput-screening-services/, https://www.pharmaron.com/services/laboratory-services/medical-device-testing/, https://www.pharmaron.com/about-us/latest-news/pharmaron-receives-a-cfda-glp-certificate-for-its-safety-assessment-facility/, https://www.pharmaron.com/services/biologics-cgt/biologics-laboratory-services/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Cambridge UK small molecule CRO cluster ADME automation GLP tox services\"]:\n\n\nSources: https://www.domainex.co.uk/sites/default/files/2023-05/Integrated_Drug_Discovery_CNS_Targets_Domainex_Brochure_May23_1.pdf, https://nonabio.com/toxicology-and-safety-assessment/, https://ardigen.com/, https://www.cam.ac.uk/stories/cambridge-cancer-spinouts, https://www.stratech.co.uk/indigo/designing-safer-pharmaceutical-leads-through-discovery-toxicology/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the Cambridge UK small-molecule CRO cluster focusing on the specific companies and service capabilities you've identified. This requires gathering current information on services, automation, capacity, pricing, and deal structures for each player."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Charles River Laboratories Chesterford Cambridge UK ADME in-vivo PoC GLP tox services\"]:\n\n\nSources: https://www.criver.com/products-services/discovery-services/discovery-facilities/cambridge-and-harlow-uk, https://www.criver.com/products-services/discovery-services/discovery-facilities, https://www.criver.com/, https://www.criver.com/products-services/safety-assessment/toxicology-services, https://www.criver.com/research-phase/preclinical-testing"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Domainex Cambridge UK small molecule CRO ADME automation capacity pricing\"]:\n\n\nSources: https://www.domainex.co.uk/, https://www.domainex.co.uk/services/adme-and-bioanalytical-sciences, https://www.domainex.co.uk/services/medicinal-chemistry, https://www.domainex.co.uk/Integrated-drug-discovery-services-USA, https://www.domainex.co.uk/sites/default/files/2021-03/Domainex-Integrated-Drug-Discovery-Brochure.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Sygnature Discovery Cambridge ADME high-throughput automation services\"]:\n\n\nSources: https://www.sygnaturediscovery.com/drug-discovery/dmpk-services/in-vitro-adme-and-physicochemical-profiling/, https://www.sygnaturediscovery.com/news-and-events/news/sygnature-discovery-us-office-cambridge-ma/, https://www.sygnaturediscovery.com/, https://www.sygnaturediscovery.com/drug-discovery/bioscience/screening/medium-high-throughput-screening-mts-hts-2/, https://www.sygnaturediscovery.com/news-and-events/blog/sygnature-discovery-partners-with-insmed-to-develop-first-in-class-compounds-for-genetically-defined-diseases/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Concept Life Sciences Cambridge small molecule CRO services capacity\"]:\n\n\nSources: https://www.conceptlifesciences.com/, https://www.conceptlifesciences.com/services/therapeutic-modalities/small-molecules, https://insidescientific.com/suppliers/concept-life-sciences/, https://www.biospace.com/press-releases/concept-life-sciences-expands-integrated-drug-discovery-facilities, https://www.cbinsights.com/company/concept-life-sciences"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Pharmaron UK Cambridge ADME in-vivo PoC services\"]:\n\n\nSources: https://www.pharmaron.com/services/laboratory-services/dmpk-services/integrated-in-vitro-and-in-vivo-adme/, https://www.pharmaron.com/services/laboratory-services/dmpk-services/, https://www.pharmaron.com/pharmaron-stories/adme-optimisation-2025/, https://www.pharmaron.com/services/biologics-cgt/cell-gene-therapy-laboratory-services/in-vivo-studies/, https://www.pharmaron.com/services/laboratory-services/dmpk-services/regulatory-in-vitro-admet-studies/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Cambridge UK CRO cluster small molecule ADME automation GLP tox 2025 2026\"]:\n\n\nSources: https://www.ats.cam.ac.uk/practical-application-toxicology-drug-development, https://www.collaborativedrug.com/rxcelerate-case-study, https://www.ats.cam.ac.uk/practical-application-toxicology-drug-development/patdd-2025-topics-speakers, https://www.pharmaron.com/pharmaron-stories/adme-optimisation-2025/, https://www.ukri.org/opportunity/small-molecule-high-throughput-screen-using-astrazeneca-facilities/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research the Cambridge UK CRO cluster focusing on the specific companies you mentioned. This is a detailed technical due diligence task requiring current information on services, capabilities, pricing, and deal structures. Let me gather comprehensive data on each organization."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Charles River Chesterford Cambridge UK services automation capacity ADME GLP tox\"]:\n\n\nSources: https://www.criver.com/products-services/safety-assessment/toxicology-services, https://www.criver.com/, https://www.criver.com/products-services/discovery-services/discovery-facilities/cambridge-and-harlow-uk, https://www.criver.com/products-services/safety-assessment/toxicology-services/general-toxicology, https://www.criver.com/products-services/discovery-services/discovery-facilities"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Domainex Cambridge UK CRO small molecule services automation ADME\"]:\n\n\nSources: https://www.domainex.co.uk/, https://www.domainex.co.uk/about-domainex, https://www.domainex.co.uk/services/medicinal-chemistry, https://www.domainex.co.uk/services/adme-and-bioanalytical-sciences, https://www.domainex.co.uk/sites/default/files/2021-03/Domainex-Integrated-Drug-Discovery-Brochure.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Sygnature Discovery Cambridge UK services ADME in-vivo PoC GLP toxicology\"]:\n\n\nSources: https://www.sygnaturediscovery.com/, https://www.sygnaturediscovery.com/drug-discovery/dmpk-services/, https://www.sbdrugdiscovery.com/, https://www.sygnaturediscovery.com/drug-discovery/in-vivo-pharmacology-and-in-vivo-testing/, https://www.linkedin.com/company/sygnature-discovery"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Concept Life Sciences Cambridge CRO services automation capacity\"]:\n\n\nSources: https://www.conceptlifesciences.com/news-and-blog/concept-life-sciences-fios-genomics-partner-to-enhance-complex-data-analysis-in-drug-discovery, https://www.conceptlifesciences.com/news-and-blog/driving-discovery-expanded-facilities-faster-innovation, https://www.conceptlifesciences.com/, https://www.news-medical.net/news/20250929/Concept-Life-Sciences-expands-integrated-drug-discovery-facilities.aspx, https://www.zeiss.com/microscopy/en/about-us/newsroom/press-releases/2025/partnership-concept-life-sciences.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Pharmaron UK Cambridge small molecule ADME services pricing\"]:\n\n\nSources: https://www.pharmaron.com/services/laboratory-services/dmpk-services/us-lab-services-dmpk-e-store/adme-profiling/, https://www.pharmaron.com/services/laboratory-services/dmpk-services/, https://www.pharmaron.com/services/laboratory-services/dmpk-services/integrated-in-vitro-and-in-vivo-adme/, https://www.pharmaron.com/about-us/upcoming-events/adme-optimisation/, https://www.pharmaron.com/pharmaron-stories/adme-optimisation-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Cambridge UK CRO cluster high-throughput automation small molecule discovery\"]:\n\n\nSources: https://www.youtube.com/watch?v=IrqpY0gnPM0, https://www.cam.ac.uk/research/news/accelerating-how-new-drugs-are-made-with-machine-learning, https://www.cam.ac.uk/stories/cambridge-cancer-spinouts, https://www.ats.cam.ac.uk/therapeutic-interest-groups/small-molecule, https://crukcambridgecentre.org.uk/research/collaboration/cruk-therapeutic-discovery-laboratories"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research small-molecule CROs in the Cambridge UK cluster with the specific capabilities you've outlined. This is a detailed market research task requiring information gathering on service offerings, automation capacity, pricing, and deal structures. Let me start by searching for information on these key players."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Charles River Chesterford Cambridge small molecule CRO automation ADME in-vivo GLP tox\"]:\n\n\nSources: https://www.criver.com/products-services/discovery-services/discovery-facilities, https://www.criver.com/molecule-type/small-molecule, https://www.criver.com/products-services/safety-assessment/toxicology-services, https://www.criver.com/products-services/discovery-services/discovery-facilities/cambridge-and-harlow-uk, https://www.criver.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Domainex Cambridge UK CRO services automation capacity ADME\"]:\n\n\nSources: https://www.domainex.co.uk/, https://intuitionlabs.ai/articles/future-cro-trends-2030, https://www.domainex.co.uk/services/adme, https://www.domainex.co.uk/Integrated-drug-discovery-services-USA, https://www.domainex.co.uk/services/medicinal-chemistry"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Sygnature Discovery Cambridge CRO small molecule automation services\"]:\n\n\nSources: https://www.sygnaturediscovery.com/, https://anilocus.com/boston-cambridge-cro-services/?srsltid=AfmBOoqvqNiIP-0K92n1oClQeBXOhuUk8uuXD1__j1-CML5iyNnn5y2Z, https://www.sygnaturediscovery.com/drug-discovery/, https://www.domainex.co.uk/about-domainex, https://www.sygnaturediscovery.com/publications/posters/establishing-humanising-drug-discovery-with-integration-of-automation-workflows/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Concept Life Sciences Cambridge CRO automation ADME services\"]:\n\n\nSources: https://www.conceptlifesciences.com/, https://www.conceptlifesciences.com/services/admet-dmpk/in-vitro-adme-assays, https://www.conceptlifesciences.com/news-and-blog/advanced-workflow-automation-scalable-image-analysis-in-spatial-biology, https://www.conceptlifesciences.com/services, https://www.conceptlifesciences.com/services/admet-dmpk"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Pharmaron UK Cambridge small molecule CRO automation capacity\"]:\n\n\nSources: https://www.pharmaron.com/services/chemistry-manufacturing-controls/small-molecule-drug-substance/, https://www.pharmaron.com/services/laboratory-services/, https://www.pharmaron.com/modalities/small-molecule-services/, https://www.pharmaron.com/services/laboratory-services/bioanalysis-services/biomarker-assays/, https://www.pharmaron.com/knowledge-center/fully-automated-high-throughput-screening-services/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Cambridge UK CRO cluster small molecule automation high-throughput services\"]:\n\n\nSources: https://www.criver.com/products-services/discovery-services/discovery-facilities/cambridge-and-harlow-uk, https://catsci.com/event/advances-in-small-molecule-drug-development-boston-2026/, https://www.cam.ac.uk/stories/cambridge-cancer-spinouts, https://www.domainex.co.uk/about-domainex, https://metrionbiosciences.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "The initial web searches have provided a good starting point, identifying the presence of the requested services (high-throughput automation, ADME, in-vivo PoC, and GLP tox) for most of the named CROs. However, the level of detail regarding specific automation technologies, actual capacity/timelines, approximate pricing, and typical deal structures is still largely missing or very high-level, as is common for proprietary business information. I need to synthesize the information gathered so far and identify specific gaps for each CRO. Then, I will attempt to fill these gaps through more targeted searches, focusing on news releases, scientific publications, and corporate reports that might indirectly reveal such details. I will also look for any 'similar' CROs that might fit the criteria and were not explicitly named."
+    }
+  ],
+  "set_plan_args": {}
+}

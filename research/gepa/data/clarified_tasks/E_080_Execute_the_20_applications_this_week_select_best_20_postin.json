@@ -1,0 +1,23 @@
+{
+  "id": "6b85ff0a-5702-4384-8854-7a2f51158523",
+  "raw_seed": "Execute the 20 applications this week: select best 20 postings, populate a tracker, and submit applications (either via automated browser submissions if credentials are provided, or produce a step-by-step apply queue for the user)",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Execute the 20 applications this week: select best 20 postings, populate a tracker, and submit applications (either via automated browser submissions if credentials are provided, or produce a step-by-step apply queue for the user)"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the scope and approach for this goal. You want to apply to 20 job postings this week, but I need some critical information to proceed effectively:\n\n1. **Job source**: Where should I find these 20 postings? (LinkedIn, Indeed, company websites, a specific list you have, etc.)\n2. **Job criteria**: What are the target roles, industries, experience levels, and locations?\n3. **Application credentials**: Do you have login credentials for job boards that support automated submissions, or should I prepare a manual step-by-step queue?\n4. **Resume/materials**: Do you have a resume and cover letter template ready to use?\n5. **Tracker format**: Do you want a spreadsheet (CSV/Excel), a simple document, or something else?\n\nWithout these details, I'm blocked from moving forward efficiently. Let me ask you directly."
+    },
+    {
+      "role": "user",
+      "content": "Okay, great! Here are my preferences:\n\n1.  **Where to find postings**: Primarily LinkedIn and Indeed. Also, check the careers pages for Google, Microsoft, and Amazon if you find relevant roles.\n2.  **Job criteria**: I'm looking for \"Product Manager\" or \"Technical Program Manager\" roles in the tech industry. I prefer remote, but am open to Seattle, WA, or Austin, TX. I'm targeting senior-level positions.\n3.  **Application method**: Please build a manual apply queue. I prefer to submit them myself.\n4.  **Your materials**: Yes, I have a resume and a general cover letter template. I'll provide them to you.\n5.  **Tracker preference**: A Google Sheet would be perfect."
+    },
+    {
+      "role": "assistant",
+      "content": "**Planning the Approach**\n\nI've got the necessary input, and I'm solidifying a strategic plan. I'm focusing on job sources like LinkedIn, Indeed, and the career pages of Google, Microsoft, and Amazon. My next step involves parsing the criteria to refine my search parameters.\n\n\n**Formulating the Strategy**\n\nNow I have a clearer picture of the approach, I'm defining the search criteria and methods. I'm focusing on the user's provided list of resources, and considering how the criteria fit together. I'm building a system to extract application links and note requirements, making sure to consider the resume/cover letter fit for the best jobs.\n\nThank you for the detailed information! This clarifies everything I need to get started. I will now create a plan to find the 20 best postings, gather the necessary information for a manual apply queue, and set up a Google Sheet tracker."
+    }
+  ],
+  "set_plan_args": {}
+}

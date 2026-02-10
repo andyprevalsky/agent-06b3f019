@@ -1,0 +1,23 @@
+{
+  "id": "fbfb864a-4d9c-4b95-85fc-9cff3de7a708",
+  "raw_seed": "Develop a support plan for Maya focusing on her end-of-month move and breakup isolation",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Develop a support plan for Maya focusing on her end-of-month move and breakup isolation"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand Maya's situation better before creating a support plan. Let me research what information might be available about her circumstances, or I may need to ask you directly for clarification about her specific needs, timeline, and current support system."
+    },
+    {
+      "role": "user",
+      "content": "Okay, great! Here are the details for Maya:\n\n1.  **Timeline**: She has to be out of her current place by March 2nd. She's moving into her new apartment on February 28th.\n2.  **Breakup context**: The breakup was pretty recent, about three weeks ago. It was a 3-year relationship, so she's still really reeling from it.\n3.  **Current support system**: She has some close friends, Sarah and Jess, who live nearby. Her family is out of state, so not much in-person support there. She *doesn't* have a therapist right now, but she's thought about getting one.\n4.  **Living situation**: She's moving alone into a new apartment in the same city. No roommates.\n5.  **Work/obligations**: Yes, she works full-time remotely as a graphic designer. Her job is pretty demanding.\n6.  **Specific challenges**: Honestly, it's a mix. The logistics of packing and moving all by herself are overwhelming her, especially with work. Emotionally, she's really struggling with the loneliness after the breakup. Financials are okay for now, but she's worried about the security deposit and first month's rent hitting at the same time.\n7.  **Goals**: She just wants to get through the move without a complete meltdown, feel settled in"
+    },
+    {
+      "role": "assistant",
+      "content": "I have a clear picture of Maya's situation now. Let me create a comprehensive support plan that addresses her move logistics, emotional needs during the breakup isolation, and helps her get settled in her new space. I'll organize this into key phases covering the immediate timeline through her move and initial settling period."
+    }
+  ],
+  "set_plan_args": {}
+}

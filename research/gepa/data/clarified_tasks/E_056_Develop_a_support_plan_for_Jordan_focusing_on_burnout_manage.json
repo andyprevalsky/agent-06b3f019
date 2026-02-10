@@ -1,0 +1,15 @@
+{
+  "id": "873fcd73-175d-4feb-a70d-4b936d68b9f5",
+  "raw_seed": "Develop a support plan for Jordan focusing on burnout management and mid-month deadline encouragement",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Develop a support plan for Jordan focusing on burnout management and mid-month deadline encouragement"
+    },
+    {
+      "role": "assistant",
+      "content": "**Drafting the Support Plan**\n\nI'm now outlining a support plan tailored for Jordan. It's focused on burnout management and mid-month deadline motivation. I am structuring it with actionable steps to directly address those needs, skipping any unnecessary research since the goal is already clear.\n\n\n**Constructing the Actionable Steps**\n\nI'm deep in the specifics now, crafting practical steps. I'm prioritizing techniques for Jordan to employ immediately. The plan is becoming a concrete series of actions targeting burnout and boosting motivation for those mid-month targets. I am about to use `set_plan` to begin the support strategy phase.\n\nThe goal is clear: develop a support plan for Jordan focusing on burnout management and mid-month deadline encouragement. I will proceed to set a plan which will outline strategies for both aspects."
+    }
+  ],
+  "set_plan_args": {}
+}

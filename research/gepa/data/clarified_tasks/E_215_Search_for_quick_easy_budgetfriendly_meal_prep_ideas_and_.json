@@ -1,0 +1,83 @@
+{
+  "id": "12d4ebc0-49d2-4628-ac7e-5c270d837272",
+  "raw_seed": "Search for quick, easy, budget-friendly meal prep ideas and weekly meal plans suitable for a busy person with basic cooking skills. Focus on high-protein breakfasts that replace just coffee/toast, satisfying lunches that replace fast food, and healthy dinner ideas similar to what the user already enjoys (pasta, chicken/rice, tacos) but optimized for weight loss. Include healthy snack alternatives to chips and cookies.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Search for quick, easy, budget-friendly meal prep ideas and weekly meal plans suitable for a busy person with basic cooking skills. Focus on high-protein breakfasts that replace just coffee/toast, satisfying lunches that replace fast food, and healthy dinner ideas similar to what the user already enjoys (pasta, chicken/rice, tacos) but optimized for weight loss. Include healthy snack alternatives to chips and cookies."
+    },
+    {
+      "role": "assistant",
+      "content": "**Brainstorming Meal Solutions**\n\nI've been focusing on meal prep specifically, and am now generating meal plan templates. Thinking through the logistics of fast, easy, and affordable recipes. High-protein breakfasts are getting special attention, with the goal of replacing coffee and toast with something more sustainable. I'm prioritizing lunches that outshine fast food options.\n\n\n**Refining Recipe Research**\n\nI'm currently delving into the specifics of each meal category. The initial research phase is complete, and I'm sifting through information. I've uncovered a wealth of high-protein breakfast options, and I'm beginning to identify common themes for the other categories. I'm prioritizing options with easily accessible ingredients to ensure the budget-friendly aspect is met. My next step will be to synthesize these findings and begin creating some sample weekly meal plans.\n\nI will begin by researching quick, easy, and budget-friendly meal prep ideas tailored for busy individuals with basic cooking skills. My research will cover high-protein breakfasts, satisfying healthy lunches, weight-loss-optimized healthy dinners (similar to pasta, chicken/rice, tacos), and healthy snack alternatives. This will provide a comprehensive set of options to build a suitable meal plan."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"quick easy budget friendly meal prep for busy beginners high protein weight loss\"]:\n\n\nSources: https://www.budgetbytes.com/category/extra-bytes/budget-friendly-meal-prep/, https://www.myprotein.com/thezone/recipe/meal-prep-recipes-muscle-building-fat-loss/, https://us.myprotein.com/thezone/recipe/healthy-meals/meal-prep-recipes-muscle-building-fat-loss/, https://thegirlonbloor.com/meal-prep-busy-people/, https://www.eatingwell.com/gallery/7871002/high-protein-dinner-recipes-for-weight-loss/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"high protein breakfast ideas no coffee toast replacement\"]:\n\n\nSources: https://therealfooddietitians.com/high-protein-breakfast-ideas/, https://www.reddit.com/r/cookingforbeginners/comments/v2jsvd/high_protein_breakfast_ideas_that_isnt_eggs/, https://www.eatingwell.com/high-fiber-breakfasts-that-arent-toast-11880053, https://www.youtube.com/watch?v=QGrk4gnxPL0, https://www.bbcgoodfood.com/recipes/collection/high-protein-breakfast-recipes"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy satisfying lunch ideas meal prep no fast food\"]:\n\n\nSources: https://www.loveandlemons.com/healthy-meal-prep-ideas/, https://www.loveandlemons.com/healthy-lunch-ideas/, https://gratefulgrazer.com/vegetarian-meal-prep-ideas/, https://www.foodnetwork.com/healthy/photos/healthy-lunch-recipes, https://therealfooddietitians.com/meal-prep-ideas/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy dinner ideas for weight loss similar to pasta chicken rice tacos\"]:\n\n\nSources: https://www.reddit.com/r/EatCheapAndHealthy/comments/ggdiqh/what_are_some_healthycheap_recipes_which_arent/, https://therealfooddietitians.com/healthy-chicken-recipes/, https://thedefineddish.com/chicken-and-rice-taco-skillet/, https://www.tasteofhome.com/collection/low-calorie-dinner-recipes-ready-in-30-minutes/, https://www.nourishmovelove.com/high-protein-chicken-recipes/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy snack alternatives to chips and cookies\"]:\n\n\nSources: https://www.anytimefitness.com/blog/6-healthier-alternatives-to-chips-and-crackers, https://www.reddit.com/r/EatCheapAndHealthy/comments/ez8wo2/whats_a_good_chip_replacement_snack/, http://www.webmd.com/diet/ss/slideshow-100-calorie-snacks, https://www.eatingwell.com/gallery/7915779/healthy-alternatives-to-chips/, https://www.reddit.com/r/EatCheapAndHealthy/comments/z5os4j/best_low_calorie_high_volume_snacks/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll search for comprehensive meal prep resources that cover quick, budget-friendly, high-protein meal ideas suitable for busy people with basic cooking skills. This will help me gather practical information on breakfasts, lunches, dinners, and snacks that align with your needs."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"quick easy budget-friendly meal prep high protein breakfast ideas busy people\"]:\n\n\nSources: https://therealfooddietitians.com/high-protein-breakfast-ideas/, https://www.eatingwell.com/gallery/7922416/dietitian-make-ahead-breakfasts-for-busy-weeks/, https://www.budgetbytes.com/category/extra-bytes/budget-friendly-meal-prep/breakfast-meal-prep/, https://www.reddit.com/r/MealPrepSunday/comments/1b5agvu/good_and_cheap_breakfast_ideas/, https://www.bbcgoodfood.com/recipes/collection/high-protein-breakfast-recipes"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"weekly meal plans satisfying lunch ideas replace fast food weight loss\"]:\n\n\nSources: https://www.loveandlemons.com/healthy-lunch-ideas/, https://www.eatingwell.com/meal-prep-lunch-recipes-to-lose-visceral-fat-11901227, https://www.goodhousekeeping.com/health/diet-nutrition/g4351/1200-calorie-diet-plan/, https://www.womenshealthmag.com/weight-loss/a19990069/lunches-for-weight-loss/, https://www.foodnetwork.com/healthy/photos/healthy-lunch-recipes"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"easy dinner recipes pasta chicken rice tacos weight loss healthy\"]:\n\n\nSources: https://thedefineddish.com/chicken-and-rice-taco-skillet/, https://www.bbcgoodfood.com/recipes/collection/healthy-chicken-rice-recipes, https://www.ctcd.edu/sites/myctcd/detail/?p=7-high-protein-pasta-dinners-that-actually-support-weight-loss-backed-by-nutrition-science-697219f3241db, https://www.organizeyourselfskinny.com/one-pot-chicken-and-rice/, https://www.homemademastery.com/healthy-rice-and-chicken-dinner/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy snack alternatives chips cookies budget meal prep\"]:\n\n\nSources: https://www.reddit.com/r/HealthyFood/comments/s0vvyu/replacing_chips_and_cookies_with_healthier_options/, https://www.foodnetwork.com/healthy/packages/healthy-every-week/healthy-snacks, https://workweeklunch.com/ultimate-guide-healthy-snacking/, https://www.loveandlemons.com/best-healthy-snacks/, https://www.bucketlisttummy.com/easy-meal-prep-snacks/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research comprehensive meal prep ideas and weekly plans that fit your specific needs: quick, budget-friendly options with high-protein breakfasts, satisfying lunches to replace fast food, dinner variations on foods you already enjoy, and healthy snacks. Let me gather current information on this topic."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"quick easy budget meal prep high protein breakfast ideas busy person\"]:\n\n\nSources: https://therealfooddietitians.com/high-protein-breakfast-ideas/, https://www.eatingwell.com/gallery/7922416/dietitian-make-ahead-breakfasts-for-busy-weeks/, https://www.budgetbytes.com/category/extra-bytes/budget-friendly-meal-prep/breakfast-meal-prep/, https://www.reddit.com/r/EatCheapAndHealthy/comments/1l2tzja/high_protein_breakfast_recipes_that_can_be_meal/, https://rachaelsgoodeats.com/5-high-protein-prep-ahead-breakfasts/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"satisfying lunch meal prep ideas replace fast food weight loss\"]:\n\n\nSources: https://www.eatingwell.com/meal-prep-lunch-recipes-to-lose-visceral-fat-11901227, https://www.loveandlemons.com/healthy-meal-prep-ideas/, https://thegirlonbloor.com/40-healthy-meal-prep-lunch-ideas-for-work/, https://www.myprotein.com/thezone/recipe/low-calorie-meal-prep/, https://www.ctcd.edu/sites/myctcd/discover/%3Fp%3Dmeal-prep-lunch-recipes-for-weight-loss-in-2026-what-it-really-feels-like-to-eat-this-way-for-4-weeks-6985f30f81687"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy dinner pasta chicken rice tacos weight loss meal prep\"]:\n\n\nSources: https://camillestyles.com/food/cooking/healthy-chicken-pasta-recipes/, https://www.eatingwell.com/30-minute-anti-inflammatory-dinner-recipes-for-weight-loss-11899614, https://sweetpeasandsaffron.com/rice-bowl-recipes/, https://healthyfitnessmeals.com/tuscan-chicken-pasta/, https://mealprepmanual.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"weekly meal plan busy person basic cooking skills budget friendly\"]:\n\n\nSources: https://www.budgetbytes.com/category/extra-bytes/budget-friendly-meal-prep/, https://easyfamilyrecipes.com/weekly-meal-plan/, https://www.bbc.co.uk/food/articles/budget_family_meal_plan_for_four, https://www.budgetbytes.com/meal-prep-101-a-beginners-guide/, https://www.5dollardinners.com/budget-dinner-ideas-meal-plan/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy snack alternatives chips cookies weight loss meal prep\"]:\n\n\nSources: https://health.clevelandclinic.org/healthy-snacks-for-weight-loss, https://www.eatingwell.com/low-calorie-no-sugar-added-snack-recipes-11892601, https://www.eatingwell.com/20-easy-snacks-to-meal-prep-for-adults-8733264, https://www.eatingwell.com/gallery/7915779/healthy-alternatives-to-chips/, https://www.healthline.com/nutrition/29-healthy-snacks-for-weight-loss"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the initial research on quick, easy, budget-friendly meal prep ideas, high-protein breakfasts, satisfying lunches, healthy dinners, and snack alternatives. I have gathered enough information to start formulating a comprehensive meal plan. My next step will be to synthesize this information and create a detailed weekly meal plan tailored to your specific requirements. I will then present this plan for your review."
+    }
+  ],
+  "set_plan_args": {}
+}

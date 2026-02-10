@@ -1,0 +1,23 @@
+{
+  "id": "b656801e-91da-48f6-9122-3f109963618a",
+  "raw_seed": "Draft a technical job description for 'Head of Developer Relations (Platform)', create a cold outreach sequence, and research current salary benchmarks for this role.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Draft a technical job description for 'Head of Developer Relations (Platform)', create a cold outreach sequence, and research current salary benchmarks for this role."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you draft a technical job description for 'Head of Developer Relations (Platform)', create a cold outreach sequence, and research salary benchmarks. Let me start by researching the current market data and best practices for this role."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Head of Developer Relations salary benchmarks 2025 platform technology\"]:\n\n\nSources: https://www.glassdoor.com/Salaries/head-of-developer-relations-salary-SRCH_KO0,27.htm, https://6figr.com/us/salary/head-of-developer-relations--t, https://www.glassdoor.com/Salaries/developer-relations-salary-SRCH_KO0,19.htm, https://www.levels.fyi/t/software-engineer/title/developer-advocate, https://app.comprehensive.io/benchmarking/s/title=Head+of+Developer+Relations"
+    },
+    {
+      "role": "assistant",
+      "content": "I have gathered some initial salary benchmark data. Now I will proceed to define the plan for drafting the job description, creating the outreach sequence, and further refining the salary research."
+    }
+  ],
+  "set_plan_args": {}
+}

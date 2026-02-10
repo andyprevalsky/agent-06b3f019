@@ -1,0 +1,15 @@
+{
+  "id": "791cffaf-88d9-423c-a08f-d7f66a72fb19",
+  "raw_seed": "Prepare a diligence-ready data room checklist and templates (cap table snapshot, incorporation/IP, financials, KPI dashboard, customer/user insights, security/privacy, beta terms) to reduce friction post-interest",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Prepare a diligence-ready data room checklist and templates (cap table snapshot, incorporation/IP, financials, KPI dashboard, customer/user insights, security/privacy, beta terms) to reduce friction post-interest"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing this goal to create a comprehensive diligence-ready data room checklist and templates. This is a clear, well-defined request for startup due diligence documentation. The user wants structured templates covering 7 key areas (cap table, incorporation/IP, financials, KPIs, customer insights, security/privacy, and beta terms) to streamline investor due diligence processes.\n\nI have sufficient clarity on what's needed. I'll create a comprehensive, production-ready data room package with:\n1. Master checklist organizing all diligence categories\n2. Seven detailed templates with built-in guidance\n3. Implementation guide for founders\n4. Quick-reference summary document\n\nThis is decomposable into clear execution tasks without additional clarification needed. Moving to plan generation."
+    }
+  ],
+  "set_plan_args": {}
+}

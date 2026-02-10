@@ -40,7 +40,7 @@ import { ResponseSchemaField, FilePointer } from '@/lib/api';
 import ClaudeIcon from '@/assets/claude-color.svg';
 import { supabase, getSession } from '@/lib/supabase';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 
 // Format field type for display
 function formatFieldType(type: ResponseSchemaField['type']): string {

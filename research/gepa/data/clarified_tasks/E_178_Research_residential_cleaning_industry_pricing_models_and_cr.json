@@ -1,0 +1,35 @@
+{
+  "id": "78ecc40f-0770-4af0-bc14-520f8575be2f",
+  "raw_seed": "Research residential cleaning industry pricing models and create optimized pricing/service packages for Harbor Home Cleaning. Consider: current range of $150-$220 per job, recurring discount structures (weekly/biweekly), flat-rate vs hourly vs per-sqft, add-on services, initial promotional pricing to hit 10 recurring customers in 90 days. Include competitor benchmarking from typical US metro/suburban markets. Output a ready-to-use pricing sheet.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research residential cleaning industry pricing models and create optimized pricing/service packages for Harbor Home Cleaning. Consider: current range of $150-$220 per job, recurring discount structures (weekly/biweekly), flat-rate vs hourly vs per-sqft, add-on services, initial promotional pricing to hit 10 recurring customers in 90 days. Include competitor benchmarking from typical US metro/suburban markets. Output a ready-to-use pricing sheet."
+    },
+    {
+      "role": "assistant",
+      "content": ": "
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"residential house cleaning pricing models 2024 flat rate hourly per square foot recurring discounts\"]:\n\n\nSources: https://www.housecallpro.com/resources/house-cleaning-prices/, https://www.freshbooks.com/hub/estimates/estimate-house-cleaning-jobs?srsltid=AfmBOopd3E9JhzBVdNvmVF2GfrhBDksxLxTGptf1fR-gQMx3h7KPCupe, https://www.freshbooks.com/hub/estimates/estimate-house-cleaning-jobs?srsltid=AfmBOorVJ54QqsJBHQ0bzUpxzfl3aN2HD8SiTPJhgEhkJ1JZdn0Lfddu, https://www.freshbooks.com/hub/estimates/estimate-house-cleaning-jobs, https://www.eufy.com/blogs/robovac/home-cleaning-price-insights"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"house cleaning service pricing packages weekly biweekly monthly discounts competitor analysis\"]:\n\n\nSources: https://absolutelyspotless.com/specials/, https://cleanerhq.com/competitive-analysis/, https://www.housecallpro.com/resources/house-cleaning-prices/, https://www.maidcomplete.com/house-cleaning-las-vegas.php, https://doinn.co/blog/cleaning-company-best-practices-to-outshine-your-competition/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"residential cleaning services pricing typical rates US metro suburban markets 2024\"]:\n\n\nSources: https://www.housecallpro.com/resources/house-cleaning-prices/, https://www.taskrabbit.com/cost-guides/house-cleaning, https://mistyclean.com/house-cleaning-rates-in-maryland-a-comprehensive-chart/, https://www.freshbooks.com/hub/estimates/estimate-house-cleaning-jobs?srsltid=AfmBOoprcxPQWWiJkOpw5rIMDbmrjlvGg5HrRm3fdq8Aqqd_E167NEs-, https://www.freshbooks.com/hub/estimates/estimate-house-cleaning-jobs?srsltid=AfmBOoodj8dQzq7-wRgToNC4xYKGQdqRFw_UgOMS5ajgWywUYFESI99y"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cleaning business promotional pricing strategies acquire recurring customers initial discount\"]:\n\n\nSources: https://www.reddit.com/r/smallbusiness/comments/1k9xtef/is_it_wise_to_give_out_discounts_to_first_time/, https://www.reddit.com/r/EntrepreneurRideAlong/comments/2ktzrc/maid_or_similar_businesses_what_is_your_cost_to/, https://www.gomarketbox.com/blog/repeat-customers-cleaning, https://www.facebook.com/groups/1509058732863009/posts/2147778902324319/, https://smith.ai/blog/9-sales-promotion-ideas-for-your-home-cleaning-business"
+    },
+    {
+      "role": "assistant",
+      "content": ": Research complete. Now I'll create a comprehensive pricing strategy and service packages for Harbor Home Cleaning based on the industry data gathered."
+    }
+  ],
+  "set_plan_args": {}
+}

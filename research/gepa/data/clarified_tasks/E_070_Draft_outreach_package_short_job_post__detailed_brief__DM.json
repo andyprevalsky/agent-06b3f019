@@ -1,0 +1,43 @@
+{
+  "id": "28b07a57-8af1-460b-98a5-49a34fba6e7e",
+  "raw_seed": "Draft outreach package: short job post + detailed brief + DM/email templates tailored to Lean community, including budget/timeline and requested technical details",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Draft outreach package: short job post + detailed brief + DM/email templates tailored to Lean community, including budget/timeline and requested technical details"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you create a comprehensive outreach package for recruiting Lean community members. Let me start by researching the Lean community landscape, typical engagement patterns, and best practices for technical hiring in this space."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Lean theorem prover community hiring job posting best practices 2024\"]:\n\n\nSources: https://leanprover-community.github.io/archive/stream/284757-job-postings/, https://emallson.net/blog/a-beginners-companion-to-theorem-proving-in-lean/, https://intepros.com/recruiting-trends-learning-from-2024-to-lean-into-2025/, https://www.indeed.com/q-theorem-proving-jobs.html, https://ripplematch.com/hubfs/Making%20the%20Most%20of%20Your%20Lean%20Team_%20Key%20Stats%20and%20Clever%20Hacks%20to%20Use%20in%202025.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand the scope and specifics of this outreach package before drafting. Let me clarify a few key details to ensure I create something truly useful for the Lean community."
+    },
+    {
+      "role": "user",
+      "content": "Okay, here are the details:\n\n1.  **Core Project/Role:** We're looking for a Lean developer to formalize proofs for a new quantum computing library we're building. It's an open-source project, but this is a paid contract role.\n\n2.  **Budget Range:** We have a budget of $15,000 - $20,000 for this contract.\n\n3.  **Timeline:** We'd like someone to start by mid-September (around Sept 18th) and the project duration is approximately 3 months.\n\n4.  **Technical Scope:** Primarily Lean 4. Strong formalization experience is key, specifically with algebraic structures and category theory. Familiarity with `mathlib` would be a huge plus, especially its linear algebra and group theory components. Experience with tactic development isn't strictly necessary but would be a bonus.\n\n5.  **Audience Specificity:** We're targeting academic researchers and graduate students who have significant experience with formal verification in Lean, particularly those with a strong math background in abstract algebra or theoretical computer science.\n\n6.  **Deliverables/Outcomes:** The main deliverable is a set of formalized proofs for a core set of quantum algorithms (e.g., Shor's algorithm, Grover's algorithm) within our new Lean 4 library. This includes well-documented Lean code, and potentially some accompanying informal explanations/"
+    },
+    {
+      "role": "assistant",
+      "content": "Based on your requirements, I'll create a comprehensive outreach package targeting the Lean community for your quantum computing library project. This will include a concise job posting, detailed technical brief, and tailored messaging templates designed to resonate with academic researchers and graduate students in formal verification."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have all the key details needed. Let me create a comprehensive outreach package that will effectively reach the Lean community's academic researchers and graduate students. This will include a concise job posting for broad distribution, a detailed technical brief for interested candidates, and personalized DM/email templates that speak to the specific expertise you're seeking."
+    },
+    {
+      "role": "user",
+      "content": "Perfect. We're building a Lean4 library for verifying quantum circuit optimizations at Xanadu - think Qiskit but with formal proofs that transformations preserve unitarity. Timeline is 3 months, budget around $15k. Need someone who knows Lean and has at least undergrad quantum computing background. \n\nKey deliverables: formalize our 5 core optimization passes (gate cancellation, commutation, etc.), prove they maintain semantic equivalence, and integrate with our Python toolchain via lean4py. Would prefer a PhD student since they'll need to understand both the math and implementation details.\n\nCan you make the tone casual-academic? Like \"hey, want to get paid to play with quantum proofs\" but still professional enough for professors to forward to their students."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect\u2014I have all the context I need now. You're looking for a Lean 4 developer with quantum computing background to formalize optimization passes for Xanadu's quantum circuit library. The tone should be approachable and exciting while maintaining credibility with both students and faculty. I'll create a complete outreach package with: (1) a punchy short job post suitable for Zulip/forums, (2) a detailed technical brief covering the quantum formalization scope and Lean 4 specifics, (3) personalized DM/email templates for direct outreach to key community members and advisors, and (4) a supporting brief with budget/timeline details. Let me draft these now and get them ready for your review."
+    }
+  ],
+  "set_plan_args": {}
+}

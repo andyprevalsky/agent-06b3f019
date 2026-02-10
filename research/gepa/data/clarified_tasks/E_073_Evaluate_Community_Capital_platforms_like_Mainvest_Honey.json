@@ -1,0 +1,151 @@
+{
+  "id": "c916a2ed-39f6-4afa-95b3-313f71e7de4a",
+  "raw_seed": "Evaluate 'Community Capital' platforms (like Mainvest, Honeycomb Credit) and local Angel Investor networks. Create a comparative analysis of fees, timelines, and legal structures for raising $50k.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Evaluate 'Community Capital' platforms (like Mainvest, Honeycomb Credit) and local Angel Investor networks. Create a comparative analysis of fees, timelines, and legal structures for raising $50k."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research current Community Capital platforms and local Angel Investor networks to create a comprehensive comparative analysis for raising $50k. Let me gather detailed information about platforms like Mainvest, Honeycomb Credit, and understand the landscape of angel investor networks."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Mainvest Community Capital platform fees structure 2024 2025\"]:\n\n\nSources: https://www.fundwisdom.com/investors/platforms/mainvest, https://www.sec.gov/Archives/edgar/data/1856489/000174605921000160/oakd_page.pdf, https://mainvest.com/, https://republic.com/mainvest, https://www.crunchbase.com/organization/mainvest"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Honeycomb Credit platform fees timeline legal structure\"]:\n\n\nSources: https://www.honeycombcredit.com/how-honeycomb-works, https://www.honeycombcredit.com/post/the-price-of-money-how-does-your-small-business-financing-stack-up, https://www.honeycombcredit.com/next-steps, https://www.reddit.com/r/investing/comments/1l9ewir/was_this_an_investment_or_a_scam_and_does/, https://www.sec.gov/Archives/edgar/data/1829951/000182995120000001/formcsbc.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local angel investor networks how they work fees structure\"]:\n\n\nSources: https://seedblink.com/blog/2024-10-21-angel-investment-explained-a-practical-guide-for-founders, https://www.networksolutions.com/blog/angel-networks-every-entrepreneur-should-know-about/, https://foundersnetwork.com/how-does-angel-investing-work/, https://www.hustlefund.vc/post/angel-squad-angel-investor-network-fees-decoded-what-youre-really-paying-for, https://www.angelinvestmentnetwork.us/how-it-works"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Community Capital platforms comparison raising $50000\"]:\n\n\nSources: https://qubit.capital/blog/best-fundraising-tools-for-startups, https://www.marketing-faktor.de/en/crowdfunding-platform/, https://money.usnews.com/investing/articles/best-real-estate-crowdfunding-platforms, https://www.mapfre.com/en/insights/innovation/venture-capital-platforms-supporting-entrepreneurs/, https://www.dealmaker.tech/content/navigating-the-consumer-tech-capital-raise"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"equity crowdfunding vs angel investors legal structures requirements\"]:\n\n\nSources: https://www.pmcg.pt/en/legal-framework-of-crowdfunding-in-portugal-a-brief-overview/, https://qubit.capital/blog/crowdfunding-for-startups, https://www.law.cornell.edu/wex/angel_investor, https://qubit.capital/blog/crowdfunding-legal-requirements, https://www.balancedbusinessgroup.com/perspectives/business-funding-angel-investors-crowdfunding-vc-guide"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research Community Capital platforms and local Angel Investor networks to create a comprehensive comparative analysis. Let me start by gathering current information on the key platforms and their offerings for a $50k fundraising goal."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Mainvest platform fees timelines legal structure 2025 2026\"]:\n\n\nSources: https://lenderkit.com/blog/the-rise-and-fall-of-funding-portals-why-some-are-exiting-the-space/, https://mainvest.com/, https://lawyersforcivilrights.org/wp-content/uploads/2024/06/Mainvest-Collapse-Letter-to-FINRA-and-FDIC-1.pdf, https://www.startlandnews.com/2024/05/mainvest-closing/, https://www.angelschool.vc/blog/best-reg-cf-crowdfunding-platforms-for-investments"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Honeycomb Credit fees requirements legal structure community capital\"]:\n\n\nSources: https://www.honeycombcredit.com/terms-of-use, https://www.honeycombcredit.com/how-honeycomb-works, https://tracxn.com/d/companies/honeycomb-credit/__qkeA4MByWvKRc8QF6Nf1Dd6F8m99Ozrd0lQQpPjT-6g, https://www.honeycombcredit.com/community, https://www.honeycomb.io/terms"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local angel investor networks fees structure raising capital 2025\"]:\n\n\nSources: https://www.hustlefund.vc/post/angel-squad-angel-investor-network-fees-decoded-what-youre-really-paying-for, https://www.angelinvestmentnetwork.us/, https://medium.com/@squad_17515/the-real-cost-of-angel-investing-hidden-fees-time-investment-and-opportunity-costs-8889d375df63, https://www.openvc.app/blog/best-angel-investor-platforms, https://wise.com/us/blog/how-to-find-angel-investors"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"community capital platforms comparison $50k fundraising\"]:\n\n\nSources: https://accountancycloud.com/blogs/the-10-best-crowdfunding-websites, https://www.reddit.com/r/venturecapital/comments/wf9rrd/is_there_a_way_to_invest_as_little_as_50k_into/, https://waveup.com/blog/top-angel-investing-platforms/, https://stripe.com/resources/more/four-types-of-crowdfunding-for-startups-and-how-to-choose-one, https://qubit.capital/blog/find-engage-retail-investors"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research Community Capital platforms and local Angel Investor networks to create a comprehensive comparative analysis. Let me gather current information on Mainvest, Honeycomb Credit, and other relevant platforms, focusing on fees, timelines, and legal structures for a $50k raise."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Mainvest platform fees timeline legal structure 2024 2025\"]:\n\n\nSources: https://mainvest.com/, https://lawyersforcivilrights.org/wp-content/uploads/2024/06/Mainvest-Collapse-Letter-to-FINRA-and-FDIC-1.pdf, https://www.fundwisdom.com/investors/platforms/mainvest, https://www.sec.gov/Archives/edgar/data/1866703/000174605921000272/hinoya_page.pdf, https://www.gklaw.com/Godfrey-Kahn/Full-PDFs/Investment-Management---October-2024.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Honeycomb Credit fees timeline community capital platform\"]:\n\n\nSources: https://www.honeycombcredit.com/post/the-price-of-money-how-does-your-small-business-financing-stack-up, https://www.honeycombcredit.com/grow, https://www.inc.com/grace-dickinson/do-you-have-100-to-invest-consider-this-growth-sector/91202451, https://www.honeycombcredit.com/next-steps, https://www.honeycombcredit.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"community capital platforms comparison fees legal structure\"]:\n\n\nSources: https://communitydeskchicago.org/wp-content/uploads/2024/10/CommunityDesk_CIVReport_Updated-10-7-24.pdf, https://carta.com/learn/private-funds/management/management-fees/, https://pickafund.com/pages/choosing-the-best-investment-platform, https://www.dealmaker.tech/content/navigating-the-best-equity-crowdfunding-platforms-your-2024-guide-to-raising-capital, https://www.dealmaker.tech/content/mastering-community-capital-roi-measurement-key-insights-and-metrics"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local angel investor networks fees structure 2025\"]:\n\n\nSources: https://www.reddit.com/r/Entrepreneur/comments/1lso35w/are_application_fees_usual_for_angel_investment/, https://www.nerdwallet.com/investing/learn/angel-investing, https://www.hustlefund.vc/post/angel-squad-angel-investor-network-fees-decoded-what-youre-really-paying-for, https://www.venturesouth.vc/2016-6-20-angel-groups-fees-and-costs, https://medium.com/@squad_17515/the-real-cost-of-angel-investing-hidden-fees-time-investment-and-opportunity-costs-8889d375df63"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"raising $50k community capital vs angel investors timeline\"]:\n\n\nSources: https://www.hustlefund.vc/post/the-complete-guide-to-pre-seed-capital-everything-angel-investors-need-to-know, https://www.reddit.com/r/startups/comments/fcuv3y/so_you_want_to_raise_an_angel_preseed_round_heres/, https://thesocialcat.com/guides/startup-funding, https://govclab.com/2025/12/26/how-to-get-better-lp-commitments/, https://stripe.com/resources/more/small-business-startup-capital-101-how-to-fund-your-early-days"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research Community Capital platforms and local Angel Investor networks to create a comprehensive comparative analysis. Let me gather current information on the key platforms and their offerings for a $50k fundraising goal."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Mainvest platform fees timeline legal structure 2024 2025\"]:\n\n\nSources: https://mainvest.com/, https://www.sec.gov/Archives/edgar/data/1856489/000174605921000160/oakd_page.pdf, https://www.fundwisdom.com/investors/platforms/mainvest, https://www.gklaw.com/Godfrey-Kahn/Full-PDFs/Investment-Management---October-2024.pdf, https://lawyersforcivilrights.org/wp-content/uploads/2024/06/Mainvest-Collapse-Letter-to-FINRA-and-FDIC-1.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Honeycomb Credit fees timeline community capital platform\"]:\n\n\nSources: https://www.honeycombcredit.com/post/the-price-of-money-how-does-your-small-business-financing-stack-up, https://www.honeycombcredit.com/grow, https://www.honeycombcredit.com/how-honeycomb-works, https://www.inc.com/grace-dickinson/do-you-have-100-to-invest-consider-this-growth-sector/91202451, https://www.honeycombcredit.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"community capital platforms comparison fees legal structure\"]:\n\n\nSources: https://www.communityct.com/, https://www.getro.com/blog/12-essential-community-platforms-for-founders-and-investors-in-2025, https://pathlightlaw.com/planning-and-developing-a-community-investment-fund/, https://torontofoundation.ca/investment-solutions-built-for-canadian-charities/, https://www.cbinsights.com/company/community-capital-technology/alternatives-competitors"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local angel investor networks fees structure 2025\"]:\n\n\nSources: https://www.hustlefund.vc/post/angel-squad-angel-investor-network-fees-decoded-what-youre-really-paying-for, https://www.venturesouth.vc/2016-6-20-angel-groups-fees-and-costs, https://www.nerdwallet.com/investing/learn/angel-investing, https://www.reddit.com/r/Entrepreneur/comments/1lso35w/are_application_fees_usual_for_angel_investment/, https://medium.com/@squad_17515/the-real-cost-of-angel-investing-what-communities-dont-tell-you-until-now-0112ccec20e0"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"raising $50k community capital vs angel investors timeline\"]:\n\n\nSources: https://www.hustlefund.vc/post/the-complete-guide-to-pre-seed-capital-everything-angel-investors-need-to-know, https://www.reddit.com/r/startups/comments/fcuv3y/so_you_want_to_raise_an_angel_preseed_round_heres/, https://financialmodelslab.com/blogs/how-to-open/online-community%3Fsrsltid%3DAfmBOoqIYPMsc8uI_7pPiPQwVJNDpTTum6zg1ubPZTwk83qRr_qC2Vu4, https://www.quora.com/How-do-I-raise-50k-for-a-startup, https://stripe.com/resources/more/small-business-startup-capital-101-how-to-fund-your-early-days"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll conduct a comprehensive research phase to gather current information on Community Capital platforms and local Angel Investor networks, then create a detailed comparative analysis for raising $50k. Let me start by researching these platforms and their specific offerings."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Mainvest Community Capital platform fees timelines 2026\"]:\n\n\nSources: https://mainvest.com/, https://kingscrowd.com/investor-fees-vary-platform/, https://financebuzz.com/mainvest-review, https://www.sec.gov/Archives/edgar/data/1916178/000174605922000102/thesocial_offmo.pdf, https://www.sec.gov/Archives/edgar/data/1866703/000174605921000272/hinoya_page.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Honeycomb Credit Community Capital fees structure\"]:\n\n\nSources: https://www.honeycombcredit.com/community, https://www.honeycombcredit.com/, https://www.honeycombcredit.com/post/your-complete-guide-to-small-business-funding-diversification-is-your-superpower, https://www.honeycombcredit.com/grow, https://www.honeycombcredit.com/post/a-guide-to-honeycomb-credit-s-diverse-investment-offerings"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local Angel Investor networks fees legal structure 2026\"]:\n\n\nSources: https://www.hustlefund.vc/post/angel-squad-angel-investor-network-fees-decoded-what-youre-really-paying-for, https://angelcapitalassociation.org/blog/building-a-stronger-angel-ecosystem-2025-impact-and-2026-priorities/, https://angelcapitalassociation.org/group-terms-and-criteria/, https://www.hustlefund.vc/post/angel-squad-how-to-become-an-angel-investor-the-no-bs-2026-guide, https://www.jpmorgan.com/insights/banking/commercial-banking/what-is-angel-financing"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Community Capital platforms comparison raising capital\"]:\n\n\nSources: https://www.getro.com/blog/12-essential-community-platforms-for-founders-and-investors-in-2025, https://bloomerang.com/blog/virtual-fundraising-platforms/, https://www.cnbc.com/select/best-crowdfunding-platforms-for-businesses/, https://qubit.capital/blog/best-fundraising-tools-for-startups, https://crowdsourcingweek.com/blog/top-10-usa-crowdfunding-platforms/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Regulation A+ Regulation CF Community Capital legal structure\"]:\n\n\nSources: https://www.sec.gov/resources-small-businesses/exempt-offerings/regulation, https://www.startengine.com/blog/regulation-a-what-entrepreneurs-need-to-know, https://www.innreg.com/blog/regulation-cf-explained, https://www.dealmaker.tech/content/the-ultimate-guide-to-regulation-a-reg-a-unleash-the-power-of-retail-capital, https://media.mcguirewoods.com/publications/2015/White-Paper-on-Regulation-Aplus.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research Community Capital platforms and local Angel Investor networks to create a comprehensive comparative analysis for raising $50k. Let me gather current information on Mainvest, Honeycomb Credit, and typical angel investor networks, focusing on fees, timelines, and legal structures."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Mainvest platform fees timelines legal structure 2025 2026\"]:\n\n\nSources: https://lawyersforcivilrights.org/wp-content/uploads/2024/06/Mainvest-Collapse-Letter-to-FINRA-and-FDIC-1.pdf, https://lenderkit.com/blog/the-rise-and-fall-of-funding-portals-why-some-are-exiting-the-space/, https://mainvest.com/, https://www.sec.gov/Archives/edgar/data/1866703/000174605921000272/hinoya_page.pdf, https://www.sullcrom.com/insights/newsletters/2026/January/Investment-Management-Newsletter-January-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Honeycomb Credit fees structure timeline requirements\"]:\n\n\nSources: https://www.honeycombcredit.com/grow, https://www.honeycombcredit.com/post/the-price-of-money-how-does-your-small-business-financing-stack-up, https://www.honeycombcredit.com/faq, https://www.honeycombcredit.com/how-honeycomb-works, https://www.honeycombcredit.com/invest"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"community capital platforms SAFE notes equity crowdfunding regulations\"]:\n\n\nSources: https://carta.com/learn/startups/fundraising/convertible-securities/safes/, https://www.cakeequity.com/guides/safe-notes, https://www.startengine.com/blog/understanding-simple-agreements-for-future-equity-safe, https://www.long.law/blog/understanding-safe-notes-under-regulation-d-of-the-sec-act, https://virginialawreview.org/articles/crowdfunding-and-not-so-safe-safe/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local angel investor networks fees timelines legal requirements\"]:\n\n\nSources: https://accountancycloud.com/assets/guides/pdf/TSC15_Legals-Required-for-Angel-Investment.pdf, https://www.hustlefund.vc/post/angel-squad-angel-investor-network-fees-decoded-what-youre-really-paying-for, https://www.founderconnects.com/post/angel-investor-exit-expectations-preparing-for-5-10-year-timelines, https://flofr.gov/education/entrepreneurial-and-investor-resources/entrepreneurial-resources/idea-phase/angel-investors-for-businesses, https://www.reddit.com/r/Entrepreneur/comments/1lso35w/are_application_fees_usual_for_angel_investment/"
+    },
+    {
+      "role": "assistant",
+      "content": "**Evaluating Fundraising Avenues**\n\nI'm currently focused on the practicalities of raising $50k through Community Capital platforms versus Angel networks. I'm deep-diving into the fees, comparing expected timelines for each, and trying to understand the legal structures involved. Mainvest is proving to be a challenge; recent news reports on the platform are concerning.\n\n\n**Contrasting Platform Structures**\n\nI'm now zeroing in on the structural differences. Honeycomb Credit's debt-based approach contrasts sharply with the equity models common in angel networks. I'm focusing on the implications of each, specifically examining the dilution effects of equity vs. the repayment obligations of debt. I'm building a comparative table highlighting these differences.\n\nI have gathered initial information on Community Capital platforms and Angel Investor networks. My next step is to synthesize this research into a comparative analysis, focusing on fees, timelines, and legal structures for a $50k raise. I've noted that Mainvest has faced significant operational issues recently, potentially impacting its viability, so I will focus on Honeycomb Credit and general Angel Investor network characteristics. I will detail the specific fees, typical timelines, and legal frameworks (like Regulation CF for crowdfunding, or equity/SAFE notes for angel investments)."
+    }
+  ],
+  "set_plan_args": {}
+}

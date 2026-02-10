@@ -1,0 +1,23 @@
+{
+  "id": "41e35ac4-cbe5-4140-95ae-288c970a0b19",
+  "raw_seed": "Create a vegetarian nutrition plan aligned to the targets: calorie range, protein strategy (eggs/dairy/plant), meal templates, snack rules, grocery staples, and a MyFitnessPal tracking setup approach",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create a vegetarian nutrition plan aligned to the targets: calorie range, protein strategy (eggs/dairy/plant), meal templates, snack rules, grocery staples, and a MyFitnessPal tracking setup approach"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the calorie range target and any dietary preferences before creating a personalized vegetarian nutrition plan. Let me ask a few key questions to ensure the plan fits your needs."
+    },
+    {
+      "role": "user",
+      "content": "Great! Here's what I'm looking for:\n\n1. **Calorie Target**: 2000-2200 calories daily. I'm moderately active and want to maintain while building a bit of muscle.\n\n2. **Protein Goal**: Around 120g per day. I weigh about 155 lbs, so that's roughly 0.77g per pound.\n\n3. **Protein Sources**: I'm open to a mix, but I prefer:\n   - Eggs (whole eggs are fine, I eat them regularly)\n   - Greek yogurt and cottage cheese (love both)\n   - Legumes and tofu (I cook with these a lot)\n   - Maybe some tempeh occasionally\n   - I'm not huge on seitan though\n\n4. **Restrictions**: I have a mild dairy sensitivity, so I can't do regular milk or too much cheese. But Greek yogurt and cottage cheese are fine for some reason. Also not a fan of mushrooms\u2014can we skip those?\n\n5. **Meal Frequency**: I prefer 3 meals + 1-2 snacks. I'm busy during the day, so I need something realistic I can actually stick to.\n\n6. **Fitness Goal**: Muscle gain and maintenance. I do strength training 4x per week, so I want to support that without gaining excess fat.\n\nDoes that help?"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have all the details I need to create a comprehensive vegetarian nutrition plan tailored to your goals. You've given me clear targets: 2000-2200 calories, 120g protein daily, specific protein preferences (eggs, Greek yogurt, cottage cheese, legumes, tofu, tempeh), dairy sensitivity accommodation, no mushrooms, 3 meals + 1-2 snacks structure, and strength training support for muscle gain. This is decomposable into a complete plan with meal templates, macro breakdowns, grocery lists, and MyFitnessPal setup guidance. I'm ready to structure and execute this."
+    }
+  ],
+  "set_plan_args": {}
+}

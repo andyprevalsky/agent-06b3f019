@@ -1,0 +1,15 @@
+{
+  "id": "3f093594-0fe9-4e83-bef5-58c5c667fa2b",
+  "raw_seed": "Implement the GitHub repo core in Python: question bank format + algorithmic generators, problem-set builder, instant grading (numeric/MC), 3-in-a-row difficulty bump logic, mastery tracking, and a simple dashboard/report",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Implement the GitHub repo core in Python: question bank format + algorithmic generators, problem-set builder, instant grading (numeric/MC), 3-in-a-row difficulty bump logic, mastery tracking, and a simple dashboard/report"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing this goal to build a comprehensive GitHub repo with a question bank system, problem set builder, grading engine, and mastery tracking. This is a substantial software engineering project with multiple interconnected components.\n\nLet me break down what's needed:\n1. Question bank format and data structures\n2. Algorithmic problem generators\n3. Problem set builder\n4. Instant grading system (numeric and multiple choice)\n5. 3-in-a-row difficulty bump logic\n6. Mastery tracking system\n7. Dashboard and reporting\n\nThis is decomposable into clear modules. I have enough clarity on the requirements to proceed with planning and execution. The goal is well-defined: create a complete, functional Python package ready for GitHub."
+    }
+  ],
+  "set_plan_args": {}
+}

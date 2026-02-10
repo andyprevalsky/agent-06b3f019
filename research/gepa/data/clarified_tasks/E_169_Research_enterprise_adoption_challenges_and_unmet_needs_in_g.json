@@ -1,0 +1,131 @@
+{
+  "id": "230a0205-43e7-4b47-9327-cf293673c753",
+  "raw_seed": "Research enterprise adoption challenges and unmet needs in generative AI: common pain points (hallucinations, data privacy, integration complexity, cost, lack of domain expertise, evaluation/testing, compliance), what enterprises say they need but can't find, underserved buyer personas (SMBs, non-tech industries, government), and infrastructure gaps (on-prem deployment, edge AI, data labeling, guardrails, observability). Look for analyst reports, surveys, and expert commentary from 2025-2026.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research enterprise adoption challenges and unmet needs in generative AI: common pain points (hallucinations, data privacy, integration complexity, cost, lack of domain expertise, evaluation/testing, compliance), what enterprises say they need but can't find, underserved buyer personas (SMBs, non-tech industries, government), and infrastructure gaps (on-prem deployment, edge AI, data labeling, guardrails, observability). Look for analyst reports, surveys, and expert commentary from 2025-2026."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research enterprise adoption challenges and unmet needs in generative AI by searching for recent analyst reports, surveys, and expert commentary from 2025-2026. This is a comprehensive research goal covering pain points, unmet needs, underserved personas, and infrastructure gaps."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"enterprise generative AI adoption challenges pain points 2025 2026 analyst report\"]:\n\n\nSources: https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/content/state-of-ai-in-the-enterprise.html, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://medium.com/@sunil.baidyanath/challenges-and-risks-for-enterprise-adoption-of-genai-90d87a2cc5c2, https://cdn.openai.com/pdf/7ef17d82-96bf-4dd1-9df2-228f7f377a29/the-state-of-enterprise-ai_2025-report.pdf, https://isg-one.com/state-of-enterprise-ai-adoption-report-2025"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"hallucinations data privacy integration complexity generative AI enterprises 2025\"]:\n\n\nSources: https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://www.ibm.com/think/insights/ai-integration, https://iapp.org/news/a/ghosts-in-the-algorithm-busting-ai-hallucinations-under-the-gdpr, https://fortune.com/2025/08/18/mit-report-95-percent-generative-ai-pilots-at-companies-failing-cfo/, https://www.ayadata.ai/everything-you-need-to-know-about-ai-hallucinations/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI cost compliance challenges enterprises 2025 2026\"]:\n\n\nSources: https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/content/state-of-ai-in-the-enterprise.html, https://usmsystems.com/ai-software-cost/, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://www.binadox.com/blog/generative-ai-cost-management-key-challenges-and-solutions/, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SMB small business generative AI adoption barriers 2025\"]:\n\n\nSources: https://usmsystems.com/small-business-ai-adoption-statistics/, https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/blogs/pulse-check-series-latest-ai-developments/ai-adoption-challenges-ai-trends.html, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://www.business.com/articles/ai-usage-smb-workplace-study/, https://www.statista.com/statistics/1557024/barriers-ai-adoption/?srsltid=AfmBOoosLnH4h2SFPXvC9dStkc4ykGGgSmot8XAWzL_d1fEq-to5sImm"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"non-tech industries generative AI implementation challenges 2025\"]:\n\n\nSources: https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/blogs/pulse-check-series-latest-ai-developments/ai-adoption-challenges-ai-trends.html, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://hbr.org/2025/11/overcoming-the-organizational-barriers-to-ai-adoption, https://www.stlouisfed.org/on-the-economy/2025/nov/state-generative-ai-adoption-2025, https://fortune.com/2025/08/18/mit-report-95-percent-generative-ai-pilots-at-companies-failing-cfo/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"government sector generative AI adoption unmet needs 2025\"]:\n\n\nSources: https://www.govtech.com/voices/how-government-may-use-generative-ai-in-2025-and-beyond, https://www.gao.gov/products/gao-25-107653, https://www.stlouisfed.org/on-the-economy/2025/nov/state-generative-ai-adoption-2025, https://www.urban.org/sites/default/files/2025-05/Removing-Barriers-to-AI-Innovation-in-Local-Government.pdf, https://www.zscaler.com/blogs/security-research/latest-public-sector-ai-adoption-trends-what-government-healthcare-and"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"on-premises edge AI deployment enterprise 2025 2026\"]:\n\n\nSources: https://www.techaheadcorp.com/blog/edge-ai-in-manufacturing-trends/, https://www.dell.com/en-us/blog/the-power-of-small-edge-ai-predictions-for-2026/, https://www.deloitte.com/us/en/insights/topics/technology-management/tech-trends/2026/ai-infrastructure-compute-strategy.html, https://www.nutanix.com/blog/reflections-and-predictions, https://www.latticesemi.com/Blog/2026/02/03/09/58/Edge-AI-Opportunity-Will-Come-to-Life-in-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"data labeling guardrails observability generative AI infrastructure 2025\"]:\n\n\nSources: https://www.dynatrace.com/news/blog/ai-observability-business-impact-2025/, https://encord.com/blog/data-labeling-platforms-generative-ai/, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://www.linkedin.com/pulse/guardrails-ai-agents-evolution-through-2025-new-era-2026-kamboj-0bwec, https://www.superannotate.com/blog/best-data-labeling-tools"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"enterprise generative AI evaluation testing frameworks 2025\"]:\n\n\nSources: https://medium.com/@nayan.j.paul/designing-a-testing-framework-for-gen-ai-applications-582da504e71a, https://www.getmaxim.ai/articles/top-5-ai-evals-tools-for-enterprises-in-2025-features-strengths-and-use-cases/, https://galileo.ai/blog/mastering-llm-evaluation-metrics-frameworks-and-techniques, https://medium.com/@nomannayeem/2025-ai-evaluations-from-basics-to-power-f2739e1566e9, https://www.virtuosoqa.com/post/best-generative-ai-testing-tools"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"domain expertise skills gap generative AI enterprises 2025 survey\"]:\n\n\nSources: https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://cdn.openai.com/pdf/7ef17d82-96bf-4dd1-9df2-228f7f377a29/the-state-of-enterprise-ai_2025-report.pdf, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://mlq.ai/media/quarterly_decks/v0.1_State_of_AI_in_Business_2025_Report.pdf, https://www.workera.ai/blog/the-5-5-trillion-skills-gap-what-idcs-new-report-reveals-about-ai-workforce-readiness"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research enterprise adoption challenges and unmet needs in generative AI, focusing on recent analyst reports, surveys, and expert commentary from 2025-2026. I need to find comprehensive data on pain points, gaps, and underserved segments."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"enterprise generative AI adoption challenges 2025 2026 analyst report\"]:\n\n\nSources: https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/content/state-of-ai-in-the-enterprise.html, https://cdn.openai.com/pdf/7ef17d82-96bf-4dd1-9df2-228f7f377a29/the-state-of-enterprise-ai_2025-report.pdf, https://scholar.google.com/scholar?q=enterprise+AI+adoption+barriers+2026&hl=en&as_sdt=0&as_vis=1&oi=scholart, https://knowledge.wharton.upenn.edu/special-report/2025-ai-adoption-report/, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"hallucination data privacy integration cost enterprise AI pain points 2025\"]:\n\n\nSources: https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://www.linkedin.com/pulse/how-much-ai-integration-cost-your-business-2025-rejoicehubllp-g94gc, https://drainpipe.io/the-reality-of-ai-hallucinations-in-2025/, https://productcustomerlab.substack.com/p/enterprise-ai-in-2025-the-agentic, https://korra.ai/the-67-billion-warning-how-ai-hallucinations-hurt-enterprises-and-how-to-stop-them/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SMB small business generative AI adoption barriers 2025\"]:\n\n\nSources: https://www.oecd.org/content/dam/oecd/en/publications/reports/2025/12/ai-adoption-by-small-and-medium-sized-enterprises_9c48eae6/426399c1-en.pdf, https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/blogs/pulse-check-series-latest-ai-developments/ai-adoption-challenges-ai-trends.html, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://usmsystems.com/small-business-ai-adoption-statistics/, https://www.statista.com/statistics/1557024/barriers-ai-adoption/?srsltid=AfmBOoqtVQA-nCx6qEKwqh_K7zGSQEaV-tuXIuCJG33SUUyXh7G5_rLK"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"enterprise AI compliance regulatory challenges 2025 2026\"]:\n\n\nSources: https://airia.com/ai-compliance-takes-center-stage-global-regulatory-trends-for-2026/, https://www.wsgr.com/en/insights/2026-year-in-preview-ai-regulatory-developments-for-companies-to-watch-out-for.html, https://www.whitehouse.gov/presidential-actions/2025/12/eliminating-state-law-obstruction-of-national-artificial-intelligence-policy/, https://www.bakerdonelson.com/2026-ai-legal-forecast-from-innovation-to-compliance, https://www.credo.ai/blog/latest-ai-regulations-update-what-enterprises-need-to-know"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"on-premises edge AI deployment enterprises 2025\"]:\n\n\nSources: https://www.edge-ai-vision.com/2025/12/why-edge-ai-struggles-towards-production-the-deployment-problem/, https://medium.com/@marketing_39301/top-8-on-premise-ai-deployments-enterprises-are-planning-in-2025-e335a70f34f8, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://cdrdv2-public.intel.com/867305/IDC%20Edge%20AI%20white%20paper.pdf, https://stlpartners.com/articles/edge-computing/50-edge-computing-companies-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI evaluation testing frameworks enterprise 2025\"]:\n\n\nSources: https://galileo.ai/blog/mastering-llm-evaluation-metrics-frameworks-and-techniques, https://www.getmaxim.ai/articles/top-5-ai-evaluation-tools-in-2025-comprehensive-comparison-for-production-ready-llm-and-agentic-systems/, https://letsautomate.us/the-best-ai-frameworks-of-2025-top-tools-for-business-success/, https://www.virtuosoqa.com/post/best-generative-ai-testing-tools, https://developer.ibm.com/blogs/top-10-gen-ai-content-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll conduct comprehensive research on enterprise adoption challenges and unmet needs in generative AI, focusing on recent analyst reports, surveys, and expert commentary from 2025-2026. This will cover pain points, unmet needs, underserved personas, and infrastructure gaps."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"enterprise generative AI adoption challenges pain points 2025 2026 analyst report\"]:\n\n\nSources: https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/content/state-of-ai-in-the-enterprise.html, https://fortune.com/2025/08/18/mit-report-95-percent-generative-ai-pilots-at-companies-failing-cfo/, https://cdn.openai.com/pdf/7ef17d82-96bf-4dd1-9df2-228f7f377a29/the-state-of-enterprise-ai_2025-report.pdf, https://knowledge.wharton.upenn.edu/special-report/2025-ai-adoption-report/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"hallucinations data privacy integration complexity generative AI enterprise 2025\"]:\n\n\nSources: https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://fortune.com/2025/08/18/mit-report-95-percent-generative-ai-pilots-at-companies-failing-cfo/, https://iapp.org/news/a/ghosts-in-the-algorithm-busting-ai-hallucinations-under-the-gdpr, https://cdn.openai.com/pdf/7ef17d82-96bf-4dd1-9df2-228f7f377a29/the-state-of-enterprise-ai_2025-report.pdf, https://www.ibm.com/think/insights/ai-integration"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI cost compliance evaluation testing enterprise challenges 2025 2026\"]:\n\n\nSources: https://www.avenga.com/magazine/ai-development-cost/, https://www.bakerdonelson.com/2026-ai-legal-forecast-from-innovation-to-compliance, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://hai.stanford.edu/news/stanford-ai-experts-predict-what-will-happen-in-2026, https://www.jdsupra.com/legalnews/the-ai-regulation-landscape-for-2026-7255123/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"enterprise generative AI unmet needs what companies need 2025 survey\"]:\n\n\nSources: https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://cdn.openai.com/pdf/7ef17d82-96bf-4dd1-9df2-228f7f377a29/the-state-of-enterprise-ai_2025-report.pdf, https://writer.com/blog/enterprise-ai-adoption-survey-press-release/, https://hai.stanford.edu/ai-index/2025-ai-index-report"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SMB small business generative AI adoption barriers 2025 2026\"]:\n\n\nSources: https://www.business.com/articles/ai-usage-smb-workplace-study/, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://fortune.com/2025/08/18/mit-report-95-percent-generative-ai-pilots-at-companies-failing-cfo/, https://usmsystems.com/small-business-ai-adoption-statistics/, https://aibusiness.com/verticals/small-medium-businesses-face-barriers-to-technology-adoption"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"non-tech industries manufacturing healthcare generative AI adoption challenges 2025\"]:\n\n\nSources: https://menlovc.com/perspective/2025-the-state-of-ai-in-healthcare/, https://imubit.com/article/ai-adoption-in-manufacturing/, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://pmc.ncbi.nlm.nih.gov/articles/PMC12240008/, https://www.johnsnowlabs.com/generative-ai-healthcare/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"government public sector generative AI adoption needs 2025 2026\"]:\n\n\nSources: https://www.businessofgovernment.org/report/genai-and-future-government-work, https://www.zscaler.com/blogs/security-research/latest-public-sector-ai-adoption-trends-what-government-healthcare-and, https://www.zscaler.com/mx/blogs/security-research/latest-public-sector-ai-adoption-trends-what-government-healthcare-and, https://gov.appmaisters.com/the-impact-of-ai-on-public-sector-growth-and-transformation-in-2026/, https://www.naspe.net/workforce-of-the-future-the-government-ai-skilling-imperative"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"on-premises deployment edge AI generative models enterprise infrastructure 2025\"]:\n\n\nSources: https://www.coresite.com/blog/what-2025-revealed-about-ai-infrastructure-problems-and-requirements-for-2026, https://www.convox.com/blog/ai-edge-computing-infrastructure-2025?, https://my.avnet.com/silica/solutions/technologies/artificial-intelligence/generative-ai/generative-ai-at-the-edge/, https://www.truefoundry.com/blog/on-premises-generative-ai, https://medium.com/@marketing_39301/top-8-on-premise-ai-deployments-enterprises-are-planning-in-2025-e335a70f34f8"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"data labeling guardrails observability generative AI enterprise solutions 2025 2026\"]:\n\n\nSources: https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/content/state-of-ai-in-the-enterprise.html, https://www.superblocks.com/blog/data-governance-ai, https://encord.com/blog/data-labeling-platforms-generative-ai/, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://www.aciinfotech.com/blogs/digital-transformation-2026-enterprise-agentic-ai-strategy"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Gartner Forrester McKinsey generative AI enterprise adoption survey 2025 2026\"]:\n\n\nSources: https://www.gartner.com/en/documents/6923366, https://www.gartner.com/en/articles/hype-cycle-for-artificial-intelligence, https://www.forrester.com/blogs/the-state-of-genai-and-consumers-for-2026/, https://www.gartner.com/en/topics/generative-ai, https://www.gartner.com/en/newsroom/press-releases/2025-09-22-gartner-survey-reveals-generative-artificial-intelligence-attacks-are-on-the-rise"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the initial web search phase to gather information on enterprise generative AI adoption challenges and unmet needs, focusing on 2025-2026 analyst reports, surveys, and expert commentary. The search results cover various aspects including common pain points, unmet needs, underserved buyer personas, and infrastructure gaps. I will now proceed to organize and synthesize this information into a comprehensive plan."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,39 @@
+{
+  "id": "b625fc5d-2956-466c-8c1b-9510c5fc1ad8",
+  "raw_seed": "Get me refunds on all subscriptions I don't use anymore",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Get me refunds on all subscriptions I don't use anymore"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you identify and get refunds on unused subscriptions. Let me start by researching the best approaches for tracking down and cancelling unused subscription services."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to find all subscriptions tied to email credit card bank account 2024\"]:\n\n\nSources: https://www.cnbc.com/select/best-subscription-trackers/, https://www.rocketmoney.com/, https://www.reddit.com/r/macapps/comments/100lbvl/app_that_tracks_recurring_expenses_and/, https://www.pcmag.com/how-to/avoid-subscription-price-increases-apps-to-track-cancel-paid-services, https://trackmysubs.com/"
+    },
+    {
+      "role": "assistant",
+      "content": ": "
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best apps to track and cancel subscriptions 2024 refund policies\"]:\n\n\nSources: https://www.pcmag.com/how-to/avoid-subscription-price-increases-apps-to-track-cancel-paid-services, https://www.cnbc.com/select/best-subscription-trackers/, https://apps.apple.com/us/app/cancel-subscriptions/id6444500753, https://www.reddit.com/r/povertyfinance/comments/1cbxfje/are_any_of_those_subscription_canceling_apps_any/, https://play.google.com/store/apps/details?id=com.fooga.joinchargeback&hl=en_US"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand your subscription situation better before I can help you get refunds. Let me ask a few clarifying questions to create an effective plan:\n\n1. **Which subscriptions** do you want refunded? (e.g., streaming services, software, memberships, etc.)\n2. **When were they purchased?** This affects refund eligibility\u2014some services have 30-day refund windows.\n3. **Are they recurring subscriptions** or one-time purchases?\n4. **Have you already cancelled them**, or do you want me to help with cancellation + refunds?\n5. **Do you have login credentials** for these services, or would you prefer I guide you through the process?\n\nOnce I understand your specific subscriptions and their status, I can create a plan to maximize your refund success."
+    },
+    {
+      "role": "user",
+      "content": "1) Unused subs I\u2019m still paying for:  \n- **Adobe Creative Cloud (All Apps)** \u2013 $59.99/mo  \n- **The New York Times (digital)** \u2013 $17/mo (I think it\u2019s the \u201cAll Access\u201d plan)  \n- **Calm** \u2013 $69.99/yr  \n- **Dropbox Plus** \u2013 $11.99/mo  \n- **Xbox Game Pass Ultimate** \u2013 $16.99/mo  \n- **DoorDash DashPass** \u2013 $9.99/mo  \n\n2) When they started (approx):  \n- Adobe CC: **June 2024**  \n- NYT: **Jan 2024** (was a promo, then it went up)  \n- Calm: **Nov 2024** (annual renewal hit recently)  \n- Dropbox Plus: **Aug 2023**  \n- Game Pass Ultimate: **Dec 2024**  \n- DashPass: **Sept 2024**\n\n3) Status:  \n- All of these are **active recurring charges** right now (none cancelled yet).\n\n4) Account access:  \n- **Yes** for all. Adobe + Dropbox"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have a clear picture now. You're paying $185.96/month (~$2,231/year) across 6 active subscriptions. Given the dates, some are within refund windows, others may require negotiation. Let me create a strategic plan to maximize your refunds.\n\nMy approach:\n1. Prioritize by refund likelihood (recent purchases + annual plans have better odds)\n2. Research each service's refund policy\n3. Prepare cancellation + refund request templates\n4. Execute cancellations with refund appeals where applicable\n5. Document everything for follow-up\n\nI'm moving to plan generation now."
+    }
+  ],
+  "set_plan_args": {}
+}

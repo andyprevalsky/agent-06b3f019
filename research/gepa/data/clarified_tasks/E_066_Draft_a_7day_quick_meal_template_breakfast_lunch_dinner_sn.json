@@ -1,0 +1,39 @@
+{
+  "id": "e673364c-7620-4d18-89b0-bf45ae2d6be0",
+  "raw_seed": "Draft a 7-day quick meal template (breakfast/lunch/dinner/snacks) aligned to the targets, non-spicy preference, and busy schedule; include portion guidance and easy swaps that fit dinners cooked at home",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Draft a 7-day quick meal template (breakfast/lunch/dinner/snacks) aligned to the targets, non-spicy preference, and busy schedule; include portion guidance and easy swaps that fit dinners cooked at home"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify a few details about your targets and preferences before I create the meal template. I don't have information about your specific nutritional/dietary targets, current schedule constraints, or other preferences beyond the non-spicy requirement and busy schedule context."
+    },
+    {
+      "role": "user",
+      "content": "Great, thanks for asking! Here's what works for me:\n\n1. **Nutritional targets**: I'm looking to maintain my weight but get a bit leaner\u2014so maybe around 1,800-2,000 calories a day? I'd like to keep protein higher (around 100-120g) since I do light gym work 3-4x a week. Not too strict on the rest.\n\n2. **Dietary restrictions**: No allergies, but I'm not a fan of mushrooms or seafood. Also try to avoid too much dairy\u2014maybe lighter on cheese and cream sauces?\n\n3. **Schedule specifics**: Weekdays I'm pretty slammed\u2014can only spend 20-30 minutes on dinner prep. Weekends I have more time, maybe 45 minutes. Thursdays and Fridays are my craziest days, so those need the easiest options.\n\n4. **Cooking style**: I'd love to do some batch cooking on Sunday\u2014maybe prep proteins and a couple sides. Then do quick assembly during the week. I have a standard kitchen: stove, oven, microwave, blender. No air fryer or fancy stuff.\n\n5. **Budget/ingredient access**: I'm in a normal suburban area, so grocery access is fine. Budget is reasonable\u2014maybe $60-80/week for groceries is my target."
+    },
+    {
+      "role": "assistant",
+      "content": "Researching quick meal templates and batch cooking strategies for busy professionals with 1,800-2,000 calorie targets and 100-120g protein needs"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"meal prep template 1800-2000 calories high protein 100-120g batch cooking busy schedule\"]:\n\n\nSources: https://www.reddit.com/r/MealPlanYourMacros/comments/f56mw2/whats_a_good_18002000_calorie_high_protein_175g/, https://www.djkfit.com/blog/fuel-your-fitness-journey-a-high-protein-meal-plan-1800-2000-calories, https://www.eatingwell.com/article/287731/7-day-diet-meal-plan-to-lose-weight-1800-calories/, https://amandanighbert.com/2024/08/13/cheat-sheet-for-100-120-and-140-grams-of-protein-a-day/, https://lifeisgoldin.com/120-grams-of-protein-a-day-meal-plan-examples/"
+    },
+    {
+      "role": "assistant",
+      "content": "Here are 7 search results for meal prep template busy professional meal plan:\n\n1. https://www.reddit.com/r/MealPlanYourMacros/comments/f56mw...  \n  \nA 28-year-old female, 5'6\", 137 lbs, seeking to lose weight while maintaining muscle...  \n  \n2. https://www.djkfit.com/blog/fuel-your-fitness-journey-a-comprehensive-guide-to-a-high-protein-meal-plan\n  \n  Fuel your fitness with this high-protein meal plan!  \n\n  \n3. https://www.eatingwell.com/article/287731/7-day-diet-meal-plan-to-lose-weight-1800-calories\n  \n  A 7-day meal plan at 1,800 calories...  \n  \n4. https://amandanighbert.com/2024/08/13/cheat-sheet-for-100-120-and-140-grams-of-protein-a-day/\n  \n  Simple meal prep: 100-120g protein daily...  \n  \n5. https://lifeisgoldin.com/120-grams-of-protein-a-day-meal-plan-examples/\n  \n  120g protein meal plan examples...  \n  \n6. https://www.pinterest.com/pin/healthy-high-protein-meal-prep-ideas-for-busy-people--116215015022277169/\n  \n  High-protein meal prep ideas...  \n  \n7. https://www.reddit.com/r/MealPrepSunday/comments/1e7m9wk/beginner_meal_prep_sunday_ideas_for_busy/\n  \n  Beginner meal prep Sunday ideas..."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"meal prep template 1800-2000 calories high protein 100-120g batch cooking busy schedule\"]:\n\n\nSources: https://amandanighbert.com/2024/08/13/cheat-sheet-for-100-120-and-140-grams-of-protein-a-day/, https://www.thekitchn.com/1800-calorie-meal-plan-22931896, https://www.djkfit.com/blog/fuel-your-fitness-journey-a-high-protein-meal-plan-1800-2000-calories, https://www.aruplab.com/files/images/wellness/MealPlan_1800_calorie.pdf, https://www.reddit.com/r/MealPrepSunday/comments/1i70hd1/best_meal_prep_recipes_to_hit_100120g_of_protein/"
+    },
+    {
+      "role": "assistant",
+      "content": "Found great resources for high-protein meal prep templates targeting 100-120g daily protein in 1,800-2,000 calories. The Amanda Nighbert guide shows practical breakdowns for 100g, 120g, and 140g protein targets with specific food combinations. Reddit thread shows real-world meal prep examples from people hitting similar targets. The Kitchn 1,800-calorie plan offers structured daily templates. Ready to create your personalized 7-day plan now."
+    }
+  ],
+  "set_plan_args": {}
+}

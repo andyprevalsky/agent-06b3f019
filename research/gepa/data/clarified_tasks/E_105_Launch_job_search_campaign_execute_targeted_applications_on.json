@@ -1,0 +1,15 @@
+{
+  "id": "d9476186-ca2f-490f-87b4-bec9bc631e46",
+  "raw_seed": "Launch job search campaign: execute targeted applications on prioritized platforms plus direct outreach to 20-30 small health/wellness/creative businesses weekly",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Launch job search campaign: execute targeted applications on prioritized platforms plus direct outreach to 20-30 small health/wellness/creative businesses weekly"
+    },
+    {
+      "role": "assistant",
+      "content": "**Initiating the Campaign's Core**\n\nI'm focusing now on the job search launch. Currently, I'm identifying the key platforms for targeted applications. I'm also starting to brainstorm the best ways to discover relevant job postings efficiently. My next step will be to identify the right businesses for direct outreach.\n\n\n**Mapping the Strategy's Scope**\n\nI'm now clarifying the overall scope. I've broken down the job search campaign into two main pillars: applying through platforms and direct outreach. To stay organized, I will now focus on designing the initial planning stage. Then, I will start to conceptualize how this plan will interface with a planner LLM.\n\nThe goal is clear. I will now create a plan to launch a job search campaign, including targeted applications on prioritized platforms and direct outreach to small health/wellness/creative businesses weekly."
+    }
+  ],
+  "set_plan_args": {}
+}

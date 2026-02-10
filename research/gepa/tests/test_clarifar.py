@@ -42,8 +42,6 @@ class TestClarifarStub:
     async def test_lists_initialized(self):
         result = await clarifar('Book a flight')
         assert isinstance(result.agent_context, list)
-        assert isinstance(result.tools_used, list)
-        assert isinstance(result.simulated_responses, list)
 
 
 class TestClarifarBehavioral:
@@ -56,10 +54,11 @@ class TestClarifarBehavioral:
         assert 'tasks' in result.set_plan_args or 'title' in result.set_plan_args
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason='STUB: awaiting run_agent integration')
+    @pytest.mark.xfail(reason='Behavioral: tools used derivable from agent_context')
     async def test_records_tools_used(self):
         result = await clarifar('Research the best restaurants in SF')
-        assert len(result.tools_used) > 0
+        # tools_used is derivable from agent_context, no longer a separate field
+        assert len(result.agent_context) > 0
 
     @pytest.mark.asyncio
     @pytest.mark.xfail(reason='STUB: awaiting run_agent integration')

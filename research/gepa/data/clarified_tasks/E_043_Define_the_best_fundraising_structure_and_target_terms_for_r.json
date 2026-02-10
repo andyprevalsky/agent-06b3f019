@@ -1,0 +1,51 @@
+{
+  "id": "8425470b-9fe8-468d-9073-394e3503f17e",
+  "raw_seed": "Define the best fundraising structure and target terms for raising $50k (investor profile, ticket sizes, likely valuation/terms, convertible note vs equity vs revenue-share, compliance/solicitation do\u2019s & don\u2019ts) aligned to your Oct 1 deadline",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Define the best fundraising structure and target terms for raising $50k (investor profile, ticket sizes, likely valuation/terms, convertible note vs equity vs revenue-share, compliance/solicitation do\u2019s & don\u2019ts) aligned to your Oct 1 deadline"
+    },
+    {
+      "role": "assistant",
+      "content": "Set fundraising plan for similar goals. Need to research current market terms for the $50,000 seed stage and adapt the proven structure to the specific deadline or timeline."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"seed stage $50000 fundraising terms 2024 convertible note safe equity valuation investor profile\"]:\n\n\nSources: https://carta.com/data/state-of-pre-seed-2024/, https://carta.com/learn/startups/fundraising/convertible-securities/safes/, https://angelcapitalassociation.org/blog/aca-releases-update-to-the-model-convertible-promissory-note/, https://www.saastr.com/the-state-of-seed-today-10-key-learnings-from-cartas-latest-data/, https://www.gilion.com/basics/simple-agreement-for-future-equity-safe"
+    },
+    {
+      "role": "assistant",
+      "content": "The user is asking me to define a comprehensive fundraising strategy for raising $50k with an October 1 deadline. However, I notice a critical issue: the current date is February 7, 2026, and they're referencing an \"Oct 1 deadline\" - this appears to be October 1, 2026, which is about 8 months away.\n\nBefore I create a detailed fundraising plan, I need to clarify several key factors that will dramatically affect the structure:\n\n1. **Company stage & traction**: Pre-revenue, early revenue, profitable, growth stage?\n2. **Industry/sector**: Tech, biotech, services, physical product?\n3. **Geography**: US (which state?), international?\n4. **Founder background**: First-time, serial entrepreneur, technical vs business?\n5. **Current capitalization**: Bootstrapped, already raised, equity structure in place?\n6. **Use of funds**: Product development, hiring, marketing, runway?\n7. **Growth trajectory**: What metrics demonstrate progress?\n\nThese details are essential because:\n- A pre-seed biotech startup targets different investors than a SaaS company with $10k MRR\n- Valuation ranges from $250k-$2M depending on traction\n- Compliance obligations vary by state and investor type\n- The $50k raise could be a single check or 5-10 smaller ones, changing strategy entirely\n\nI can proceed two ways:\n1. **With assumptions**: I'll research current market standards (Feb 2026) and provide a general framework for a typical early-stage tech startup\n2. **With your input**: You provide the specifics above, and I'll tailor the strategy precisely\n\nWhich approach works better for you?"
+    },
+    {
+      "role": "user",
+      "content": "We're pre-revenue, building an AI-powered legal-tech SaaS for small firms (think Clio but focused on automated intake & document prep). Bootstrapped so far\u2014my co-founder and I each own 45%, 10% option pool.  \n\nThe $50k is to pay two contract devs through year-end so we can ship our beta and start charging.  \n\nWe're in Colorado (Boulder), both first-time founders\u2014I'm the business side (ex-BigLaw paralegal), she's technical (ex-Google, CS from CU).  \n\nNeed to start fundraising in early April (giving us six months to close by Oct 1).  \n\nGo ahead and build the framework with those facts\u2014I'll adjust if anything feels off."
+    },
+    {
+      "role": "assistant",
+      "content": "Excellent context. I have what I need to build a comprehensive fundraising framework. Let me research current Feb 2026 market conditions for pre-seed legal-tech, then create a detailed structure covering investor profiles, ticket sizes, valuation ranges, instrument choice, and compliance specifics tailored to your Colorado-based, first-time founder profile with strong domain expertise."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"pre-seed fundraising 2026 legal tech SaaS valuation convertible note SAFE terms\"]:\n\n\nSources: https://legal.thomsonreuters.com/blog/convertible-note-legal-glossary/, https://www.cakeequity.com/guides/safe-notes, https://signal.nfx.com/investor-lists/top-legaltech-pre-seed-investors, https://kruzeconsulting.com/blog/convertible-notes/, https://carta.com/learn/startups/fundraising/convertible-securities/safes/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Colorado startup accredited investor requirements regulation D compliance 2026\"]:\n\n\nSources: https://davisgraham.com/news-events/what-is-changing-in-2026-for-colorado-licensed-investment-advisers-and-for-colorado-licensed-investment-adviser-representatives/, https://leg.colorado.gov/bill_files/82292/download, https://almcorp.com/blog/colorado-ai-act-sb-205-compliance-guide/, https://www.caliberco.com/secs-latest-proposed-changes-to-accredited-investor-criteria/, https://www.stephentwomey.com/blog/accredited-investor-2026-rules-thresholds-how-to-qualify/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"$50k seed round fundraising strategy angel investors friends family 2026\"]:\n\n\nSources: https://ideaproof.io/guides/pre-seed-funding, https://altar.io/most-active-angels-vcs-for-seed-startup-investments/, https://www.thevccorner.com/p/friends-and-family-funding-guide, https://lightyear.ai/blogs/so-your-startup-wants-to-raise-an-angel-pre-seed-round-heres-some-advice, https://www.hubspot.com/startups/fundraising/preseed-vs-seed-funding"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"legal tech SaaS comparable valuations pre-revenue Clio competitors 2026\"]:\n\n\nSources: https://tracxn.com/d/companies/clio/__VHNDx_LwMJabSkqMAu8NhbsTOiDgSiibt3EQCr4mDUo, https://www.feinternational.com/blog/saas-metrics-value-saas-business, https://legal.thomsonreuters.com/blog/the-legal-market-at-a-crossroads-5-forces-reshaping-law-firm-success-in-2026/, https://www.sunbeltatlanta.com/blog/saas-valuation-how-to-value-a-saas-business-in-2026, https://www.younium.com/blog/saas-finance-trends-2026-industry-expert-predictions"
+    },
+    {
+      "role": "assistant",
+      "content": "I\u2019m in the planning phase right now, and I need to call the set_plan function. This step seems crucial for moving forward, but I want to make sure I\u2019m executing it correctly. I should check that I'm following the right parameters and logic. Planning is all about laying down a solid foundation, after all, so I want to get this part right before proceeding with the rest of the task. Okay, let\u2019s do this!\n\nI have enough context to produce a tailored fundraising structure (instrument choice, target terms, investor/ticket strategy, timeline to Oct 1, and Colorado/SEC compliance do\u2019s & don\u2019ts). I\u2019m going to lock the plan now, then we\u2019ll execute it step-by-step (terms template, target investor list archetypes, outreach sequence, and compliance checklist)."
+    }
+  ],
+  "set_plan_args": {}
+}

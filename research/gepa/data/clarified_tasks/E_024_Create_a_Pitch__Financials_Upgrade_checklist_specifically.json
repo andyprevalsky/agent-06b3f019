@@ -1,0 +1,15 @@
+{
+  "id": "3839226d-61dc-4508-be11-232fa5613da2",
+  "raw_seed": "Create a 'Pitch & Financials Upgrade' checklist specifically for a 2nd location expansion, focusing on unit economics and multi-location management proof points.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create a 'Pitch & Financials Upgrade' checklist specifically for a 2nd location expansion, focusing on unit economics and multi-location management proof points."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to create a comprehensive checklist for a 2nd location expansion that focuses on unit economics and multi-location management proof points. This is a clear goal - the user wants a specific document/checklist tailored to second location expansion with emphasis on financial metrics and operational proof points.\n\nLet me break down what's needed:\n1. Pitch & Financials Upgrade checklist format\n2. Specific to 2nd location expansion (not 1st location)\n3. Focus areas: unit economics and multi-location management\n4. Should include proof points that demonstrate readiness\n\nThis is decomposable and clear enough to move directly to planning. I have sufficient context to create an execution plan that will generate this checklist document."
+    }
+  ],
+  "set_plan_args": {}
+}

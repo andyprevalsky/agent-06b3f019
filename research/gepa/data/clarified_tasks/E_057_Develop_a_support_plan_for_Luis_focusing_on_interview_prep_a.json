@@ -1,0 +1,23 @@
+{
+  "id": "4c547603-1bb1-428d-8f83-ca526b1bf63b",
+  "raw_seed": "Develop a support plan for Luis focusing on interview prep and accountability for the next 2-3 weeks",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Develop a support plan for Luis focusing on interview prep and accountability for the next 2-3 weeks"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand more about Luis's situation to create a tailored support plan. Let me ask some clarifying questions before developing the plan."
+    },
+    {
+      "role": "user",
+      "content": "Great questions. Here's what I can tell you:\n\n1. **Interview Type**: It's a software engineer role at a mid-size tech company (Series B startup). Full-time position.\n\n2. **Experience**: Luis has done 2 internships but this is his first serious full-time interview. He's a recent grad, CS degree from State University.\n\n3. **Timeline**: Interview is scheduled for March 15th, so we have exactly 2 weeks starting now.\n\n4. **Challenges**: He's strongest with technical coding problems but really struggles with behavioral questions\u2014gets nervous and doesn't tell good stories about his accomplishments. Also needs to research the company better and practice salary negotiation (he tends to undersell himself).\n\n5. **Current Prep**: He's done some LeetCode practice but honestly hasn't started on the behavioral side at all. No company research yet.\n\n6. **Support**: I'm his mentor\u2014we can do weekly check-ins on Mondays, and he can send me quick progress updates mid-week. He's also got a friend in tech who could do a mock interview with him.\n\n7. **Resources**: He has access to LeetCode premium, and I can help with mock interviews. No formal coaching platform, but we can use what we have.\n\n8. **Goals**: Obviously land the offer, but more importantly, he wants to feel confident going"
+    },
+    {
+      "role": "assistant",
+      "content": "**Formulating the Strategy**\n\nI'm now in a good position to draft a support plan for Luis. The goal is a comprehensive approach. I'll focus on technical and behavioral interview prep, incorporating company research and salary negotiation tactics. To ensure effectiveness, I'll include weekly check-ins for accountability.\n\n\n**Planning the Approach**\n\nI've reviewed Luis's interview prep needs thoroughly and am ready to create the plan. It'll be a two-week intensive, hitting technical and behavioral aspects, plus research and salary tactics. Weekly check-ins, mid-week updates and mock interviews will keep us on track. I plan to incorporate available resources, and target specific challenges.\n\nThank you for the detailed information. This gives me a clear picture of Luis's situation and what needs to be prioritized. I will now create a comprehensive support plan for the next two weeks, focusing on his strengths and addressing his challenges."
+    }
+  ],
+  "set_plan_args": {}
+}

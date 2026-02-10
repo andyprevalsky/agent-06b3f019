@@ -1,0 +1,15 @@
+{
+  "id": "3f72e085-0e45-4ce5-8cec-85e05f2e0e52",
+  "raw_seed": "Design personalized support plans for each friend with immediate actions and ongoing rhythms (Maya: move help + weekly walks; Jordan: deadline accountability + sleep routine check-ins; Priya: solo week coverage + mom-friendly outings; Luis: interview prep + weekly career coffee)",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Design personalized support plans for each friend with immediate actions and ongoing rhythms (Maya: move help + weekly walks; Jordan: deadline accountability + sleep routine check-ins; Priya: solo week coverage + mom-friendly outings; Luis: interview prep + weekly career coffee)"
+    },
+    {
+      "role": "assistant",
+      "content": ": internal log, may or may not surface in UI\n\nI need to create personalized support plans for four friends with specific immediate actions and ongoing rhythms. Let me break this down and create a comprehensive plan.\n\nBased on the requirements, I can see the structure needed:\n- Maya: move help + weekly walks\n- Jordan: deadline accountability + sleep routine check-ins  \n- Priya: solo week coverage + mom-friendly outings\n- Luis: interview prep + weekly career coffee\n\nThis is a clear, decomposable goal with specific actions for each person. I'll create detailed support plans with immediate next steps and sustainable ongoing rhythms."
+    }
+  ],
+  "set_plan_args": {}
+}

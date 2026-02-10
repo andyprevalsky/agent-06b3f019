@@ -1,0 +1,15 @@
+{
+  "id": "a03ff8a9-72c9-49f6-8828-4f646b75bb08",
+  "raw_seed": "Design a 4\u20135 month, knee-friendly strength + cardio program (3\u20134 sessions/week, 45\u201360 min) using 24 Hour Fitness plus a home fallback; include progressive overload, exercise substitutions, and a simple warm-up/mobility plan",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Design a 4\u20135 month, knee-friendly strength + cardio program (3\u20134 sessions/week, 45\u201360 min) using 24 Hour Fitness plus a home fallback; include progressive overload, exercise substitutions, and a simple warm-up/mobility plan"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to create a comprehensive 4-5 month strength and cardio program for someone with knee considerations. The goal is clear: design a program that works at 24 Hour Fitness with home alternatives, includes progressive overload, substitutions, warm-up/mobility, and runs 3-4 sessions per week for 45-60 minutes. I have enough information to proceed directly to planning without additional research, as this is a well-defined fitness programming task based on established principles."
+    }
+  ],
+  "set_plan_args": {}
+}

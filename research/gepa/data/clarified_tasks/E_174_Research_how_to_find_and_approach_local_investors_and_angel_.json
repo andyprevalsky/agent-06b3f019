@@ -1,0 +1,71 @@
+{
+  "id": "a28cde9b-5d4c-4ac0-8cc2-dcb4f3ce1522",
+  "raw_seed": "Research how to find and approach local investors and angel investor networks for a small business expansion. Search for: local angel investor groups, small business investment clubs, how to find local investors for coffee shop expansion, SCORE mentorship for investor introductions, local Chamber of Commerce resources, and revenue-based financing options. Provide concrete platforms, networks, and outreach strategies.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research how to find and approach local investors and angel investor networks for a small business expansion. Search for: local angel investor groups, small business investment clubs, how to find local investors for coffee shop expansion, SCORE mentorship for investor introductions, local Chamber of Commerce resources, and revenue-based financing options. Provide concrete platforms, networks, and outreach strategies."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research local investor networks and angel investor groups to provide you with concrete platforms, networks, and outreach strategies for small business expansion. This requires gathering current information on angel investor organizations, small business investment clubs, SCORE resources, and alternative financing options."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local angel investor groups networks how to find\"]:\n\n\nSources: https://www.angelinvestmentnetwork.us/, https://angelcapitalassociation.org/directory/, https://www.angelinvestmentnetwork.us/ohio-angel-investors, https://www.angelinvestmentnetwork.us/angel-investors-los-angeles, https://www.meetup.com/topics/angel-investors/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"small business investment clubs near me\"]:\n\n\nSources: https://www.betterinvesting.org/chapters/north-texas/visit-a-club, https://www.meetup.com/find/us--md--columbia/investment-club/, https://www.ica.fund/, https://www.meetup.com/ibd-265/, https://www.betterinvesting.org/chapters/maryland"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to find local investors for coffee shop expansion\"]:\n\n\nSources: https://www.reddit.com/r/phinvest/comments/zzhnyx/thoughts_on_becoming_an_angel_investor_coffee_shop/, https://proudmarycoffee.com/pages/invest?srsltid=AfmBOooz632sJcy2aJ8Gqmku2_mIxMDVVLmARwDH2E7rS4KRbdfG-kgV, https://www.sba.gov/business-guide/plan-your-business/fund-your-business, https://www.facebook.com/groups/2815042615255352/posts/6594561443970098/, https://www.angelinvestmentnetwork.us/business-proposal/industry-food-beverage-23"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SCORE mentorship investor introductions small business\"]:\n\n\nSources: https://www.score.org/, https://www.sba.gov/local-assistance/resource-partners/score-business-mentoring, https://www.score.org/find-mentor/how-it-works, https://www.score.org/find-mentor, https://www.prnewswire.com/news-releases/small-businesses-grow-and-thrive-with-help-from-score-mentors-302343473.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Chamber of Commerce resources investor connections\"]:\n\n\nSources: https://jerseyshorechambernj.com/, https://www.greenvillechamber.org/whyinvest/navigating-investor-benefits/, https://www.mnchamber.com/business-and-economic-development-resources, https://www.uschamber.com/, https://www.uschamber.com/co/start/strategy/local-organizations-for-small-business-owners"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"revenue-based financing options small business 2025\"]:\n\n\nSources: https://www.clearlyacquired.com/blog/the-ultimate-guide-to-business-financing-options-in-2025, https://www.gilion.com/basics/revenue-based-financing, https://bigthinkcapital.com/alternative-lending-inflation-2025/, https://www.federalreserve.gov/publications/2025-march-consumer-community-context.htm, https://hitidecapital.com/best-small-business-financing-options-for-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you research local investor networks and angel investor groups for small business expansion. This is a clear research goal - I'll search for concrete platforms, networks, and outreach strategies across multiple categories."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local angel investor groups networks how to find\"]:\n\n\nSources: https://www.angelinvestmentnetwork.us/angel-investors-california, https://www.angelinvestmentnetwork.co.uk/, https://angel-investors-group.com/, https://www.angelinvestmentnetwork.us/, https://www.meetup.com/topics/angel-investors/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"small business investment clubs near me\"]:\n\n\nSources: https://www.angelinvestmentnetwork.us/ohio-angel-investors, https://www.betterinvesting.org/chapters/oklahoma, https://www.meetup.com/topics/investing/, https://www.ohioinvestmentnetwork.com/home/105, https://www.meetup.com/okcentrepreneurgroup/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"how to find local investors for coffee shop expansion\"]:\n\n\nSources: https://www.facebook.com/groups/2815042615255352/posts/6594561443970098/, https://www.reddit.com/r/phinvest/comments/zzhnyx/thoughts_on_becoming_an_angel_investor_coffee_shop/, https://www.localenterprise.ie/Discover-Business-Supports/Financial-Supports/Business-Expansion-Grant/, https://www.bizbuysell.com/california/los-angeles-county/coffee-shops-and-cafes-for-sale/, https://www.angelinvestmentnetwork.us/business-proposal/industry-food-beverage-23"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SCORE mentorship investor introductions small business\"]:\n\n\nSources: https://www.score.org/, https://www.sba.gov/local-assistance/resource-partners/score-business-mentoring, https://www.score.org/find-mentor, https://www.score.org/find-mentor/how-it-works, https://www.score.org/small-business-resource-hubs"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Chamber of Commerce resources investor connections\"]:\n\n\nSources: https://www.fccsingapore.com/committees/programmes-for-start-ups-entrepreneurs/fccs-investor-network/fccs-investor-network-form.html, https://lachamber.com/pages/investors/, https://www.kankakeecountychamber.com/membership-tiers-with-benefits/, https://www.businessfrance.fr/en, https://www.uschamber.com/co/run/business-financing/investment-deal-structure"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"revenue-based financing options small business\"]:\n\n\nSources: https://www.credibly.com/revenue-based-business-loans/, https://www.sba.gov/business-guide/plan-your-business/fund-your-business, https://www.sba.gov/funding-programs/loans, https://kapitus.com/products-services/revenue-based-financing/, https://www.lendio.com/business-loans/revenue-based-financing"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the initial research on local angel investor groups, small business investment clubs, methods for finding local investors for coffee shop expansion, SCORE mentorship for investor introductions, local Chamber of Commerce resources, and revenue-based financing options. The next step is to synthesize this information into a structured plan that outlines concrete platforms, networks, and outreach strategies for your small business expansion. I will then present this plan."
+    }
+  ],
+  "set_plan_args": {}
+}

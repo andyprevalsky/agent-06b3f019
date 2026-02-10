@@ -1,0 +1,15 @@
+{
+  "id": "4114510f-f16c-4ef5-b587-2d4e947f9c8b",
+  "raw_seed": "Research the best indie music communities, venues, open mics, and social scenes in Austin, TX for a 32-year-old. Austin is a music city so find specific venues with strong community vibes (not just big concerts), indie music Discord servers, subreddits like r/Austin or r/indieheads local threads, volunteer opportunities at music festivals (SXSW, ACL, Levitation), and any recurring indie music social events.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research the best indie music communities, venues, open mics, and social scenes in Austin, TX for a 32-year-old. Austin is a music city so find specific venues with strong community vibes (not just big concerts), indie music Discord servers, subreddits like r/Austin or r/indieheads local threads, volunteer opportunities at music festivals (SXSW, ACL, Levitation), and any recurring indie music social events."
+    },
+    {
+      "role": "assistant",
+      "content": ": Researching Austin's indie music ecosystem for a 32-year-old looking to connect with authentic communities rather than just attending big concerts."
+    }
+  ],
+  "set_plan_args": {}
+}

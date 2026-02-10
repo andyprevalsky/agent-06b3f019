@@ -1,0 +1,35 @@
+{
+  "id": "f8838aeb-9a7c-4622-87ad-8ae23d98fccc",
+  "raw_seed": "Create comprehensive visa application action plan including document checklist, timeline, appointment booking instructions, form guidance, and preparation steps for Indian tourist visa applicant in Bengaluru",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create comprehensive visa application action plan including document checklist, timeline, appointment booking instructions, form guidance, and preparation steps for Indian tourist visa applicant in Bengaluru"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to gather current information about the Indian tourist visa application process for applicants in Bengaluru. Since visa requirements, procedures, and processing times can change, I'll research the most up-to-date details from official sources to create an accurate and comprehensive action plan."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Indian tourist visa application process Bengaluru 2026\"]:\n\n\nSources: https://indianvisaonline.gov.in/evisa/tvoa.html, https://india-evisa.it.com/guide-to-india-new-2026-e-visa-rules/, https://www.odynovotours.com/india/e-tourist-visa.html, https://www.visahq.com/india/, https://www.airindia.com/in/en/travel-information/visa-services/india-visa.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Indian tourist visa requirements documents checklist\"]:\n\n\nSources: https://services.vfsglobal.com/one-pager/india/united-states-of-america/visa-services/pdf/tourist-checklist.pdf, https://indianvisaonline.gov.in/evisa/tvoa.html, https://www.indiainnewyork.gov.in/pages?id=WEEvaENpL3VyK3BxTER3cTFYYVJqUT09&subid=VFZTZWc0c1IvNnZTVnpNYk9reVNnUT09&nextid=VHczZ08wbDJJQmhJRXNJeEFaUzNEdz09, https://www.cgisf.gov.in/page/e-visa/, https://services.vfsglobal.com/one-pager/india/united-states-of-america/visa-services/pdf/Tourist-Checklist-10-Years-Visa-Sep-25.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Indian visa application form e-visa vs regular visa Bengaluru\"]:\n\n\nSources: https://indianvisaonline.gov.in/evisa/tvoa.html, https://indembassysuriname.gov.in/public_files/assets/pdf/Indian_dddddd19sep.pdf, https://www.tripadvisor.ie/ShowTopic-g293860-i511-k14633556-Indian_Paper_Visa_vs_E_Visa-India.html, https://indiasomeday.com/en/article/tourist-visa-india/, https://www.airindia.com/in/en/travel-information/visa-services/india-visa.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Indian tourist visa appointment booking Bengaluru VFS\"]:\n\n\nSources: https://visa.vfsglobal.com/ind/en/deu/book-an-appointment, https://services.vfsglobal.com/usa/en/ind/visa-appointment-registration, https://visa.vfsglobal.com/ind/en/pol/attend-centre/bangalore, https://www.youtube.com/watch?v=_G2qzFsfdZE, https://services.vfsglobal.com/usa/en/ind/appointment-interim"
+    },
+    {
+      "role": "assistant",
+      "content": "The search results indicate that for tourist visas to India, applicants in Bengaluru primarily have two options: e-Visa and regular paper visa. The e-Visa process is entirely online, while the regular visa might involve VFS Global for application submission and biometrics. The specific requirements, documents, and appointment booking procedures depend on which type of visa the applicant chooses. I need to consolidate this information into a comprehensive action plan, covering both possibilities and clearly outlining the steps for each."
+    }
+  ],
+  "set_plan_args": {}
+}

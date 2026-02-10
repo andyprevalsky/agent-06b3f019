@@ -1,0 +1,15 @@
+{
+  "id": "7def9598-2be3-42ea-b913-95254b89610b",
+  "raw_seed": "Research current processing times for Canadian work permit applications from India (both online and paper-based, including biometrics timelines). Check if there are any known delays or backlogs as of early 2026. Also check if Port of Entry (POE) application is an option for Indian citizens.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research current processing times for Canadian work permit applications from India (both online and paper-based, including biometrics timelines). Check if there are any known delays or backlogs as of early 2026. Also check if Port of Entry (POE) application is an option for Indian citizens."
+    },
+    {
+      "role": "assistant",
+      "content": "Researching current Canadian work permit processing times from India, including biometrics and POE options."
+    }
+  ],
+  "set_plan_args": {}
+}

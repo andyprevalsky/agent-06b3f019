@@ -1,0 +1,107 @@
+{
+  "id": "3f10ce7c-d735-477e-9e88-dec46e0b45b0",
+  "raw_seed": "Research the best board game groups, meetups, game nights, and board game cafes in Austin, TX for a 32-year-old looking to make genuine friends. Find specific venues, recurring events, Facebook/Discord groups, and any Austin board gaming communities. Look for things like Emerald Tavern, Dragon's Lair, Meetup.com groups, etc.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research the best board game groups, meetups, game nights, and board game cafes in Austin, TX for a 32-year-old looking to make genuine friends. Find specific venues, recurring events, Facebook/Discord groups, and any Austin board gaming communities. Look for things like Emerald Tavern, Dragon's Lair, Meetup.com groups, etc."
+    },
+    {
+      "role": "assistant",
+      "content": ": Starting research on Austin's board gaming scene to find the best venues and communities for making genuine connections."
+    },
+    {
+      "role": "user",
+      "content": "Thanks! That would be great. I'm especially interested in places or groups that are beginner-friendly or have a good mix of casual and more serious games. I'm not really into super competitive stuff, more looking for a relaxed atmosphere. Also, anything that leans towards cooperative games would be a huge plus! I'm free most evenings after 6 PM and on weekends."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best board game cafes Austin TX 2024 2025 Emerald Tavern Dragon's Lair game nights\"]:\n\n\nSources: https://emeraldtaverngames.com/, https://www.dlair.net/austin/events/, https://emeraldtaverngames.com/events/, https://m.yelp.com/search?find_desc=Board+Games+Cafe&find_loc=Austin%2C+TX, https://www.dlair.net/austin/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin board game Meetup groups 2024 social gaming events\"]:\n\n\nSources: https://www.meetup.com/find/us--tx--austin/board-games/, https://www.reddit.com/r/Austin/comments/1gtk57q/looking_for_a_group_to_play_board_games_with/, https://classicgamefest.com/, https://www.meetup.com/central-texas-boardgames/, https://withfriends.co/event/20292114/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin board game Discord Facebook groups communities 2024\"]:\n\n\nSources: https://www.facebook.com/groups/122587421414236/, https://www.reddit.com/r/Austin/comments/txrian/last_year_i_made_a_discord_group_for_board_gamers/, https://www.reddit.com/r/Austin/comments/1gtk57q/looking_for_a_group_to_play_board_games_with/, https://www.facebook.com/groups/432513922216876/posts/1443299541138304/, https://www.meetup.com/find/us--tx--austin/board-games/"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have the context I need. You're looking for beginner-friendly, relaxed board gaming communities in Austin with a focus on cooperative games, available evenings after 6 PM and weekends. I'll research specific venues, recurring events, online communities, and groups that match these criteria. Let me gather comprehensive information now."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best board game cafes Austin TX 2026\"]:\n\n\nSources: https://vigilantebar.com/, https://www.yelp.com/search?find_desc=Board+Games+Cafe&find_loc=Austin%2C+TX, https://www.reddit.com/r/Austin/comments/19defef/board_game_bars/, https://www.austinchronicle.com/features/the-best-places-to-play-board-games-in-austin-12098446/, https://www.tripadvisor.com/Restaurant_Review-g30196-d4820475-Reviews-Emerald_Tavern_Games_and_Cafe-Austin_Texas.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"board game meetup groups Austin Texas\"]:\n\n\nSources: https://www.meetup.com/find/us--tx--austin/board-games/, https://www.meetup.com/central-texas-boardgames/, https://pinballz.com/events/board-game-nights/, https://www.reddit.com/r/Austin/comments/1gtk57q/looking_for_a_group_to_play_board_games_with/, https://emeraldtaverngames.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Emerald Tavern Dragon's Lair Austin board games\"]:\n\n\nSources: https://www.dlair.net/austin/, https://emeraldtaverngames.com/, https://emeraldtaverngames.com/events/, https://www.dlair.net/austin/new/, https://www.facebook.com/groups/theboardgamegroup/posts/24824696140491071/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cooperative board games groups Austin TX\"]:\n\n\nSources: https://boardgamegeek.com/thread/3061690/looking-for-board-games-player-or-game-tables-to-j, https://www.meetup.com/central-texas-boardgames/, https://www.reddit.com/r/boardgames/comments/3h9hck/board_game_groups_in_austin/, https://pinballz.com/events/board-game-nights/, https://www.meetup.com/games-and-grub-austin/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin board gaming Discord communities Facebook groups\"]:\n\n\nSources: https://www.meetup.com/find/us--tx--austin/board-games/, https://www.meetup.com/central-texas-boardgames/, https://boardgamegeek.com/thread/3061690/looking-for-board-games-player-or-game-tables-to-j, https://www.facebook.com/groups/432513922216876/posts/1443299541138304/, https://www.facebook.com/groups/AustinGeeksAndGamers/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"beginner friendly board game nights Austin Texas\"]:\n\n\nSources: https://www.reddit.com/r/Austin/comments/9tuqb5/best_open_board_game_nights_if_youre_by_yourself/, https://www.meetup.com/g3games/, https://www.meetup.com/central-texas-boardgames/, https://boardgamegeek.com/thread/3061690/looking-for-board-games-player-or-game-tables-to-j, https://do512.com/events/weekly/sun/central-texas-board-game-meetup-tickets"
+    },
+    {
+      "role": "assistant",
+      "content": "Got it! I'm looking for beginner-friendly, relaxed board gaming communities in Austin with emphasis on cooperative games, evening/weekend availability, and genuine social connection. Let me research the best venues, recurring events, and online communities."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best board game cafes Austin TX\"]:\n\n\nSources: https://www.reddit.com/r/Austin/comments/19defef/board_game_bars/, https://www.yelp.com/search?find_desc=Board+Games+Cafe&find_loc=Austin%2C+TX, https://emeraldtaverngames.com/, https://vigilantebar.com/, https://www.austinchronicle.com/features/the-best-places-to-play-board-games-in-austin-12098446/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin board game meetup groups cooperative games\"]:\n\n\nSources: https://www.meetup.com/find/us--tx--austin/board-games/, https://www.meetup.com/central-texas-boardgames/, https://www.reddit.com/r/Austin/comments/1gtk57q/looking_for_a_group_to_play_board_games_with/, https://boardgamegeek.com/thread/3061690/looking-for-board-games-player-or-game-tables-to-j, https://www.meetup.com/boards-and-brews/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Dragon's Lair Emerald Tavern Austin board game nights\"]:\n\n\nSources: https://www.dlair.net/austin/events/, https://emeraldtaverngames.com/, https://emeraldtaverngames.com/events/, https://www.dlair.net/austin/, https://emeraldtaverngames.com/game-library/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin TX board gaming community Discord Facebook groups\"]:\n\n\nSources: https://www.reddit.com/r/Austin/comments/txrian/last_year_i_made_a_discord_group_for_board_gamers/, https://www.facebook.com/groups/432513922216876/posts/1443299541138304/, https://www.facebook.com/groups/AustinBoardGameBazaar/, https://www.facebook.com/groups/AustinGeeksAndGamers/posts/2949215495252894/, https://www.facebook.com/groups/pflugervilletxboardgames/"
+    },
+    {
+      "role": "assistant",
+      "content": "Got it - you're looking for beginner-friendly, relaxed, cooperative-focused board game communities in Austin with evening/weekend availability. I'll research specific venues, recurring events, online communities, and game cafes that match this vibe. Let me gather comprehensive information about the Austin board gaming scene."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"best board game cafes Austin TX 2025 2026\"]:\n\n\nSources: https://www.yelp.com/search?find_desc=Board+Games+Cafe&find_loc=Austin%2C+TX, https://emeraldtaverngames.com/, https://vigilantebar.com/, https://www.facebook.com/groups/132851767828/posts/10163110784712829/, https://www.austinchronicle.com/features/the-best-places-to-play-board-games-in-austin-12098446/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"board game meetups Austin TX Meetup.com groups\"]:\n\n\nSources: http://Meetup.com, https://www.meetup.com/find/us--tx--austin/board-games/, https://www.meetup.com/central-texas-boardgames/, https://www.meetup.com/boards-and-brews/, https://www.meetup.com/games-and-grub-austin/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Dragon's Lair Emerald Tavern Austin board games events\"]:\n\n\nSources: https://emeraldtaverngames.com/events/, https://www.dlair.net/austin/events/, https://emeraldtaverngames.com/, https://www.facebook.com/groups/2261144717/posts/10162636310304718/, https://www.dlair.net/austin/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Austin board gaming community Discord Facebook groups\"]:\n\n\nSources: https://www.reddit.com/r/Austin/comments/txrian/last_year_i_made_a_discord_group_for_board_gamers/, https://www.facebook.com/groups/432513922216876/posts/1443299541138304/, https://www.meetup.com/central-texas-boardgames/, https://www.austinlfg.com/, https://www.facebook.com/groups/AustinGeeksAndGamers/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cooperative board games meetup Austin TX beginner friendly\"]:\n\n\nSources: https://www.kxan.com/calendar/?_escaped_fragment_=/show/?start=2022-09-07, https://www.meetup.com/find/us--tx--austin/board-games/, https://www.meetup.com/central-texas-boardgames/, https://boardgamegeek.com/thread/3061690/looking-for-board-games-player-or-game-tables-to-j, https://www.reddit.com/r/boardgames/comments/3h9hck/board_game_groups_in_austin/"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have the context I need. You're looking for beginner-friendly, relaxed board gaming communities in Austin with a focus on cooperative games, available evenings after 6 PM and weekends. I'll research specific venues, recurring events, online communities, and game cafes that fit this vibe. Let me gather comprehensive information about Austin's board gaming scene."
+    }
+  ],
+  "set_plan_args": {}
+}

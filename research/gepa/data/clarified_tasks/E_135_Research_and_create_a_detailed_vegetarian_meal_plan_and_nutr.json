@@ -1,0 +1,39 @@
+{
+  "id": "a00edfbd-af00-4d6f-9ee8-8768f50c78dd",
+  "raw_seed": "Research and create a detailed vegetarian meal plan and nutrition strategy for losing 15-20 lbs over 4-5 months (~1-1.5 lb/week). Requirements: lacto-ovo vegetarian (eggs and dairy OK, no meat), high protein for muscle preservation/toning (target ~0.7-1g per lb of lean body mass), caloric deficit guidance, budget-friendly groceries. Include: how to calculate personal calorie target, sample 7-day meal plan with breakfast/lunch/dinner/snacks, a grocery shopping list, top high-protein vegetarian foods, and tips for using MyFitnessPal effectively for tracking. Address common vegetarian pitfalls for fat loss (too many carbs, insufficient protein).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research and create a detailed vegetarian meal plan and nutrition strategy for losing 15-20 lbs over 4-5 months (~1-1.5 lb/week). Requirements: lacto-ovo vegetarian (eggs and dairy OK, no meat), high protein for muscle preservation/toning (target ~0.7-1g per lb of lean body mass), caloric deficit guidance, budget-friendly groceries. Include: how to calculate personal calorie target, sample 7-day meal plan with breakfast/lunch/dinner/snacks, a grocery shopping list, top high-protein vegetarian foods, and tips for using MyFitnessPal effectively for tracking. Address common vegetarian pitfalls for fat loss (too many carbs, insufficient protein)."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research current evidence-based approaches to vegetarian weight loss, high-protein vegetarian nutrition, and practical meal planning strategies. Let me gather comprehensive information to create a detailed, science-backed plan."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"vegetarian high protein weight loss meal plan nutrition 2025\"]:\n\n\nSources: https://www.eatingwell.com/7-day-no-sugar-high-protein-vegetarian-meal-plan-8426176, https://ai-mealplan.com/blog/high-protein-vegetarian-meal-plan, https://www.eatingwell.com/7-day-high-protein-plant-based-meal-plan-11883134, https://alleviatepainclinic.com/blog/a-template-of-7-day-indian-vegetarian-diet-plan-for-weight-loss/, https://planeatai.com/blog/vegetarian-high-protein-meal-plan-7-day"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"lacto-ovo vegetarian protein sources complete amino acids\"]:\n\n\nSources: https://pmc.ncbi.nlm.nih.gov/articles/PMC6893534/, https://www.healthline.com/nutrition/complete-protein-for-vegans, https://traveltrim.com/blog/2022/08/25/best-protein-sources-for-vegetarians/, https://www.polar.com/blog/veggie-protein/%3Fsrsltid%3DAfmBOooDZxzKoAhc-0LSolgGhC124MqEGtx81NIM5K8HN-3FkXze7bRu, https://www.polar.com/blog/veggie-protein/%3Fsrsltid%3DAfmBOopi1R0RDmQoaN0jKKvNWZsvuhsTTOfrQRHTRaNxNNnRruKhdix0"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"calorie deficit calculation lean body mass protein requirements\"]:\n\n\nSources: https://blog.nasm.org/nutrition/how-much-protein-should-you-eat-per-day-for-weight-loss%3Futm_source%3Dblog%26utm_medium%3Dreferral%26utm_campaign%3Dorganic%26utm_content%3Dsafeandhealthyweightloss, https://www.calculator.net/calorie-calculator.html, https://pubmed.ncbi.nlm.nih.gov/35538903/, https://www.strengthlog.com/protein-calculator/, https://www.musclehacking.com/calorie-calculator/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"high protein vegetarian foods budget friendly grocery list\"]:\n\n\nSources: https://www.reddit.com/r/EatCheapAndHealthy/comments/1d2u94k/big_ask_a_weeks_worth_of_groceries_for_vegetarian/, https://www.bucketlisttummy.com/11-great-sources-of-vegetarian-protein/, https://www.bhf.org.uk/informationsupport/heart-matters-magazine/nutrition/protein/how-to-get-protein-without-the-meat, https://www.eatingwell.com/best-high-protein-vegetarian-foods-11762306, https://www.reddit.com/r/fitmeals/comments/igf35s/decently_cheap_vegetarian_protein_sources/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"MyFitnessPal tracking vegetarian diet common mistakes\"]:\n\n\nSources: https://www.reddit.com/r/vegetarian/comments/gv38u7/myfitnesspal_filter/, https://blog.myfitnesspal.com/6-unintentional-habits-that-wreck-your-healthy-eating-plan/, https://www.reddit.com/r/Myfitnesspal/comments/t1i3f7/just_a_question_does_anyone_log_their_veggies/, https://www.facebook.com/groups/193405822374729/posts/266542585061052/, https://www.youtube.com/watch?v=FW09nXdbabE"
+    },
+    {
+      "role": "assistant",
+      "content": "\u2705 **PLAN READY: Complete Vegetarian Fat Loss System**\n\nBased on research evidence, I'll deliver a comprehensive vegetarian weight loss system with precise calorie calculations, high-protein meal planning, and proven tracking strategies. The plan addresses the specific challenge of maintaining muscle mass while losing 1-1.5 lbs weekly on a lacto-ovo vegetarian diet.\n\n**DELIVERABLES:**\n1. **Personal Calorie Calculator** - Step-by-step formula for individual targets\n2. **7-Day High-Protein Meal Plan** (~120g+ protein daily, budget-friendly)\n3. **Complete Grocery List** with budget breakdown (~$60-70/week)\n4. **Protein Priority Food Guide** - Top 20+ vegetarian sources\n5. **MyFitnessPal Mastery Protocol** - Avoid common tracking errors\n6. **Pitfall Prevention System** - Address carb creep, protein gaps\n\n**KEY SCIENCE-BASED TARGETS:**\n- Calorie deficit: 500-750 daily for 1-1.5 lb/week loss\n- Protein: 0.8-1g per lb lean mass (typically 100-140g daily)\n- Meal timing: 3 main meals + 2 protein-focused snacks\n- Budget: $8-10/day maximum for complete nutrition\n\nReady to proceed with detailed execution?"
+    }
+  ],
+  "set_plan_args": {}
+}

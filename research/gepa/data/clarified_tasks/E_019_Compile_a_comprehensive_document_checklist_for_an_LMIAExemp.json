@@ -1,0 +1,47 @@
+{
+  "id": "ada32207-d819-4d06-a377-7b3842a27f73",
+  "raw_seed": "Compile a comprehensive document checklist for an LMIA-Exempt ICT application, including specific forms (e.g., IMM 1295 vs IMM 5710) and employer documents.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Compile a comprehensive document checklist for an LMIA-Exempt ICT application, including specific forms (e.g., IMM 1295 vs IMM 5710) and employer documents."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research the current LMIA-Exempt ICT (Labour Market Impact Assessment-Exempt International Mobility Program - ICT category) application requirements to compile an accurate, comprehensive document checklist. This involves understanding which forms are required, employer documents needed, and any recent changes to the process. Let me gather this information."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"LMIA-Exempt ICT application document checklist requirements 2026\"]:\n\n\nSources: https://cifile.org/immigration-to-canada/intra-company-transfer/, https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/special-instructions/global-skills-strategy.html, https://libertyimmigration.ca/canada-intra-company-transfer-ict-work-permit-2026-requirements-for-executives-managers-specialized-knowledge-c61c62c63/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"IMM 1295 vs IMM 5710 ICT application forms Canada\"]:\n\n\nSources: https://www.facebook.com/groups/303165387551454/posts/1216111226256861/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/after-apply.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5710.html, https://ircc.canada.ca/english/helpcentre/answer.asp?qnum=1361&top=4, https://loftimmigration.com/business-immigration/c10-work-permit/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"ICT category international mobility program employer documents requirements\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/international-mobility-program.html, https://visaserve.com/canada-tightens-rules-for-intracompany-transfers-what-employers-need-to-know-2/, https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/international-mobility-program/how-to-hire.html, https://www.mercanrecruit.com/intra-company-transferees-ict-r205a-c61-c62-c63-canadian-interests-international-mobility-program/, https://cifile.org/immigration-to-canada/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research the current LMIA-Exempt ICT (Labour Market Impact Assessment Exempt International Mobility Program - ICT stream) application requirements to compile an accurate, comprehensive checklist. Let me gather the specific forms, documents, and requirements from official Canadian immigration sources."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"LMIA-Exempt ICT application forms IMM 1295 IMM 5710 checklist Canada 2026\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm1295.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/imm5710.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides.html, https://www.facebook.com/SXMGOV/posts/2026-employment-permit-checklist-now-availablethe-division-of-labor-affairs-soci/1289456926549928/, https://cifile.org/immigration-to-canada/intra-company-transfer/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"International Mobility Program ICT employer documents requirements Canada\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/hire-temporary-foreign/international-mobility-program.html, https://cifile.org/immigration-to-canada/intra-company-transfer/, https://www.canadavisa.com/intra-company-transfer-program.html, https://www.canada.ca/en/immigration-refugees-citizenship/corporate/partners-service-providers/employer-portal/user-guide.html, https://www.canada.ca/en/immigration-refugees-citizenship/services/application/application-forms-guides/guide-5487-applying-work-permit-outside-canada.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"IMM 1295 vs IMM 5710 intra-company transfer ICT\"]:\n\n\nSources: https://www.canada.ca/en/immigration-refugees-citizenship/services/work-canada/work-permit/after-apply.html, https://gowlingwlg.com/en/insights-resources/articles/2015/update-employer-portal-for-lmia-exempt-work-permi, https://enterprise.gov.ie/en/what-we-do/workplace-and-skills/employment-permits/permit-types/intra-company-transfer-employment-permit/, https://www.facebook.com/groups/303165387551454/posts/1216111226256861/, https://www.migracija.lt/en/esu-perkeliamas-imones-viduje"
+    },
+    {
+      "role": "assistant",
+      "content": "I have gathered initial information regarding the LMIA-Exempt ICT application. It appears there are two main forms, IMM 1295 and IMM 5710, with specific use cases. I also have some general understanding of employer document requirements. To compile a comprehensive and accurate checklist, I need to synthesize this information and structure it clearly. I will now create a plan to outline the checklist."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,23 @@
+{
+  "id": "26f9d18f-d190-4f64-b9c6-c2fc8c82ceb6",
+  "raw_seed": "Execute batch 1 of job applications (~10 jobs): For each position, navigate to the job listing URL, complete the application form using the user's resume and tailored cover letter. Handle LinkedIn Easy Apply and Indeed Apply flows. Track which applications were successfully submitted and any that require additional steps.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Execute batch 1 of job applications (~10 jobs): For each position, navigate to the job listing URL, complete the application form using the user's resume and tailored cover letter. Handle LinkedIn Easy Apply and Indeed Apply flows. Track which applications were successfully submitted and any that require additional steps."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify several critical details before I can execute this batch of job applications. This is a high-stakes task that requires precise information to avoid errors.\n\n**Questions before proceeding:**\n\n1. **Job Listings**: Where should I find the ~10 job URLs? Do you have:\n   - A list of URLs (spreadsheet, document, or list)?\n   - A saved file with job links?\n   - Should I search for specific roles/companies?\n\n2. **Resume & Cover Letter**: Do you have these documents prepared?\n   - Where are they located (file attachments, URLs, or should I ask you to provide them)?\n   - Should the cover letter be the same for all positions, or do you have tailored versions per job?\n   - What format are they in (PDF, Word, plain text)?\n\n3. **Account Access**: \n   - Do you want me to use your LinkedIn account (if so, I'll need login credentials)?\n   - Do you want me to use your Indeed account (credentials needed)?\n   - Or should I apply as a guest where possible?\n\n4. **Application Preferences**:\n   - Any specific jobs/companies to prioritize or avoid?\n   - Should I skip positions that require phone screening or additional steps, or complete those too?\n   - Any minimum salary/location requirements to filter by?\n\n5. **Tracking Output**:\n   - Should I create a spreadsheet tracking submission status, URLs, and any blockers?\n   - Where should I save the results?\n\nOnce you provide these details, I'll execute the batch applications efficiently and track all submissions."
+    },
+    {
+      "role": "user",
+      "content": "1. **Job URLs**: I've got them in a Google Sheet called \"Job Search Batch 1\" - link is https://docs.google.com/spreadsheets/d/1B7xK... (columns A has the URLs, B has company name, C has the job title)\n\n2. **Resume & Cover Letter**: Both in my Google Drive - \"Resume_2024_SWE.pdf\" and \"CoverLetter_Template.docx\" in the Job Applications folder. The cover letter template is generic, but I've added placeholders like [COMPANY] and [ROLE] that need to be replaced for each job.\n\n3. **Account Credentials**: Yes, use my LinkedIn (mike.chen.dev@gmail.com / password: TempPass123!) and Indeed (same email / IndeedPass456). Both have 2FA - I'll text you the codes when prompted.\n\n4. **Application Rules**: Skip anything with \"senior\" or \"lead\" in title. Only apply to remote or NYC metro area. Minimum $85k base - if salary isn't listed, still apply but note it.\n\n5. **Output Format**: Yeah, add columns D/E/F to the Google Sheet - \"Status\", \"Date Applied\", \"Notes\". Mark as \"Submitted\", \"Needs Follow-up\", or \"Error - Manual Required\"."
+    },
+    {
+      "role": "assistant",
+      "content": "User provided all required details for job application batch. Ready to execute plan."
+    }
+  ],
+  "set_plan_args": {}
+}

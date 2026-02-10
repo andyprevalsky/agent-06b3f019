@@ -1,0 +1,195 @@
+{
+  "id": "1a8e6bfb-f375-4686-b8c1-e822853e762e",
+  "raw_seed": "Map the HORIZONTAL APPLICATION layer: general copilots and cross-industry apps (coding, customer support, sales/marketing, knowledge work, design/content, meetings, search). Capture ICP, workflow wedge, pricing model, and competitive density signals.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Map the HORIZONTAL APPLICATION layer: general copilots and cross-industry apps (coding, customer support, sales/marketing, knowledge work, design/content, meetings, search). Capture ICP, workflow wedge, pricing model, and competitive density signals."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to map the horizontal application layer for AI copilots and cross-industry apps. This is a market research task requiring me to gather current information on general-purpose AI tools across multiple domains. Let me start by researching the landscape to understand the key players, their positioning, and market dynamics."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI copilots market 2026 general purpose coding customer support sales marketing\"]:\n\n\nSources: https://www.icopilots.com/the-state-of-ai-in-2026/, https://gdc.einnews.com/amp/pr_news/886864976/artificial-intelligence-ai-copilot-market-drivers-2026-2030-analysis-of-regional-trends-and-market-size, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://beam.ai/agentic-insights/10-best-ai-copilots-enterprise-productivity-2026, https://finance.yahoo.com/news/five-ai-agent-predictions-2026-152230629.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"horizontal AI applications cross-industry copilots pricing models ICP\"]:\n\n\nSources: https://www.bcg.com/publications/2025/rethinking-b2b-software-pricing-in-the-era-of-ai, https://beincrypto.com/dfinity-pierre-samaties-self-writing-internet-icp/, https://www.microsoft.com/en-us/microsoft-365-copilot/pricing, https://www.bvp.com/atlas/part-iii-business-model-invention-in-the-ai-era, https://itoaction.com/ai-pricing-strategy-example-microsoft-copilot/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"coding copilots GitHub Copilot Cursor Claude competitive landscape 2026\"]:\n\n\nSources: https://seedium.io/blog/comparison-of-best-ai-coding-assistants/, https://www.quickaiflow.com/ai-coding-assistants-github-copilot-vs-competitors-2026/, https://www.reddit.com/r/ClaudeAI/comments/1izmyps/claude_cursor_aider_cline_or_github_copilotwhich/, https://manus.im/blog/best-ai-coding-assistant-tools, https://beam.ai/es/agentic-insights/10-best-ai-copilots-enterprise-productivity-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"customer support AI copilots market leaders pricing\"]:\n\n\nSources: https://www.copilotai.com/pricing, https://www.cbinsights.com/research/report/customer-service-ai-market-share-2025/, https://www.eesel.ai/blog/ai-copilot-for-customer-service, https://www.microsoft.com/en-us/microsoft-365-copilot/pricing, https://www.microsoft.com/en-us/microsoft-365-copilot/pricing/copilot-studio"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sales marketing AI copilots 2026 competitive analysis\"]:\n\n\nSources: https://odsc.medium.com/top-ai-tools-for-sales-and-marketing-in-2026-277f1a3b457f, https://www.walnut.io/blog/sales-tips/ai-in-sales-complete-guide-2026/, https://xenoss.io/blog/ai-trends-2026, https://www.siliconflow.com/articles/en/AI-copilot-for-sales-teams, https://getalai.com/blog/best-ai-marketing-tools"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI knowledge work applications enterprise copilots market\"]:\n\n\nSources: https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://fintech.global/2026/02/04/m-files-six-ai-predictions-shaping-knowledge-work-in-2026/, https://www.grandviewresearch.com/industry-analysis/knowledge-management-software-market-report, https://www.cloud-awards.com/harnessing-ai-agents-and-copilots-for-global-scale, https://www.worklytics.co/resources/2025-ai-adoption-benchmarks-employee-usage-statistics"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll map the horizontal application layer for AI copilots and cross-industry apps. This requires research into current offerings, their positioning, pricing, and market dynamics. Let me gather data on the seven segments you've identified."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI copilots general market 2026 landscape pricing\"]:\n\n\nSources: https://www.icopilots.com/the-state-of-ai-in-2026/, https://www.france-epargne.fr/research/en/state-of-ai-entering-2026, https://www.adoptify.ai/blogs/2026-microsoft-copilot-consulting-pricing-and-licensing-guide/, http://oreateai.com/blog/understanding-the-pricing-landscape-of-ai-copilot-solutions/75aa9a481597dd2df0b04475e778e172, https://www.ibm.com/think/news/ai-tech-trends-predictions-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"coding copilots GitHub Copilot Claude Cursor Windsurf competitive landscape\"]:\n\n\nSources: https://www.wwt.com/wwt-research/ai-coding-assistants-enterprise-market-landscape-and-tools-evaluation, https://axify.io/blog/the-best-ai-coding-assistants-a-full-comparison-of-17-tools, https://www.reddit.com/r/ChatGPTCoding/comments/1mpgmth/claude_vs_copilot_vs_cursor_whats_your_take/, https://www.cbinsights.com/research/report/coding-ai-market-share-december-2025/, https://dev.to/bekahhw/comparing-5-ai-coding-assistants-18l4"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"customer support AI copilots Zendesk Intercom competitive analysis 2026\"]:\n\n\nSources: https://www.intercom.com/compare-intercom-vs-zendesk, https://www.zendesk.com/service/comparison/intercom-alternatives/, https://fin.ai/learn/ai-copilot-tools, https://qualimero.com/en/blog/intercom-vs-zendesk-vs-freshdesk-comparison-2026, https://www.kustomer.com/resources/blog/zendesk-vs-intercom/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sales marketing AI copilots Salesforce HubSpot pricing models\"]:\n\n\nSources: https://www.salesforce.com/pricing/, https://www.hubspot.com/pricing/marketing/enterprise, https://www.hubspot.com/products/artificial-intelligence/breeze-ai-assistant, https://www.getmonetizely.com/articles/how-much-does-hubspots-ai-agent-integration-actually-cost-a-complete-pricing-breakdown, https://clevyr.com/blog/post/salesforce-vs-hubspot-pricing"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knowledge work AI copilots enterprise search tools 2026\"]:\n\n\nSources: https://fintech.global/2026/02/04/m-files-six-ai-predictions-shaping-knowledge-work-in-2026/, https://www.read.ai/articles/enterprise-search-tools, https://www.zendesk.com/blog/ai-copilot/, https://slack.com/blog/productivity/ai-enterprise-search-top-features-and-tools-in-2025, https://www.gosearch.ai/blog/enterprise-search-software-2026/"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to map the horizontal application layer of AI copilots and cross-industry apps. This requires research into current market offerings, their target customer profiles, workflow integration points, pricing strategies, and competitive dynamics. Let me start by gathering current information on the major players and market segments."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI copilots horizontal applications market 2025 2026 general purpose\"]:\n\n\nSources: https://www.progress.com/blogs/details/the-6-ai-trends-that-will-actually-matter-in-2026, https://finance.yahoo.com/news/ai-agents-market-grow-43-182200779.html, https://news.microsoft.com/source/features/ai/whats-next-in-ai-7-trends-to-watch-in-2026/, https://www.mckinsey.com/capabilities/quantumblack/our-insights/seizing-the-agentic-ai-advantage, https://world.einnews.com/pr_news/886864976/artificial-intelligence-ai-copilot-market-drivers-2026-2030-analysis-of-regional-trends-and-market-size"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"coding copilots GitHub Copilot JetBrains Cursor pricing ICP\"]:\n\n\nSources: https://github.com/features/copilot/plans, https://www.reddit.com/r/GithubCopilot/comments/1jnboan/github_copilot_vs_cursor_in_2025_why_im_paying/, https://www.jetbrains.com/ai-ides/buy/, https://docs.github.com/en/copilot/get-started/plans, https://www.jetbrains.com/ai/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"customer support AI copilots market landscape 2025\"]:\n\n\nSources: https://www.cbinsights.com/research/report/customer-service-ai-market-share-2025/, https://www.mckinsey.com/capabilities/quantumblack/our-insights/the-state-of-ai, https://www.puzzel.com/blog/what-is-an-ai-co-pilot-for-contact-centres, https://everworker.ai/blog/ai-trends-in-customer-support-2025, https://www.grandviewresearch.com/industry-analysis/ai-customer-service-market-report"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sales marketing AI copilots Salesforce Einstein Outreach\"]:\n\n\nSources: https://www.salesforce.com/sales/ai/, https://www.salesforce.com/it/blog/einstein-copilot-funzioni/, https://www.salesforce.com/au/news/stories/about-einstein-copilot/, https://www.salesforce.com/artificial-intelligence/, https://www.salesforce.com/marketing/ai/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knowledge work AI copilots productivity apps 2025\"]:\n\n\nSources: https://www.rezolve.ai/blog/ai-assistants-for-knowledge-workers-productivity, https://www.microsoft.com/en-us/research/blog/the-future-of-ai-in-knowledge-work-tools-for-thought-at-chi-2025/, https://www.reddit.com/r/ProductivityApps/comments/1jvn1g5/whats_the_one_productivity_app_that_actually/, https://beam.ai/agentic-insights/10-best-ai-copilots-enterprise-productivity-2026, https://medium.com/@danielasgharian/three-productivity-apps-worth-watching-in-2025-7c57713adc4e"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"design content creation AI tools Figma Adobe Generative\"]:\n\n\nSources: https://www.figma.com/resource-library/ai-design-tools/, https://www.figma.com/ai/, https://genesysgrowth.com/blog/canva-magic-write-vs-adobe-firefly-vs-figma-ai, https://medium.com/@design_nerd/is-adobe-still-king-my-take-on-gen-ai-figma-canva-the-future-of-design-tools-3a5eec78c287, https://help.figma.com/hc/en-us/articles/23870272542231-Use-AI-tools-in-Figma-Design"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research the current landscape of horizontal application layer copilots and cross-industry apps to map ICP, workflow wedge, pricing models, and competitive density. This is a market research goal requiring systematic investigation of multiple categories."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"horizontal copilot applications 2026 coding customer support sales marketing\"]:\n\n\nSources: https://techcommunity.microsoft.com/blog/microsoft365copilotblog/what%E2%80%99s-new-in-microsoft-365-copilot--january-2026/4488916, https://www.microsoft.com/insidetrack/blog/microsoft-365-copilot-for-executives-sharing-our-deployment-and-adoption-journey-at-microsoft/, https://visualstudio.microsoft.com/insiders/, https://adoption.microsoft.com/en-us/scenario-library/customer-service/, https://www.youtube.com/watch?v=oVHvR0Nkgs0"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"general purpose AI copilots enterprise pricing models competitive landscape\"]:\n\n\nSources: https://www.microsoft.com/en-us/microsoft-365-copilot/pricing, https://www.microsoft.com/en-gb/microsoft-365-copilot/pricing/enterprise, https://www.linkedin.com/pulse/ai-copilots-2025-automating-enterprise-workflows-xitoc, http://oreateai.com/blog/understanding-the-pricing-landscape-of-ai-copilot-solutions/75aa9a481597dd2df0b04475e778e172, https://intuitionlabs.ai/articles/microsoft-copilot-pricing-licensing"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knowledge work AI assistants design content generation tools 2026\"]:\n\n\nSources: https://www.read.ai/articles/ai-in-the-workplace, https://www.getblend.com/blog/10-best-ai-tools-to-use-for-content-creation/, https://medium.com/%40mohit15856/the-2026-ai-agent-revolution-7-tools-that-actually-automate-your-work-not-just-chat-13e9f82e3a9b, https://www.youtube.com/watch?v=w5YvRT3dOEE, https://medium.muz.li/10-best-ai-tools-for-ux-designers-in-2026-63b1b4fab19f"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"meeting transcription collaboration AI tools market analysis\"]:\n\n\nSources: https://www.digitalocean.com/resources/articles/ai-meeting-tools, https://www.linkedin.com/pulse/ai-meeting-transcription-market-size-analysis-type-yndkf/, https://sonix.ai/resources/meeting-transcription-adoption-statistics/, https://www.technavio.com/report/ai-note-taking-market-industry-analysis, https://miro.com/ai/ai-market-research/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"enterprise search AI copilot tools semantic search 2026\"]:\n\n\nSources: https://www.read.ai/articles/enterprise-search-tools, https://www.gosearch.ai/blog/enterprise-search-software-2026/, https://slack.com/blog/productivity/ai-enterprise-search-top-features-and-tools-in-2025, https://www.microsoft.com/en-us/microsoft-365-copilot/enterprise, https://dust.tt/blog/glean-alternatives-ai-enterprise-search-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to map the horizontal application layer for AI copilots and cross-industry apps. This is a market research task that requires gathering current information on multiple product categories. Let me clarify the scope and then execute a comprehensive research plan.\n\nThe goal is to create a structured market map showing:\n1. General copilots (Claude, ChatGPT, Gemini, etc.)\n2. Coding assistants (GitHub Copilot, Cursor, etc.)\n3. Customer support AI\n4. Sales/marketing copilots\n5. Knowledge work tools\n6. Design/content creation\n7. Meeting/collaboration tools\n8. AI search products\n\nFor each category, I need to capture: ICP (Ideal Customer Profile), workflow wedge (how it enters the workflow), pricing model, and competitive density signals.\n\nLet me start researching the current market landscape across these categories."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI copilots market 2026 general purpose ChatGPT Claude Gemini competitive landscape\"]:\n\n\nSources: https://www.einpresswire.com/article/886877188/industry-report-on-artificial-intelligence-ai-learning-copilots-market-competition-and-future-outlook, https://www.zendesk.com/blog/ai-copilot/, https://fortune.com/2026/02/05/chatgpt-openai-market-share-app-slip-google-rivals-close-the-gap/, https://www.salttechno.com/blog/how-ai-copilots-are-changing-software-development-in-2026, https://www.icopilots.com/the-state-of-ai-in-2026/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"coding AI assistants 2026 GitHub Copilot Cursor pricing competitive analysis\"]:\n\n\nSources: https://www.faros.ai/blog/best-ai-coding-agents-2026, https://www.wwt.com/wwt-research/ai-coding-assistants-enterprise-market-landscape-and-tools-evaluation, https://www.digitalocean.com/resources/articles/github-copilot-vs-cursor, https://www.intelmarketresearch.com/ai-coding-assistants-software-market-27800, https://www.linkedin.com/pulse/ai-coding-assistant-market-refracting-wpdae"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI customer support copilots 2026 market landscape pricing\"]:\n\n\nSources: https://news.microsoft.com/source/features/ai/whats-next-in-ai-7-trends-to-watch-in-2026/, https://gabster.ai/en/blog/ai-customer-service-pricing-2026, https://www.text.com/blog/best-ai-agents-for-customer-support/, https://www.comscore.com/Insights/Press-Releases/2026/1/AI-Assistants-Head-into-2026-on-a-High-Note, https://fin.ai/learn/best-ai-agents-customer-service"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sales marketing AI copilots 2026 pricing ICP workflow\"]:\n\n\nSources: https://www.siliconflow.com/articles/en/AI-copilot-for-sales-teams, https://www.copilotai.com/pricing, https://www.sybill.ai/blogs/icp-sales, https://www.knolli.ai/post/best-ai-copilot-sales-teams, https://beam.ai/agentic-insights/10-best-ai-copilots-enterprise-productivity-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knowledge work AI tools 2026 enterprise copilots pricing\"]:\n\n\nSources: https://www.microsoft.com/en-us/microsoft-365-copilot/pricing/enterprise, https://medium.com/@laura.wade/ai-tools-worth-paying-for-in-2025-2026-my-tested-picks-d835dc93012b, https://www.microsoft.com/en-us/microsoft-365-copilot/enterprise, https://beam.ai/agentic-insights/10-best-ai-copilots-enterprise-productivity-2026, https://peoplemanagingpeople.com/tools/best-ai-knowledge-base-tools/"
+    },
+    {
+      "role": "assistant",
+      "content": "I am initiating a comprehensive research phase to map the horizontal application layer of AI copilots and cross-industry apps. This involves gathering data on Ideal Customer Profile (ICP), workflow wedge, pricing model, and competitive density signals across various categories. I will start by performing focused web searches to collect this information."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"design content creation AI tools 2026 Adobe Figma Midjourney pricing ICP workflow competitive landscape\"]:\n\n\nSources: https://www.figma.com/resource-library/ai-design-tools/, https://docs.midjourney.com/hc/en-us/articles/27870484040333-Comparing-Midjourney-Plans, https://medium.muz.li/10-best-ai-tools-for-ux-designers-in-2026-63b1b4fab19f, https://medium.com/@amresh.kumar11/the-best-ai-tools-for-2026-a-comprehensive-guide-across-all-sectors-d3395633551e, https://www.reddit.com/r/midjourney/comments/1p4lkmz/2026_prices_b_fri/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"meeting collaboration AI tools 2026 transcription summarization pricing ICP workflow competitive landscape\"]:\n\n\nSources: https://www.jotform.com/ai/best-ai-transcription/, https://firmable.com/my/resources/gtm-plays/build-icp-lists-with-ai/, https://thedigitalprojectmanager.com/tools/best-ai-collaboration-tools/, https://m.youtube.com/watch?v=ZKQ-ZPmHyDg, https://overloop.com/blog/9-best-ai-sales-workflow-tools"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"search AI copilots 2026 enterprise semantic search pricing ICP workflow competitive landscape\"]:\n\n\nSources: https://www.microsoft.com/en-us/microsoft-365-copilot/pricing, https://www.linkedin.com/pulse/launching-ai-products-2026-definitive-guide-francesca-tabor-3cvle, https://www.icopilots.com/the-state-of-ai-in-2026/, https://beam.ai/agentic-insights/10-best-ai-copilots-enterprise-productivity-2026, https://www.gosearch.ai/blog/enterprise-search-pricing-guide/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll map the horizontal application layer of AI copilots and cross-industry apps. This requires research into current market positioning, ICPs, pricing strategies, and competitive dynamics for each category. Let me gather data on the major players and their positioning."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI copilots general purpose market 2026 pricing ICP positioning\"]:\n\n\nSources: https://www.icopilots.com/the-state-of-ai-in-2026/, https://www.withorb.com/blog/ai-pricing-models, https://www.techment.com/blogs/ai-copilots-executive-decision-making-2026/, https://www.ibm.com/think/news/ai-tech-trends-predictions-2026, https://www.zendesk.com/blog/ai-copilot/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"coding copilots GitHub Copilot Cursor Claude Codeium competitive analysis\"]:\n\n\nSources: https://javascript.plainenglish.io/github-copilot-vs-cursor-vs-claude-i-tested-all-ai-coding-tools-for-30-days-the-results-will-c66a9f56db05, https://axify.io/blog/the-best-ai-coding-assistants-a-full-comparison-of-17-tools, https://www.cbinsights.com/research/report/coding-ai-market-share-december-2025/, https://www.reddit.com/r/ClaudeAI/comments/1izmyps/claude_cursor_aider_cline_or_github_copilotwhich/, https://www.qodo.ai/blog/best-coding-ai-copilots/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"customer support AI copilots market pricing 2026\"]:\n\n\nSources: https://www.zendesk.com/blog/ai-customer-service-statistics/, https://www.gleap.io/blog/ai-customer-support-trends-2026, https://www.forbes.com/sites/forrester/2025/12/10/ai-gets-real-for-customer-service-in-2026/, https://fin.ai/learn/ai-copilot-tools, https://www.getnextphone.com/blog/ai-customer-service-statistics"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sales marketing AI copilots Salesforce Einstein HubSpot pricing\"]:\n\n\nSources: https://www.avidlyagency.com/blog/hubspot-vs.-salesforce-pricing-the-real-cost-for-mid-market-companies, https://www.hubspot.com/products/artificial-intelligence/breeze-ai-assistant, https://www.salesforce.com/service/ai/pricing/, https://www.salesforce.com/pricing/, https://www.getmonetizely.com/articles/how-much-does-hubspots-ai-agent-integration-actually-cost-a-complete-pricing-breakdown"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"knowledge work AI copilots Notion Obsidian Roam competitive landscape\"]:\n\n\nSources: https://scholar.google.com/scholar?q=AI+copilots+for+knowledge+management+comparison&hl=en&as_sdt=0&as_vis=1&oi=scholart, https://www.worklytics.co/resources/2025-ai-adoption-benchmarks-employee-usage-statistics, https://www.reddit.com/r/NoteTaking/comments/1as471u/notion_vs_obsidian_vs_roam_research_which_is/, https://bloomfire.com/blog/ai-driven-tool-comparison/, https://scholar.google.com/scholar_url?url=https://ijhit.info/index.php/ijhit/article/download/76/78&hl=en&sa=X&ei=0LeHacLIOZbJieoP3_2KsAM&scisig=AHkA5jTQ9GCBtWaTpB7Jf0E4eF2B&oi=scholarr"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"design content creation AI copilots Figma Adobe Midjourney pricing 2026\"]:\n\n\nSources: https://www.figma.com/pricing/, https://medium.com/@laura.wade/ai-tools-worth-paying-for-in-2025-2026-my-tested-picks-d835dc93012b, https://www.adobe.com/creativecloud/plans.html, https://www.figma.com/resource-library/ai-design-tools/, https://www.getblend.com/blog/10-best-ai-tools-to-use-for-content-creation/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"meeting AI copilots Otter Fireflies Avoma pricing competitive density\"]:\n\n\nSources: https://www.avoma.com/blog/otter-vs-fireflies, https://sourceforge.net/software/compare/Avoma-vs-Fireflies.ai-vs-Otter.ai/, https://www.meetjamie.ai/blog/ai-meeting-note-takers, https://www.avoma.com/pricing, https://summarizemeeting.com/en/faq/meeting-ai-cost-comparison"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AI search copilots Perplexity You.com Brave Search market positioning 2026\"]:\n\n\nSources: http://You.com, https://you.com/resources/2026-ai-predictions-sneak-peek, https://www.yotpo.com/blog/best-ai-search-engines-strategies/, https://www.businessofapps.com/data/perplexity-ai-statistics/, https://you.com/"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the initial research into the various categories of horizontal AI applications. I have gathered information on key players, their potential ICPs, workflow wedges, pricing models, and competitive density signals. The next step is to synthesize this information into a structured map as requested. I will now proceed to set the plan, which will outline how I will consolidate and present this data."
+    }
+  ],
+  "set_plan_args": {}
+}

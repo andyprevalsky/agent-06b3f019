@@ -1,0 +1,27 @@
+{
+  "id": "a7c22605-e7b8-4f4e-b1a4-207a7506f2a5",
+  "raw_seed": "Research Schengen-compliant travel insurance options available to Indian travelers: minimum coverage requirements (\u20ac30,000), recommended providers, approximate cost for 12-day coverage, and what the policy must explicitly cover. Look for well-known providers that are accepted for French Schengen visa applications.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research Schengen-compliant travel insurance options available to Indian travelers: minimum coverage requirements (\u20ac30,000), recommended providers, approximate cost for 12-day coverage, and what the policy must explicitly cover. Look for well-known providers that are accepted for French Schengen visa applications."
+    },
+    {
+      "role": "assistant",
+      "content": "**Examining Travel Insurance**\n\nI've begun outlining the essential aspects of Schengen-compliant travel insurance for Indian travelers. I'm focusing on the specifics: minimum coverage (\u20ac30,000), identifying potential insurance providers, and calculating a cost estimate for a 12-day trip. My next step will be to delve into the explicit coverage stipulations.\n\n\n**Pinpointing Coverage Needs**\n\nI'm now zeroing in on the explicit coverage details beyond the basic \u20ac30,000. I plan to identify specific elements, like medical expenses, repatriation, and other stipulations that align with Schengen visa application requirements. I will check for providers accepted by French consulates next, refining the search parameters to match those guidelines.\n\nI will start by researching the explicit coverage requirements for Schengen visa travel insurance, particularly for French Schengen visa applications, and then identify recommended providers and approximate costs for Indian travelers. The minimum coverage of \u20ac30,000 is already noted."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Schengen visa travel insurance requirements France Indian citizens\"]:\n\n\nSources: https://www.vfsglobal.com/en/individuals/travel-insurance.html, https://france-visas.gouv.fr/en/questions-frequentes, https://www.americanvisitorinsurance.com/travel-insurance/india/travel-to-france.asp, https://www.hdfcergo.com/travel-insurance/travel-insurance-for-schengen-visa-from-india, https://www.axa-schengen.com/en/travel-insurance/schengen/france"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Schengen travel insurance providers Indian travelers accepted for French visa\"]:\n\n\nSources: https://www.vfsglobal.com/en/individuals/travel-insurance.html, https://www.axa-schengen.com/en/travel-insurance/schengen/france, https://france-visas.gouv.fr/en/questions-frequentes, https://www.vfsglobal.com/luxembourg/india/pdf/list-of-indian-travel-insurance.pdf, https://www.icicilombard.com/travel-insurance/travel-insurance-for-france"
+    },
+    {
+      "role": "assistant",
+      "content": "I have started researching Schengen travel insurance requirements, focusing on the explicit coverage needed for French Schengen visa applications. I have identified key search results that will help me understand the detailed requirements and find reliable providers for Indian citizens. I'll continue this research to gather precise details on coverage and costs."
+    }
+  ],
+  "set_plan_args": {}
+}
