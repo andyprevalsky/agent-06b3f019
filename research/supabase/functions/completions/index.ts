@@ -106,7 +106,7 @@ const BROWSER_USE_API_URL = 'https://llm.api.browser-use.com/v1/chat/completions
 
 // Yutori n1 API configuration
 const YUTORI_API_URL = 'https://api.yutori.com/v1/chat/completions';
-const YUTORI_MODEL = 'n1-preview-2025-11';
+const YUTORI_MODEL = 'n1-latest';
 
 // Anthropic CUA (Computer Use) API configuration
 const ANTHROPIC_CUA_MODEL = 'claude-sonnet-4-20250514';
@@ -707,115 +707,178 @@ async function callBrowserUseLLM(
 // YUTORI N1 TRANSFORM FUNCTIONS
 // ============================================
 
-// Transform unified request to Yutori format
-// Yutori expects: user message, then alternating observation (screenshot) and assistant messages
-// Screenshot can be a URL or base64 data URI
+// Map our internal action names to n1-latest native tool names
+function mapToYutoriN1ToolName(action: string): string {
+  const reverseMap: Record<string, string> = {
+    'click': 'left_click',
+    'input_text': 'type',
+    'press_key': 'key_press',
+    'navback': 'go_back',
+    'goto': 'goto_url',
+    'scroll': 'scroll',
+    'wait': 'wait',
+    'hover': 'hover',
+    'double_click': 'double_click',
+    'right_click': 'right_click',
+    'drag': 'drag',
+    'refresh': 'refresh',
+  };
+  return reverseMap[action] || action;
+}
+
+// Build structured tool_call arguments from an ActionHistoryEntry
+function buildYutoriToolArgs(
+  entry: ActionHistoryEntry,
+  viewport: { width: number; height: number }
+): Record<string, any> {
+  const args: Record<string, any> = {};
+  const toolName = mapToYutoriN1ToolName(entry.action);
+
+  // Coordinates: convert viewport pixels to 1000x1000 normalized space
+  if (entry.coordinates) {
+    args.coordinates = [
+      Math.round((entry.coordinates.x / viewport.width) * 1000),
+      Math.round((entry.coordinates.y / viewport.height) * 1000)
+    ];
+    console.log('📸 [YUTORI] Coordinate transform', {
+      original: `${entry.coordinates.x},${entry.coordinates.y}`,
+      normalized: `${args.coordinates[0]},${args.coordinates[1]}`,
+      viewport: `${viewport.width}x${viewport.height}`
+    });
+  }
+
+  // Tool-specific arguments
+  if (toolName === 'type') {
+    if (entry.params?.text) args.text = entry.params.text;
+    if (entry.params?.press_enter_after !== undefined) args.press_enter_after = entry.params.press_enter_after;
+    if (entry.params?.clear_before_typing !== undefined) args.clear_before_typing = entry.params.clear_before_typing;
+  }
+  if (toolName === 'key_press' && entry.params?.key) {
+    args.key_comb = entry.params.key;
+  }
+  if (toolName === 'goto_url' && entry.params?.url) {
+    args.url = entry.params.url;
+  }
+  if (toolName === 'scroll') {
+    args.direction = entry.params?.direction || 'down';
+    // Convert pixel amount to percentage of viewport height for n1-latest
+    const pixelAmount = entry.params?.amount || 300;
+    args.amount = Math.round((pixelAmount / viewport.height) * 100);
+    if (entry.coordinates) {
+      args.coordinates = [
+        Math.round((entry.coordinates.x / viewport.width) * 1000),
+        Math.round((entry.coordinates.y / viewport.height) * 1000)
+      ];
+    }
+  }
+  if (toolName === 'drag' && entry.params?.start_coordinates) {
+    args.start_coordinates = entry.params.start_coordinates;
+  }
+
+  return args;
+}
+
+// Transform unified request to Yutori n1-latest format
+// n1-latest expects: user message (with screenshot), then alternating assistant (tool_calls) and tool (screenshot) messages
 function transformToYutoriFormat(req: BrowserUseRequest): {
   messages: any[];
 } {
   const messages: any[] = [];
-  
-  // Initial user message with task
-  // Per Yutori docs: "place any additional necessary instructions in the first user message, after the main task description"
-  messages.push({
-    role: 'user',
-    content: [
-      { type: 'text', text: `Task: ${req.task}` }
-    ]
-  });
-  
-  // Add action history as observation/assistant pairs
-  // Track last known URL for observation messages
+  const viewport = req.browser_state.viewport;
+
+  // Determine the first screenshot to include in the user message
+  // If there's action history, the first entry's screenshot is the initial state
+  // Otherwise use the current browser_state screenshot
+  const firstHistoryScreenshot = req.action_history.length > 0
+    ? req.action_history[0].screenshot
+    : undefined;
+  const firstScreenshot = firstHistoryScreenshot || req.browser_state.screenshot;
+
+  // Build user message: task text + initial screenshot
+  const userContent: any[] = [
+    { type: 'text', text: `Task: ${req.task}` }
+  ];
+
+  // Add URL context in the user message
+  if (req.browser_state.url) {
+    userContent.push({ type: 'text', text: `Current URL: ${req.browser_state.url}` });
+  }
+
+  // Add first screenshot to user message (n1-latest requires screenshots in user or tool messages)
+  if (firstScreenshot) {
+    const imageUrl = firstScreenshot.startsWith('http')
+      ? firstScreenshot
+      : `data:image/png;base64,${firstScreenshot}`;
+    userContent.push({ type: 'image_url', image_url: { url: imageUrl } });
+  }
+
+  messages.push({ role: 'user', content: userContent });
+
+  // Process action history as assistant(tool_calls) → tool(screenshot) pairs
+  // History entry screenshots represent the state BEFORE that entry's action.
+  // So for tool result after entry[i]'s action, we use entry[i+1]'s screenshot
+  // (or current browser_state.screenshot for the last entry).
   let lastKnownUrl = req.browser_state.url;
-  
-  for (const entry of req.action_history) {
-    // Update URL tracking if this was a navigation action
+
+  for (let i = 0; i < req.action_history.length; i++) {
+    const entry = req.action_history[i];
+    const toolCallId = `call_${i}`;
+    const toolName = mapToYutoriN1ToolName(entry.action);
+    const toolArgs = buildYutoriToolArgs(entry, viewport);
+
+    // Track URL
     if (entry.action === 'goto' && entry.params?.url) {
       lastKnownUrl = entry.params.url;
     }
-    
-    // Screenshot from history as observation
-    // Per Yutori docs: "Including the URL of the current page in observation messages is recommended"
-    if (entry.screenshot) {
-      // Check if it's already a URL or if it's base64
-      const imageUrl = entry.screenshot.startsWith('http') 
-        ? entry.screenshot 
-        : `data:image/png;base64,${entry.screenshot}`;
-      
-      const observationContent: any[] = [];
-      
-      // Add URL as text before the screenshot (recommended by Yutori docs)
-      if (lastKnownUrl) {
-        observationContent.push({ type: 'text', text: `Current URL: ${lastKnownUrl}` });
-      }
-      
-      observationContent.push({ type: 'image_url', image_url: { url: imageUrl } });
-      
-      messages.push({
-        role: 'observation',
-        content: observationContent
-      });
-    }
-    
-    // Previous action as assistant response
-    // Convert coordinates to 1000x1000 normalized space for Yutori
-    let normalizedCoords: [number, number] | undefined;
-    if (entry.coordinates) {
-      normalizedCoords = [
-        Math.round((entry.coordinates.x / req.browser_state.viewport.width) * 1000),
-        Math.round((entry.coordinates.y / req.browser_state.viewport.height) * 1000)
-      ];
-      // Tracing: log coordinate transform
-      console.log('📸 [YUTORI] Coordinate transform', {
-        original: `${entry.coordinates.x},${entry.coordinates.y}`,
-        normalized: `${normalizedCoords[0]},${normalizedCoords[1]}`,
-        viewport: `${req.browser_state.viewport.width}x${req.browser_state.viewport.height}`
-      });
-    }
-    
-    const actionResponse = {
-      thoughts: entry.thinking || `Executed ${entry.action}`,
-      actions: [{
-        action_type: entry.action,
-        ...(normalizedCoords ? { center_coordinates: normalizedCoords } : {}),
-        ...(entry.params || {})
-      }]
-    };
-    
+
+    // Assistant message with tool_calls
     messages.push({
       role: 'assistant',
-      content: JSON.stringify(actionResponse)
+      content: entry.thinking || `Executing ${entry.action}`,
+      tool_calls: [{
+        id: toolCallId,
+        type: 'function',
+        function: {
+          name: toolName,
+          arguments: JSON.stringify(toolArgs)
+        }
+      }]
     });
-  }
-  
-  // Current screenshot as final observation
-  // Per Yutori docs: "Including the URL of the current page in observation messages is recommended"
-  if (req.browser_state.screenshot) {
-    // Check if it's already a URL or if it's base64
-    const imageUrl = req.browser_state.screenshot.startsWith('http') 
-      ? req.browser_state.screenshot 
-      : `data:image/png;base64,${req.browser_state.screenshot}`;
-    
-    const observationContent: any[] = [];
-    
-    // Add current URL as text before the screenshot
-    if (req.browser_state.url) {
-      observationContent.push({ type: 'text', text: `Current URL: ${req.browser_state.url}` });
+
+    // Tool message with result screenshot
+    // Screenshot comes from the NEXT history entry, or current state for the last entry
+    const toolContent: any[] = [];
+
+    if (lastKnownUrl) {
+      toolContent.push({ type: 'text', text: `Current URL: ${lastKnownUrl}` });
     }
-    
-    observationContent.push({ type: 'image_url', image_url: { url: imageUrl } });
-    
+
+    let resultScreenshot: string | undefined;
+    if (i + 1 < req.action_history.length && req.action_history[i + 1].screenshot) {
+      resultScreenshot = req.action_history[i + 1].screenshot;
+    } else if (i === req.action_history.length - 1) {
+      resultScreenshot = req.browser_state.screenshot;
+    }
+
+    if (resultScreenshot) {
+      const imageUrl = resultScreenshot.startsWith('http')
+        ? resultScreenshot
+        : `data:image/png;base64,${resultScreenshot}`;
+      toolContent.push({ type: 'image_url', image_url: { url: imageUrl } });
+    }
+
     messages.push({
-      role: 'observation',
-      content: observationContent
+      role: 'tool',
+      tool_call_id: toolCallId,
+      content: toolContent
     });
   }
 
   // Tracing: log Yutori messages summary
-  console.log('🔍 [TRACE] Yutori messages:', {
+  console.log('🔍 [TRACE] Yutori n1-latest messages:', {
     total: messages.length,
-    assistantCount: messages.filter(m => m.role === 'assistant').length,
-    observationCount: messages.filter(m => m.role === 'observation').length
+    assistantCount: messages.filter((m: any) => m.role === 'assistant').length,
+    toolCount: messages.filter((m: any) => m.role === 'tool').length
   });
 
   return { messages };
@@ -869,130 +932,109 @@ async function callYutoriLLM(
   return { response: data, ttftMs, usage };
 }
 
-// Normalize Yutori response to unified action format
-// Yutori returns coordinates in 1000x1000 normalized space
+// Normalize Yutori n1-latest response to unified action format
+// n1-latest returns actions as native tool_calls, reasoning in content
+// Coordinates still in 1000x1000 normalized space
 function normalizeYutoriResponse(response: any, viewport: { width: number; height: number }): UnifiedAction {
-  console.log('🔍 Normalizing Yutori response');
-  
-  const content = response.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error('normalizeYutoriResponse: No response content from Yutori');
+  console.log('🔍 Normalizing Yutori n1-latest response');
+
+  const message = response.choices?.[0]?.message;
+  if (!message) {
+    throw new Error('normalizeYutoriResponse: No message in Yutori response');
   }
-  
-  // Parse the JSON content (handles markdown-wrapped JSON)
-  let parsed: any;
-  if (typeof content === 'string') {
-    parsed = extractJSON(content);
-    if (!parsed) {
-      console.log('⚠️ Could not extract JSON from Yutori response:', content.slice(0, 300));
-      throw new Error(`normalizeYutoriResponse: Could not extract JSON from Yutori response: ${content.slice(0, 200)}`);
-    }
-  } else {
-    parsed = content;
-  }
-  
-  const thoughts = parsed.thoughts || parsed.thinking;
-  const actions = parsed.actions || [];
-  
-  if (actions.length === 0) {
+
+  const thinking = message.content || '';
+  const toolCalls = message.tool_calls;
+
+  // If no tool_calls, the model considers the task done
+  if (!toolCalls || toolCalls.length === 0) {
     return {
       action: 'done',
-      thinking: thoughts || 'Task complete'
+      thinking: thinking || 'Task complete'
     };
   }
-  
-  const firstAction = actions[0];
-  const actionType = firstAction.action_type || 'unknown';
-  
+
+  // Parse the first tool call
+  const firstToolCall = toolCalls[0];
+  const toolName = firstToolCall.function?.name;
+  let toolArgs: Record<string, any> = {};
+
+  try {
+    toolArgs = JSON.parse(firstToolCall.function?.arguments || '{}');
+  } catch (e) {
+    console.error('Failed to parse tool_call arguments:', firstToolCall.function?.arguments);
+    throw new Error(`normalizeYutoriResponse: Failed to parse tool_call arguments: ${firstToolCall.function?.arguments?.slice(0, 200)}`);
+  }
+
   // Convert 1000x1000 coordinates to viewport coordinates
   let coordinates: { x: number; y: number } | undefined;
-  if (firstAction.center_coordinates || firstAction.coordinates) {
-    const [normX, normY] = firstAction.center_coordinates || firstAction.coordinates;
+  if (toolArgs.coordinates && Array.isArray(toolArgs.coordinates)) {
+    const [normX, normY] = toolArgs.coordinates;
     coordinates = {
       x: Math.round((normX / 1000) * viewport.width),
       y: Math.round((normY / 1000) * viewport.height)
     };
   }
-  
-  // Map Yutori action names to Python agent expected names
-  // Yutori native actions: click, scroll, type, key_press, hover, drag, wait, refresh, go_back, goto_url, read_texts_and_links, stop
+
+  // Map n1-latest native tool names to our internal action names
+  // n1-latest native tools: left_click, scroll, type, key_press, drag, hover,
+  //   double_click, triple_click, right_click, wait, go_back, goto_url, refresh
   const yutoriActionMap: Record<string, string> = {
+    'left_click': 'click',
     'type': 'input_text',
     'key_press': 'press_key',
     'go_back': 'navback',
     'goto_url': 'goto',
-    'stop': 'attempt_completion',
+    'double_click': 'click',
+    'triple_click': 'click',
+    'right_click': 'click',
   };
-  
-  const normalizedAction = yutoriActionMap[actionType] || actionType;
-  
-  // Validate action is one we support (Yutori has limited actions)
+
+  const normalizedAction = yutoriActionMap[toolName] || toolName;
+
+  // Validate action is one we support
   // NOTE: upload_file is NOT included because yutori is a vision model that doesn't understand DOM indices.
   // When yutori tries to return upload_file, we reject it and fall back to browser-use.
-  const validYutoriActions = ['click', 'scroll', 'input_text', 'press_key', 'navback', 'goto', 'wait', 'attempt_completion'];
+  const validYutoriActions = ['click', 'scroll', 'input_text', 'press_key', 'navback', 'goto', 'wait', 'attempt_completion', 'done', 'hover', 'refresh'];
   if (!validYutoriActions.includes(normalizedAction)) {
-    throw new Error(`normalizeYutoriResponse: Unknown action "${normalizedAction}" (raw: "${actionType}") - add to yutoriActionMap or validYutoriActions`);
+    throw new Error(`normalizeYutoriResponse: Unknown action "${normalizedAction}" (raw tool: "${toolName}") - add to yutoriActionMap or validYutoriActions`);
   }
 
-  // Normalize Yutori params to Python agent expected format
+  // Normalize tool arguments to our internal param format
   const normalizedParams: Record<string, any> = {};
 
   // Text input
-  if (firstAction.typing_text) normalizedParams.text = firstAction.typing_text;
-  if (firstAction.text) normalizedParams.text = firstAction.text;
+  if (toolArgs.text) normalizedParams.text = toolArgs.text;
 
-  // Navigation
-  if (firstAction.url) normalizedParams.url = firstAction.url;
+  // Navigation URL
+  if (toolArgs.url) normalizedParams.url = toolArgs.url;
 
-  // File upload - filename is at top level in Yutori response
-  if (firstAction.filename) normalizedParams.filename = firstAction.filename;
-  if (firstAction.file_path) normalizedParams.file_path = firstAction.file_path;
+  // Key presses - n1-latest uses 'key_comb' (Playwright format, e.g., "Control+c")
+  if (toolArgs.key_comb) normalizedParams.key = toolArgs.key_comb;
 
-  // Key presses - map 'keys' and 'key_comb' to 'key'
-  // Yutori uses 'key_comb' for keyboard shortcuts (e.g., "Control+o")
-  if (firstAction.key) normalizedParams.key = firstAction.key;
-  if (firstAction.keys) normalizedParams.key = firstAction.keys;
-  if (firstAction.key_comb) normalizedParams.key = firstAction.key_comb;
-  
-  // Handle scroll direction from action_type
-  // Yutori returns amount in pixels directly (e.g. 300, 600)
-  // Small values (<50) are likely multipliers - convert them, otherwise use directly
-  const normalizeScrollAmount = (amount: number, viewportHeight: number = 800): number => {
-    if (amount < 50) {
-      // Small value - probably a multiplier (e.g. 3 = 3 * 100px)
-      return Math.max(100, Math.round(amount * 100));
-    }
-    // Larger values are pixels, use directly with reasonable bounds
-    return Math.min(Math.max(amount, 100), 2000);
-  };
-  
-  if (actionType === 'scroll_up') {
-    normalizedParams.direction = 'up';
-    normalizedParams.amount = 300;
-  } else if (actionType === 'scroll_down') {
-    normalizedParams.direction = 'down';
-    normalizedParams.amount = 300;
-  } else if (firstAction.direction) {
-    normalizedParams.direction = firstAction.direction;
-    const rawAmount = firstAction.amount || 300;
-    normalizedParams.amount = normalizeScrollAmount(rawAmount, viewport.height);
-    console.log(`📜 Yutori scroll: raw=${firstAction.amount} → normalized=${normalizedParams.amount}px (direction=${firstAction.direction})`);
+  // Scroll: n1-latest uses percentage-based amount
+  if (toolName === 'scroll') {
+    normalizedParams.direction = toolArgs.direction || 'down';
+    // Convert viewport percentage to pixels
+    const percentAmount = toolArgs.amount || 50;
+    normalizedParams.amount = Math.round((percentAmount / 100) * viewport.height);
+    normalizedParams.amount = Math.min(Math.max(normalizedParams.amount, 100), 2000);
+    console.log(`📜 Yutori n1-latest scroll: ${percentAmount}% of ${viewport.height}px → ${normalizedParams.amount}px (direction=${normalizedParams.direction})`);
   }
-  
-  // Wait - Yutori might use seconds or wait_time
-  if (firstAction.seconds !== undefined) {
-    normalizedParams.time_ms = firstAction.seconds * 1000;
+
+  // Wait
+  if (toolArgs.seconds !== undefined) {
+    normalizedParams.time_ms = toolArgs.seconds * 1000;
   }
-  if (firstAction.wait_time !== undefined) {
-    normalizedParams.time_ms = firstAction.wait_time * 1000;
+
+  // Store normalized coordinates for reference
+  if (toolArgs.coordinates) {
+    normalizedParams.normalized_coordinates = toolArgs.coordinates;
   }
-  
-  // Add normalized coordinates for reference
-  normalizedParams.normalized_coordinates = firstAction.center_coordinates || firstAction.coordinates;
-  
+
   return {
     action: normalizedAction,
-    thinking: thoughts,
+    thinking,
     coordinates,
     params: normalizedParams
   };
@@ -3128,7 +3170,7 @@ serve(async (req) => {
           return {
             action: normalizedAction,
             ttftMs: result.ttftMs,
-            actualModel: 'yutori/n1-preview-2025-11',
+            actualModel: 'yutori/n1-latest',
             usage: result.usage
           };
 
