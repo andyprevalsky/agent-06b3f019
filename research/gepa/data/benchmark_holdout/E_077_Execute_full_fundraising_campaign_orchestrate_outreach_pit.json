@@ -1,0 +1,23 @@
+{
+  "id": "5007b70e-17e8-4f9a-a5c4-49cebe101607",
+  "raw_seed": "Execute full fundraising campaign: orchestrate outreach, pitch meetings, term sheet negotiation, and closing to raise $1M",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Execute full fundraising campaign: orchestrate outreach, pitch meetings, term sheet negotiation, and closing to raise $1M"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the scope and context of this fundraising campaign before creating a plan. This is a complex, multi-stage goal that requires understanding your specific situation.\n\nKey clarifications needed:\n\n1. **Company/Project Stage**: Are you pre-seed, seed, Series A? What's your current traction (revenue, users, growth rate)?\n\n2. **Target Investors**: Are you targeting angels, VCs, family offices, or a specific fund? Do you have a prospect list, or should I help build one?\n\n3. **Pitch Materials**: Do you have a deck, executive summary, financial projections, and business plan ready? Or do I need to help create these?\n\n4. **Your Role**: Are you the founder/CEO who will lead pitches, or are you coordinating on behalf of someone else?\n\n5. **Timeline**: What's your target closing date? Do you have any existing investor interest or warm introductions?\n\n6. **Geography/Market**: What region/market are you in? This affects investor targeting.\n\n7. **Business Details**: What industry, business model, and problem are you solving? (I need this to help craft messaging)\n\n8. **Current Status**: Have you already started outreach, or is this a complete campaign from scratch?\n\nOnce I understand your situation, I can create a detailed execution plan covering investor research, outreach sequencing, pitch preparation, meeting coordination, term sheet review, and closing logistics."
+    },
+    {
+      "role": "user",
+      "content": "Good questions. Here's what we're working with:\n\n**Company:** ClimateTrack - we're a Seed stage climate tech startup building software for corporate carbon accounting. We've got 8 customers (mostly mid-market companies), $12K MRR, and have been live for 6 months.\n\n**My Role:** I'm the co-founder/CEO, so I'll be doing the pitching.\n\n**Pitch Materials:** We have a solid deck (32 slides, updated last month) and basic financials, but they could use polish. No formal summary doc yet.\n\n**Investors:** Mix of both\u2014I've got warm intros to maybe 5-6 angel investors and one micro-VC fund (Frontier Tech Partners) that's relevant. But we need to expand beyond my network. Open to both angels and early-stage VCs that focus on climate.\n\n**Timeline:** We want to close by end of Q2\u2014so roughly 4 months, ideally sooner.\n\n**Warm Intros:** My co-founder knows someone at a climate accelerator who can probably intro us to 3-4 angels. I also have a former mentor at a VC who might give us intro access to their portfolio founders.\n\n**Current Progress:** Starting from scratch on the campaign side. We've had a few casual investor coffees but nothing structured yet."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have enough context to build a comprehensive execution plan. ClimateTrack is in a strong position\u20146 months of traction, real revenue, and warm intro access to angels and VCs. The 4-month timeline to close $1M is aggressive but achievable with disciplined execution.\n\nI'm now ready to generate a detailed plan that will cover:\n\n1. **Materials Preparation** (executive summary, investor one-pager, financial model refinement)\n2. **Investor Targeting & List Building** (expand beyond your 5-6 warm intros to 40-50 qualified prospects across angels, micro-VCs, and climate-focused funds)\n3. **Outreach Sequencing** (warm intros first, then cold outreach with clear cadence)\n4. **Pitch Meeting Coordination** (scheduling, preparation, follow-up)\n5. **Term Sheet Negotiation** (legal review, terms guidance, closing prep)\n6. **Closing Logistics** (wire coordination, documentation, cap table updates)\n\nThe plan will be structured to run in parallel where possible\u2014while you're pitching to warm intro angels, we'll be building the cold outreach list and refining materials. This keeps momentum high and maximizes your 4-month window.\n\nProceeding to plan generation now."
+    }
+  ],
+  "set_plan_args": {}
+}

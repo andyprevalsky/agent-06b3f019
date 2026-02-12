@@ -1,0 +1,23 @@
+{
+  "id": "36335f2b-d68d-48e2-846f-8f56ab1756cc",
+  "raw_seed": "Develop a comprehensive 7-day meal plan. Steps: 1) Calculate user's TDEE and weight loss calorie target. 2) Create a weekly menu that integrates family dinners (tacos/pasta) with modifications, replaces coffee-only breakfasts, and offers quick lunch solutions. 3) Generate a shopping list.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Develop a comprehensive 7-day meal plan. Steps: 1) Calculate user's TDEE and weight loss calorie target. 2) Create a weekly menu that integrates family dinners (tacos/pasta) with modifications, replaces coffee-only breakfasts, and offers quick lunch solutions. 3) Generate a shopping list."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify several key parameters before creating your personalized meal plan. The goal requires calculating your TDEE (Total Daily Energy Expenditure) and setting a calorie target, but I'm missing essential information.\n\nLet me gather what I need: your age, sex, current weight, height, activity level, and your weight loss goal (how many pounds/kg do you want to lose, or what's your target weight?). Also, regarding family dinners\u2014what are the typical family preferences, any dietary restrictions or allergies I should know about? And for the quick lunch solutions, do you have any food preferences or restrictions?\n\nOnce I have these details, I can:\n1. Calculate your precise TDEE using your biometrics\n2. Set an appropriate calorie deficit for safe weight loss\n3. Build a 7-day menu with family-friendly tacos/pasta options, nutrient-dense breakfasts replacing coffee-only mornings, and efficient lunch ideas\n4. Generate a complete shopping list with quantities\n\nPlease share these details so I can proceed."
+    },
+    {
+      "role": "user",
+      "content": "Okay, here are the details:\n\n**Personal Biometrics:**\n- Age: 35\n- Sex/Gender: Female\n- Current weight: 165 lbs\n- Height: 5'6\"\n- Activity level: Moderately active (I work out 3-4 times a week)\n- Weight loss goal: To lose 15-20 lbs\n\n**Dietary Preferences & Constraints:**\n- Allergies/intolerances: None\n- Dietary preferences: No specific dietary preferences, but I do prefer lean protein.\n- Foods to avoid: I really dislike mushrooms and olives.\n- Family size: 4 people (my husband, me, and two kids, ages 7 and 9). The 7-year-old is a bit picky with new foods.\n\n**Lifestyle Context:**\n- Budget: Moderate. I'm willing to spend a bit more for quality ingredients but don't want anything super expensive.\n- Cooking time weekdays: About 30-45 minutes max, ideally less for most nights.\n- Preferred cuisine styles for family dinners: We like Italian, Mexican, and Asian-inspired dishes (stir-fries, etc.)."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have all the information I need. Let me create your comprehensive 7-day meal plan with TDEE calculation, weekly menu, and shopping list. I'm proceeding to the planning phase."
+    }
+  ],
+  "set_plan_args": {}
+}

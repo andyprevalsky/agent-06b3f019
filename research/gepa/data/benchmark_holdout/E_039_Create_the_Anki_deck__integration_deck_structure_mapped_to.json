@@ -1,0 +1,47 @@
+{
+  "id": "6f5d3a31-ccff-4c81-a6bc-d99daf74b416",
+  "raw_seed": "Create the Anki deck + integration: deck structure mapped to syllabus topics, scripts using AnkiConnect to add/update cards for missed/weak items, and scheduling rules to prioritize gaps",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create the Anki deck + integration: deck structure mapped to syllabus topics, scripts using AnkiConnect to add/update cards for missed/weak items, and scheduling rules to prioritize gaps"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you create a comprehensive Anki deck system with syllabus mapping, automated card management, and intelligent scheduling. Let me start by researching best practices for Anki deck structures and integrations."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Anki deck structure best practices syllabus mapping educational content organization\"]:\n\n\nSources: https://forums.ankiweb.net/t/enhancing-anki-for-advanced-education-seeking-guidance-on-deck-layout-and-personalisation/48748, https://www.reddit.com/r/Anki/comments/1ptqm7k/what_strategies_do_you_use_to_create_effective/, https://www.reddit.com/r/Anki/comments/1lyz37f/what_methods_do_you_use_to_organize_your/, https://www.youtube.com/watch?v=JYT4xdIaIBo, https://medschoolinsiders.com/medical-student/anki-flashcard-best-practices-how-to-create-good-cards/"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand the scope of this Anki deck creation project before planning execution. The request involves creating a structured Anki deck integrated with AnkiConnect, with automation scripts and scheduling logic. I need clarification on a few critical dimensions:\n\n1. **Syllabus Source**: Do you have an existing syllabus document/file I should use, or should I create a sample structure to demonstrate the system?\n\n2. **Content Domain**: What subject/course is this for? (e.g., medical school, language learning, computer science, etc.)\n\n3. **Weak Item Detection**: How should the system identify \"missed/weak\" items? Should I:\n   - Use Anki's built-in review metrics (ease factor, retention rate)?\n   - Integrate with external assessment data?\n   - Create a custom scoring mechanism?\n\n4. **Scheduling Rules**: Should I implement:\n   - Modified SM-2 algorithm?\n   - Custom priority weighting based on syllabus importance?\n   - Deadline-aware scheduling?\n\n5. **Deliverables Scope**: Do you want:\n   - A working Anki deck (.apkg file)?\n   - Python scripts for AnkiConnect automation?\n   - Documentation on setup/usage?\n   - All of the above?\n\n6. **Card Generation**: Should cards be:\n   - Manually created as samples?\n   - Auto-generated from syllabus text?\n   - Imported from existing flashcard data?\n\nI can proceed with reasonable defaults (sample medical syllabus, Python scripts, comprehensive automation), but want to confirm these assumptions match your intent."
+    },
+    {
+      "role": "user",
+      "content": "Great questions. Let me be specific:\n\n**1. Syllabus Source:** I have a syllabus\u2014it's for an AWS Solutions Architect Associate certification prep. I can share the topic breakdown, but honestly a template structure would help me adapt it.\n\n**2. Subject Domain:** AWS cert prep\u2014so cloud architecture, services, best practices, pricing. Mix of conceptual and scenario-based questions.\n\n**3. Weak Item Detection:** Use Anki's built-in metrics (ease factor + retention rate). Flag anything below 75% retention or ease < 1.8 as weak. That's simpler than external scoring.\n\n**4. Scheduling Strategy:** Combination approach\u2014standard SM-2 spaced repetition, BUT boost priority for weak items AND weight by syllabus topic importance (some domains are heavier on the exam). No hard deadline yet, but I'm targeting 8 weeks out.\n\n**5. Deliverables:** All three, please. Working .apkg deck I can import, Python scripts for the automation (AnkiConnect), and clear docs so I can maintain/extend it.\n\n**6. Scale:** Start with ~150 cards across 5 core AWS domains (EC2, S3, RDS, IAM, networking). Scalable to more later.\n\n**Don't use the medical school default.** I want this tail"
+    },
+    {
+      "role": "assistant",
+      "content": ": Creating AWS Solutions Architect Anki deck with AnkiConnect automation. Starting research on AWS cert structure and Anki automation best practices."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AWS Solutions Architect Associate certification exam topics syllabus breakdown 2024\"]:\n\n\nSources: https://aws.amazon.com/certification/certified-solutions-architect-associate/, https://d1.awsstatic.com/training-and-certification/docs-sa-assoc/AWS-Certified-Solutions-Architect-Associate_Exam-Guide.pdf, https://www.examtopics.com/exams/amazon/aws-certified-solutions-architect-associate-saa-c03/, https://www.examtopics.com/exams/amazon/aws-certified-solutions-architect-associate-saa-c03/view/, https://docs.aws.amazon.com/aws-certification/latest/examguides/solutions-architect-associate-03.html"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AnkiConnect API Python automation scripts card management examples\"]:\n\n\nSources: https://github.com/amikey/anki-connect, https://pypi.org/project/ankiapi/, https://www.reddit.com/r/Anki/comments/mviiwr/anki_api_card_creation_example/, https://ankiweb.net/shared/info/2055492159, https://forums.ankiweb.net/t/connect-anki-with-python/13430"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"AWS Solutions Architect Associate flashcards study cards best practices\"]:\n\n\nSources: https://skillbuilder.aws/exam-prep/solutions-architect-associate, https://aws.amazon.com/certification/certified-solutions-architect-associate/, https://quizlet.com/274554896/aws-solutions-architect-associate-flash-cards/, https://medium.com/@hamzas2401/how-i-passed-the-aws-solutions-architect-associate-exam-a8ba15cd7381, https://www.amazon.com/Certified-Solutions-Architect-Study-SAA-C03/dp/173643974X"
+    },
+    {
+      "role": "assistant",
+      "content": "**Analyzing Certification Domains**\n\nI've been mapping the user's requirements for AWS certification study, specifically the Solutions Architect Associate. I'm focusing on the syllabus structure as the primary data source, and applying criteria for weak item detection. The user\u2019s detailed responses are informing the scheduling methodology - SM-2 with priority settings. I'm also now considering the Anki metrics.\n\n\n**Defining Project Structure**\n\nI'm solidifying the project plan, starting with deck design based on the AWS SAA syllabus. I'll create sample cards across the core domains, then refine the approach with the user. The focus will be on delivering APKG, Python scripts, and documentation based on the user's criteria. I am now exploring the Python scripts.\n\nThank you for the detailed clarification. This gives me a solid foundation to move forward. I have a clear understanding of the project scope, deliverables, and specific requirements for the Anki deck and its automation. I've already conducted some initial research on AWS SAA syllabus structure, AnkiConnect automation, and effective flashcard creation for this domain. I am now ready to set the plan for execution."
+    }
+  ],
+  "set_plan_args": {}
+}

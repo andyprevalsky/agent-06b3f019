@@ -1,0 +1,23 @@
+{
+  "id": "672edc46-cbaa-4e5a-b5be-c1ecbe061c00",
+  "raw_seed": "Cancel Xbox Game Pass Ultimate (Dec 2024) with full refund - within 14-30 days",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Cancel Xbox Game Pass Ultimate (Dec 2024) with full refund - within 14-30 days"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you cancel your Xbox Game Pass Ultimate subscription and get a full refund. Let me research the current cancellation and refund policies to ensure we follow the most up-to-date process."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Xbox Game Pass Ultimate cancellation policy refund 14-30 days December 2024\"]:\n\n\nSources: https://support.xbox.com/en-US/help/subscriptions-billing/manage-subscriptions/cancel-recurring-billing-or-subscription, https://www.facebook.com/groups/thexboxecosystem/posts/1738594436580276/, https://support.microsoft.com/en-us/account-billing/how-to-get-a-refund-on-a-microsoft-subscription-67dca30b-b323-44d5-acc2-e02f9902c472, https://support.xbox.com/en-US/help/subscriptions-billing/buy-games-apps/refund-orders, https://www.reddit.com/r/XboxGamePass/comments/1nf3nwl/can_i_get_a_refund/"
+    },
+    {
+      "role": "assistant",
+      "content": "> Xbox Game Pass Ultimate cancellation policy refund 14-30 days December 2024\n> \n> Xbox Game Pass Ultimate subscriptions can be cancelled anytime, but refunds depend on usage and timing. Microsoft offers refunds for unused subscription time, typically within 14-30 days of purchase or renewal, but eligibility varies based on account history and usage patterns. The refund process requires contacting Microsoft Support directly, as self-service cancellations don't automatically include refunds."
+    }
+  ],
+  "set_plan_args": {}
+}

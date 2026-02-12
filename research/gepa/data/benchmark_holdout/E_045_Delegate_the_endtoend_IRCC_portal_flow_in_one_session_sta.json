@@ -1,0 +1,23 @@
+{
+  "id": "702c9187-f596-41c8-96ea-bf45a65d01b8",
+  "raw_seed": "Delegate the end-to-end IRCC portal flow in one session: start application, enter answers consistent with the plan, upload documents, pay fees, submit, and initiate biometrics instructions/appointment workflow (as applicable).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Delegate the end-to-end IRCC portal flow in one session: start application, enter answers consistent with the plan, upload documents, pay fees, submit, and initiate biometrics instructions/appointment workflow (as applicable)."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the scope of this goal before proceeding. The IRCC (Immigration, Refugees and Citizenship Canada) portal encompasses multiple application types with different workflows. To execute the end-to-end flow accurately, I need to understand:\n\n1. **Application Type**: Which IRCC application are you targeting? (e.g., Express Entry, Family Sponsorship, Work Permit, Study Permit, Visitor Visa, PR renewal, etc.)\n\n2. **Applicant Profile**: Do you have an existing IRCC account, or should I create one? What is your current immigration status/relationship to Canada?\n\n3. **Document Readiness**: Are all required documents prepared and available? (passport, birth certificate, police certificates, medical exam results, proof of funds, employment letters, etc.)\n\n4. **Personal Information**: Should I use placeholder/test data, or do you have specific answers prepared for the application form?\n\n5. **Payment Method**: How should fees be paid? (credit card, debit, other)\n\n6. **Scope Clarification**: When you say \"initiate biometrics instructions/appointment workflow,\" do you want me to:\n   - Complete the biometrics request form if required?\n   - Schedule an actual appointment (if applicable)?\n   - Or just navigate to where that workflow would begin?\n\nWithout these details, I risk starting an incorrect application type or using invalid data. Please provide these clarifications so I can create a precise execution plan."
+    },
+    {
+      "role": "user",
+      "content": ""
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the scope of this goal before proceeding. The IRCC (Immigration, Refugees and Citizenship Canada) portal encompasses multiple application types with different workflows. To execute the end-to-end flow accurately, I need to understand:\n\n1. **Application Type**: Which IRCC application are you targeting? (e.g., Express Entry, Family Sponsorship, Work Permit, Study Permit, Visitor Visa, PR renewal, etc.)\n\n2. **Applicant Profile**: Do you have an existing IRCC account, or should I create one? What is your current immigration status/relationship to Canada?\n\n3. **Document Readiness**: Are all required documents prepared and available? (passport, birth certificate, police certificates, medical exam results, proof of funds, employment letters, etc.)\n\n4. **Personal Information**: Should I use placeholder/test data, or do you have specific answers prepared for the application form?\n\n5. **Payment Method**: How should fees be paid? (credit card, debit, other)\n\n6. **Scope Clarification**: When you say \"initiate biometrics instructions/appointment workflow,\" do you want me to:\n   - Complete the biometrics request form if required?\n   - Schedule an actual appointment (if applicable)?\n   - Or just navigate to where that workflow would begin?\n\nWithout these details, I risk starting an incorrect application type or using invalid data. Please provide these clarifications so I can create a precise execution plan."
+    }
+  ],
+  "set_plan_args": {}
+}

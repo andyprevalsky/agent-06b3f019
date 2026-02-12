@@ -1,0 +1,15 @@
+{
+  "id": "d12355d8-aee2-4640-93f5-383f52029c7b",
+  "raw_seed": "Develop a 'Build in Public' content strategy for a tech marketer",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Develop a 'Build in Public' content strategy for a tech marketer"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you develop a comprehensive 'Build in Public' content strategy for a tech marketer. Let me start by researching current best practices and successful examples in this space."
+    }
+  ],
+  "set_plan_args": {}
+}

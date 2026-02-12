@@ -239,7 +239,8 @@ def score_candidates(
     Serializes locally, sends pre-serialized conversations to Modal for inference.
     """
     import modal
-    score_fn = modal.Function.from_name('gepa-critic', 'score')
+    Scorer = modal.Cls.from_name('gepa-critic', 'Scorer')
+    scorer = Scorer()
 
     prompt_text = serialize_prompt(task_seed, agent_context)
     conversations = []
@@ -249,4 +250,4 @@ def score_candidates(
             {'role': 'assistant', 'content': serialize_candidate(cand)},
         ])
 
-    return score_fn.remote(conversations, model_id=model_id)
+    return scorer.score.remote(conversations)

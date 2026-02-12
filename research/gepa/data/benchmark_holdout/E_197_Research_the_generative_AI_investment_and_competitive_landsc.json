@@ -1,0 +1,43 @@
+{
+  "id": "ec957d66-04c0-49c5-bc85-82d0df3830a2",
+  "raw_seed": "Research the generative AI investment and competitive landscape as of early 2026: total funding by category, recent major rounds, M&A activity, market size estimates and growth projections by segment, which categories are overfunded vs. underfunded, and where VCs see whitespace. Include data from CB Insights, PitchBook summaries, a16z, Sequoia, and other market reports.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research the generative AI investment and competitive landscape as of early 2026: total funding by category, recent major rounds, M&A activity, market size estimates and growth projections by segment, which categories are overfunded vs. underfunded, and where VCs see whitespace. Include data from CB Insights, PitchBook summaries, a16z, Sequoia, and other market reports."
+    },
+    {
+      "role": "assistant",
+      "content": "**Analyzing Investment Landscape**\n\nI'm currently focused on pinpointing the most relevant data sources for this generative AI investment report. I've started by considering CB Insights and PitchBook, as the user mentioned, but I'm also exploring other industry-specific databases. My goal is to ensure data completeness and accuracy, focusing specifically on early 2026 investment trends.\n\n\n**Outlining Research Approach**\n\nI'm now structuring my research methodology. I'm decomposing the user's request into specific, searchable queries. I will be looking for data on funding, M&A activity, and market sizing, which I plan to source from the data providers mentioned. I also intend to examine reports from VC firms to understand their perspectives on whitespace opportunities.\n\nThe goal is to research the generative AI investment and competitive landscape as of early 2026, covering total funding by category, recent major rounds, M&A activity, market size estimates, growth projections, over/underfunded categories, and VC whitespace. I will use web search to find reports and analyses from CB Insights, PitchBook, a16z, Sequoia, and other relevant market research firms to cover these aspects."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI investment landscape early 2026 funding categories\"]:\n\n\nSources: https://qubit.capital/blog/ai-startup-fundraising-trends, https://aifundingtracker.com/top-50-ai-startups/, https://dealroom.co/guides/generative-ai, https://sloanreview.mit.edu/article/five-trends-in-ai-and-data-science-for-2026/, https://wellows.com/blog/ai-startups/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI market size estimates growth projections early 2026\"]:\n\n\nSources: https://www.gminsights.com/industry-analysis/generative-ai-market, https://www.ibm.com/think/news/ai-tech-trends-predictions-2026, https://sloanreview.mit.edu/article/five-trends-in-ai-and-data-science-for-2026/, https://www.precedenceresearch.com/generative-ai-market, https://www.researchandmarkets.com/reports/5846887/generative-ai-market-global-forecast?srsltid=AfmBOooa7zx1EGOzMEnhfKcX1bC8l1xN8sHvG3ASizDFOuUECdeh8toD"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI recent major funding rounds late 2025 early 2026\"]:\n\n\nSources: https://qubit.capital/blog/ai-startup-fundraising-trends, https://techcrunch.com/2026/01/19/here-are-the-49-us-ai-startups-that-have-raised-100m-or-more-in-2025/, https://menlovc.com/perspective/2025-the-state-of-generative-ai-in-the-enterprise/, https://aifundingtracker.com/top-50-ai-startups/, https://dealroom.co/guides/generative-ai"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI M&A activity late 2025 early 2026\"]:\n\n\nSources: https://www.mofo.com/resources/insights/260115-m-a-in-2025-and-trends-for-2026, https://www.pwc.com/gx/en/services/deals/trends.html, https://www.morganlewis.com/pubs/2025/09/ai-deals-in-2025-key-trends-in-ma-private-equity-and-venture-capital, https://www.clearygottlieb.com/news-and-insights/publication-listing/ma-2025-in-review-and-a-look-ahead-to-2026, https://practiceguides.chambers.com/practice-guides/technology-ma-2026"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"generative AI overfunded underfunded categories VC whitespace early 2026\"]:\n\n\nSources: https://techfundingnews.com/vcs-bet-big-on-generative-ai-testing-startups-in-2026/, https://www.france-epargne.fr/research/en/state-of-ai-entering-2026, https://techfundingnews.com/why-2026-ends-ai-experimentation-vertical-scale-human-hurdles/, https://www.forbes.com/sites/josipamajic/2026/01/02/what-legendary-vc-expects-from-ai-in-2026/, https://techcrunch.com/2025/12/29/vcs-predict-strong-enterprise-ai-adoption-next-year-again/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"CB Insights PitchBook a16z Sequoia generative AI market report 2025 2026\"]:\n\n\nSources: https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/content/state-of-ai-in-the-enterprise.html, https://www.cbinsights.com/research/report/ai-trends-2025/, https://pitchbook.com/news/reports/2026-artificial-intelligence-outlook-the-great-competition-wars-have-begun, https://assets.bbhub.io/professional/sites/41/Generative-AI-Outlook.pdf, https://www.cbinsights.com/research/top-ai-market-maps-2025/"
+    },
+    {
+      "role": "assistant",
+      "content": "> **Analyzing Investment Landscape**\n\nI'm currently focused on pinpointing the most relevant data sources for this generative AI investment report. I've started by considering CB Insights and PitchBook, as the user mentioned, but I'm also exploring other industry-specific databases. My goal is to ensure data completeness and accuracy, focusing specifically on early 2026 investment trends.\n\n\n**Outlining Research Approach**\n\nI'm now structuring my research methodology. I'm decomposing the user's request into specific, searchable queries. I will be looking for data on funding, M&A activity, and market sizing, which I plan to source from the data providers mentioned. I also intend to examine reports from VC firms to understand their perspectives on whitespace opportunities.\n\nThe goal is to research the generative AI investment and competitive landscape as of early 2026, covering total funding by category, recent major rounds, M&A activity, market size estimates, growth projections, over/underfunded categories, and VC whitespace. I will use web search to find reports and analyses from CB Insights, PitchBook, a16z, Sequoia, and other relevant market research firms to cover these aspects."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -687,7 +687,7 @@ async def call_llm_structured_streaming(
             request_start_time = _safe_time()
             ttft_logged = False
             
-            async with httpx.AsyncClient(timeout=60.0) as http_client:
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
                 async with http_client.stream(
                     'POST',
                     config.rose.api_url,

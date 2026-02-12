@@ -1,0 +1,3 @@
+{
+    "plan_json": "{\n  \"title\": \"Climate Tech Commercial Viability Synthesis\",\n  \"content\": \"The context already contains comprehensive research on all six breakthrough climate technologies (DAC, green hydrogen, next-gen nuclear, enhanced geothermal, LDES, and SAF). The goal now is to synthesize this information into a clear ranking of which technologies are closest to commercial viability. This requires a reasoning step to analyze the collected data and produce a comparative assessment.\",\n  \"tasks\": [\n    {\"goal\": \"Synthesize research findings and rank climate technologies by commercial viability proximity\", \"tool_name\": \"reasoning\", \"depends_on\": []}\n  ],\n  \"dependencies_graph\": [],\n  \"join\": \"all\"\n}"
+}

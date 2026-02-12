@@ -1,0 +1,31 @@
+{
+  "id": "8ea00f47-da50-49c8-9e0e-3fe82e9e454c",
+  "raw_seed": "Create a tailored positioning statement + networking narrative + 30-day LinkedIn (optionally X) content plan for a 28yo marketing pro in tech, optimized for inbound opportunities",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create a tailored positioning statement + networking narrative + 30-day LinkedIn (optionally X) content plan for a 28yo marketing pro in tech, optimized for inbound opportunities"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you create a comprehensive personal branding package for a marketing professional in tech. Let me start by researching current trends and best practices for positioning and content strategies in the tech marketing space."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"tech marketing personal branding LinkedIn positioning 2024 trends inbound opportunities\"]:\n\n\nSources: https://www.linkedin.com/jobs/remote-inbound-marketing-jobs-new-york-ny, https://www.linkedin.com/pulse/navigating-professional-personal-branding-trends-2024-rami-salomaa-zepnc, https://www.linkedin.com/top-content/marketing/linkedin-marketing-guide/linkedin-strategies-for-industry-experts-2024/, https://www.linkedin.com/jobs/inbound-marketing-jobs, https://www.linkedin.com/pulse/2024-recap-what-i-learned-personal-branding-melon-perez-mp55f"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing this goal. The user wants a comprehensive professional positioning package for a 28-year-old marketing professional in tech. This includes three interconnected deliverables: (1) a tailored positioning statement, (2) a networking narrative, and (3) a 30-day LinkedIn/X content plan optimized for inbound opportunities.\n\nBefore I create the plan, I need to gather some critical context about this person to make the positioning and content truly tailored. The more specific the input, the more targeted and effective the output. I should ask clarifying questions about their background, specialization, target audience, and goals."
+    },
+    {
+      "role": "user",
+      "content": "Okay, this is super helpful! Here are the details for Sarah, my friend:\n\n**About Them:**\n1.  **Specialty:** Product Marketing (specifically B2B SaaS)\n2.  **Role/Context:** Senior Product Marketing Manager at \"InnovateCo\" (a Series B scale-up, around 150 employees).\n3.  **Biggest Wins/Expertise:**\n    *   Launched 3 major product features, contributing to a 20% increase in product adoption.\n    *   Developed and executed a GTM strategy that led to a 15% growth in MQLs for a new product line.\n    *   Strong at translating complex tech features into clear, compelling customer value propositions.\n\n**About Their Goals:**\n4.  **Targeting:** Primarily job opportunities (Head of PMM or Lead PMM roles at other B2B SaaS scale-ups) and building thought leadership within the PMM space.\n5.  **Ideal Audience:** CMOs, VPs of Marketing, Heads of Product, other PMMs, and potentially founders of early-stage B2B SaaS companies.\n6.  **X/Twitter:** Let's focus solely on LinkedIn for now.\n\n**About Their Voice:**\n7.  **Authentic Tone:** Data-driven and analytical, but also very practical and action-oriented. She likes to share \"how-to\" and \""
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect! I have all the context I need to create a comprehensive, tailored personal branding package for Sarah. I have clear information about her specialty (B2B SaaS Product Marketing), her wins (feature launches, GTM strategy, MQL growth), her target roles (Head of PMM/Lead PMM), her ideal audience (CMOs, VPs, Heads of Product, founders), and her authentic voice (data-driven, practical, action-oriented). Now I'll create the positioning statement, networking narrative, and 30-day LinkedIn content plan optimized for inbound opportunities. Let me proceed to planning and execution."
+    }
+  ],
+  "set_plan_args": {}
+}

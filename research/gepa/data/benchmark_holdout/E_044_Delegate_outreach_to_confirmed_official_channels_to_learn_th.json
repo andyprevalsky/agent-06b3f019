@@ -1,0 +1,35 @@
+{
+  "id": "a743316d-b9d8-46e6-9cfc-57eb925d493f",
+  "raw_seed": "Delegate outreach to confirmed official channels to learn the fastest pathway for a child protection/medical emergency referral from outside Gaza (attempt calls/emails/forms as appropriate; request required info, reference numbers, and escalation steps).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Delegate outreach to confirmed official channels to learn the fastest pathway for a child protection/medical emergency referral from outside Gaza (attempt calls/emails/forms as appropriate; request required info, reference numbers, and escalation steps)."
+    },
+    {
+      "role": "assistant",
+      "content": "I understand the goal: you need to identify and contact official channels for child protection and medical emergency referrals from outside Gaza, with the aim of learning the fastest pathway and gathering required information, reference numbers, and escalation procedures.\n\nThis is a sensitive, time-critical matter involving humanitarian/medical coordination. I need to research the current official channels for such referrals\u2014likely UNICEF, WHO, Red Crescent/Red Cross, and UN OCHA coordination mechanisms.\n\nLet me research the official channels and contact procedures before creating an execution plan."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"UNICEF child protection emergency referral from outside Gaza contact\"]:\n\n\nSources: https://www.unicef.org/emergencies/children-gaza-need-lifesaving-support, https://www.unicef.org/sop/contact-us, https://www.unicef.org/media/175596/file/UNICEF-Palestine-Gaza-Ceasefire-Response-Plan-2025.pdf, https://help.unicef.org/en/meta-gaza-2025, https://open.unicef.org/sites/transparency/files/2024-05/State%20of%20Palestine%20CER%202023.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"WHO medical emergency referral Gaza official channels 2026\"]:\n\n\nSources: https://www.emro.who.int/opt/information-resources/emergency-situation-reports.html, https://cdn.who.int/media/docs/default-source/documents/emergencies/2026-appeals/who-health-emergency-appeal-2026.pdf?sfvrsn=13fa5a4_4&download=true, https://cdn.who.int/media/docs/default-source/documents/emergencies/2026-appeals/who-health-emergency-appeal-snapshot-2026.pdf?sfvrsn=2a4529bc_6, https://www.who.int/publications/m/item/occupied-palestinian-territory--who-health-emergency-appeal-2026, https://english.pnn.ps/news/48057"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"Red Crescent Red Cross emergency referral Gaza contact procedures\"]:\n\n\nSources: https://www.redcross.org.uk/stories/disasters-and-emergencies/world/how-is-aid-getting-into-gaza, https://www.icrc.org/en/contact, https://www.palestinercs.org/en, https://www.palestinercs.org/public/files/image/2025/news/PRCS%2520Emergency%2520Master%2520Plan%25202025-2027.pdf, https://www.icrc.org/en/donate/israelgaza"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"UN OCHA Gaza humanitarian emergency coordination contact\"]:\n\n\nSources: https://www.ochaopt.org/about-us/contacts, https://response.reliefweb.int/palestine/contacts, https://www.unocha.org/about-occupied-palestinian-territory-humanitarian-fund/contacts, https://www.ochaopt.org/coordination/coordination-structure, https://palestine.un.org/en/contact-us"
+    },
+    {
+      "role": "assistant",
+      "content": "I've researched the official channels for child protection and medical emergency referrals from outside Gaza. Based on my findings, the most relevant official bodies are UNICEF (child protection), WHO (medical), Red Crescent/Red Cross (emergency coordination), and UN OCHA (humanitarian coordination).\n\nLet me create an execution plan that systematically contacts these organizations through their official channels to gather the fastest pathway information, required documentation, and escalation procedures."
+    }
+  ],
+  "set_plan_args": {}
+}

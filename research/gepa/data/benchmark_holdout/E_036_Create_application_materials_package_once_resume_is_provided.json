@@ -1,0 +1,15 @@
+{
+  "id": "aa8d8e66-2916-425f-88db-af26a3cfeaa3",
+  "raw_seed": "Create application materials package once resume is provided: 1\u20132 tailored resume variants (DA/BI vs Marketing Analyst), a cover letter template, and a bullet bank aligned to common requirements",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create application materials package once resume is provided: 1\u20132 tailored resume variants (DA/BI vs Marketing Analyst), a cover letter template, and a bullet bank aligned to common requirements"
+    },
+    {
+      "role": "assistant",
+      "content": "I understand the goal: create a comprehensive application materials package once a resume is provided. The package should include:\n\n1. 1-2 tailored resume variants (one for Data Analytics/BI roles, one for Marketing Analyst roles)\n2. A cover letter template\n3. A bullet bank with accomplishments aligned to common job requirements\n\nThe goal is clear and well-decomposed. I'm ready to create an execution plan that will:\n- Wait for resume submission\n- Analyze the resume content\n- Create two targeted variants emphasizing different skill sets\n- Build a reusable cover letter template\n- Develop a structured bullet bank of achievements that can be adapted across applications\n\nI'll proceed to set the plan."
+    }
+  ],
+  "set_plan_args": {}
+}

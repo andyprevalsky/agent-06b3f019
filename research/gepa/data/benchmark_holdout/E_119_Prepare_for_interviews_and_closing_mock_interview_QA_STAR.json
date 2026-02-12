@@ -1,0 +1,15 @@
+{
+  "id": "09b10916-6b10-4091-8e26-6b3a72093670",
+  "raw_seed": "Prepare for interviews and closing: mock interview Q&A, STAR stories mapped to VA competencies, work-sample prompts, reference strategy, and negotiation script/checklist to reach $20\u2013$25/hr (or equivalent salary)",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Prepare for interviews and closing: mock interview Q&A, STAR stories mapped to VA competencies, work-sample prompts, reference strategy, and negotiation script/checklist to reach $20\u2013$25/hr (or equivalent salary)"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll help you prepare comprehensively for interviews and closing with a complete preparation package. Let me create a structured plan covering mock interview Q&A, STAR stories mapped to VA competencies, work-sample prompts, reference strategy, and negotiation materials to achieve your $20-25/hr target."
+    }
+  ],
+  "set_plan_args": {}
+}

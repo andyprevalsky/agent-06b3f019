@@ -1,0 +1,35 @@
+{
+  "id": "58c3441a-e8a4-4e4f-b6c1-15d896ea3cbd",
+  "raw_seed": "Set up post-submission workflow: how to track via VFS, expected processing windows, handling additional document requests, passport collection vs courier, and what to verify on the visa sticker upon receipt (dates, entries, name/passport no.).",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Set up post-submission workflow: how to track via VFS, expected processing windows, handling additional document requests, passport collection vs courier, and what to verify on the visa sticker upon receipt (dates, entries, name/passport no.)."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to research the specific visa application workflow and post-submission procedures. The user is asking for comprehensive guidance on tracking, processing timelines, document requests, collection methods, and verification steps. Let me gather current information about visa processing workflows."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"VFS visa application tracking post-submission workflow 2026\"]:\n\n\nSources: https://visa.vfsglobal.com/usa/en/ind/track-application, https://www.vfsvisaonline.com/Global-Passporttracking/Track/Index?q=shSA0YnE4pLF9Xzwon/x/PPk/PGOUuwCiM9bJfQ11eZzWJY4PnuEU0I4GIg2z7zCTvNUXu3AKRVnM8K5h91BOBz/CPQm/oKowN9A+dw0aa8=, https://visa.vfsglobal.com/usa/en/isl/track-application, https://visa.vfsglobal.com/tur/en/est/track-application, https://www.facebook.com/VFSGlobalOfficial/videos/stay-in-touch-with-your-visa-application-post-submission-use-your-application-id/1278437517118537/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"visa processing window expected timeframe document requests\"]:\n\n\nSources: https://travel.state.gov/content/travel/en/us-visas/tourism-visit/visitor.html/visa, https://www.gov.uk/guidance/visa-processing-times-applications-inside-the-uk, https://travel.state.gov/content/travel/en/us-visas/visa-information-resources/wait-times.html, https://egov.uscis.gov/processing-times/, https://tr.usembassy.gov/what-are-the-supporting-documents/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"passport collection courier options visa sticker verification\"]:\n\n\nSources: https://travel.state.gov/content/travel/en/passports/get-fast/courier-and-expeditor-companies.html, https://regulaforensics.com/blog/visa-verification-challenges-tools/, https://tr.usembassy.gov/visas-nonimmigrant-visas-congratulations-en/, https://www.office.fedex.com/default/passport-services?srsltid=AfmBOooyiMsm4qqmTf4PWgkYvhQ35mxwR7Lfcs1QsH8SAwF__4TpTafG, https://ar.usembassy.gov/what-to-expect-after-your-visa-is-approved-and-issued/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"visa sticker verification checklist dates entries name passport number\"]:\n\n\nSources: https://travel.state.gov/content/travel/en/us-visas/visa-information-resources/visa-expiration-date.html, https://iso.mit.edu/getting-started/obtaining-a-visa/, https://www.axa-schengen.com/en/visa/requirements/visa-sticker, https://www.atlys.com/blog/schengen-visa-sticker-number, https://travel.state.gov/content/travel/en/us-visas/tourism-visit/visitor.html/visa"
+    },
+    {
+      "role": "assistant",
+      "content": "The user wants a comprehensive post-submission workflow for a visa application. This includes how to track the application via VFS, understanding expected processing windows, handling additional document requests, options for passport collection versus courier, and what to verify on the visa sticker upon receipt. I have conducted initial web searches to gather information on these topics. I will now synthesize this information and formulate a plan to provide a detailed workflow."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,23 @@
+{
+  "id": "500544c2-ced6-4099-b439-8ca91efce7fa",
+  "raw_seed": "Design a progressive 4-month low-impact workout plan (Gym + Home)",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Design a progressive 4-month low-impact workout plan (Gym + Home)"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify a few key details about your fitness goals before designing the 4-month progressive plan. This will ensure the workout plan is tailored to your needs and realistic."
+    },
+    {
+      "role": "user",
+      "content": "1. Returning after a break \u2013 I used to jog 5Ks but haven\u2019t trained since my daughter was born 18 months ago.  \n2. Main goal is dropping the 18 lbs I still have from the pregnancy, plus getting my core strength back (diastasis feels almost shut).  \n3. Gym: 2 weekdays (Tue/Thu) while she\u2019s at daycare; weekends are home-only.  \n4. Home stuff: 8-lb and 15-lb dumbbells, two 20-lb kettlebells, green & purple resistance bands, yoga mat, and a sturdy doorway pull-up bar.  \n5. Can give you 45 min on gym days, 30\u201335 min at home before naptime ends.  \n6. No injuries, but my left knee feels crunchy going downstairs\u2014avoid deep weighted squats/lunges for now.  \n7. Love swimming and Pilates; hate long steady-state cardio on machines (bores me to death)."
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have all the context I need to design a comprehensive 4-month progressive plan. You're returning postpartum with specific equipment, time constraints, and preferences. I'll create a structured progression that:\n\n1. Respects your knee limitation (avoid deep weighted squats/lunges initially)\n2. Prioritizes core rebuild (diastasis recovery)\n3. Leverages your love of swimming and Pilates\n4. Fits your 45-min gym window (Tue/Thu) + 30-35 min home sessions (weekends)\n5. Incorporates fat loss through varied intensity, not boring steady-state\n6. Progresses intelligently over 4 months from low-impact foundation to stronger capacity\n\nI'm ready to generate the detailed plan now."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,4 +1,4 @@
-"""Tests for GEPA optimizer (DSPy MIPROv2 integration).
+"""Tests for GEPA optimizer (DSPy GEPA integration).
 
 Unit tests cover strategy extraction, prompt composition, depth computation,
 and metric edge cases. Integration tests (marked) require API keys + Modal.
@@ -197,7 +197,7 @@ class TestGepaMetric:
         metric = make_gepa_metric()
         example = SimpleNamespace(goal='test', context='[]')
         pred = SimpleNamespace(plan_json='not valid json')
-        assert metric(example, pred) == 0.0
+        assert float(metric(example, pred)) == 0.0
 
     def test_invalid_structure_returns_zero(self):
         """Valid JSON but only 1 task → fails hard_gate → 0.0."""
@@ -211,7 +211,7 @@ class TestGepaMetric:
         }
         example = SimpleNamespace(goal='test', context='[]')
         pred = SimpleNamespace(plan_json=json.dumps(plan))
-        assert metric(example, pred) == 0.0
+        assert float(metric(example, pred)) == 0.0
 
     def test_cycle_returns_zero(self):
         """Cyclic deps → fails hard_gate → 0.0."""
@@ -231,7 +231,7 @@ class TestGepaMetric:
         }
         example = SimpleNamespace(goal='test', context='[]')
         pred = SimpleNamespace(plan_json=json.dumps(plan))
-        assert metric(example, pred) == 0.0
+        assert float(metric(example, pred)) == 0.0
 
     @patch('research.gepa.pipelines.gepa_optimizer.score_candidates')
     def test_valid_plan_calls_critic(self, mock_score):
@@ -280,7 +280,7 @@ class TestGepaMetric:
         }
         example = SimpleNamespace(goal='test', context='[]')
         pred = SimpleNamespace(plan_json=json.dumps(plan))
-        assert metric(example, pred) == 0.0
+        assert float(metric(example, pred)) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -325,11 +325,9 @@ class TestLoadTrainset:
 
 @pytest.mark.integration
 class TestOptimizeMinimal:
-    """Exercises the full MIPROv2 pipeline with minimal data.
+    """Full end-to-end GEPA pipeline at reduced data scale (2 examples).
 
-    Uses 2 training examples and a simple metric (parse + hard_gate only,
-    no Modal critic needed) to verify all pipes connect.
-    Requires: OPENROUTER_API_KEY env var + dspy importable without collision.
+    Requires: OPENROUTER_API_KEY + MODAL env vars + dspy.
     """
 
     @pytest.fixture(autouse=True)
@@ -344,29 +342,13 @@ class TestOptimizeMinimal:
         except ImportError:
             pytest.skip('dspy import fails (gepa name collision)')
 
-    def test_optimize_light_minimal(self):
-        """auto='light' with 2 examples and a simple metric returns valid result."""
+    def test_optimize_light_end_to_end(self):
+        """auto='light', 2 examples, real metric through full pipeline."""
         trainset = _load_trainset()[:2]
-
-        # Simple metric: 1.0 if parseable + passes hard_gate, else 0.0
-        def simple_metric(example, pred, trace=None):
-            text = pred.plan_json
-            if text.strip().startswith('```'):
-                lines = text.strip().split('\n')
-                lines = [l for l in lines if not l.strip().startswith('```')]
-                text = '\n'.join(lines)
-            pr = _parse_plan(text)
-            if pr is None:
-                return 0.0
-            from research.gepa.scoring import hard_gate
-            gate = hard_gate(pr)
-            return 0.0 if math.isinf(gate) else 1.0
-
         result = optimize_prompt(
             auto='light',
             num_threads=1,
             trainset=trainset,
-            metric=simple_metric,
         )
 
         assert isinstance(result, OptimizationResult)
@@ -374,3 +356,4 @@ class TestOptimizeMinimal:
         assert len(result.optimized_prompt) > 0
         assert 'OUTPUT CONTRACT' in result.optimized_prompt
         assert 'AVAILABLE TOOLS' in result.optimized_prompt
+        assert 'SPAWN_SUB_AGENT TOOL' in result.optimized_prompt

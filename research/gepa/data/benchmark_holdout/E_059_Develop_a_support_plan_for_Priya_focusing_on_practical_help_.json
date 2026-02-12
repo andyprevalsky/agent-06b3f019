@@ -1,0 +1,23 @@
+{
+  "id": "759f042f-8adf-47cd-a404-0e8ee3f930ed",
+  "raw_seed": "Develop a support plan for Priya focusing on practical help for her solo-parenting week next week",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Develop a support plan for Priya focusing on practical help for her solo-parenting week next week"
+    },
+    {
+      "role": "assistant",
+      "content": "I need to understand Priya's situation better before developing a support plan. Let me clarify a few key details about her solo-parenting week and needs."
+    },
+    {
+      "role": "user",
+      "content": "Okay, great!\n\n1.  Priya is my sister. Her children are Maya (7, in 2nd grade) and Leo (4, in preschool).\n2.  It's next week, Monday, Oct 23rd to Friday, Oct 27th.\n3.  Her husband, Ben, is away on a work trip to Boston.\n4.  Her biggest pain points are definitely dinner prep (getting home late from work and figuring out food), keeping the kids entertained after school without screens, and just feeling overwhelmed and lonely.\n5.  She has me (her sister) and my husband nearby, and a few close friends. She also has a bit of a budget for some services if needed \u2013 maybe $100-150.\n6.  She works full-time, 9-5, from home mostly, but has to go into the office on Wednesday for a big team meeting. Maya has soccer practice on Tuesday afternoons (4:30-5:30 PM). Leo has preschool until 3 PM daily.\n7.  A written checklist or a simple calendar schedule with ideas would be perfect."
+    },
+    {
+      "role": "assistant",
+      "content": "**Mapping Out Priya's Needs**\n\nI'm zeroing in on Priya's situation. I'm focusing on her children: Maya, the second-grader, and Leo, who's preschool-aged, along with Priya herself. The family unit is clear, and the date is set for next week, starting on Monday in October. I am starting to formulate some plans.\n\n\n**Defining the Parameters**\n\nI've got a solid grip on Priya's life, especially the family dynamics and the timeframe. With the work from home situation, the solo parenting, and the kids' activities, I am constructing a plan. I'm focusing on those pain points and the budget, it's starting to shape into a realistic schedule. I can see the outline of a checklist forming in my mind.\n\nThank you for the detailed information about Priya! This gives me a clear picture of her needs and the resources available. I will now create a plan to develop a support strategy for her solo-parenting week, focusing on practical help for dinner, after-school activities, and emotional support, while leveraging the available family, friends, and budget."
+    }
+  ],
+  "set_plan_args": {}
+}

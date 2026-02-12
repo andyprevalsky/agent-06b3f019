@@ -1,0 +1,223 @@
+{
+  "id": "e685189c-48b4-4bc4-9b0a-6cebe8f1eccf",
+  "raw_seed": "Research specific foods and supplements that help with: (1) sustained energy throughout the day (to fix afternoon crashes), (2) mildly elevated cholesterol reduction through diet, and (3) easy healthy swaps for the user's current habits (e.g., better coffee additions, whole grain toast toppings, healthier taco/pasta versions). Look for practical swap lists from nutrition experts.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Research specific foods and supplements that help with: (1) sustained energy throughout the day (to fix afternoon crashes), (2) mildly elevated cholesterol reduction through diet, and (3) easy healthy swaps for the user's current habits (e.g., better coffee additions, whole grain toast toppings, healthier taco/pasta versions). Look for practical swap lists from nutrition experts."
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research evidence-based foods and supplements for sustained energy, cholesterol reduction, and practical healthy swaps. This requires gathering current nutritional science and expert recommendations."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustained energy throughout day prevent afternoon crash foods supplements nutrition\"]:\n\n\nSources: https://www.nm.org/healthbeat/healthy-tips/nutrition/jump-start-snacks, https://mcpress.mayoclinic.org/nutrition-fitness/how-to-prevent-an-afternoon-crash-with-diet/, https://www.urmc.rochester.edu/encyclopedia/content?contenttypeid=1&contentid=503, https://www.health.harvard.edu/nutrition/best-vitamins-and-minerals-for-energy, https://www.deliciouslyella.com/en-us/blog/a-dieticians-guide-to-avoiding-an-afternoon-slump"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"lower cholesterol diet foods supplements clinical evidence\"]:\n\n\nSources: https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol-lowering-supplements/art-20050980, https://pubmed.ncbi.nlm.nih.gov/37300664/, https://pubmed.ncbi.nlm.nih.gov/33762150/, https://newsroom.heart.org/news/6-common-heart-health-supplements-ineffective-at-lowering-cholesterol-compared-to-statins, https://clinicaltrials.gov/search?cond=Hypercholesterolemia&intr=Diet&aggFilters=status:not%20rec"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy food swaps practical alternatives coffee toppings whole grain toast\"]:\n\n\nSources: https://thelivingwell.com/order-these-healthier-coffee-swaps/, https://www.momskitchenhandbook.com/healthy-breakfast-toast-with-all-the-toppings/, https://www.eatingwell.com/food-swaps-blood-sugar-friendly-meals-11792901, https://segafredocoffee.com/blogs/essentials/the-ultimate-guide-to-healthy-coffee-additives?srsltid=AfmBOooN6MRD5G01BG6lzCI7cR1-etM5TQv_9x38FCYxvpC66dNF9Rpg, https://hoorahtohealth.com/toppings-for-toast/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"nutritionist recommended healthy swaps tacos pasta quick meals\"]:\n\n\nSources: https://www.eatingwell.com/gallery/8064906/dietitian-go-to-20-minute-dinner-recipes/, https://www.today.com/health/diet-fitness/healthy-food-swaps-dietitians-rcna187166, https://therealfooddietitians.com/taco-pasta/, https://www.bhf.org.uk/informationsupport/heart-matters-magazine/nutrition/quick-healthy-meals, http://nbgh.org/about/news-press/news-detail?articleId=54237&publicid=395"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research evidence-based foods and supplements for sustained energy, cholesterol reduction, and practical healthy swaps. This requires gathering current nutritional science and expert recommendations."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustained energy throughout day prevent afternoon crash foods supplements\"]:\n\n\nSources: https://www.nm.org/healthbeat/healthy-tips/nutrition/jump-start-snacks, https://www.health.harvard.edu/nutrition/best-vitamins-and-minerals-for-energy, https://mcpress.mayoclinic.org/nutrition-fitness/how-to-prevent-an-afternoon-crash-with-diet/, https://www.hydroassoc.org/stop-feeling-tired-power-foods-boost-energy/, https://cooksrx.ca/blog/foods-that-fight-fatigue"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"reduce cholesterol diet foods supplements evidence-based\"]:\n\n\nSources: https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol-lowering-supplements/art-20050980, https://www.health.harvard.edu/heart-health/11-foods-that-lower-cholesterol, https://www.sciencedirect.com/science/article/pii/S0939475321000028, https://pmc.ncbi.nlm.nih.gov/articles/PMC9645405/, https://www.bhf.org.uk/informationsupport/heart-matters-magazine/medical/cholesterol-lowering-alternatives"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy food swaps nutrition expert practical substitutions coffee toast\"]:\n\n\nSources: https://www.healthline.com/nutrition/coffee-alternatives, https://www.quora.com/What-are-some-alternatives-besides-sweets-to-have-with-your-morning-coffee, https://www.healthyfood.com/advice/14-smart-swaps-for-a-healthier-cafe-breakfast/, https://www.ctcd.edu/sites/myctcd/today/?p=i-swapped-my-afternoon-coffee-for-healthy-drinks-for-30-days-what-i-really-noticed-697fffce72280, https://www.atozrunning.com/50-combinations-of-ways-to-fix-toast/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"whole grain toast toppings healthy options\"]:\n\n\nSources: https://www.momskitchenhandbook.com/healthy-breakfast-toast-with-all-the-toppings/, https://hoorahtohealth.com/toppings-for-toast/, https://reallifenutritionist.com/healthy-toppings-for-toast/, https://www.bhf.org.uk/informationsupport/heart-matters-magazine/nutrition/afternoon-tea/5-healthy-toast-toppings, https://www.nourishingplate.com/blog/2017/9/18/quick-and-easy-breakfast-ideas-five-fab-toast-toppings"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy taco pasta alternatives nutritionist recommendations\"]:\n\n\nSources: https://therealfooddietitians.com/taco-pasta/, https://easyeatsdietitian.com/healthy-taco-pasta/, https://gatherednutrition.com/healthy-taco-pasta/, https://www.healthline.com/nutrition/pasta-alternatives-reviews, https://www.lizmoody.com/healthy-taco-pasta/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research evidence-based foods and supplements for sustained energy, cholesterol management, and practical healthy swaps. This is a clear research goal with good decomposability - I'll gather actionable nutrition expert recommendations across these three areas."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"foods supplements sustained energy afternoon crash prevention nutrition expert\"]:\n\n\nSources: https://www.gohealthuc.com/library/7-energy-boosting-foods-eat-during-mid-afternoon-slump, https://www.deliciouslyella.com/en-us/blog/a-dieticians-guide-to-avoiding-an-afternoon-slump, https://www.deliciouslyella.com/blog/a-dieticians-guide-to-avoiding-an-afternoon-slump, https://www.weightandwellness.com/resources/podcasts/afternoon-slump, https://www.urmc.rochester.edu/encyclopedia/content?contenttypeid=1&contentid=503"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"diet reduce cholesterol naturally foods supplements evidence based\"]:\n\n\nSources: https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol-lowering-supplements/art-20050980, https://pubmed.ncbi.nlm.nih.gov/37300664/, https://www.health.harvard.edu/heart-health/11-foods-that-lower-cholesterol, https://www.bhf.org.uk/informationsupport/heart-matters-magazine/medical/cholesterol-lowering-alternatives, https://www.nccih.nih.gov/health/providers/digest/high-cholesterol-and-natural-products-science"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy food swaps coffee additions whole grain toast toppings\"]:\n\n\nSources: https://healthymadetasty.com.au/blog/10-topping-ideas-to-transform-your-toast/, https://hoorahtohealth.com/toppings-for-toast/, https://segafredocoffee.com/blogs/essentials/the-ultimate-guide-to-healthy-coffee-additives%3Fsrsltid%3DAfmBOorLxeFd41uDDOE6bB_J8ZIfoVdQxVzUoq0jiS4Is_VDD_jkq1MG, https://www.momskitchenhandbook.com/healthy-breakfast-toast-with-all-the-toppings/, https://www.reddit.com/r/HealthyFood/comments/ptu4ou/healthy_additives_to_sweeten_coffee/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthier taco pasta recipes nutritionist recommendations practical swaps\"]:\n\n\nSources: https://therealfooddietitians.com/taco-pasta/, https://gatherednutrition.com/healthy-taco-pasta/, https://theproteinchef.co/taco-pasta-recipe/, https://easyeatsdietitian.com/healthy-taco-pasta/, https://www.erinliveswhole.com/healthy-taco-pasta/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research evidence-based foods and supplements for sustained energy, cholesterol management, and practical healthy swaps. This is a clear goal with good decomposability - I'll gather current nutrition science and expert recommendations."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"foods supplements sustained energy avoid afternoon energy crash nutrition science\"]:\n\n\nSources: https://www.aware.app/en/magazine/14-science-backed-foods-to-boost-your-energy-levels, https://mcpress.mayoclinic.org/nutrition-fitness/how-to-prevent-an-afternoon-crash-with-diet/, https://pmc.ncbi.nlm.nih.gov/articles/PMC12209867/, https://www.nutritionnews.abbott/lifestyle-nutrition/diet-wellness/energy-boosting-foods-and-energy-sustaining-foods/, https://now.tufts.edu/2022/02/01/want-more-energy-start-your-plate"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cholesterol reduction diet foods evidence-based nutrition recommendations\"]:\n\n\nSources: https://medlineplus.gov/howtolowercholesterolwithdiet.html, https://www.health.harvard.edu/heart-health/11-foods-that-lower-cholesterol, https://www.ncbi.nlm.nih.gov/books/NBK551722/, https://my.clevelandclinic.org/health/articles/16867-cholesterol--nutrition-tlc, https://www.sciencedirect.com/science/article/pii/S0939475321000028"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy food swaps practical alternatives coffee toppings whole grain toast\"]:\n\n\nSources: https://www.momskitchenhandbook.com/healthy-breakfast-toast-with-all-the-toppings/, https://thelivingwell.com/order-these-healthier-coffee-swaps/, https://healthymadetasty.com.au/blog/10-topping-ideas-to-transform-your-toast/, https://hoorahtohealth.com/toppings-for-toast/, https://segafredocoffee.com/blogs/essentials/the-ultimate-guide-to-healthy-coffee-additives?srsltid=AfmBOopdJhzCUxLL_Eiwv-aeCHtoghjbT-cJ-ZNG9s7LI3Qrvh8NrJUc"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy pasta taco alternatives nutritionist recommendations\"]:\n\n\nSources: https://peasandcrayons.com/6-easy-hacks-healthier-taco-night/, https://www.healthline.com/nutrition/pasta-alternatives-reviews, https://therealfooddietitians.com/taco-pasta/, https://www.levels.com/blog/dr-caseys-healthy-tacos-two-ways, https://teamnutrition.ca/blog-nutritionist-dietitian/4-alternatives-pasta"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research evidence-based foods and supplements for sustained energy, cholesterol reduction, and practical healthy swaps. This is clearly scoped - I need to gather specific nutritionist-recommended alternatives and swap lists to create actionable guidance."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"prevent afternoon energy crash foods supplements sustained energy all day\"]:\n\n\nSources: https://www.hydroassoc.org/stop-feeling-tired-power-foods-boost-energy/, https://mcpress.mayoclinic.org/nutrition-fitness/how-to-prevent-an-afternoon-crash-with-diet/, https://www.urmc.rochester.edu/encyclopedia/content?contenttypeid=1&contentid=503, https://www.deliciouslyella.com/en-us/blog/a-dieticians-guide-to-avoiding-an-afternoon-slump, https://www.health.harvard.edu/nutrition/best-vitamins-and-minerals-for-energy"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cholesterol reduction diet foods supplements clinical evidence\"]:\n\n\nSources: https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol-lowering-supplements/art-20050980, https://www.sciencedirect.com/science/article/pii/S0939475321000028, https://www.ncbi.nlm.nih.gov/books/NBK551722/, https://pmc.ncbi.nlm.nih.gov/articles/PMC12389712/, https://pubmed.ncbi.nlm.nih.gov/37300664/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy food swaps coffee additions whole grain toppings nutrition expert\"]:\n\n\nSources: https://www.uhhospitals.org/blog/articles/2025/11/the-best-and-worst-things-to-add-to-your-coffee, https://blog.joinfightcamp.com/wellness/switch-it-up-6-healthy-food-swaps-for-everyday-options/, https://www.seriouseats.com/whole-grain-recipes, https://www.eatingwell.com/article/7912339/the-best-and-worst-things-to-add-to-your-coffee-according-to-dietitians/, https://www.moatfield.co.uk/media/content/files/Healthy%20food%20swaps.pdf"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthier taco pasta recipes nutritionist recommended practical alternatives\"]:\n\n\nSources: https://gatherednutrition.com/healthy-taco-pasta/, https://pickanytwo.net/healthy-taco-pasta/, https://easyeatsdietitian.com/healthy-taco-pasta/, https://therealfooddietitians.com/taco-pasta/, https://theproteinchef.co/taco-pasta-recipe/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research specific foods and supplements for sustained energy, cholesterol reduction, and practical healthy swaps. This is a clear research goal with good decomposability. Let me gather evidence-based recommendations from nutrition experts."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"foods supplements sustained energy afternoon crash prevention nutrition expert\"]:\n\n\nSources: https://www.healthline.com/health/food-nutrition/foods-that-beat-fatigue, https://mcpress.mayoclinic.org/nutrition-fitness/how-to-prevent-an-afternoon-crash-with-diet/, https://www.gnc.com/buy/supplements-for-afternoon-energy-slumps, https://www.prevention.com/food-nutrition/a69300824/best-foods-that-give-you-energy/, https://www.bbc.co.uk/food/articles/energy_boosting_foods"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"foods reduce cholesterol diet evidence-based nutrition\"]:\n\n\nSources: https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol/art-20045192, https://www.health.harvard.edu/heart-health/11-foods-that-lower-cholesterol, https://medlineplus.gov/howtolowercholesterolwithdiet.html, https://www.sciencedirect.com/science/article/pii/S0939475321000028, https://www.ncbi.nlm.nih.gov/books/NBK551722/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"practical healthy food swaps coffee additions whole grain toast toppings\"]:\n\n\nSources: https://www.momskitchenhandbook.com/healthy-breakfast-toast-with-all-the-toppings/, https://segafredocoffee.com/blogs/essentials/the-ultimate-guide-to-healthy-coffee-additives%3Fsrsltid%3DAfmBOoq4wFchsc4ACqnZu2CqoNGL0UF1VGOR7VBio-rKeN2ZD3xXxgIE, https://www.eatingwell.com/food-swaps-for-weight-loss-11845023, https://hoorahtohealth.com/toppings-for-toast/, https://www.reddit.com/r/HealthyFood/comments/ptu4ou/healthy_additives_to_sweeten_coffee/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy taco pasta alternatives recipes nutrition expert\"]:\n\n\nSources: https://theproteinchef.co/taco-pasta-recipe/, https://thecleaneatingcouple.com/taco-pasta/, https://www.pickanytwo.net/healthy-taco-pasta/, https://perfectlyportionednutrition.com/shop/beef-taco-pasta-regular/, https://gatherednutrition.com/healthy-taco-pasta/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research specific foods, supplements, and practical dietary swaps to address sustained energy, cholesterol reduction, and healthy habit replacements. This is a clear research goal with well-defined sub-topics. Let me gather expert recommendations on all three areas."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"foods supplements sustained energy afternoon crash prevention nutrition experts\"]:\n\n\nSources: https://www.healthline.com/health/food-nutrition/foods-that-beat-fatigue, https://www.prevention.com/food-nutrition/a69300824/best-foods-that-give-you-energy/, https://www.gnc.com/buy/supplements-for-afternoon-energy-slumps, https://health.clevelandclinic.org/foods-that-give-you-energy, https://www.deliciouslyella.com/blog/a-dieticians-guide-to-avoiding-an-afternoon-slump"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cholesterol reduction diet foods supplements natural remedies\"]:\n\n\nSources: https://www.health.harvard.edu/heart-health/11-foods-that-lower-cholesterol, https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol/art-20045192, https://www.brownhealth.org/be-well/top-10-foods-lower-cholesterol, https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol-lowering-supplements/art-20050980, https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/reduce-cholesterol/art-20045935"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"practical healthy food swaps coffee additions whole grain toppings nutrition expert recommendations\"]:\n\n\nSources: https://segafredocoffee.com/blogs/essentials/the-ultimate-guide-to-healthy-coffee-additives, https://www.facebook.com/groups/769434716564891/posts/2575864675921877/, https://www.healthdirect.gov.au/healthy-food-swaps, https://www.uhhospitals.org/blog/articles/2025/11/the-best-and-worst-things-to-add-to-your-coffee, https://melissaknorris.com/healthy-ingredients-to-swap-out-now/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy taco pasta alternatives easy swaps nutritionist guide\"]:\n\n\nSources: https://www.thekitchn.com/taco-pasta-recipe-2-23751362, https://www.landofrost.com/6-healthy-alternatives-to-traditional-pasta/, https://therealfooddietitians.com/taco-pasta/, https://www.chelseasmessyapron.com/one-skillet-cheesy-taco-pasta/, https://www.healthline.com/nutrition/pasta-alternatives-reviews"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research evidence-based foods and supplements for sustained energy, cholesterol management, and practical healthy swaps. This is a clear research goal with good decomposability. Let me gather comprehensive information from nutrition experts."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustained energy throughout day foods supplements prevent afternoon crash\"]:\n\n\nSources: https://mcpress.mayoclinic.org/nutrition-fitness/how-to-prevent-an-afternoon-crash-with-diet/, https://www.urmc.rochester.edu/encyclopedia/content?contenttypeid=1&contentid=503, https://www.nm.org/healthbeat/healthy-tips/nutrition/jump-start-snacks, https://www.deliciouslyella.com/en-us/blog/a-dieticians-guide-to-avoiding-an-afternoon-slump, https://www.health.harvard.edu/nutrition/best-vitamins-and-minerals-for-energy"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cholesterol reduction diet foods nutrition expert recommendations\"]:\n\n\nSources: https://www.health.harvard.edu/heart-health/11-foods-that-lower-cholesterol, https://www.nhs.uk/conditions/high-cholesterol/how-to-lower-your-cholesterol/, https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol/art-20045192, https://www.brownhealth.org/be-well/top-10-foods-lower-cholesterol, https://www.heart.org/en/health-topics/cholesterol/prevention-and-treatment-of-high-cholesterol-hyperlipidemia/cooking-to-lower-cholesterol"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy food swaps practical alternatives coffee additions whole grain toast\"]:\n\n\nSources: https://www.eatingwell.com/food-swaps-for-weight-loss-11845023, https://www.momskitchenhandbook.com/healthy-breakfast-toast-with-all-the-toppings/, https://segafredocoffee.com/blogs/essentials/the-ultimate-guide-to-healthy-coffee-additives?srsltid=AfmBOooFBs-WLdKKS7lcM7fTfrOgGdMD6zqw_eEj0kS97dqN9UTOmADc, https://www.instagram.com/p/DTnNlWdiXdi/, https://www.self.com/gallery/breakfast-toasts-to-brighten-your-morning"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"easy healthy swaps tacos pasta nutrition expert lists\"]:\n\n\nSources: https://gatherednutrition.com/healthy-taco-pasta/, https://legallyhealthyblonde.com/healthy-pasta-alternatives/, https://peasandcrayons.com/6-easy-hacks-healthier-taco-night/, https://hungryhobby.net/taco-pasta-skillet-recipe/, https://www.landofrost.com/6-healthy-alternatives-to-traditional-pasta/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research specific foods, supplements, and practical healthy swaps for sustained energy, cholesterol reduction, and easy dietary substitutions. Let me gather current expert recommendations from reputable nutrition sources."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustained energy throughout day prevent afternoon crash foods supplements nutrition\"]:\n\n\nSources: https://www.nm.org/healthbeat/healthy-tips/nutrition/jump-start-snacks, https://www.urmc.rochester.edu/encyclopedia/content?contenttypeid=1&contentid=503, https://www.maxinutrition.com/blogs/nutrition/boost-energy-to-beat-the-afternoon-slump, https://mcpress.mayoclinic.org/nutrition-fitness/how-to-prevent-an-afternoon-crash-with-diet/, https://www.weightandwellness.com/resources/podcasts/afternoon-slump"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"reduce cholesterol through diet foods supplements expert recommendations\"]:\n\n\nSources: https://www.mayoclinic.org/diseases-conditions/high-blood-cholesterol/in-depth/cholesterol-lowering-supplements/art-20050980, https://www.health.harvard.edu/heart-health/11-foods-that-lower-cholesterol, https://www.bhf.org.uk/informationsupport/heart-matters-magazine/medical/cholesterol-lowering-alternatives, https://medlineplus.gov/howtolowercholesterolwithdiet.html, https://www.massgeneralbrigham.org/en/about/newsroom/articles/10-foods-to-lower-cholesterol"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthy food swaps practical substitutions coffee additions whole grain toast toppings\"]:\n\n\nSources: https://www.massgeneralbrigham.org/en/about/newsroom/articles/simple-substitutes-for-healthy-eating, https://www.lemon8-app.com/@hannahvitacco/7403558396793815557?region=us, https://segafredocoffee.com/blogs/essentials/the-ultimate-guide-to-healthy-coffee-additives?srsltid=AfmBOoohgGlTYfSgZqDqrpE0dn2kcGBjdXxYijFX_oVeG3l5jUyGbLIX, https://www.heart.org/en/healthy-living/healthy-eating/cooking-skills/cooking/smart-substitutions-to-eat-healthy, https://www.lemon8-app.com/alliecat11k/7384047274332881413?region=us"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"healthier taco pasta alternatives nutrition expert recommendations\"]:\n\n\nSources: https://therealfooddietitians.com/taco-pasta/, https://gatherednutrition.com/healthy-taco-pasta/, https://dietitiandebbie.com/vegan-taco-pasta/, https://easyeatsdietitian.com/healthy-taco-pasta/, https://www.lizmoody.com/healthy-taco-pasta/"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll research evidence-based foods and supplements for sustained energy, cholesterol management, and practical healthy swaps. This is a clear research goal with good decomposability. Let me gather information from nutrition experts and credible sources."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"foods supplements sustained energy afternoon crashes nutrition expert\"]:\n\n\nSources: https://mcpress.mayoclinic.org/nutrition-fitness/how-to-prevent-an-afternoon-crash-with-diet/, https://www.deliciouslyella.com/en-us/blog/a-dieticians-guide-to-avoiding-an-afternoon-slump, https://www.purition.com/blogs/fitness-nutrition/5-tips-for-sustained-energy-beat-energy-crashes-naturally?srsltid=AfmBOooze9O7Kr5TBvWpPDBggh9vgC0N3eg7OmV6-k4JiiHGMd0rKA1D, https://www.nm.org/healthbeat/healthy-tips/nutrition/jump-start-snacks, https://www.gohealthuc.com/library/7-energy-boosting-foods-eat-during-mid-afternoon-slump"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"cholesterol reduction diet foods evidence based\"]:\n\n\nSources: https://www.health.harvard.edu/heart-health/11-foods-that-lower-cholesterol, https://medlineplus.gov/howtolowercholesterolwithdiet.html, https://www.ncbi.nlm.nih.gov/books/NBK551722/, https://www.sciencedirect.com/science/article/pii/S0939475321000028, https://www.nhlbi.nih.gov/education/TLC-Therapeutic-Lifestyle-Changes-Lower-Cholesterol"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"practical healthy food swaps nutrition expert recommendations\"]:\n\n\nSources: https://www.healthdirect.gov.au/healthy-food-swaps, https://www.nhs.uk/healthier-families/food-facts/healthier-food-swaps/, https://www.massgeneralbrigham.org/en/about/newsroom/articles/simple-substitutes-for-healthy-eating, https://bodynetwork.com/healthy-food-swaps-nutrition-expert-recommendations/, https://www.heart.org/en/healthy-living/healthy-eating/cooking-skills/cooking/smart-substitutions-to-eat-healthy"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"sustained energy foods avoid blood sugar crashes\"]:\n\n\nSources: https://www.healthline.com/health/food-nutrition/foods-that-beat-fatigue, https://www.thepeachkitchen.com/2026/01/foods-that-give-you-energy-without-sugar-crashes/, https://www.stmaryshealthcaresystem.org/blog-articles/5-best-foods-help-regulate-your-blood-sugar-levels, https://www.gq-magazine.co.uk/article/what-to-eat-to-avoid-spiking-your-glucose-and-those-post-lunch-energy-crashes, https://www.nm.org/healthbeat/healthy-tips/nutrition/jump-start-snacks"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"whole grain toast toppings healthy options nutritionist\"]:\n\n\nSources: https://nutritiontofit.com/toppings-for-toast/, https://www.momskitchenhandbook.com/healthy-breakfast-toast-with-all-the-toppings/, https://healthymadetasty.com.au/blog/10-topping-ideas-to-transform-your-toast/, https://www.superhealthykids.com/20-toast-toppings-for-a-healthy-breakfast/, https://reallifenutritionist.com/healthy-toppings-for-toast/"
+    },
+    {
+      "role": "assistant",
+      "content": "I have completed the initial research into foods, supplements, and healthy swaps across all three areas of your goal. I have gathered information on: (1) foods and supplements for sustained energy and preventing afternoon crashes, (2) dietary approaches and supplements for mildly elevated cholesterol reduction, and (3) practical healthy swaps for common habits like coffee additions, whole-grain toast toppings, and healthier taco/pasta versions, focusing on nutritionist recommendations. I will now consolidate this information and formulate a comprehensive plan."
+    }
+  ],
+  "set_plan_args": {}
+}

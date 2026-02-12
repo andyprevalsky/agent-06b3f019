@@ -1,4 +1,4 @@
-"""GEPA prompt optimizer: evolves the planner's core strategy section using DSPy MIPROv2.
+"""GEPA prompt optimizer: evolves the planner's core strategy section using DSPy GEPA.
 
 Optimizes 3 sections of the planner system prompt (lines 603-629 of agents/helpers/prompts.py):
   1. TWO-AXIS PLANNING FRAMEWORK — uncertainty vs decomposability heuristic
@@ -78,7 +78,7 @@ def _build_prompt_skeleton() -> str:
 
     This is passed as an input field to the DSPy module so the LLM sees
     structural requirements (OUTPUT CONTRACT, tool examples, reminders)
-    but MIPROv2 doesn't modify them.
+    but GEPA doesn't modify them.
     """
     tools_desc = _get_planner_tools_description()
     full = build_planner_system_prompt(tools_desc)
@@ -169,10 +169,11 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
     """Create a DSPy metric function that scores decompositions via our pipeline.
 
     Pipeline: parse JSON → hard_gate → critic.score → final_score
-    Returns 0.0 for invalid/unparseable plans.
+    Returns ScoreWithFeedback for GEPA's reflective mutation process.
     """
+    from dspy.teleprompt.gepa.gepa_utils import ScoreWithFeedback
 
-    def gepa_metric(example, pred, trace=None):
+    def gepa_metric(example, pred, trace=None, pred_name=None, pred_trace=None):
         plan_text = pred.plan_json
         # Strip markdown fences if model wrapped the JSON
         if plan_text.strip().startswith('```'):
@@ -183,12 +184,12 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
         pr = _parse_plan(plan_text)
         if pr is None:
             logger.debug(f'Metric: parse failed for plan_json: {pred.plan_json[:200]}')
-            return 0.0
+            return ScoreWithFeedback(score=0.0, feedback=f'Could not parse JSON output: {pred.plan_json[:200]}')
 
         gate = hard_gate(pr)
         if math.isinf(gate):
             logger.debug(f'Metric: hard_gate failed ({len(pr.tasks)} tasks)')
-            return 0.0
+            return ScoreWithFeedback(score=0.0, feedback=f'Invalid structure: {len(pr.tasks)} tasks (need 2-8) or cycle detected')
 
         try:
             ctx = json.loads(example.context) if isinstance(example.context, str) else example.context
@@ -197,13 +198,16 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
             # Normalize raw logits to [0, 1] — final_score expects normalized critic_score
             critic_normalized = 1.0 / (1.0 + math.exp(-raw_scores[0]))
             depth = _compute_depth(pr)
-            score = final_score(critic_normalized, 0.0, len(pr.tasks), depth)
+            score = max(0.0, final_score(critic_normalized, 0.0, len(pr.tasks), depth))
             logger.info(f'Metric: raw_critic={raw_scores[0]:.3f}, normalized={critic_normalized:.3f}, '
                         f'depth={depth}, tasks={len(pr.tasks)}, final={score:.3f}')
-            return max(0.0, score)
+            return ScoreWithFeedback(
+                score=score,
+                feedback=f'depth={depth}, tasks={len(pr.tasks)}, critic_raw={raw_scores[0]:.2f}, normalized={critic_normalized:.3f}, final={score:.3f}',
+            )
         except Exception as e:
             logger.warning(f'Metric scoring failed: {e}')
-            return 0.0
+            return ScoreWithFeedback(score=0.0, feedback=f'Scoring error: {e}')
 
     return gepa_metric
 
@@ -254,8 +258,9 @@ def optimize_prompt(
     openrouter_api_key: str | None = None,
     trainset: list | None = None,
     metric=None,
+    reflection_lm=None,
 ) -> OptimizationResult:
-    """Optimize the planner strategy section using DSPy MIPROv2.
+    """Optimize the planner strategy section using DSPy GEPA.
 
     Args:
         auto: Optimization intensity ('light', 'medium', 'heavy').
@@ -265,6 +270,7 @@ def optimize_prompt(
         openrouter_api_key: OpenRouter API key. Defaults to OPENROUTER_API_KEY env var.
         trainset: Pre-built DSPy Examples. If None, loads from tasks_dir.
         metric: Custom metric function. If None, uses critic-based gepa_metric.
+        reflection_lm: dspy.LM for GEPA reflection. If None, uses default configured LM.
 
     Returns:
         OptimizationResult with the evolved strategy and full composed prompt.
@@ -288,12 +294,13 @@ def optimize_prompt(
         metric = make_gepa_metric(critic_model_id)
 
     initial_strategy = get_initial_strategy()
-    logger.info(f'Starting MIPROv2 optimization (auto={auto}, {len(trainset)} tasks)')
+    logger.info(f'Starting GEPA optimization (auto={auto}, {len(trainset)} tasks)')
 
-    optimizer = dspy.MIPROv2(
+    optimizer = dspy.GEPA(
         metric=metric,
         auto=auto,
         num_threads=num_threads,
+        reflection_lm=reflection_lm or lm,
     )
     optimized = optimizer.compile(module, trainset=trainset)
 
@@ -304,7 +311,7 @@ def optimize_prompt(
     return OptimizationResult(
         optimized_strategy=optimized_strategy,
         optimized_prompt=compose_prompt(optimized_strategy),
-        initial_score=0.0,  # MIPROv2 tracks this internally
+        initial_score=0.0,  # GEPA tracks this internally
         final_score=0.0,
         num_trials=0,
         demos=demos,

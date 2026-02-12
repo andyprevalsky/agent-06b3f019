@@ -68,6 +68,9 @@ async def decompose_once(
         system_prompt = build_planner_system_prompt(tools_description)
 
     base_messages = _build_planner_messages(task)
+    # Ensure messages end with a user message (some providers reject assistant-ending conversations)
+    if base_messages and base_messages[-1]['role'] != 'user':
+        base_messages.append({'role': 'user', 'content': 'Generate the plan now.'})
     full_messages = [{'role': 'system', 'content': system_prompt}] + base_messages
 
     async def noop(text: str, count: int):

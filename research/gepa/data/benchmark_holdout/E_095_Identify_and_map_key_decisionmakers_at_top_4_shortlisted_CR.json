@@ -1,0 +1,23 @@
+{
+  "id": "64193858-f0b4-484a-8b68-2d2b43a8bb4b",
+  "raw_seed": "Identify and map key decision-makers at top 4 shortlisted CROs: BD leads (SVP/VP level), scientific leadership (CSO/CTO), and program directors with authority to approve timeline accelerations and equity-sharing arrangements. Retrieve contact details and org chart intelligence.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Identify and map key decision-makers at top 4 shortlisted CROs: BD leads (SVP/VP level), scientific leadership (CSO/CTO), and program directors with authority to approve timeline accelerations and equity-sharing arrangements. Retrieve contact details and org chart intelligence."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the scope of this research before proceeding with the plan. You've asked me to identify key decision-makers at the top 4 shortlisted CROs, but I don't have information about which 4 CROs you've shortlisted. This is critical context that will determine the entire research approach.\n\nLet me ask a clarifying question to ensure I execute this correctly."
+    },
+    {
+      "role": "user",
+      "content": "Our top 4 shortlisted CROs are:\n\n1) **ICON plc** \u2013 large/global (US + EU coverage); strong **oncology** and Phase I\u2013III execution; we\u2019d likely run the program out of US sites with EU expansion.  \n2) **Parexel** \u2013 large/global; good **early clinical + oncology** ops and regulatory; we\u2019ve used them previously for a Phase II vendor selection (good experience).  \n3) **Syneos Health** \u2013 large/global; we\u2019re looking at them mainly for **full-service clinical ops + commercialization interface** in oncology.  \n4) **Precision for Medicine (Precision ADVANCE)** \u2013 mid-size/specialist; very **oncology-focused**, more flexible on timelines and creative deal structures; primarily US/EU.\n\nContext: We\u2019re a venture"
+    },
+    {
+      "role": "assistant",
+      "content": "Perfect. I have the four CROs clearly identified. I now understand the context: you're a venture-backed biotech looking to evaluate BD/scientific/program leadership at these four CROs, with particular focus on their flexibility around timeline acceleration and equity arrangements. This is a pre-negotiation intelligence-gathering exercise.\n\nI'm ready to create a comprehensive execution plan that will:\n1. Research organizational structures and leadership rosters for each CRO\n2. Identify BD SVP/VP leads, CSO/CTO-level scientific leadership, and program directors with P&L authority\n3. Retrieve contact details and org chart intelligence\n4. Compile this into an actionable map organized by CRO and decision-maker tier\n\nI'll proceed with plan generation."
+    }
+  ],
+  "set_plan_args": {}
+}

@@ -1,0 +1,39 @@
+{
+  "id": "5222d033-4a43-413f-8a4c-77f2bb0c9c5e",
+  "raw_seed": "Prepare and initiate the small business loan track (recommend best-fit products: SBA 7(a)/microloan, local banks/credit unions, CDFIs; create lender shortlist; assemble application checklist and timeline; quantify DSCR/payment comfort)",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Prepare and initiate the small business loan track (recommend best-fit products: SBA 7(a)/microloan, local banks/credit unions, CDFIs; create lender shortlist; assemble application checklist and timeline; quantify DSCR/payment comfort)"
+    },
+    {
+      "role": "assistant",
+      "content": "I'm analyzing this request. The user wants a comprehensive small business loan preparation guide covering: product recommendations (SBA 7(a), microloans, CDFIs), lender identification, application materials, timeline, and debt service coverage ratio analysis. This is a structured research and planning task where I need to gather current information about lending programs and best practices, then synthesize into actionable deliverables."
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SBA 7(a) loan program 2026 requirements rates terms\"]:\n\n\nSources: https://www.sba.gov/funding-programs/loans/7a-loans, https://www.nerdwallet.com/business/loans/learn/sba-loan-rates, https://www.sba.gov/document/information-notice-5000-872051-7a-fees-effective-october-1-2025-fiscal-year-2026, https://www.sba7a.loans/sba-7a-loan-terms-rates-fees-maturity/, https://www.lendio.com/blog/sba-loan-interest-rates"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"SBA microloan program current terms requirements 2026\"]:\n\n\nSources: https://www.sba.gov/funding-programs/loans/microloans, https://www.lendio.com/blog/sba-loan-requirements, https://www.fastwaysba.com/blog/sba-loan-requirements-2026-how-to-get-approved-for-an-sba-loan, https://www.paychex.com/articles/finance/sba-microloan, https://www.peoplesbankmtg.com/the-complete-guide-to-sba-loans-for-small-business-owners-2026-edition/"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"CDFI lenders small business loans 2026\"]:\n\n\nSources: https://www.cdfifund.gov/, https://www.ofn.org/cdfi-locator/, https://home.treasury.gov/system/files/266/09.-CDFI-Fund-FY-2026-BIB.pdf, https://helloalice.com/cdfi-funding-guide/, https://www.cdfifund.gov/programs-training/certification/cdfi/application-faqs"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"small business loan DSCR debt service coverage ratio calculator\"]:\n\n\nSources: https://www.commercialrealestate.loans/dscr-calculator/, https://commercialloandirect.com/debt-service-coverage-ratio-calculator, https://www.omnicalculator.com/finance/dscr, https://www.townebank.com/business/resources/calculators/debt-service/, https://www.merchantsbank.com/debt-service-coverage-calculator"
+    },
+    {
+      "role": "assistant",
+      "content": "[web_search result for \"local credit unions small business lending 2026\"]:\n\n\nSources: https://www.navyfederal.org/services/business/loans.html, https://www.wpcu.coop/business/loans, https://creditunions.com/features/3-ways-credit-unions-showed-up-for-small-businesses-in-2025/, https://product.hopecu.org/small-business/, https://trupartnercu.org/loans/business-loans/"
+    },
+    {
+      "role": "assistant",
+      "content": "The goal is to prepare a comprehensive small business loan track. This involves recommending best-fit loan products (SBA 7(a), microloan, local banks/credit unions, CDFIs), creating a lender shortlist, assembling an application checklist and timeline, and quantifying Debt Service Coverage Ratio (DSCR) for payment comfort. I have conducted initial research on SBA 7(a) loans, SBA microloans, CDFI lenders, DSCR calculation, and local credit unions for small business lending. I now have a foundational understanding of these components."
+    }
+  ],
+  "set_plan_args": {}
+}

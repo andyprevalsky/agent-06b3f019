@@ -147,56 +147,63 @@ def train(
     }
 
 
-@app.function(
+SCORER_MODEL_ID = 'gepa_critic_312'
+
+
+@app.cls(
     gpu='A10G',
     image=image,
     volumes={MODEL_DIR: vol},
     secrets=[hf_secret],
-    timeout=300,
+    timeout=600,
+    min_containers=1,
 )
-def score(
-    conversations: list[list[dict]],
-    model_id: str = 'reward_model',
-) -> list[float]:
-    """Score pre-serialized conversations on GPU.
+class Scorer:
+    @modal.enter()
+    def load_model(self):
+        import os
+        import torch
+        from huggingface_hub import login
+        from peft import AutoPeftModelForSequenceClassification
+        from transformers import AutoTokenizer, BitsAndBytesConfig
 
-    Args:
-        conversations: list of conversations, each is
-            [{"role": "user", "content": prompt}, {"role": "assistant", "content": candidate}]
-            Serialization is done by the caller using serialize_prompt + serialize_candidate.
-        model_id: name of trained model to load from volume.
+        if os.environ.get('HF_TOKEN'):
+            login(token=os.environ['HF_TOKEN'])
 
-    Returns:
-        list of float scores, one per conversation.
-    """
-    import os
-    from huggingface_hub import login
-    from peft import AutoPeftModelForSequenceClassification
-    from transformers import AutoTokenizer
-    import torch
+        model_dir = f'{MODEL_DIR}/{SCORER_MODEL_ID}'
+        vol.reload()
+        print(f'Loading model {SCORER_MODEL_ID} from {model_dir} (4-bit)...')
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type='nf4',
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        self.model = AutoPeftModelForSequenceClassification.from_pretrained(
+            model_dir, num_labels=1,
+            quantization_config=quantization_config,
+            device_map='auto',
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        self.model.eval()
+        print(f'Model {SCORER_MODEL_ID} loaded on {self.model.device}.')
 
-    if os.environ.get('HF_TOKEN'):
-        login(token=os.environ['HF_TOKEN'])
+    @modal.method()
+    def score(self, conversations: list[list[dict]]) -> list[float]:
+        """Score pre-serialized conversations on GPU."""
+        import torch
 
-    model_dir = f'{MODEL_DIR}/{model_id}'
-    vol.reload()
+        scores = []
+        for conv in conversations:
+            inputs = self.tokenizer.apply_chat_template(
+                conv,
+                return_tensors='pt',
+                tokenize=True,
+                return_dict=True,
+            ).to(self.model.device)
 
-    model = AutoPeftModelForSequenceClassification.from_pretrained(model_dir, num_labels=1)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model.eval()
+            with torch.no_grad():
+                outputs = self.model(**inputs)
 
-    scores = []
-    for conv in conversations:
-        inputs = tokenizer.apply_chat_template(
-            conv,
-            return_tensors='pt',
-            tokenize=True,
-            return_dict=True,
-        ).to(model.device)
+            scores.append(outputs.logits[0, 0].item())
 
-        with torch.no_grad():
-            outputs = model(**inputs)
-
-        scores.append(outputs.logits[0, 0].item())
-
-    return scores
+        return scores

@@ -1,0 +1,23 @@
+{
+  "id": "76b634ee-0e24-4860-8016-fbf4e483d7d4",
+  "raw_seed": "Create website content (text/structure) and a Google Business Profile setup guide based on the defined services and legal status.",
+  "agent_context": [
+    {
+      "role": "user",
+      "content": "Create website content (text/structure) and a Google Business Profile setup guide based on the defined services and legal status."
+    },
+    {
+      "role": "assistant",
+      "content": "I need to clarify the goal before proceeding. You've asked me to create website content and a Google Business Profile setup guide, but I'm missing critical information about what services and legal status to base this on.\n\nLet me ask for the key details:"
+    },
+    {
+      "role": "user",
+      "content": "Business name: \"Maple & Main Bookkeeping\"\n\nServices: Monthly bank reconciliation, accounts payable/receivable cleanup, QuickBooks Online setup and training, sales-tax filing, year-end 1099 prep, and catch-up bookkeeping for 2022-2024.\n\nIndustry: Bookkeeping / small-business finance\n\nLegal: Single-member LLC, formed January 2023 in Michigan. EIN: 93-4821766. Registered address: 417 Maple St., Ann Arbor, MI 48104. I serve Washtenaw, Wayne, and Livingston counties remotely; occasional on-site visits.\n\nCustomers: Owner-operated service businesses (consultants, landscapers, Etsy sellers, solo attorneys) with 1\u201310 employees and $200k\u2013$2 M annual revenue. Most hate QuickBooks and just want it off their plate.\n\nTone: Friendly, plain-English, \u201cyour nerdy neighbor who actually likes spreadsheets.\u201d No jargon.\n\nDeliverables: Give me the website copy broken into normal pages (Home, Services, About, Contact, FAQ). For Google Business Profile, a step-by-step checklist I can print and tick off is perfect."
+    },
+    {
+      "role": "assistant",
+      "content": "**Processing User Input Data**\n\nI'm now fully confident in the provided user data. My focus is on crafting the website content and Google Business Profile setup guide, ensuring all necessary elements are included. I will soon be ready to generate.\n\n\n**Structuring Content and Guides**\n\nI'm currently focused on the framework for content generation. I'm structuring the website copy, incorporating the persona and tone from the prompt. Moreover, I'm outlining the step-by-step checklist for the Google Business Profile, ready to pull information regarding the user's business from earlier steps to improve accuracy. I'm preparing to flesh out the detail now.\n\nGreat, thank you for the detailed information! This is exactly what I needed. I'm ready to move forward and generate the content and guide for you. \n\nHere's my plan:\n\n1.  **Generate Website Content:** I will create the text and structure for the Home, Services, About, Contact, and FAQ pages, ensuring it reflects \"Maple & Main Bookkeeping's\" services, target customers, and the friendly, plain-English tone you described.\n2.  **Generate Google Business Profile Setup Guide:** I will create a step-by-step, printable checklist for setting up your Google Business Profile, incorporating all the relevant business details like your name, address, and service areas.\n\nOnce these are complete, I will present them to you."
+    }
+  ],
+  "set_plan_args": {}
+}
