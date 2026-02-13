@@ -35,6 +35,11 @@ const electronHandlers = {
       }
     },
   },
+  claudeCode: {
+    isAvailable: true,
+    hasCredentials: () => window.api.claudeCode?.hasCredentials() ?? Promise.resolve(false),
+    syncCredentials: () => window.api.claudeCode?.syncCredentials() ?? Promise.resolve({ success: false, message: 'Not available' }),
+  },
   browserCookies: {
     isAvailable: true,
     getInstalledBrowsers: async () => {

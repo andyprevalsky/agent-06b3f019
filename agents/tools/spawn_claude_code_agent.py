@@ -445,11 +445,8 @@ async def spawn_claude_code_activity(
         # Model pricing for usage tracking
         # Parent model pricing (for verifier calls)
         model_pricing = await get_model_pricing_with_fallback(model)
-        # Claude Code uses Sonnet 4 - $3/MTok input, $15/MTok output = 0.3¢/1k input, 1.5¢/1k output
-        claude_code_pricing = {
-            "input_cents_per_1k": 0.3,
-            "output_cents_per_1k": 1.5,
-        }
+        # Claude Code LLM usage is not charged — users provide their own credentials
+        # We only charge for the verifier agent and E2B sandbox time
 
         # Terminal filter (pyte) for processing ANSI codes like xterm.js
         terminal = TerminalFilter(cols=200, rows=500)
@@ -926,35 +923,20 @@ async def spawn_claude_code_activity(
         execution_time_ms = (_safe_time() - start_time) * 1000
         usage_items = []
 
-        # 1. Claude Code LLM usage (from JSONL logs, using Sonnet 4 pricing)
+        # 1. Claude Code LLM usage — not charged, users provide their own
+        # Claude credentials via OAuth sync. We only charge for the wrapping
+        # agent (verifier) and E2B sandbox time.
         if claude_code_usage:
             cc_input = claude_code_usage.get("inputTokens", 0)
             cc_output = claude_code_usage.get("outputTokens", 0)
             cc_cache_read = claude_code_usage.get("cacheReadInputTokens", 0)
             cc_cache_create = claude_code_usage.get("cacheCreationInputTokens", 0)
-            # Cache reads are 10% of input price, cache creation is 125% of input price
-            cc_cost = round(
-                (cc_input / 1000) * claude_code_pricing["input_cents_per_1k"] +
-                (cc_output / 1000) * claude_code_pricing["output_cents_per_1k"] +
-                (cc_cache_read / 1000) * claude_code_pricing["input_cents_per_1k"] * 0.1 +
-                (cc_cache_create / 1000) * claude_code_pricing["input_cents_per_1k"] * 1.25,
-                4
-            )
-            usage_items.append({
-                "type": "llm",
-                "cost_cents": cc_cost,
-                "provider": "Claude Code (Sonnet 4)",
-                "model": "claude-sonnet-4",
-                "input_tokens": cc_input + cc_cache_read + cc_cache_create,
-                "output_tokens": cc_output,
-            })
             logger.info(
-                "[ClaudeCode] Claude Code LLM usage",
+                "[ClaudeCode] Claude Code LLM usage (not charged, user's plan)",
                 input_tokens=cc_input,
                 output_tokens=cc_output,
                 cache_read=cc_cache_read,
                 cache_create=cc_cache_create,
-                cost_cents=cc_cost,
             )
 
         # 2. Verifier/parent LLM usage (using parent model pricing)

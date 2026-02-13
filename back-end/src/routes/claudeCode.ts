@@ -78,7 +78,8 @@ router.post('/create', authenticate, async (req: AuthRequest, res) => {
       agent_id,
       goal,
       attachments as FilePointer[] | undefined,
-      normalizedRepoUrl
+      normalizedRepoUrl,
+      user_id
     );
 
     res.json({

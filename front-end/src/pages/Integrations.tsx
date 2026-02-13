@@ -53,6 +53,7 @@ import chromeIcon from '@/assets/chrome-icon.png';
 import chatgptIcon from '@/assets/chatgpt-icon.webp';
 import braveIcon from '@/assets/brave-icon.webp';
 import applePasswordsIcon from '@/assets/apple-passwords-icon.png';
+import claudeIcon from '@/assets/claude-color.svg';
 
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
@@ -204,6 +205,10 @@ export default function Integrations() {
   const [passwordRequestSending, setPasswordRequestSending] = useState(false);
   const [passwordRequestSent, setPasswordRequestSent] = useState(false);
 
+  // Claude Code state
+  const [claudeCodeSynced, setClaudeCodeSynced] = useState(false);
+  const [claudeCodeSyncLoading, setClaudeCodeSyncLoading] = useState(false);
+
   const fetchIntegrations = useCallback(async () => {
     try {
       const headers = getAuthHeaders();
@@ -237,6 +242,10 @@ export default function Integrations() {
         // Atlas passwords have their own integration
         const atlasPasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'atlas_passwords' && i.status === 'CONNECTED');
         setAtlasPasswordsSynced(!!atlasPasswordsIntegration);
+
+        // Claude Code credentials
+        const claudeCodeIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'claude_code' && i.status === 'CONNECTED');
+        setClaudeCodeSynced(!!claudeCodeIntegration);
       }
     } catch (err) {
       console.error('Failed to fetch integrations:', err);
@@ -443,6 +452,25 @@ export default function Integrations() {
       setError(err instanceof Error ? err.message : 'Failed to send request');
     } finally {
       setPasswordRequestSending(false);
+    }
+  };
+
+  // Handle Claude Code credentials sync
+  const handleClaudeCodeSync = async () => {
+    if (!handlers.claudeCode) return;
+    setClaudeCodeSyncLoading(true);
+    setError(null);
+    try {
+      const result = await handlers.claudeCode.syncCredentials();
+      if (!result.success) {
+        throw new Error(result.message || 'Failed to sync Claude Code credentials');
+      }
+      setClaudeCodeSynced(true);
+      await fetchIntegrations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to sync Claude Code credentials');
+    } finally {
+      setClaudeCodeSyncLoading(false);
     }
   };
 
@@ -916,6 +944,65 @@ export default function Integrations() {
                   </div>
                 )}
               </div>
+
+              {/* Claude Code Credentials */}
+              {handlers.claudeCode?.isAvailable ? (
+                <div className="flex items-center justify-between p-4 border border-border rounded-lg bg-card/60">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+                      <img src={claudeIcon} alt="Claude Code" className="w-5 h-5" />
+                    </div>
+                    <div className="flex flex-col">
+                      <h3 className="font-medium">Claude Code</h3>
+                      <span className="text-xs text-muted-foreground">
+                        Sync credentials for Claude Code agents (e2e encrypted)
+                      </span>
+                      {claudeCodeSynced && (
+                        <span className="text-xs text-green-600 dark:text-green-400">Connected</span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleClaudeCodeSync}
+                    disabled={claudeCodeSyncLoading}
+                    className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                      claudeCodeSynced
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                    }`}
+                  >
+                    {claudeCodeSyncLoading ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : claudeCodeSynced ? (
+                      <Check className="w-4 h-4" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between p-4 border border-border rounded-lg bg-card/60">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+                      <img src={claudeIcon} alt="Claude Code" className="w-5 h-5" />
+                    </div>
+                    <div className="flex flex-col">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-medium">Claude Code</h3>
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                          Desktop Only
+                        </span>
+                      </div>
+                      <span className="text-xs text-muted-foreground">
+                        Sync credentials for Claude Code agents (e2e encrypted)
+                      </span>
+                    </div>
+                  </div>
+                  <Button size="sm" variant="outline" asChild>
+                    <a href="/download">Download for Mac</a>
+                  </Button>
+                </div>
+              )}
 
               {/* Other integrations */}
               {integrations.map((integration) => {

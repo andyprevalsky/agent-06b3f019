@@ -12,6 +12,7 @@ import chromeIcon from '../assets/chrome-icon.png';
 import chatgptIcon from '../assets/chatgpt-icon.webp';
 import braveIcon from '../assets/brave-icon.webp';
 import applePasswordsIcon from '../assets/apple-passwords-icon.png';
+import claudeIcon from '../assets/claude-color.svg';
 
 interface OnboardingDataProps {
   onComplete: () => void;
@@ -63,7 +64,7 @@ const IntegrationItem = ({
       <button
         onClick={onConnect}
         disabled={loading}
-        className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
+        className={`h-10 w-10 shrink-0 rounded-lg flex items-center justify-center transition-all duration-200 ${
           connected
             ? 'bg-green-100 text-green-700'
             : 'bg-foreground text-background hover:bg-foreground/90'
@@ -210,6 +211,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const [whatsAppQRCode, setWhatsAppQRCode] = useState<string | null>(null);
   const [telegramAuthModalOpen, setTelegramAuthModalOpen] = useState(false);
 
+  // Claude Code state
+  const [claudeCodeSynced, setClaudeCodeSynced] = useState(false);
+  const [claudeCodeSyncLoading, setClaudeCodeSyncLoading] = useState(false);
+
   // Accordion behavior - expand one section, collapse others
   const handleBrowsersExpand = () => {
     setBrowsersExpanded(!browsersExpanded);
@@ -309,6 +314,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
           const telegramIntegration = integrations.find((i: Integration) => i.name === 'telegram' && i.status === 'CONNECTED');
           setTelegramConnected(!!telegramIntegration);
+
+          // Check for Claude Code credentials
+          const claudeCodeIntegration = integrations.find((i: Integration) => i.name === 'claude_code' && i.status === 'CONNECTED');
+          setClaudeCodeSynced(!!claudeCodeIntegration);
         }
       } catch (err) {
         console.error('Failed to fetch data:', err);
@@ -600,6 +609,24 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       console.error('Failed to connect Telegram:', err);
     } finally {
       setChatSyncLoading(null);
+    }
+  };
+
+  // Handle Claude Code credentials sync
+  const handleClaudeCodeSync = async () => {
+    if (!window.api.claudeCode) return;
+    setClaudeCodeSyncLoading(true);
+    try {
+      const result = await window.api.claudeCode.syncCredentials();
+      if (result.success) {
+        setClaudeCodeSynced(true);
+      } else {
+        console.error('Failed to sync Claude Code credentials:', result.message);
+      }
+    } catch (err) {
+      console.error('Failed to sync Claude Code credentials:', err);
+    } finally {
+      setClaudeCodeSyncLoading(false);
     }
   };
 
@@ -1150,6 +1177,18 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
               </div>
             )}
           </div>
+
+          {/* Claude Code Credentials */}
+          {window.api.claudeCode && (
+            <IntegrationItem
+              icon={<img src={claudeIcon} alt="Claude Code" className="w-5 h-5" />}
+              name="Claude Code"
+              description="Sync credentials for Claude Code agents (e2e encrypted)"
+              connected={claudeCodeSynced}
+              loading={claudeCodeSyncLoading}
+              onConnect={handleClaudeCodeSync}
+            />
+          )}
         </div>
 
         {/* Continue button */}

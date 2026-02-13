@@ -118,6 +118,14 @@ const api: IPC = {
     ipcRenderer.removeAllListeners('payment-complete');
   },
 
+  // Claude Code credentials
+  claudeCode: {
+    hasCredentials: () =>
+      ipcRenderer.invoke('claude:hasCredentials') as Promise<boolean>,
+    syncCredentials: () =>
+      ipcRenderer.invoke('claude:syncCredentials') as Promise<{ success: boolean; message?: string }>,
+  },
+
   // Atlas credentials
   atlas: {
     storePassword: (password: string) =>

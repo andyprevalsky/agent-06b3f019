@@ -52,10 +52,17 @@ export interface BrowserCookiesHandler {
   openKeychainAccess: (searchQuery?: string) => Promise<{ success: boolean }>;
 }
 
+export interface ClaudeCodeHandler {
+  isAvailable: boolean;
+  hasCredentials: () => Promise<boolean>;
+  syncCredentials: () => Promise<{ success: boolean; message?: string }>;
+}
+
 export interface IntegrationHandlers {
   iMessage?: IntegrationHandler;
   chromeCookies?: IntegrationHandler;
   browserCookies?: BrowserCookiesHandler;
+  claudeCode?: ClaudeCodeHandler;
 }
 
 const IntegrationHandlersContext = createContext<IntegrationHandlers>({});

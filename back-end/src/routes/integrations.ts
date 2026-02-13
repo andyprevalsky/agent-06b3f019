@@ -3122,5 +3122,75 @@ router.post('/passwords/request', authenticate, async (req: AuthRequest, res: Re
   }
 });
 
+/**
+ * POST /api/integrations/claude-code/credentials/upload
+ *
+ * Upload Claude Code credentials from the Mac app.
+ * Receives AES-256-CBC encrypted payload containing RSA-encrypted credentials.
+ */
+router.post('/claude-code/credentials/upload', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { data, iv, key } = req.body;
+
+    if (!data || !iv || !key) {
+      return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
+    }
+
+    // Decrypt the AES-256-CBC transport layer
+    let payload: { encryptedCredentials: string };
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-cbc',
+        Buffer.from(key, 'hex'),
+        Buffer.from(iv, 'hex')
+      );
+      let decrypted = decipher.update(data, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+      payload = JSON.parse(decrypted);
+    } catch (decryptError) {
+      console.error('[Integrations] Claude Code credential decryption failed:', decryptError);
+      return res.status(400).json({ error: 'Failed to decrypt credential payload' });
+    }
+
+    if (!payload.encryptedCredentials) {
+      return res.status(400).json({ error: 'Invalid payload: missing encryptedCredentials' });
+    }
+
+    console.log(`[Integrations] Storing Claude Code credentials for user ${userId}`);
+
+    await prisma.integration.upsert({
+      where: { userId_name: { userId, name: 'claude_code' } },
+      create: {
+        userId,
+        type: IntegrationType.TOOL_SETUP,
+        name: 'claude_code',
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config: { encryptedCredentials: payload.encryptedCredentials },
+        lastSyncAt: new Date(),
+        lastSuccessfulSyncAt: new Date(),
+      },
+      update: {
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config: { encryptedCredentials: payload.encryptedCredentials },
+        lastSyncAt: new Date(),
+        lastSuccessfulSyncAt: new Date(),
+        failureReason: null,
+      },
+    });
+
+    console.log(`[Integrations] Claude Code credentials stored for user ${userId}`);
+    return res.json({ message: 'Claude Code credentials uploaded successfully' });
+  } catch (error) {
+    console.error('Error uploading Claude Code credentials:', error);
+    return res.status(500).json({
+      error: 'Failed to upload Claude Code credentials',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
 export default router;
 

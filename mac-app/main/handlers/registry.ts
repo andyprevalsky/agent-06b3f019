@@ -13,6 +13,7 @@ import { IMessageSync } from '../services/iMessageSync';
 import { CookieSync } from '../services/cookieSync';
 import { BrowserStateSync } from '../services/browserStateSync';
 import { AtlasCredentialStore } from '../services/atlasCredentialStore';
+import { ClaudeCredentialSync } from '../services/claudeCredentialSync';
 import { WhatsAppSync } from '../services/messaging/platforms/whatsapp/WhatsAppSync';
 import { TelegramSync } from '../services/messaging/platforms/telegram/TelegramSync';
 import { SyncManager } from '../services/sync/SyncManager';
@@ -439,6 +440,27 @@ export function registerHandlers() {
     const result = AtlasCredentialStore.clearPassword();
     logIpc('OUT', 'atlas:clearPassword', { success: result.success });
     return result;
+  });
+
+  // Claude Code credential handlers
+  ipcMain.handle('claude:hasCredentials', () => {
+    logIpc('IN', 'claude:hasCredentials');
+    const hasCredentials = ClaudeCredentialSync.hasCredentials();
+    logIpc('OUT', 'claude:hasCredentials', { hasCredentials });
+    return hasCredentials;
+  });
+
+  ipcMain.handle('claude:syncCredentials', async () => {
+    logIpc('IN', 'claude:syncCredentials');
+    try {
+      const result = await ClaudeCredentialSync.syncCredentials();
+      logIpc('OUT', 'claude:syncCredentials', result);
+      return result;
+    } catch (error: any) {
+      logConsoleError('ClaudeCredentialSync', 'Sync failed', error);
+      logIpc('OUT', 'claude:syncCredentials', { success: false, message: error.message });
+      return { success: false, message: error.message };
+    }
   });
 
   // WhatsApp handlers

@@ -30,12 +30,13 @@ function log(level, message, data = {}) {
 const PORT = 3000;
 const GOAL = process.env.CLAUDE_CODE_GOAL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const CLAUDE_CODE_CREDENTIALS = process.env.CLAUDE_CODE_CREDENTIALS;
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 // Validate required env vars
-if (!ANTHROPIC_API_KEY) {
-  log('error', 'ANTHROPIC_API_KEY not set');
+if (!ANTHROPIC_API_KEY && !CLAUDE_CODE_CREDENTIALS) {
+  log('error', 'Neither ANTHROPIC_API_KEY nor CLAUDE_CODE_CREDENTIALS set');
   process.exit(1);
 }
 if (!GOAL) {
@@ -155,29 +156,40 @@ process.on('SIGTERM', () => shutdown(0));
 // Pre-configure Claude Code to skip all prompts
 log('info', 'Configuring Claude Code');
 
-const apiKeyLast20 = ANTHROPIC_API_KEY.slice(-20);
-const config = {
-  theme: 'dark',
-  hasCompletedOnboarding: true,
-  bypassPermissionsModeAccepted: true,
-  autoUpdaterStatus: 'disabled',
-  shiftEnterKeyBindingInstalled: true,
-  customApiKeyResponses: {
-    approved: [apiKeyLast20],
-    rejected: [],
-  },
-};
-const projects = {
-  '/home/user': { allowedTools: ['*'], hasTrustDialogAccepted: true },
-  '/': { allowedTools: ['*'], hasTrustDialogAccepted: true },
-};
-
 import { writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
 const home = homedir();
 mkdirSync(join(home, '.claude'), { recursive: true });
+
+const config = {
+  theme: 'dark',
+  hasCompletedOnboarding: true,
+  bypassPermissionsModeAccepted: true,
+  autoUpdaterStatus: 'disabled',
+  shiftEnterKeyBindingInstalled: true,
+};
+
+// Per-user credentials: write ~/.claude/.credentials.json
+// API key mode: add customApiKeyResponses to config
+if (CLAUDE_CODE_CREDENTIALS) {
+  log('info', 'Using per-user credentials');
+  writeFileSync(join(home, '.claude', '.credentials.json'), CLAUDE_CODE_CREDENTIALS);
+} else {
+  log('info', 'Using shared API key');
+  const apiKeyLast20 = ANTHROPIC_API_KEY.slice(-20);
+  config.customApiKeyResponses = {
+    approved: [apiKeyLast20],
+    rejected: [],
+  };
+}
+
+const projects = {
+  '/home/user': { allowedTools: ['*'], hasTrustDialogAccepted: true },
+  '/': { allowedTools: ['*'], hasTrustDialogAccepted: true },
+};
+
 writeFileSync(join(home, '.claude.json'), JSON.stringify(config));
 writeFileSync(join(home, '.claude', 'projects.json'), JSON.stringify(projects));
 

@@ -104,6 +104,12 @@ export interface IPC {
   onPaymentComplete: (callback: (data: { success: boolean }) => void) => void;
   removePaymentCompleteListener: () => void;
 
+  // Claude Code credentials
+  claudeCode?: {
+    hasCredentials: () => Promise<boolean>;
+    syncCredentials: () => Promise<{ success: boolean; message?: string }>;
+  };
+
   // Atlas credentials
   atlas?: {
     storePassword: (password: string) => Promise<{ success: boolean; error?: string }>;
