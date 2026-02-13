@@ -121,7 +121,8 @@ export type EventHandlers = Record<string, EventHandler>;
 export async function subscribeToChannel(
   channelName: string,
   eventHandlers: EventHandlers,
-  logPrefix: string = 'Channel'
+  logPrefix: string = 'Channel',
+  onDisconnect?: () => void,
 ): Promise<RealtimeChannel> {
   // Verify session exists
   const session = getSession();
@@ -151,6 +152,7 @@ export async function subscribeToChannel(
   const shortName = channelName.length > 16 ? `${channelName.slice(0, 16)}...` : channelName;
 
   let resolved = false;
+  let disconnectNotified = false;
   return new Promise((resolve, reject) => {
     channel.subscribe((status) => {
       // Log all status changes for debugging
@@ -159,16 +161,29 @@ export async function subscribeToChannel(
       if (status === 'SUBSCRIBED') {
         console.log(`✅ Connected to ${channelName}`);
         resolved = true;
+        disconnectNotified = false; // Reset on successful (re)join
         resolve(channel);
       } else if (status === 'CHANNEL_ERROR') {
         console.error(`❌ Disconnected from ${channelName} - CHANNEL_ERROR`);
         if (!resolved) reject(new Error(`Channel error for ${channelName}`));
+        else if (onDisconnect && !disconnectNotified) {
+          disconnectNotified = true;
+          onDisconnect();
+        }
       } else if (status === 'TIMED_OUT') {
         console.error(`❌ Disconnected from ${channelName} - TIMED_OUT`);
         if (!resolved) reject(new Error(`Subscription timed out for ${channelName}`));
+        else if (onDisconnect && !disconnectNotified) {
+          disconnectNotified = true;
+          onDisconnect();
+        }
       } else if (status === 'CLOSED') {
         console.warn(`🔴 Disconnected from ${channelName} - CLOSED`);
         if (!resolved) reject(new Error(`Channel closed for ${channelName}`));
+        else if (onDisconnect && !disconnectNotified) {
+          disconnectNotified = true;
+          onDisconnect();
+        }
       }
     });
   });
@@ -187,6 +202,7 @@ export interface AgentHandlers {
   onAttentionStream?: (payload: AttentionStreamPayload) => void;
   onToolStream?: (payload: ToolStreamPayload) => void;
   onAgentModeStarted?: () => void;
+  onDisconnect?: () => void;
 }
 
 /**
@@ -255,7 +271,7 @@ export async function subscribeToAgent(
     };
   }
 
-  return subscribeToChannel(`agent:${agentId}`, eventHandlers, 'Agent');
+  return subscribeToChannel(`agent:${agentId}`, eventHandlers, 'Agent', handlers.onDisconnect);
 }
 
 /**
@@ -265,6 +281,7 @@ export interface AttentionRequestHandlers {
   onInsert?: (payload: any) => void;
   onUpdate?: (payload: any) => void;
   onDelete?: (payload: any) => void;
+  onDisconnect?: () => void;
 }
 
 /**
@@ -290,7 +307,7 @@ export async function subscribeToAttentionRequests(
     eventHandlers['DELETE'] = handlers.onDelete;
   }
 
-  return subscribeToChannel(`user:${userId}`, eventHandlers, 'User attention');
+  return subscribeToChannel(`user:${userId}`, eventHandlers, 'User attention', handlers.onDisconnect);
 }
 
 /**
@@ -299,6 +316,7 @@ export async function subscribeToAttentionRequests(
  */
 export interface BusHandlers {
   onAgentStateChanged?: (payload: AgentStateChangedPayload) => void;
+  onDisconnect?: () => void;
 }
 
 /**
@@ -323,7 +341,7 @@ export async function subscribeToBus(
     };
   }
 
-  return subscribeToChannel(`bus:${busId}`, eventHandlers, 'Bus');
+  return subscribeToChannel(`bus:${busId}`, eventHandlers, 'Bus', handlers.onDisconnect);
 }
 
 /**

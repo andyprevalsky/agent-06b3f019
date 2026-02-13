@@ -181,8 +181,12 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
             // Data is in payload.record or payload.payload.record
             const data = payload.record || payload.payload?.record;
             if (!data) return;
-            
+
             setRequests((prev) => prev.filter((req) => req.id !== data.id));
+          },
+          onDisconnect: () => {
+            console.warn('[AttentionInbox] Channel disconnected, scheduling reconnect');
+            scheduleReconnect();
           },
         });
 

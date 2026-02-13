@@ -382,8 +382,11 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
   // ═══════════════════════════════════════════════════════════════════════════
   
   useEffect(() => {
+    let cancelled = false;
+
     // Cleanup function
     const cleanup = () => {
+      cancelled = true;
       console.log('🧹 AgentContext: cleanup running');
       isReconnectingRef.current = false;
       
@@ -424,7 +427,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
     isReconnectingRef.current = true;
 
     if (channelRef.current) {
-      channelRef.current.unsubscribe();
+      unsubscribe(channelRef.current);
       channelRef.current = null;
     }
 
@@ -673,7 +676,18 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
             console.log(`🚀 AgentContext AGENT_MODE_STARTED`);
             setIsChatMode(false);
           },
+
+          onDisconnect: () => {
+            console.warn('🔌 AgentContext: Channel disconnected, scheduling reconnect');
+            if (!cancelled) scheduleReconnect();
+          },
         });
+
+        // Guard against stale async - if effect was cleaned up during await, discard the channel
+        if (cancelled) {
+          unsubscribe(channel);
+          return;
+        }
 
         channelRef.current = channel;
         reconnectAttemptRef.current = 0;
@@ -685,6 +699,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
         if (isReconnection && forceResubscribeCounter > 0) {
           try {
             const data = await getAgent(selectedAgentId);
+            if (cancelled) return;
             // Merge API messages with any realtime messages that arrived during fetch
             setMessages(prev => {
               const apiIds = new Set(data.messages.map(m => m.message_id));
@@ -746,6 +761,28 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
       window.removeEventListener('focus', handleFocus);
     };
   }, [selectedAgentId]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Periodic health check - detect silent channel drops
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  useEffect(() => {
+    if (!selectedAgentId || !canSubscribe) return;
+
+    const interval = setInterval(() => {
+      const state = channelRef.current?.state;
+      const shouldReconnect =
+        (!channelRef.current || (state !== 'joined' && state !== 'joining')) &&
+        !isReconnectingRef.current;
+
+      if (shouldReconnect) {
+        console.warn(`[AgentContext] Health check: ${!channelRef.current ? 'no channel' : `state="${state}"`}, triggering reconnect`);
+        setForceResubscribeCounter(prev => prev + 1);
+      }
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [selectedAgentId, canSubscribe]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // URL → State sync (popstate listener for browser back/forward)

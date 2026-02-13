@@ -14,6 +14,12 @@ const MAX_DELAY_CAP_MS = 1000;      // Max delay to equalize latencies (faster m
 const LATENCY_CACHE_TTL_MS = 60000; // 1 minute cache TTL
 const TRIO_SIZE = 3;                // Race 3 models per request
 
+// Browser-use completion racing (higher caps since these are full responses, not TTFT)
+const BU_MAX_LATENCY_CAP_MS = 30000;   // 30s hard cap (browser-use models take 2-15s)
+const BU_MAX_DELAY_CAP_MS = 5000;      // 5s max delay between fastest/slowest
+const BU_DEFAULT_LATENCY_MS = 5000;    // Default when no cache
+const BU_RACE_TIMEOUT_MS = 45000;      // 45s overall race timeout
+
 // Model pools for Rose variants - sync with backend/src/routes/rose.ts
 const MODEL_POOLS: Record<string, string[]> = {
   'rose-1-lite': [
@@ -28,10 +34,12 @@ const MODEL_POOLS: Record<string, string[]> = {
     'google/gemini-3-pro-preview',
     'moonshotai/kimi-k2.5'
   ],
-  // Browser automation pool - specialized models for web interaction
+  // Browser automation pool - completion-based trio racing
   'rose-1-browser-use': [
-    'browser-use',              // Index 0 - Their hosted LLM (bu-1-0)
-    'yutori/n1',                // Index 1 - Vision-only, coordinate output
+    'browser-use',                   // Index 0 - bu-1-0 (their hosted LLM)
+    'yutori/n1',                     // Index 1 - Vision-only, coordinate output
+    'openai/gpt-5.2',               // Index 2 - DOM-only (via OpenRouter)
+    'anthropic/claude-opus-4.6',    // Index 3 - DOM-only (direct Anthropic API)
   ]
 };
 
@@ -111,9 +119,6 @@ const YUTORI_MODEL = 'n1-latest';
 // Anthropic CUA (Computer Use) API configuration
 const ANTHROPIC_CUA_MODEL = 'claude-sonnet-4-20250514';
 const ANTHROPIC_CUA_BETA = 'computer-use-2025-01-24';
-
-// Browser-use pool configuration
-const BROWSER_USE_TIMEOUT_MS = 10000;  // 10 second timeout per provider
 
 // Helper to truncate base64 data in objects for logging
 function truncateForLogging(obj: any, maxBase64Length = 100): any {
@@ -542,7 +547,7 @@ Be precise with your actions. Click accurately on the intended elements. Type te
 // Models that require vision (coordinate-based or multimodal)
 const VISION_MODELS = ['yutori/n1', 'anthropic/claude-cua', 'browser-use'];
 // Models that use DOM indices only (no vision needed - reduces tokens and latency)
-const DOM_ONLY_MODELS = ['openai/gpt-5.2'];
+const DOM_ONLY_MODELS = ['openai/gpt-5.2', 'anthropic/claude-opus-4.6'];
 
 // Build browser-use format messages (used for browser-use LLM and generic LLMs)
 // Supports vision by including screenshot in multimodal user message
@@ -657,7 +662,8 @@ ${bs.dom_tree}${historyDesc}`;
 // Call browser-use hosted LLM
 async function callBrowserUseLLM(
   req: BrowserUseRequest,
-  apiKey: string
+  apiKey: string,
+  signal?: AbortSignal
 ): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   const { messages } = transformToBrowserUseFormat(req);
   
@@ -681,11 +687,12 @@ async function callBrowserUseLLM(
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(requestBody)
+    body: JSON.stringify(requestBody),
+    signal
   });
-  
+
   const ttftMs = Date.now() - startTime;
-  
+
   if (!response.ok) {
     const errorText = await response.text();
     console.error('browser-use API error:', response.status, errorText);
@@ -887,7 +894,8 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
 // Call Yutori n1 API
 async function callYutoriLLM(
   req: BrowserUseRequest,
-  apiKey: string
+  apiKey: string,
+  signal?: AbortSignal
 ): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   const { messages } = transformToYutoriFormat(req);
   
@@ -910,11 +918,12 @@ async function callYutoriLLM(
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(requestBody)
+    body: JSON.stringify(requestBody),
+    signal
   });
-  
+
   const ttftMs = Date.now() - startTime;
-  
+
   if (!response.ok) {
     const errorText = await response.text();
     console.error('Yutori API error:', response.status, errorText);
@@ -923,6 +932,13 @@ async function callYutoriLLM(
   
   const data = await response.json();
   console.log('📥 Yutori raw response:', JSON.stringify(data, null, 2));
+
+  // Yutori returns 200 with { detail: [...] } for validation errors
+  if (data.detail) {
+    const msg = data.detail.map((d: any) => d.msg || d.message || JSON.stringify(d)).join('; ');
+    throw new Error(`Yutori validation error: ${msg}`);
+  }
+
   // Extract usage if available (Yutori API uses OpenAI format)
   const usage = data.usage ? {
     prompt_tokens: data.usage.prompt_tokens || 0,
@@ -1334,20 +1350,21 @@ async function callGenericLLM(
   req: BrowserUseRequest,
   model: string,
   openRouterKey: string,
-  supabaseUrl: string
+  supabaseUrl: string,
+  signal?: AbortSignal
 ): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   // Check if this is a DOM-only model (no vision needed)
   const isDomOnly = DOM_ONLY_MODELS.includes(model);
-  
+
   // transformToBrowserUseFormat already includes the dynamic system prompt
   // For DOM-only models, skip screenshot to reduce tokens and improve latency
   const { messages } = transformToBrowserUseFormat(req, { includeScreenshot: !isDomOnly });
-  
+
   console.log(`📤 Generic LLM request to: ${model} (DOM-only: ${isDomOnly})`);
   console.log('📤 Messages count:', messages.length);
-  
+
   const startTime = Date.now();
-  
+
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -1361,13 +1378,13 @@ async function callGenericLLM(
       messages,
       temperature: 0.3,
       max_tokens: 1024,
-      // Request JSON response
       response_format: { type: 'json_object' }
-    })
+    }),
+    signal
   });
-  
+
   const ttftMs = Date.now() - startTime;
-  
+
   if (!response.ok) {
     const errorText = await response.text();
     console.error('OpenRouter API error:', response.status, errorText);
@@ -1622,6 +1639,7 @@ const VISION_CAPABLE_MODELS = new Set([
   'anthropic/claude-sonnet-4.5',
   'anthropic/claude-haiku-4.5',
   'anthropic/claude-opus-4',
+  'anthropic/claude-opus-4.6',
   // X.AI
   'x-ai/grok-4.1-fast',
   'x-ai/grok-4.1',
@@ -1906,8 +1924,8 @@ async function fireLatencyProbes(
 // Update latency cache for a model (upsert)
 // Ignores outlier latencies (> 10s) which are likely timeouts or errors
 async function updateLatencyCache(supabase: any, model: string, pool: string, latencyMs: number): Promise<void> {
-  // Ignore outliers - latencies > 10s are likely timeouts or cold starts
-  const MAX_VALID_LATENCY_MS = 10000;
+  // Pool-aware outlier threshold (browser-use completions take 2-15s normally)
+  const MAX_VALID_LATENCY_MS = pool === 'rose-1-browser-use' ? 60000 : 10000;
   if (latencyMs > MAX_VALID_LATENCY_MS) {
     console.warn(`⚠️ Ignoring outlier latency for ${model}: ${latencyMs}ms > ${MAX_VALID_LATENCY_MS}ms`);
     return;
@@ -2038,66 +2056,76 @@ interface RacingModel {
   delayMs: number;
 }
 
+// Racing configuration (overridable for browser-use completion racing)
+interface RacingConfig {
+  maxLatencyCapMs: number;
+  maxDelayCapMs: number;
+  defaultLatencyMs: number;
+  trioSize: number;
+}
+
 // Select a random trio from the pool, calculate delays based on cached latencies
-// 
-// Strategy: 
-// 1. First, exclude models with latency > 3s (hard cap)
-// 2. Group remaining models by latency bands (within 1000ms of each other)
+//
+// Strategy:
+// 1. First, exclude models with latency > hard cap
+// 2. Group remaining models by latency bands (within delay cap of each other)
 // 3. Prefer the fastest band, randomly select trio from that band
 // 4. Add delays to fast models so they finish at same time as the slowest in the trio
 function selectRacingTrio(
   pool: string[],
-  cachedLatencies: Map<string, number>
+  cachedLatencies: Map<string, number>,
+  config?: Partial<RacingConfig>
 ): RacingModel[] {
-  const DEFAULT_LATENCY_MS = 500;
-  
+  const maxLatencyCapMs = config?.maxLatencyCapMs ?? MAX_LATENCY_CAP_MS;
+  const maxDelayCapMs = config?.maxDelayCapMs ?? MAX_DELAY_CAP_MS;
+  const defaultLatencyMs = config?.defaultLatencyMs ?? 500;
+  const trioSize = config?.trioSize ?? TRIO_SIZE;
+
   // Get all models with their latencies
   const modelsWithLatency = pool.map(model => ({
     model,
-    latencyMs: cachedLatencies.get(model) || DEFAULT_LATENCY_MS
+    latencyMs: cachedLatencies.get(model) || defaultLatencyMs
   }));
-  
-  // Filter out models exceeding hard latency cap (3s)
+
+  // Filter out models exceeding hard latency cap
   const underHardCap = modelsWithLatency.filter(m => {
-    if (m.latencyMs > MAX_LATENCY_CAP_MS) {
-      console.warn(`⚠️ Excluding ${m.model} - latency ${m.latencyMs}ms exceeds ${MAX_LATENCY_CAP_MS}ms cap`);
+    if (m.latencyMs > maxLatencyCapMs) {
+      console.warn(`⚠️ Excluding ${m.model} - latency ${m.latencyMs}ms exceeds ${maxLatencyCapMs}ms cap`);
       return false;
     }
     return true;
   });
-  
+
   if (underHardCap.length === 0) {
-    console.warn('⚠️ No eligible models after 3s cap, using full pool with fastest models');
+    console.warn(`⚠️ No eligible models after ${maxLatencyCapMs}ms cap, using full pool with fastest models`);
     const sorted = modelsWithLatency.sort((a, b) => a.latencyMs - b.latencyMs);
-    return sorted.slice(0, TRIO_SIZE).map(m => ({ ...m, delayMs: 0 }));
+    return sorted.slice(0, trioSize).map(m => ({ ...m, delayMs: 0 }));
   }
-  
+
   // Sort by latency (fastest first)
   underHardCap.sort((a, b) => a.latencyMs - b.latencyMs);
-  
-  // Find models within MAX_DELAY_CAP_MS of the fastest model
-  // This ensures no model needs more than 1s delay
+
+  // Find models within delay cap of the fastest model
   const fastestLatency = underHardCap[0].latencyMs;
-  const withinDelayCap = underHardCap.filter(m => 
-    (m.latencyMs - fastestLatency) <= MAX_DELAY_CAP_MS
+  const withinDelayCap = underHardCap.filter(m =>
+    (m.latencyMs - fastestLatency) <= maxDelayCapMs
   );
-  
+
   // Log what we excluded due to delay cap
-  const excludedByDelay = underHardCap.filter(m => 
-    (m.latencyMs - fastestLatency) > MAX_DELAY_CAP_MS
+  const excludedByDelay = underHardCap.filter(m =>
+    (m.latencyMs - fastestLatency) > maxDelayCapMs
   );
   for (const m of excludedByDelay) {
-    console.warn(`⚠️ Excluding ${m.model} - latency ${m.latencyMs}ms is ${m.latencyMs - fastestLatency}ms slower than fastest (${fastestLatency}ms), exceeds ${MAX_DELAY_CAP_MS}ms delay cap`);
+    console.warn(`⚠️ Excluding ${m.model} - latency ${m.latencyMs}ms is ${m.latencyMs - fastestLatency}ms slower than fastest (${fastestLatency}ms), exceeds ${maxDelayCapMs}ms delay cap`);
   }
-  
+
   // ALWAYS include the fastest model, then randomly select the rest
-  // This ensures we don't accidentally exclude a fast model for complex payloads
   const fastestModel = withinDelayCap[0];  // Already sorted, index 0 is fastest
   const otherModels = withinDelayCap.slice(1);
-  
-  // Shuffle the rest and pick TRIO_SIZE - 1
+
+  // Shuffle the rest and pick trioSize - 1
   const shuffledOthers = [...otherModels].sort(() => Math.random() - 0.5);
-  const randomOthers = shuffledOthers.slice(0, Math.min(TRIO_SIZE - 1, shuffledOthers.length));
+  const randomOthers = shuffledOthers.slice(0, Math.min(trioSize - 1, shuffledOthers.length));
   
   // Combine: fastest + random others
   const selectedModels = [fastestModel, ...randomOthers];
@@ -2410,6 +2438,168 @@ async function raceModels(
   return winner;
 }
 
+// ============================================
+// BROWSER-USE COMPLETION RACING
+// ============================================
+// Races browser-use providers to COMPLETION (not first token).
+// Winner = first provider to return a complete response.
+
+async function raceBrowserUseModels(
+  racingModels: RacingModel[],
+  callProviderFn: (model: string, poolIndex: number, signal: AbortSignal) => Promise<{
+    action: UnifiedAction;
+    ttftMs: number;
+    actualModel: string;
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  }>,
+  browserPool: string[],
+  supabase: any,
+  pool: string,
+  requestId: string,
+  timings: Record<string, number>
+): Promise<{
+  action: UnifiedAction;
+  ttftMs: number;
+  actualModel: string;
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  modelsRaced: number;
+  racingModels: RacingModel[];
+}> {
+
+  console.log(`🏁 Starting completion race with ${racingModels.length} models:`, racingModels.map(m => `${m.model} (delay: ${m.delayMs}ms)`));
+  const raceInternalStart = Date.now();
+  timings.race_internal_start = 0;
+
+  // Create AbortController for each model to cancel losers
+  const controllers = racingModels.map(() => new AbortController());
+  let winnerIndex = -1;
+
+  // Create race promises that resolve on success and never reject (errors become null)
+  const racePromises = racingModels.map(async ({ model, delayMs }, index): Promise<{
+    action: UnifiedAction;
+    ttftMs: number;
+    actualModel: string;
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+    index: number;
+    completionMs: number;
+  } | null> => {
+    const modelKey = model.split('/').pop() || model;
+    try {
+      // Apply delay to equalize finish times
+      if (delayMs > 0) {
+        console.log(`⏳ ${model} waiting ${delayMs}ms before firing...`);
+        timings[`${modelKey}_delay_start`] = Date.now() - raceInternalStart;
+        await new Promise((resolve, reject) => {
+          const timeoutId = setTimeout(resolve, delayMs);
+          // If aborted during delay, reject immediately
+          controllers[index].signal.addEventListener('abort', () => {
+            clearTimeout(timeoutId);
+            reject(new DOMException('Aborted during delay', 'AbortError'));
+          });
+        });
+        timings[`${modelKey}_delay_end`] = Date.now() - raceInternalStart;
+      }
+
+      // Check if already aborted before firing
+      if (controllers[index].signal.aborted) {
+        console.log(`🛑 ${model} aborted before firing`);
+        return null;
+      }
+
+      const startTime = Date.now();
+      timings[`${modelKey}_fire`] = Date.now() - raceInternalStart;
+      console.log(`🚀 ${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
+
+      const poolIndex = browserPool.indexOf(model);
+      const result = await callProviderFn(model, poolIndex, controllers[index].signal);
+
+      const completionMs = Date.now() - startTime;
+      timings[`${modelKey}_complete`] = Date.now() - raceInternalStart;
+      timings[`${modelKey}_latency`] = completionMs;
+      console.log(`✅ ${model} COMPLETED in ${completionMs}ms at t=${timings[`${modelKey}_complete`]}ms`);
+
+      // IMMEDIATELY abort all other racing models to save API costs
+      // Don't wait for promise resolution - kill them NOW
+      controllers.forEach((controller, i) => {
+        if (i !== index) {
+          console.log(`🛑 Immediately aborting loser: ${racingModels[i].model}`);
+          controller.abort();
+        }
+      });
+
+      return { ...result, index, completionMs };
+    } catch (error) {
+      // Don't log abort errors - they're expected for losers
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        console.log(`🛑 ${model} aborted (race lost)`);
+        return null;
+      }
+      console.error(`❌ ${model} error:`, error);
+      return null;
+    }
+  });
+
+  // Use Promise.race with a filter for successful responses
+  // We need custom logic since Promise.race doesn't skip null values
+  const winner = await new Promise<{
+    action: UnifiedAction;
+    ttftMs: number;
+    actualModel: string;
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+    index: number;
+    completionMs: number;
+  }>((resolve, reject) => {
+    let resolved = false;
+    let completed = 0;
+
+    racePromises.forEach(async (promise) => {
+      try {
+        const result = await promise;
+        completed++;
+
+        if (result && !resolved) {
+          resolved = true;
+          winnerIndex = result.index;
+          console.log(`🏆 Winner: ${result.actualModel} (${result.completionMs}ms)`);
+
+          // Losers already aborted inline when winner completed
+          // Just update loser latencies (fire-and-forget)
+          controllers.forEach((controller, i) => {
+            if (i !== winnerIndex) {
+              // Increment loser's latency by 10ms (reduces sandbagging, gives them better chance next race)
+              incrementLoserLatency(supabase, racingModels[i].model, pool)
+                .catch(e => console.error(`⚠️ Failed to increment loser latency:`, e));
+            }
+          });
+
+          // Update cache for winning model with actual completion time (keeps cache fresh)
+          updateLatencyCache(supabase, result.actualModel, pool, result.completionMs)
+            .then(() => console.log(`📝 Cache updated for winner: ${result.actualModel} = ${result.completionMs}ms`))
+            .catch(e => console.error(`⚠️ Failed to update winner cache:`, e));
+
+          resolve(result);
+        } else if (completed === racePromises.length && !resolved) {
+          reject(new Error('All models failed'));
+        }
+      } catch (e) {
+        completed++;
+        if (completed === racePromises.length && !resolved) {
+          reject(new Error('All models failed'));
+        }
+      }
+    });
+  });
+
+  return {
+    action: winner.action,
+    ttftMs: winner.completionMs,
+    actualModel: winner.actualModel,
+    usage: winner.usage,
+    modelsRaced: racingModels.length,
+    racingModels
+  };
+}
+
 // Transform JSON schema to be Cerebras-compatible
 // Cerebras requires: additionalProperties: false for all objects with required arrays
 // See: https://inference-docs.cerebras.ai/capabilities/structured-outputs
@@ -2636,6 +2826,7 @@ function getAnthropicModelName(openRouterModel: string): string {
     'anthropic/claude-sonnet-4.5': 'claude-sonnet-4-5',
     'anthropic/claude-sonnet-4': 'claude-sonnet-4-20250514',
     'anthropic/claude-opus-4': 'claude-opus-4-20250514',
+    'anthropic/claude-opus-4.6': 'claude-opus-4-6',
   };
   return mapping[openRouterModel] || openRouterModel.replace('anthropic/', '');
 }
@@ -3115,7 +3306,8 @@ serve(async (req) => {
       // Helper to call a specific provider with full request/response logging
       async function callProvider(
         provider: string,
-        providerIndex: number
+        providerIndex: number,
+        signal?: AbortSignal
       ): Promise<{ action: UnifiedAction; ttftMs: number; actualModel: string; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
         // Log the full request (with truncated screenshots)
         console.log(`\n📤 [${requestId}] [${provider}] FULL REQUEST:`);
@@ -3129,25 +3321,18 @@ serve(async (req) => {
           model_seed: browserUseReq.model_seed,
         }), null, 2));
 
+        let result: { response?: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } };
+        let normalizedAction: UnifiedAction;
+        let actualModel: string;
+
         if (provider === 'browser-use') {
           const browserUseApiKey = Deno.env.get('BROWSER_USE_API_KEY');
           if (!browserUseApiKey) throw new Error('BROWSER_USE_API_KEY not configured');
 
           console.log(`🚀 [${requestId}] [${provider}] Calling browser-use API...`);
-          const result = await callBrowserUseLLM(browserUseReq, browserUseApiKey);
-          const normalizedAction = normalizeBrowserUseResponse(result.response);
-
-          console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
-          console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
-          console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
-          console.log(JSON.stringify(normalizedAction, null, 2));
-
-          return {
-            action: normalizedAction,
-            ttftMs: result.ttftMs,
-            actualModel: 'browser-use/bu-1-0',
-            usage: result.usage
-          };
+          result = await callBrowserUseLLM(browserUseReq, browserUseApiKey, signal);
+          normalizedAction = normalizeBrowserUseResponse(result.response);
+          actualModel = 'browser-use/bu-1-0';
 
         } else if (provider === 'yutori/n1') {
           const yutoriApiKey = Deno.env.get('YUTORI_API_KEY');
@@ -3157,22 +3342,9 @@ serve(async (req) => {
           }
 
           console.log(`🚀 [${requestId}] [${provider}] Calling Yutori API...`);
-          const result = await callYutoriLLM(browserUseReq, yutoriApiKey);
-
-          console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
-          console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
-
-          const normalizedAction = normalizeYutoriResponse(result.response, browserUseReq.browser_state.viewport);
-
-          console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
-          console.log(JSON.stringify(normalizedAction, null, 2));
-
-          return {
-            action: normalizedAction,
-            ttftMs: result.ttftMs,
-            actualModel: 'yutori/n1-latest',
-            usage: result.usage
-          };
+          result = await callYutoriLLM(browserUseReq, yutoriApiKey, signal);
+          normalizedAction = normalizeYutoriResponse(result.response, browserUseReq.browser_state.viewport);
+          actualModel = 'yutori/n1';
 
         } else if (provider === 'anthropic/claude-cua') {
           const anthropicApiKey = Deno.env.get('ANTHROPIC_API_KEY');
@@ -3182,46 +3354,95 @@ serve(async (req) => {
           }
 
           console.log(`🚀 [${requestId}] [${provider}] Calling Anthropic CUA API...`);
-          const result = await callAnthropicCUA(browserUseReq, anthropicApiKey);
+          result = await callAnthropicCUA(browserUseReq, anthropicApiKey);
+          normalizedAction = normalizeAnthropicCUAResponse(result.response);
+          actualModel = 'anthropic/claude-sonnet-4-cua';
 
-          console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
-          console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
+        } else if (isAnthropicModel(provider)) {
+          // Direct Anthropic API call (matching streaming race pattern)
+          const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+          if (!anthropicKey) throw new Error('ANTHROPIC_API_KEY not configured');
 
-          const normalizedAction = normalizeAnthropicCUAResponse(result.response);
+          const isDomOnly = DOM_ONLY_MODELS.includes(provider);
+          const { messages } = transformToBrowserUseFormat(browserUseReq, { includeScreenshot: !isDomOnly });
+          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(messages);
+          const anthropicModel = getAnthropicModelName(provider);
 
-          console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
-          console.log(JSON.stringify(normalizedAction, null, 2));
+          console.log(`🚀 [${requestId}] [${provider}] Calling Anthropic API directly (model: ${anthropicModel})...`);
 
-          return {
-            action: normalizedAction,
-            ttftMs: result.ttftMs,
-            actualModel: 'anthropic/claude-sonnet-4-cua',
-            usage: result.usage
+          const anthropicBody: any = {
+            model: anthropicModel,
+            messages: anthropicMessages,
+            max_tokens: 1024,
+            temperature: 0.3,
+          };
+          if (system) anthropicBody.system = system;
+          // No output_format — system prompt instructs JSON format,
+          // same approach as browser-use and yutori providers
+
+          console.log(`[Anthropic BU] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
+
+          const startTime = Date.now();
+          const response = await fetch(ANTHROPIC_API_URL, {
+            method: 'POST',
+            headers: {
+              'x-api-key': anthropicKey,
+              'anthropic-version': '2023-06-01',
+              'content-type': 'application/json'
+            },
+            body: JSON.stringify(anthropicBody),
+            signal
+          });
+
+          const ttftMs = Date.now() - startTime;
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`Anthropic BU API error:`, response.status, errorText);
+            throw new Error(`Anthropic BU API error: ${response.status} - ${errorText}`);
+          }
+
+          const data = await response.json();
+          console.log('📥 Anthropic BU raw response:', JSON.stringify(truncateForLogging(data), null, 2));
+
+          // Extract text content from Anthropic response format
+          const textContent = data.content?.find((c: any) => c.type === 'text')?.text || '';
+          let completion: any;
+          try {
+            completion = typeof textContent === 'string' ? JSON.parse(textContent) : textContent;
+          } catch {
+            // JSON.parse failed — try extractJSON to handle markdown-wrapped JSON (```json ... ```)
+            const extracted = extractJSON(textContent);
+            completion = extracted || { action: [], thinking: textContent };
+          }
+
+          const usage = {
+            prompt_tokens: data.usage?.input_tokens || 0,
+            completion_tokens: data.usage?.output_tokens || 0,
+            total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
           };
 
+          result = { response: { completion }, ttftMs, usage };
+          normalizedAction = normalizeBrowserUseResponse(result.response);
+          actualModel = provider;
+
         } else {
-          // Generic LLM via OpenRouter
+          // Generic LLM via OpenRouter (e.g. openai/gpt-5.2)
           const openRouterKey = Deno.env.get('OPENROUTER_API_KEY');
           if (!openRouterKey) throw new Error('OPENROUTER_API_KEY not configured');
 
           console.log(`🚀 [${requestId}] [${provider}] Calling OpenRouter API...`);
-          const result = await callGenericLLM(browserUseReq, provider, openRouterKey, supabaseUrl);
-
-          console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
-          console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
-
-          const normalizedAction = normalizeBrowserUseResponse(result.response);
-
-          console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
-          console.log(JSON.stringify(normalizedAction, null, 2));
-
-          return {
-            action: normalizedAction,
-            ttftMs: result.ttftMs,
-            actualModel: provider,
-            usage: result.usage
-          };
+          result = await callGenericLLM(browserUseReq, provider, openRouterKey, supabaseUrl, signal);
+          normalizedAction = normalizeBrowserUseResponse(result.response);
+          actualModel = provider;
         }
+
+        console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
+        console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
+        console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
+        console.log(JSON.stringify(normalizedAction, null, 2));
+
+        return { action: normalizedAction, ttftMs: result.ttftMs, actualModel, usage: result.usage };
       }
       
       // ============================================
@@ -3279,60 +3500,167 @@ serve(async (req) => {
       }
 
       // ============================================
-      // MODE 2: No model_seed - random rotation with 10s timeout + fallback
+      // MODE 2: No model_seed - COMPLETION-BASED TRIO RACING
       // ============================================
-      const providerOrder = shuffleArray([...Array(browserPool.length).keys()]);
-      console.log(`🎲 [${requestId}] Browser-use provider order: ${providerOrder.map(i => browserPool[i]).join(' → ')}`);
+      const buPoolName = 'rose-1-browser-use';
+      const buTimings: Record<string, number> = {};
+      const raceStartTime = Date.now();
 
-      let lastError = '';
+      // Step 1: Filter pool by screenshot availability (yutori requires screenshot)
+      const hasScreenshot = !!browserUseReq.browser_state.screenshot;
+      const VISION_REQUIRED = new Set(['yutori/n1']);
+      const eligiblePool = hasScreenshot
+        ? [...browserPool]
+        : browserPool.filter(m => !VISION_REQUIRED.has(m));
 
-      for (const providerIndex of providerOrder) {
-        const selectedProvider = browserPool[providerIndex];
-        console.log(`🎯 [${requestId}] Trying: ${selectedProvider} (${BROWSER_USE_TIMEOUT_MS}ms timeout)`);
+      console.log(`🏁 [${requestId}] Eligible pool (${eligiblePool.length}/${browserPool.length}): ${eligiblePool.join(', ')}`);
+      if (!hasScreenshot && eligiblePool.length < browserPool.length) {
+        console.log(`📸 [${requestId}] No screenshot - filtered out vision-only models`);
+      }
+
+      if (eligiblePool.length === 0) {
+        return new Response(JSON.stringify({
+          error: 'No eligible browser-use models',
+          request_id: requestId,
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 500,
+        });
+      }
+
+      // Step 2: Get cached latencies (no probing for browser-use - too expensive)
+      const { latencies: buCachedLatencies } = await getCachedLatencies(supabase, buPoolName, eligiblePool);
+      buTimings.cache_lookup_ms = Date.now() - raceStartTime;
+
+      // Step 3: Select racing trio with browser-use config
+      const racingTrio = selectRacingTrio(eligiblePool, buCachedLatencies, {
+        maxLatencyCapMs: BU_MAX_LATENCY_CAP_MS,
+        maxDelayCapMs: BU_MAX_DELAY_CAP_MS,
+        defaultLatencyMs: BU_DEFAULT_LATENCY_MS,
+        trioSize: TRIO_SIZE,
+      });
+      buTimings.trio_select_ms = Date.now() - raceStartTime;
+
+      if (racingTrio.length === 0) {
+        return new Response(JSON.stringify({
+          error: 'No eligible models after latency filtering',
+          request_id: requestId,
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 500,
+        });
+      }
+
+      // Step 4: Single model → direct call, skip racing overhead
+      if (racingTrio.length === 1) {
+        const singleModel = racingTrio[0].model;
+        const poolIndex = browserPool.indexOf(singleModel);
+        console.log(`🎯 [${requestId}] Single model eligible, direct call: ${singleModel}`);
 
         try {
           const result = await withTimeout(
-            callProvider(selectedProvider, providerIndex),
-            BROWSER_USE_TIMEOUT_MS,
-            selectedProvider
+            callProvider(singleModel, poolIndex),
+            BU_RACE_TIMEOUT_MS,
+            singleModel
           );
 
-          console.log(`✅ [${requestId}] Browser-use response: action=${result.action.action}, index=${result.action.index}`);
-          console.log(`🔷 [${requestId}] ========== REQUEST END (success) ==========\n`);
+          console.log(`✅ [${requestId}] Browser-use response: action=${result.action.action}`);
+          console.log(`🔷 [${requestId}] ========== REQUEST END (success, single) ==========\n`);
 
           return new Response(JSON.stringify({
             action: result.action,
             requested_model: browserUseReq.model,
             actual_model: result.actualModel,
-            pool_name: 'rose-1-browser-use',
+            pool_name: buPoolName,
             pool_size: browserPool.length,
-            provider_index: providerIndex,
             ttft_ms: result.ttftMs,
             usage: result.usage,
             request_id: requestId,
+            racing: { models_raced: 1, racing_type: 'single' }
           }), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
             status: 200,
           });
-
         } catch (error) {
-          lastError = error instanceof Error ? error.message : 'Unknown error';
-          console.log(`⏱️ [${requestId}] ${selectedProvider} failed: ${lastError}, trying next...`);
-          continue;
+          console.error(`❌ [${requestId}] Single model failed:`, error);
+          return new Response(JSON.stringify({
+            error: 'Browser-use request failed',
+            details: error instanceof Error ? error.message : 'Unknown error',
+            request_id: requestId,
+          }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            status: 500,
+          });
         }
       }
 
-      // All providers failed
-      console.error(`❌ [${requestId}] All browser-use providers failed. Last error: ${lastError}`);
-      console.log(`🔷 [${requestId}] ========== REQUEST END (all providers failed) ==========\n`);
-      return new Response(JSON.stringify({
-        error: 'All browser-use providers failed or timed out',
-        last_error: lastError,
-        request_id: requestId,
-      }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 500,
-      });
+      // Step 5: RACE!
+      try {
+        const raceResult = await withTimeout(
+          raceBrowserUseModels(
+            racingTrio,
+            callProvider,
+            browserPool,
+            supabase,
+            buPoolName,
+            requestId,
+            buTimings
+          ),
+          BU_RACE_TIMEOUT_MS,
+          'browser-use-race'
+        );
+
+        buTimings.race_total_ms = Date.now() - raceStartTime;
+        console.log(`✅ [${requestId}] Race complete: winner=${raceResult.actualModel}, time=${raceResult.ttftMs}ms`);
+        console.log(`🔷 [${requestId}] ========== REQUEST END (success, race) ==========\n`);
+
+        // Adjust usage for racing cost (all models consumed input tokens)
+        let adjustedUsage = raceResult.usage;
+        if (adjustedUsage && adjustedUsage.prompt_tokens) {
+          adjustedUsage = {
+            prompt_tokens: adjustedUsage.prompt_tokens * raceResult.modelsRaced,
+            completion_tokens: adjustedUsage.completion_tokens || 0,
+            total_tokens: (adjustedUsage.prompt_tokens * raceResult.modelsRaced) + (adjustedUsage.completion_tokens || 0)
+          };
+        }
+
+        return new Response(JSON.stringify({
+          action: raceResult.action,
+          requested_model: browserUseReq.model,
+          actual_model: raceResult.actualModel,
+          pool_name: buPoolName,
+          pool_size: browserPool.length,
+          ttft_ms: raceResult.ttftMs,
+          usage: adjustedUsage,
+          request_id: requestId,
+          racing: {
+            models_raced: raceResult.modelsRaced,
+            racing_type: 'completion_trio',
+            trio: raceResult.racingModels.map(m => ({
+              model: m.model,
+              latency_ms: m.latencyMs,
+              delay_ms: m.delayMs
+            })),
+            timings: buTimings
+          }
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 200,
+        });
+
+      } catch (error) {
+        console.error(`❌ [${requestId}] Browser-use race failed:`, error);
+        console.log(`🔷 [${requestId}] ========== REQUEST END (race failed) ==========\n`);
+
+        return new Response(JSON.stringify({
+          error: 'Browser-use race failed',
+          details: error instanceof Error ? error.message : 'Unknown error',
+          request_id: requestId,
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 500,
+        });
+      }
     }
     
     // ============================================

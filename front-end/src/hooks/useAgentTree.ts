@@ -165,6 +165,10 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
             sub.listeners.forEach((listener) => listener(newNodes));
           }
         },
+        onDisconnect: () => {
+          console.warn('[useAgentTree] Channel disconnected, scheduling reconnect');
+          scheduleReconnect();
+        },
       })
         .then((channel) => {
           const sub = busSubscriptions.get(busId);
@@ -181,6 +185,18 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
         });
     }
 
+    // Health check interval - detect silent channel drops
+    const healthCheckInterval = setInterval(() => {
+      const sub = busSubscriptions.get(busId);
+      if (!sub?.channel) return;
+
+      const state = sub.channel.state;
+      if (state !== 'joined' && state !== 'joining' && !isReconnectingRef.current) {
+        console.warn(`[useAgentTree] Health check: channel state="${state}", triggering reconnect`);
+        scheduleReconnect();
+      }
+    }, 10000);
+
     // Register this component as a listener
     const listener = (newNodes: Map<string, TreeNode>) => setNodes(new Map(newNodes));
     subscription.listeners.add(listener);
@@ -189,6 +205,8 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
     setNodes(new Map(subscription.nodes));
 
     return () => {
+      clearInterval(healthCheckInterval);
+
       // Unregister listener
       const sub = busSubscriptions.get(busId);
       if (sub) {
