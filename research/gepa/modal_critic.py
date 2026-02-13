@@ -156,7 +156,7 @@ SCORER_MODEL_ID = 'gepa_critic_312'
     volumes={MODEL_DIR: vol},
     secrets=[hf_secret],
     timeout=600,
-    min_containers=1,
+    min_containers=0,
 )
 class Scorer:
     @modal.enter()

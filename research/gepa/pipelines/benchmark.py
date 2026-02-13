@@ -48,6 +48,7 @@ from ..scoring import hard_gate, soft_penalties, final_score
 from ..types import ClarifiedTask, DecompositionCandidate
 from ..validators import validate_decomposition
 from .decomposer import _build_planner_messages
+from .decomposer import decompose_once
 
 logger = logging.getLogger(__name__)
 
@@ -400,13 +401,40 @@ async def benchmark_task(
     """Benchmark a single task with a specific model config."""
     total_cost = 0.0
 
-    # 1. Decompose (direct OpenRouter call, bypasses edge function timeout)
+    # 1. Decompose (route Rose models through Supabase edge; others direct OpenRouter)
     t0 = time.monotonic()
-    try:
-        candidate, decomp_usage = await _decompose_openrouter(
-            task, model=config.model, system_prompt=system_prompt,
-        )
-    except Exception as e:
+    candidate = None
+    decomp_usage = {}
+    last_error = None
+    is_rose = 'rose-labs' in config.model.lower() or config.model.lower() in {'rose', 'rose-ultra'}
+    for attempt in range(3):
+        try:
+            if is_rose:
+                candidate, decomp_usage = await decompose_once(
+                    task,
+                    model=config.model,
+                    model_seed=None,
+                    system_prompt=system_prompt,
+                )
+            else:
+                candidate, decomp_usage = await _decompose_openrouter(
+                    task, model=config.model, system_prompt=system_prompt,
+                )
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                backoff_s = 1.5 * (attempt + 1)
+                logger.warning(
+                    f'Decompose retry {attempt + 1}/3 [{config.name}] {task.raw_seed[:40]}: '
+                    f'{type(e).__name__}: {e} (sleep {backoff_s:.1f}s)'
+                )
+                await asyncio.sleep(backoff_s)
+            else:
+                candidate = None
+
+    if candidate is None and last_error is not None:
+        e = last_error
         decomp_time = time.monotonic() - t0
         logger.warning(f'Decompose failed [{config.name}] {task.raw_seed[:40]}: {type(e).__name__}: {e}')
         return TaskResult(

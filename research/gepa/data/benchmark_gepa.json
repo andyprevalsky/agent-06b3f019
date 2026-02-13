@@ -1,0 +1,1728 @@
+{
+  "total_time_s": 2.0,
+  "total_cost_usd": 0.0,
+  "configs": [
+    {
+      "config_name": "Rose Ultra\n(GEPA)",
+      "num_tasks_evaluated": 100,
+      "num_valid": 0,
+      "validation_rate": 0.0,
+      "me_pass_rate": 0,
+      "me_mean": 0.0,
+      "me_std": 0.0,
+      "ce_pass_rate": 0,
+      "ce_mean": 0.0,
+      "ce_std": 0.0,
+      "cx_pass_rate": 0,
+      "cx_mean": 0.0,
+      "cx_std": 0.0,
+      "critic_mean": 0.0,
+      "critic_std": 0.0,
+      "elo": 0.0,
+      "total_time_s": 19.0,
+      "total_cost_usd": 0.0,
+      "task_results": [
+        {
+          "task_id": "6710d296-28e3-40e9-a481-2131425c9ee0",
+          "task_seed": "File delivery",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.23,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "0a08ee7b-806f-4bd2-8709-687aad5fa610",
+          "task_seed": "Gaia benchmark",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.25,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "af7df7b4-9ab7-4dc7-8ebc-503b6e7c6ae3",
+          "task_seed": "Finding the right people to run an experiment wet lab -> e2e automation for drug discovery, automating northern blots -> e2e clinical trials, 100k per clinical. Agent negotiate on the wet labs",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "eb184702-8cbe-4839-975c-4b79b274c228",
+          "task_seed": "Verifiers for asset image quality",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "275a0502-997f-4dde-92c5-9a939e5c3829",
+          "task_seed": "Automated mathematical progress",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "619ed04b-9f63-442a-a0c4-9a217180120c",
+          "task_seed": "Make sure I accomplish my body goals",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "e63f2c6d-f237-4fa2-b3b8-8ce152b2b519",
+          "task_seed": "Get me a girlfriend",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "4fcac0dc-43a1-4aa5-a78d-9ee8bee3c90d",
+          "task_seed": "Make me a master painter",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.2,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "95d6ac10-1c11-4146-b048-4a5cea3c6e7e",
+          "task_seed": "Get me into Stanford",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.21,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "0b9167e5-9604-416f-a336-498a2a0d8b7c",
+          "task_seed": "Make sure my birthday is amazing",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.21,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "c41605e5-34b5-4ebd-a39e-84005b2cd4b8",
+          "task_seed": "Find me my first 10 customers",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.15,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "ec90a674-1c10-4494-a648-ceae3d2e6ecc",
+          "task_seed": "Make sure my startup succeeds",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.16,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "3efd3790-e222-4372-b15d-1530e38761eb",
+          "task_seed": "Make me happy",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "c1e1b510-9c66-46fd-88d4-88cfe6e20351",
+          "task_seed": "Get me a boyfriend",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.19,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "cb3ac992-55c2-418b-9883-fff5166d47d7",
+          "task_seed": "Cure cancer",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.17,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "218bec53-15f5-445d-a794-8d55fb21b627",
+          "task_seed": "Make sure my parents are taken care of",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.16,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "7ba08b42-f711-410f-990d-916da9e6bb85",
+          "task_seed": "go to linkedin.com and trigger a download for my data",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.3,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "a3f1c50f-65fd-4d82-9873-c7a5cb2573cf",
+          "task_seed": "whats the latest news?",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.21,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "80633b98-86a7-4ed0-90bc-f7c0714ad6f5",
+          "task_seed": "Buy me any black carhartt beanie < 35$ and well-made from amazon. No questions asked",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.14,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "de6f7e72-71ab-440d-a569-e54d4fa3eab5",
+          "task_seed": "Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each sub agent you spawned.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.17,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "09ef1ab4-c4f5-4b2a-b2a1-e1283fda1406",
+          "task_seed": "Get me the latest news.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.19,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "496cae05-0707-4941-a1f5-5d403deac27b",
+          "task_seed": "Use people_search to get me info about Andy Prevalsky",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.16,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "b16f1bb5-3a93-44a3-b85e-96c0a0f288b7",
+          "task_seed": "Do 3 parallel web_searches to get data for the best of each of these items: 1. Cities to live in in your 20s 2. place to vacation 3. cheapest cost of living in NA. No questions asked, start in execute mode, no sub agents",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.15,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "f37d0fed-b529-4bbc-a6e8-786ca2465761",
+          "task_seed": "Starting from 27, how many steps does it take to reach 1 in the Collatz sequence? List all the numbers. Use Claude Code and no sub agents",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.29,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "b68d4c64-d3ca-425e-8538-5d7609220aa1",
+          "task_seed": "Do 3 parallel web_searches to get data for the best of each of these items: 1. Cities to live in in your 20s 2. place to vacation 3. cheapest cost of living in NA. No questions asked, start in plan mode, dont use any websearches in plan mode, no sub agents",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "bcf98661-ec5e-40b0-b1d0-dc8a62e2673b",
+          "task_seed": "make this red",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.17,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "fc862af7-413b-4d57-9c2e-60eeacb34906",
+          "task_seed": "turn this file into 4 different color variants, yellow, red, blue, green, use a spawn_sub_agent for each one, no claude code agents in main agent, instruct each sub agent to use claude code to do the color transformation",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "2612cbdd-b7e1-4787-9d0c-8e73dfe36db3",
+          "task_seed": "upload this image to tinypng.com and compress it. No sub agents, no questions asked",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.17,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "d336c9e6-3b71-4563-971a-280b11ae7e3c",
+          "task_seed": "Understand the entire structure of https://dallasmmaboxing.com. This is my Dad's old website. But it needs a full revamp. Rebuild the site in a modern stack with React, Vercel, Render for BE, Stripe.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.23,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "a337b9f5-a525-47ac-b1fb-c4414cf3ed3b",
+          "task_seed": "Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "fc68920e-883a-4d8f-baa9-6cef49be8035",
+          "task_seed": "Apply to every relevant grant / accelerator in the United States for my company Rose Labs. Cofounders: Andy Prevalsky (andy@roselabs.ai) and Aadity Shidham (aadi@roselabs.ai). We're building Super Intelligence for everyone via recursive task decomposition.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.18,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "3a8bee9b-ab27-49fc-9f30-164ef19c02b9",
+          "task_seed": "Analyze the job descriptions from the previous task to identify common keywords/skills, then generate a tailored Resume Summary and a modular Cover Letter template optimized for these specific roles.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.23,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "f0453068-5bc9-433b-a8ad-721bd4c0c292",
+          "task_seed": "Audit and optimize pitch deck, financial projections, and demo for $1M seed round targeting sustainability investors",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "ba712aa5-aa5d-4dd2-a90d-71f95f7bbd68",
+          "task_seed": "Audit and tighten fundraising materials (pitch deck storyline, 1-page teaser, metrics/traction slides, three-year model assumptions) and produce a \u201cversion-ready\u201d collateral set + gaps/questions for you",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.14,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "19269dd0-0b50-4cb4-8c08-cde9aa7ff18d",
+          "task_seed": "Build a lead pipeline: identify best-fit job boards + VA agencies + small-team companies; compile a first batch of 50+ remote VA leads (EST-friendly, $20\u2013$25/hr target) and 30 cold-outreach targets in lifestyle/health/creative",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "5f927d27-84ea-499d-8f64-174c553cb609",
+          "task_seed": "Cancel NYT All Access (Jan 2024) with refund negotiation for recent months",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "672edc46-cbaa-4e5a-b5be-c1ecbe061c00",
+          "task_seed": "Cancel Xbox Game Pass Ultimate (Dec 2024) with full refund - within 14-30 days",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.16,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "67e0b90f-1d2e-4f17-af96-6c894ae35b5f",
+          "task_seed": "Create VA application assets tailored to your background: ATS-friendly resume, LinkedIn headline/about/experience rewrites, 2 cover letter templates (agency + small team), and a simple portfolio/one-pager outline (services, tools, mini case studies from transferable work)",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.12,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "55e75fb4-517e-4c49-b8ec-e0a331d94232",
+          "task_seed": "Create a personalized France short-stay tourism visa document checklist for an Indian applicant in Bengaluru (May 10\u201322, 2026), including templates: cover letter draft, itinerary outline, friend-invitation guidance (attestation d\u2019accueil vs. hosted stay), and a timeline/back-planning schedule to avoid late filing.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.12,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "8ea00f47-da50-49c8-9e0e-3fe82e9e454c",
+          "task_seed": "Create a tailored positioning statement + networking narrative + 30-day LinkedIn (optionally X) content plan for a 28yo marketing pro in tech, optimized for inbound opportunities",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.2,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "41e35ac4-cbe5-4140-95ae-288c970a0b19",
+          "task_seed": "Create a vegetarian nutrition plan aligned to the targets: calorie range, protein strategy (eggs/dairy/plant), meal templates, snack rules, grocery staples, and a MyFitnessPal tracking setup approach",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.23,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "5cbc972e-b718-4d76-a6ba-c10cf0d161dc",
+          "task_seed": "Create a vegetarian weight-loss nutrition strategy and MyFitnessPal setup guide",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.11,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "aa8d8e66-2916-425f-88db-af26a3cfeaa3",
+          "task_seed": "Create application materials package once resume is provided: 1\u20132 tailored resume variants (DA/BI vs Marketing Analyst), a cover letter template, and a bullet bank aligned to common requirements",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "6f5d3a31-ccff-4c81-a6bc-d99daf74b416",
+          "task_seed": "Create the Anki deck + integration: deck structure mapped to syllabus topics, scripts using AnkiConnect to add/update cards for missed/weak items, and scheduling rules to prioritize gaps",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.4,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "76b634ee-0e24-4860-8016-fbf4e483d7d4",
+          "task_seed": "Create website content (text/structure) and a Google Business Profile setup guide based on the defined services and legal status.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "4be9c065-fe1c-4fd6-9e1e-a6defbbb9ed8",
+          "task_seed": "Deep-dive on AI infrastructure tooling gaps (observability, evaluation, compliance, RAG, safety) and emerging startup opportunities",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.11,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "a743316d-b9d8-46e6-9cfc-57eb925d493f",
+          "task_seed": "Delegate outreach to confirmed official channels to learn the fastest pathway for a child protection/medical emergency referral from outside Gaza (attempt calls/emails/forms as appropriate; request required info, reference numbers, and escalation steps).",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.17,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "702c9187-f596-41c8-96ea-bf45a65d01b8",
+          "task_seed": "Delegate the end-to-end IRCC portal flow in one session: start application, enter answers consistent with the plan, upload documents, pay fees, submit, and initiate biometrics instructions/appointment workflow (as applicable).",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.12,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "af8c0d9d-b06b-405d-ac75-1dc733092c0e",
+          "task_seed": "Design a feasible financing architecture to scale the chosen portfolio (grants, concessional finance, guarantees, impact investment, outcomes-based financing), with rough order-of-magnitude capital needs and a prioritized donor/investor target list.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "712a534c-f0a6-47d1-a5b3-0520e22316d6",
+          "task_seed": "Design a local marketing launch kit including flyer copy, Nextdoor posts, and a 30-day customer acquisition calendar.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.19,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "500544c2-ced6-4099-b439-8ca91efce7fa",
+          "task_seed": "Design a progressive 4-month low-impact workout plan (Gym + Home)",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.26,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "37bf58f4-fa4f-4e2a-8733-f54db961200a",
+          "task_seed": "Design a scalable on-the-ground deployment portfolio (programs to accelerate renewables, efficiency, electrification, methane reduction, deforestation reversal, industrial decarb, carbon removal) including delivery partners, financing structures, and MRV approach",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "3f72e085-0e45-4ce5-8cec-85e05f2e0e52",
+          "task_seed": "Design personalized support plans for each friend with immediate actions and ongoing rhythms (Maya: move help + weekly walks; Jordan: deadline accountability + sleep routine check-ins; Priya: solo week coverage + mom-friendly outings; Luis: interview prep + weekly career coffee)",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.25,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "d12355d8-aee2-4640-93f5-383f52029c7b",
+          "task_seed": "Develop a 'Build in Public' content strategy for a tech marketer",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.26,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "36335f2b-d68d-48e2-846f-8f56ab1756cc",
+          "task_seed": "Develop a comprehensive 7-day meal plan. Steps: 1) Calculate user's TDEE and weight loss calorie target. 2) Create a weekly menu that integrates family dinners (tacos/pasta) with modifications, replaces coffee-only breakfasts, and offers quick lunch solutions. 3) Generate a shopping list.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.26,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "fbfb864a-4d9c-4b95-85fc-9cff3de7a708",
+          "task_seed": "Develop a support plan for Maya focusing on her end-of-month move and breakup isolation",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.26,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "759f042f-8adf-47cd-a404-0e8ee3f930ed",
+          "task_seed": "Develop a support plan for Priya focusing on practical help for her solo-parenting week next week",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.18,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "1e403256-0594-4076-b49b-e69abb2ee088",
+          "task_seed": "Develop the Python automation script and GitHub Actions workflow. The solution must: 1) Monitor keywords/@mentions/DMs via X API v2. 2) Enforce the 7am-7pm ET M-F window. 3) Enforce the 25-reply daily cap and queue excess for the next window. 4) Log all actions to a CSV compatible with Sprout Social. 5) Implement a mechanism to persist state (queue/counts) and logs between runs (e.g., committing back to the repo).",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "b0ecb55b-b840-4d36-a218-67e06b054c0c",
+          "task_seed": "Execute batch 2 of job applications (~10 jobs): For each position, navigate to the job listing URL, complete the application form using the user's resume and tailored cover letter. Handle LinkedIn Easy Apply, Indeed Apply, and any company career page flows. Track which applications were successfully submitted and any that require additional steps.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.17,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "5007b70e-17e8-4f9a-a5c4-49cebe101607",
+          "task_seed": "Execute full fundraising campaign: orchestrate outreach, pitch meetings, term sheet negotiation, and closing to raise $1M",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.25,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "e87799da-8715-4cb2-b280-ab44ec3debb0",
+          "task_seed": "Execute marketing launch: design/print flyers for neighborhood distribution, create Nextdoor business profile, and implement local SEO tactics",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.19,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "14e762b3-5917-4582-ba49-93581c3e26b9",
+          "task_seed": "Execute outreach and conduct initial negotiations with priority CROs. Present technical package, negotiate timeline guarantees for October 1st start, finalize equity/cost trade-offs, and secure term sheet LOIs from 2-3 finalists. Focus on scientific leadership engagement to validate northern blot automation workflow integration.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.18,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "86a41412-72b2-49e1-922f-778d0ae0636a",
+          "task_seed": "Finalize service menu + pricing system: one-time vs recurring packages, add-ons, minimums, travel fees, deep-clean vs maintenance definitions, and customer policies (cancellations, satisfaction guarantee, lockouts, pets).",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "965aa7be-be17-4c4f-a788-02b7105c7bb5",
+          "task_seed": "Find 5-10 active, high-quality direct-hire VA job listings in the Lifestyle, Health & Wellness, or Creative sectors. Focus on remote roles allowing EST hours, posted within the last 14 days.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.14,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "63be6dde-0a6c-4011-b5dc-e2bdeb733440",
+          "task_seed": "Find and shortlist high-signal, low-cost communities and recurring events (local + online) that fit the user\u2019s city, budget, and goals; produce a 4-weeks event pipeline + outreach/DM templates",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.15,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "6251c6c7-8edf-4e9f-afc2-4ec78c89f640",
+          "task_seed": "Form LLC and obtain EIN for Harbor Home Cleaning - handle state filing, registered agent, and IRS registration within budget",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.14,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "a0c246a2-aaeb-44fb-a69d-74f8b9042399",
+          "task_seed": "Identify 3-5 reputable Virtual Assistant Agencies that hire US-based (EST) candidates, do not require prior VA-specific experience (valuing admin history instead), and meet the $20-25/hr pay range.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.2,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "64193858-f0b4-484a-8b68-2d2b43a8bb4b",
+          "task_seed": "Identify and map key decision-makers at top 4 shortlisted CROs: BD leads (SVP/VP level), scientific leadership (CSO/CTO), and program directors with authority to approve timeline accelerations and equity-sharing arrangements. Retrieve contact details and org chart intelligence.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.15,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "7fbaee9a-0768-497d-b8ef-0fdbd6adcc11",
+          "task_seed": "Map Vertical GenAI adoption in key industries (Healthcare, Finance, Legal, Manufacturing, Education). Identify industry-specific adoption barriers, regulatory gaps, and unmet high-value use cases.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.29,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "4d9e0f5d-5ae8-437a-bb22-d5d73158d6df",
+          "task_seed": "Map the FOUNDATION layer: frontier model providers, open-weight ecosystems, fine-tuning providers, model licensing/pricing, distribution channels (cloud marketplaces), and key differentiators (context, multimodal, cost/latency, safety). Output as structured tables aligned to the taxonomy.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.24,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "791cffaf-88d9-423c-a08f-d7f66a72fb19",
+          "task_seed": "Prepare a diligence-ready data room checklist and templates (cap table snapshot, incorporation/IP, financials, KPI dashboard, customer/user insights, security/privacy, beta terms) to reduce friction post-interest",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.16,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "5222d033-4a43-413f-8a4c-77f2bb0c9c5e",
+          "task_seed": "Prepare and initiate the small business loan track (recommend best-fit products: SBA 7(a)/microloan, local banks/credit unions, CDFIs; create lender shortlist; assemble application checklist and timeline; quantify DSCR/payment comfort)",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.21,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "09b10916-6b10-4091-8e26-6b3a72093670",
+          "task_seed": "Prepare for interviews and closing: mock interview Q&A, STAR stories mapped to VA competencies, work-sample prompts, reference strategy, and negotiation script/checklist to reach $20\u2013$25/hr (or equivalent salary)",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.12,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "17274a5b-c313-4679-9e1e-7f6cc56e49a3",
+          "task_seed": "Research CRO deal benchmarking: typical pricing for hit-to-lead through GLP tox packages (3 programs) at EU CROs, standard contract structures, equity-for-speed deal precedents in biotech-CRO partnerships, IP/exclusivity clause norms, and timeline benchmarks for the workflow described (scale-up \u2192 ADME \u2192 northern blot \u2192 in-vivo PoC \u2192 GLP tox). Look for industry reports, biotech founder blogs, and any public deal terms.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.4,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "95f528d2-9a1e-4238-93cd-8ef6162bf993",
+          "task_seed": "Research SBA loan programs, micro lenders, and community banks; prepare loan application packages",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.14,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "a7c22605-e7b8-4f4e-b1a4-207a7506f2a5",
+          "task_seed": "Research Schengen-compliant travel insurance options available to Indian travelers: minimum coverage requirements (\u20ac30,000), recommended providers, approximate cost for 12-day coverage, and what the policy must explicitly cover. Look for well-known providers that are accepted for French Schengen visa applications.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.19,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "7c05389a-9bfa-445e-a750-a4261f07b433",
+          "task_seed": "Research and compile a qualified list of 30-40 active Angel Investors and Seed VCs who specifically invest in Sustainability, Climate Tech, or Circular Economy startups, prioritizing those with a presence in Seattle/PNW.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.17,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "7341cc32-44e5-488d-a531-f7ee6114c46e",
+          "task_seed": "Research and create a detailed 4-5 month progressive workout plan for fat loss and toning. Must be knee-friendly (low-impact cardio alternatives), use 24 Hour Fitness gym equipment + home resistance bands and 5/10 lb dumbbells. 3-4 sessions per week, 45-60 minutes each. Include: Phase 1 (weeks 1-6, building foundation), Phase 2 (weeks 7-12, increasing intensity), Phase 3 (weeks 13-18+, peak phase before July vacation). Include specific exercises, sets, reps, rest periods, and progression guidelines. Emphasize compound movements for toning, low-impact cardio (elliptical, cycling, swimming), and resistance training.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.25,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "bf0b1ce2-41b0-492e-8b21-7c35dec515b6",
+          "task_seed": "Research and map 90-day networking calendar: Identify 4-6 free/low-cost tech/marketing meetups, conferences, and communities within 50 miles + 2-3 relevant online communities with application deadlines",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.23,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "46f5a242-8fdf-467a-9720-d236a8107d3c",
+          "task_seed": "Research and provide a decision framework for Harbor Home Cleaning on whether to start solo vs hire 1099 contractors vs W-2 employees. Cover: (1) Legal risks of 1099 misclassification in cleaning industry (IRS guidelines, state-specific risks), (2) Pros/cons of each model at the early stage, (3) When to make the first hire based on revenue/customer milestones, (4) Cost comparison (solo vs 1099 vs W-2 including taxes, insurance, overhead), (5) Recommended approach given bootstrapped $2K budget and goal of 10 recurring customers in 90 days.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.23,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "237d1c80-9446-49d9-b65d-f811c23a3c69",
+          "task_seed": "Research and recommend the best tech stack for Harbor Home Cleaning's website, booking, and invoicing needs within a ~$300/month total budget. Cover: (1) Simple website builder (Squarespace vs Wix vs WordPress), (2) Google Business Profile setup steps and optimization for local SEO, (3) Booking/scheduling software (Jobber, Housecall Pro, Launch27, or alternatives), (4) Invoicing/payment processing (Square, Stripe, integrated options). Provide specific cost breakdowns, feature comparisons, and a recommended stack. Also outline the key website pages needed and SEO best practices for a local cleaning company.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.14,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "37b1eeed-a355-4644-bb05-d51bf081df92",
+          "task_seed": "Research current X API v2 filtered stream rules, reply endpoints, DM endpoints, and rate limits (especially reply rate limits and filtered stream rule syntax for keywords/hashtags/mentions). Summarize the exact endpoints, required scopes, and rate limit numbers needed for the engine.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.17,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "7def9598-2be3-42ea-b913-95254b89610b",
+          "task_seed": "Research current processing times for Canadian work permit applications from India (both online and paper-based, including biometrics timelines). Check if there are any known delays or backlogs as of early 2026. Also check if Port of Entry (POE) application is an option for Indian citizens.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.12,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "4e4680bb-8b13-4beb-a0bb-0703ce50bd26",
+          "task_seed": "Research current state of global climate action: search for COP outcomes, major national climate pledges (NDCs), corporate net-zero commitments, and identify the biggest gaps between commitments and action as of early 2026",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "ffc5d44b-b034-409d-8666-f27208bf8e09",
+          "task_seed": "Research evidence-based nutrition strategies for a 5'9\" 190 lb lightly active male looking to lose 15-20 lbs, combat afternoon energy crashes, and mildly lower cholesterol. Focus on: optimal caloric deficit (TDEE calculations), macronutrient ratios for satiety and energy, meal timing to prevent afternoon crashes, and foods that help lower cholesterol. Find recommendations from sources like Mayo Clinic, Harvard Health, or registered dietitians.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.2,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "d2a8df07-98b1-4ec5-8939-eba06fbdd467",
+          "task_seed": "Research industry-standard image quality dimensions and metrics relevant to asset QA (e.g., resolution/DPI, sharpness/blur, noise, exposure/contrast, color accuracy, compression artifacts, metadata/ICC, content policy) and collect credible references",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.23,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "6f51702e-9ba7-4cf4-a4f1-f08574be633c",
+          "task_seed": "Research local competitor pricing and design 3-tier service packages (maintenance/deep/move-out) with margin targets",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.15,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "e685189c-48b4-4bc4-9b0a-6cebe8f1eccf",
+          "task_seed": "Research specific foods and supplements that help with: (1) sustained energy throughout the day (to fix afternoon crashes), (2) mildly elevated cholesterol reduction through diet, and (3) easy healthy swaps for the user's current habits (e.g., better coffee additions, whole grain toast toppings, healthier taco/pasta versions). Look for practical swap lists from nutrition experts.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.15,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "1ab18516-2df7-4722-9c9a-babc89c74e80",
+          "task_seed": "Research systemic and policy leverage points: what policy changes, trade reforms, climate adaptations, and technological breakthroughs could most accelerate ending hunger? Include analysis of successful case studies (e.g., China's poverty reduction, Brazil's Zero Hunger program, India's PDS system).",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.26,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "ec957d66-04c0-49c5-bc85-82d0df3830a2",
+          "task_seed": "Research the generative AI investment and competitive landscape as of early 2026: total funding by category, recent major rounds, M&A activity, market size estimates and growth projections by segment, which categories are overfunded vs. underfunded, and where VCs see whitespace. Include data from CB Insights, PitchBook summaries, a16z, Sequoia, and other market reports.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.19,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "4da7848f-2570-4fcf-a8ec-2d266c779584",
+          "task_seed": "Research the most effective climate organizations, movements, and lobbying groups: identify which organizations have the highest impact per dollar donated, which political advocacy groups are most effective, and what individual/community actions have measurable impact",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.15,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "a47e8b83-be6a-4495-9e9f-32e5febce03a",
+          "task_seed": "Research the top angel investors and early-stage VC firms (seed/pre-seed) that focus on sustainability, cleantech, circular economy, or green tech. Identify 30-50 specific investors/firms with names, investment thesis, typical check size, portfolio companies, and contact methods. Focus on those active in the Pacific Northwest but include national/remote-friendly investors.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "2701de2a-1b6c-4a3a-abea-b5c1bc88ab8d",
+          "task_seed": "Run the job-getting sprint for 6\u20138 weeks: execute weekly applications (10\u201315/wk), targeted cold outreach (20/wk), systematic follow-ups, and tracker updates until interviews/offers are secured",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.16,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "0fee4aa0-38cc-45db-8541-29cab1cbdbf3",
+          "task_seed": "Scout specific, active Austin, TX communities and recurring events for board games, hiking, and indie music. Focus on groups with consistent attendees (e.g., leagues, weekly meetups) rather than one-off events.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "49b04212-ad34-4884-bffb-fb4abb9f467a",
+          "task_seed": "Search for key Anthropic researchers and engineers working on multi-agent systems, agent scaling, or systems infrastructure - look for names, titles, LinkedIn profiles, and any public contact info",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.21,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "12d4ebc0-49d2-4628-ac7e-5c270d837272",
+          "task_seed": "Search for quick, easy, budget-friendly meal prep ideas and weekly meal plans suitable for a busy person with basic cooking skills. Focus on high-protein breakfasts that replace just coffee/toast, satisfying lunches that replace fast food, and healthy dinner ideas similar to what the user already enjoys (pasta, chicken/rice, tacos) but optimized for weight loss. Include healthy snack alternatives to chips and cookies.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "16cdc405-d5b7-4c87-a6ef-4a1925ebc36f",
+          "task_seed": "Set up ongoing claim management and certify for benefits",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.21,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "58c3441a-e8a4-4e4f-b6c1-15d896ea3cbd",
+          "task_seed": "Set up post-submission workflow: how to track via VFS, expected processing windows, handling additional document requests, passport collection vs courier, and what to verify on the visa sticker upon receipt (dates, entries, name/passport no.).",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.13,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "301ecc6a-94ae-4b65-be9e-61465e6efec1",
+          "task_seed": "Source a list of 10-15 exemplary Head of Marketing/CMO candidates currently at top Fortune 500 companies who match the researched profile.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.21,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        },
+        {
+          "task_id": "25235ae8-6bb4-4f6e-a35c-6cc9535fced3",
+          "task_seed": "Tailor generic resume for data analyst roles. User will provide resume file. Optimize for data analysis keywords (SQL, Python/R, Excel, Tableau, statistical analysis), quantify achievements, and structure for ATS compatibility. Create version optimized for target role types.",
+          "config_name": "Rose Ultra\n(GEPA)",
+          "valid": false,
+          "validation_errors": [
+            "decompose_error: HTTPStatusError: Client error '400 Bad Request' for url 'https://openrouter.ai/api/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+          ],
+          "num_tasks": 0,
+          "depth": 0,
+          "penalty": 0.0,
+          "critic_score": null,
+          "final_score": null,
+          "decomposition_time_s": 0.22,
+          "eval_time_s": 0.0,
+          "total_cost_usd": 0.0
+        }
+      ]
+    }
+  ]
+}

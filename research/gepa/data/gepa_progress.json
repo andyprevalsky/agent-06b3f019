@@ -1,7 +1,7 @@
 {
-  "metric_calls": 1038,
-  "elapsed_s": 16638.2,
-  "elapsed_min": 277.3,
-  "calls_per_min": 3.7,
+  "metric_calls": 507,
+  "elapsed_s": 7260.8,
+  "elapsed_min": 121.0,
+  "calls_per_min": 4.2,
   "status": "running"
 }
