@@ -75,6 +75,7 @@ interface WindowState {
 
 const windowStateStore = new Store<{ mainWindow?: WindowState }>({
   name: 'window-state',
+  clearInvalidConfig: true,
   defaults: {},
 });
 

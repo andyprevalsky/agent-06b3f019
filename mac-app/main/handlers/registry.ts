@@ -32,6 +32,7 @@ interface OnboardingState {
 
 const onboardingStore = new Store<OnboardingState>({
   name: 'onboarding',
+  clearInvalidConfig: true,
   defaults: {
     isComplete: false,
     lastAuthProvider: null,
@@ -40,6 +41,7 @@ const onboardingStore = new Store<OnboardingState>({
 
 const shortcutStore = new Store<{ quickLauncher?: ShortcutConfig }>({
   name: 'shortcuts',
+  clearInvalidConfig: true,
   defaults: {},
 });
 

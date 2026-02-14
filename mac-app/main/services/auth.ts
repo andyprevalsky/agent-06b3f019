@@ -12,6 +12,7 @@ interface SupabaseTokenResponse {
 const store = new Store<{ session: AuthSession | null }>({
   name: 'navi-auth',
   encryptionKey: config.encryptionKey,
+  clearInvalidConfig: true,
 });
 
 const toMillis = (value: number | undefined | null) => {
