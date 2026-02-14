@@ -6,7 +6,7 @@ import pytest
 
 from research.gepa.scoring.hard_gates import hard_gate
 from research.gepa.scoring.soft_penalties import soft_penalties, LAMBDA
-from research.gepa.scoring.final_scorer import final_score
+from research.gepa.scoring.final_scorer import final_score, ALPHA, BETA, GAMMA
 from research.gepa.tests.fixtures import VALID_LINEAR_2, INVALID_1_TASK, INVALID_CYCLE_AB
 
 
@@ -47,26 +47,44 @@ class TestSoftPenalties:
 
 class TestFinalScorer:
 
-    def test_basic_calculation(self):
-        # critic=0.8, penalties=0.3, 2 tasks, depth=2
-        # 0.8 - 0.3 - 0.02*2 - 0.01*2 = 0.8 - 0.3 - 0.04 - 0.02 = 0.44
-        result = final_score(critic_score=0.8, penalties=0.3, num_tasks=2, depth=2)
-        assert result == pytest.approx(0.44)
+    def test_critic_only(self):
+        # No ME/CE/CX → defaults to 1.0 → pure critic score
+        assert final_score(critic_score=0.8) == pytest.approx(0.8)
+
+    def test_default_exponents(self):
+        # Verify default exponents: α=1.0 (ME), β=1.5 (CE), γ=0.5 (CX)
+        assert ALPHA == 1.0
+        assert BETA == 1.5
+        assert GAMMA == 0.5
+
+    def test_multiplicative_with_defaults(self):
+        # 0.8 × 0.9^1.0 × 0.7^1.5 × 0.95^0.5
+        result = final_score(critic_score=0.8, me_score=0.9, ce_score=0.7, cx_score=0.95)
+        expected = 0.8 * (0.9 ** ALPHA) * (0.7 ** BETA) * (0.95 ** GAMMA)
+        assert result == pytest.approx(expected)
+
+    def test_zero_dimension_collapses(self):
+        # If any structural dimension is 0, entire score is 0
+        assert final_score(critic_score=0.9, me_score=0.0, ce_score=1.0, cx_score=1.0) == 0.0
+        assert final_score(critic_score=0.9, me_score=1.0, ce_score=0.0, cx_score=1.0) == 0.0
+        assert final_score(critic_score=0.9, me_score=1.0, ce_score=1.0, cx_score=0.0) == 0.0
 
     def test_neg_inf_propagates(self):
-        result = final_score(critic_score=-math.inf, penalties=0.0, num_tasks=2, depth=1)
+        result = final_score(critic_score=-math.inf)
         assert result == -math.inf
 
-    def test_zero_penalties(self):
-        result = final_score(critic_score=1.0, penalties=0.0, num_tasks=3, depth=1)
-        # 1.0 - 0.0 - 0.02*3 - 0.01*1 = 1.0 - 0.06 - 0.01 = 0.93
-        assert result == pytest.approx(0.93)
+    def test_perfect_scores(self):
+        result = final_score(critic_score=1.0, me_score=1.0, ce_score=1.0, cx_score=1.0)
+        assert result == pytest.approx(1.0)
 
-    def test_custom_lambdas(self):
-        result = final_score(
-            critic_score=1.0, penalties=0.0,
-            num_tasks=4, depth=3,
-            lambda_size=0.05, lambda_depth=0.03,
-        )
-        # 1.0 - 0.0 - 0.05*4 - 0.03*3 = 1.0 - 0.20 - 0.09 = 0.71
-        assert result == pytest.approx(0.71)
+    def test_custom_exponents(self):
+        # 0.8 × 0.5^2.0 × 1.0^1.5 × 1.0^0.5 = 0.8 × 0.25 = 0.2
+        result = final_score(critic_score=0.8, me_score=0.5, alpha=2.0)
+        assert result == pytest.approx(0.8 * 0.25)
+
+    def test_ce_weighted_heavier(self):
+        # CE has β=1.5 so a low CE hurts more than a low ME (α=1.0)
+        score_low_me = final_score(critic_score=1.0, me_score=0.7, ce_score=1.0, cx_score=1.0)
+        score_low_ce = final_score(critic_score=1.0, me_score=1.0, ce_score=0.7, cx_score=1.0)
+        # 0.7^1.0 = 0.7 > 0.7^1.5 ≈ 0.586 → low CE hurts more
+        assert score_low_me > score_low_ce

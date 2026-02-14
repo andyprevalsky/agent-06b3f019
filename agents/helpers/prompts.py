@@ -1,5 +1,6 @@
 from textwrap import dedent
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from tools.base import ToolSchema
@@ -570,7 +571,7 @@ The final plan must ensure the following data is gathered:
 Plan tasks to explicitly capture this information before completion."""
 
     current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
-    return f"""ROLE
+    base_prompt = f"""ROLE
 ----
 Plan a goal into minimal, parallelizable tasks with a precise, acyclic dependency graph.
 Each task maps to exactly ONE tool call. Do not execute; only plan.
@@ -720,6 +721,24 @@ OTHER REMINDERS:
 - Keep plans high-level (3-8 tasks). Delegate complexity to spawn_sub_agent, don't micromanage.
 
 OUTPUT JSON ONLY - no prose, no commentary outside the JSON structure."""
+
+    # Hardcoded strategy override (agent-local file).
+    strategy = ""
+    strategy_file = Path(__file__).resolve().parent / "planner_strategy_override_v3.txt"
+    try:
+        strategy = strategy_file.read_text().strip()
+    except Exception:
+        strategy = ""
+
+    if strategy:
+        strategy_start = "TWO-AXIS PLANNING FRAMEWORK"
+        strategy_end = "SPAWN_SUB_AGENT TOOL"
+        start_idx = base_prompt.find(strategy_start)
+        end_idx = base_prompt.find(strategy_end)
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            base_prompt = base_prompt[:start_idx] + strategy + "\n\n" + base_prompt[end_idx:]
+
+    return base_prompt
 
 
 __all__ = [

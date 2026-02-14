@@ -3,7 +3,7 @@
 Usage:
     PYTHONPATH=agents python -u research/gepa/run_full_pipeline.py
 """
-import json, math, os, sys, time, logging
+import asyncio, json, math, os, sys, time, logging
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -96,25 +96,36 @@ def main():
 
     from dspy.teleprompt.gepa.gepa_utils import ScoreWithFeedback
     from research.gepa.pipelines.gepa_optimizer import (
-        _load_trainset, _make_decomposer_module, _parse_plan, _compute_depth,
+        _load_trainset, _make_decomposer_module, _parse_plan,
         get_initial_strategy, compose_prompt, TASKS_DIR,
+        _retry, MAX_RETRIES, RETRY_DELAY_S,
     )
+    from research.gepa.pipelines.benchmark import _eval_me, _eval_ce, _eval_cx
     from research.gepa.scoring import hard_gate, final_score
     from research.gepa.critic import score_candidates
 
     call_n = [0]
 
-    def _score_with_retry(candidates, goal, ctx):
-        """Call Modal critic with retries. Raises on persistent failure."""
-        for attempt in range(MAX_CRITIC_RETRIES):
-            try:
-                return score_candidates(candidates, goal, ctx, model_id=CRITIC)
-            except Exception as e:
-                if attempt < MAX_CRITIC_RETRIES - 1:
-                    print(f'    [RETRY {attempt+1}/{MAX_CRITIC_RETRIES}] critic error: {e}', flush=True)
-                    time.sleep(CRITIC_RETRY_DELAY * (attempt + 1))
-                else:
-                    raise
+    async def _run_evaluators(goal, pr, ctx):
+        async def _retry_async(coro_fn, label):
+            last_err = None
+            for attempt in range(MAX_CRITIC_RETRIES):
+                try:
+                    return await coro_fn()
+                except Exception as e:
+                    last_err = e
+                    if attempt < MAX_CRITIC_RETRIES - 1:
+                        wait = CRITIC_RETRY_DELAY * (attempt + 1)
+                        print(f'    [{label} RETRY {attempt+1}/{MAX_CRITIC_RETRIES}] {e} (sleep {wait:.1f}s)', flush=True)
+                        await asyncio.sleep(wait)
+            raise RuntimeError(f'{label} failed after {MAX_CRITIC_RETRIES} attempts: {type(last_err).__name__}: {last_err}') from last_err
+
+        me_r, ce_r, cx_r = await asyncio.gather(
+            _retry_async(lambda: _eval_me(goal, pr, ctx), 'ME'),
+            _retry_async(lambda: _eval_ce(goal, pr, ctx), 'CE'),
+            _retry_async(lambda: _eval_cx(goal, pr, ctx), 'CX'),
+        )
+        return me_r[0].score, ce_r[0].score, cx_r[0].score
 
     def metric(example, pred, trace=None, pred_name=None, pred_trace=None):
         call_n[0] += 1
@@ -134,14 +145,15 @@ def main():
             print(f'  #{n} GATE_FAIL n={len(pr.tasks)} {time.time()-t0:.1f}s', flush=True)
             return ScoreWithFeedback(score=0.0, feedback=f'Invalid structure: {len(pr.tasks)} tasks (need 2-8) or cycle detected')
         ctx = json.loads(example.context) if isinstance(example.context, str) else example.context
-        raw = _score_with_retry([json.loads(text)], example.goal, ctx)
+        plan_dict = json.loads(text)
+        raw = _retry(lambda: score_candidates([plan_dict], example.goal, ctx, model_id=CRITIC), 'Critic')
         norm = 1.0 / (1.0 + math.exp(-raw[0]))
-        depth = _compute_depth(pr)
-        s = max(0.0, final_score(norm, 0.0, len(pr.tasks), depth))
-        print(f'  #{n} raw={raw[0]:.2f} score={s:.3f} n={len(pr.tasks)} d={depth} {time.time()-t0:.1f}s', flush=True)
+        me, ce, cx = asyncio.run(_run_evaluators(example.goal, pr, ctx))
+        s = max(0.0, final_score(norm, me, ce, cx))
+        print(f'  #{n} critic={norm:.3f} ME={me:.2f} CE={ce:.2f} CX={cx:.2f} final={s:.3f} {time.time()-t0:.1f}s', flush=True)
         return ScoreWithFeedback(
             score=s,
-            feedback=f'depth={depth}, tasks={len(pr.tasks)}, critic_raw={raw[0]:.2f}, normalized={norm:.3f}, final={s:.3f}',
+            feedback=f'critic={norm:.3f}, ME={me:.2f}, CE={ce:.2f}, CX={cx:.2f}, final={s:.3f}',
         )
 
     trainset = _load_trainset(TASKS_DIR)
@@ -170,7 +182,7 @@ def main():
     progress_thread = threading.Thread(target=_progress_loop, daemon=True)
     progress_thread.start()
 
-    log_dir = str(Path(__file__).parent / 'data' / 'gepa_logs')
+    log_dir = str(Path(__file__).parent / 'data' / 'gepa_logs_v3')
     optimizer = dspy.GEPA(
         metric=metric,
         auto='light',

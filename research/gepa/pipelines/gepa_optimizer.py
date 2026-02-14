@@ -135,23 +135,6 @@ def _make_decomposer_module():
 # C. Helpers
 # ---------------------------------------------------------------------------
 
-def _compute_depth(pr: PlannerResponse) -> int:
-    """Longest path in the task dependency DAG."""
-    n = len(pr.tasks)
-    if n == 0:
-        return 0
-    memo: dict[int, int] = {}
-
-    def dfs(i: int) -> int:
-        if i in memo:
-            return memo[i]
-        deps = [int(d) for d in (pr.tasks[i].depends_on or [])]
-        memo[i] = 1 + max((dfs(d) for d in deps), default=0) if deps else 0
-        return memo[i]
-
-    return max(dfs(i) for i in range(n))
-
-
 def _parse_plan(plan_json_str: str) -> Optional[PlannerResponse]:
     """Try to parse a JSON string into a PlannerResponse. Returns None on failure."""
     try:
@@ -165,13 +148,59 @@ def _parse_plan(plan_json_str: str) -> Optional[PlannerResponse]:
 # D. Metric function
 # ---------------------------------------------------------------------------
 
+MAX_RETRIES = 3
+RETRY_DELAY_S = 2.0
+
+
+def _retry(fn, label: str, max_retries: int = MAX_RETRIES):
+    """Call fn() with retries. Raises RuntimeError after max_retries failures."""
+    import time
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                wait = RETRY_DELAY_S * (attempt + 1)
+                logger.warning(f'{label} retry {attempt + 1}/{max_retries}: {type(e).__name__}: {e} (sleep {wait:.1f}s)')
+                time.sleep(wait)
+    raise RuntimeError(f'{label} failed after {max_retries} attempts: {type(last_err).__name__}: {last_err}') from last_err
+
+
 def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
     """Create a DSPy metric function that scores decompositions via our pipeline.
 
-    Pipeline: parse JSON → hard_gate → critic.score → final_score
-    Returns ScoreWithFeedback for GEPA's reflective mutation process.
+    Pipeline: parse JSON → hard_gate → critic + ME/CE/CX evaluators → final_score
+    Each call (critic, ME, CE, CX) retries independently.
+    Raises on persistent failure to pause the run for debugging.
     """
+    import asyncio
     from dspy.teleprompt.gepa.gepa_utils import ScoreWithFeedback
+    from .benchmark import _eval_me, _eval_ce, _eval_cx
+
+    async def _run_evaluators(goal: str, pr: PlannerResponse, ctx: list):
+        """Run ME/CE/CX evaluators concurrently with per-call retries."""
+
+        async def _retry_async(coro_fn, label):
+            last_err = None
+            for attempt in range(MAX_RETRIES):
+                try:
+                    return await coro_fn()
+                except Exception as e:
+                    last_err = e
+                    if attempt < MAX_RETRIES - 1:
+                        wait = RETRY_DELAY_S * (attempt + 1)
+                        logger.warning(f'{label} retry {attempt + 1}/{MAX_RETRIES}: {type(e).__name__}: {e} (sleep {wait:.1f}s)')
+                        await asyncio.sleep(wait)
+            raise RuntimeError(f'{label} failed after {MAX_RETRIES} attempts: {type(last_err).__name__}: {last_err}') from last_err
+
+        me_result, ce_result, cx_result = await asyncio.gather(
+            _retry_async(lambda: _eval_me(goal, pr, ctx), 'ME'),
+            _retry_async(lambda: _eval_ce(goal, pr, ctx), 'CE'),
+            _retry_async(lambda: _eval_cx(goal, pr, ctx), 'CX'),
+        )
+        return me_result[0].score, ce_result[0].score, cx_result[0].score
 
     def gepa_metric(example, pred, trace=None, pred_name=None, pred_trace=None):
         plan_text = pred.plan_json
@@ -191,23 +220,23 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
             logger.debug(f'Metric: hard_gate failed ({len(pr.tasks)} tasks)')
             return ScoreWithFeedback(score=0.0, feedback=f'Invalid structure: {len(pr.tasks)} tasks (need 2-8) or cycle detected')
 
-        try:
-            ctx = json.loads(example.context) if isinstance(example.context, str) else example.context
-            plan_dict = json.loads(plan_text)
-            raw_scores = score_candidates([plan_dict], example.goal, ctx, model_id=critic_model_id)
-            # Normalize raw logits to [0, 1] — final_score expects normalized critic_score
-            critic_normalized = 1.0 / (1.0 + math.exp(-raw_scores[0]))
-            depth = _compute_depth(pr)
-            score = max(0.0, final_score(critic_normalized, 0.0, len(pr.tasks), depth))
-            logger.info(f'Metric: raw_critic={raw_scores[0]:.3f}, normalized={critic_normalized:.3f}, '
-                        f'depth={depth}, tasks={len(pr.tasks)}, final={score:.3f}')
-            return ScoreWithFeedback(
-                score=score,
-                feedback=f'depth={depth}, tasks={len(pr.tasks)}, critic_raw={raw_scores[0]:.2f}, normalized={critic_normalized:.3f}, final={score:.3f}',
-            )
-        except Exception as e:
-            logger.warning(f'Metric scoring failed: {e}')
-            return ScoreWithFeedback(score=0.0, feedback=f'Scoring error: {e}')
+        ctx = json.loads(example.context) if isinstance(example.context, str) else example.context
+        plan_dict = json.loads(plan_text)
+
+        # Each call retries independently — a critic success isn't wasted if ME fails
+        raw_scores = _retry(
+            lambda: score_candidates([plan_dict], example.goal, ctx, model_id=critic_model_id),
+            'Critic',
+        )
+        critic = 1.0 / (1.0 + math.exp(-raw_scores[0]))
+        me, ce, cx = asyncio.run(_run_evaluators(example.goal, pr, ctx))
+
+        score = max(0.0, final_score(critic, me, ce, cx))
+        logger.info(f'Metric: critic={critic:.3f}, ME={me:.2f}, CE={ce:.2f}, CX={cx:.2f}, final={score:.3f}')
+        return ScoreWithFeedback(
+            score=score,
+            feedback=f'critic={critic:.3f}, ME={me:.2f}, CE={ce:.2f}, CX={cx:.2f}, final={score:.3f}',
+        )
 
     return gepa_metric
 

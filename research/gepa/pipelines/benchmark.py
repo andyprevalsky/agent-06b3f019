@@ -44,7 +44,7 @@ from helpers.prompts import build_planner_system_prompt
 from helpers.tool_schemas import PlannerResponse
 from tools.set_plan import _get_planner_tools_description
 
-from ..scoring import hard_gate, soft_penalties, final_score
+from ..scoring import hard_gate, final_score
 from ..types import ClarifiedTask, DecompositionCandidate
 from ..validators import validate_decomposition
 from .decomposer import _build_planner_messages
@@ -72,15 +72,18 @@ class ModelConfig:
 # Direct OpenRouter model identifiers (bypass Supabase edge function)
 CONFIGS = [
     ModelConfig('Opus 4.6',     'anthropic/claude-opus-4-6',       'baseline', '#6366f1'),
+    ModelConfig('Opus 4.6 (GEPA)', 'anthropic/claude-opus-4-6',    'gepa',     '#7c3aed'),
     ModelConfig('GPT 5.2',      'openai/gpt-5.2',                  'baseline', '#10b981'),
     ModelConfig('Gemini 3 Pro', 'google/gemini-3-pro-preview',      'baseline', '#f59e0b'),
     ModelConfig('Kimi 2.5',     'moonshotai/kimi-k2.5',            'baseline', '#ef4444'),
-    ModelConfig('Rose Ultra\n(GEPA)', 'rose-labs/rose-1-ultra',     'gepa',     '#8b5cf6'),
+    ModelConfig('Rose Ultra (GEPA)', 'rose-labs/rose-1-ultra',      'gepa',     '#8b5cf6'),
 ]
 
 OPENROUTER_BASE = 'https://openrouter.ai/api/v1/chat/completions'
 OPENROUTER_TIMEOUT = 300.0  # generous timeout for structured output
-EVAL_MODEL = 'anthropic/claude-opus-4-6'
+EVAL_MODEL = 'anthropic/claude-sonnet-4.5'
+DECOMPOSE_ATTEMPT_TIMEOUT_S = 120.0  # guard against stuck streaming calls
+CRITIC_ATTEMPT_TIMEOUT_S = 180.0     # guard against stuck Modal critic calls
 
 
 async def _call_openrouter(messages: list, response_model, model: str = EVAL_MODEL,
@@ -322,6 +325,92 @@ def _safe_stdev(xs: list[float]) -> float:
     return statistics.stdev(xs) if len(xs) >= 2 else 0.0
 
 
+def _normalize_config_name(name: str) -> str:
+    # Collapse whitespace so legacy names like "Rose Ultra\n(GEPA)" still match.
+    return ' '.join((name or '').split())
+
+
+def _task_result_from_dict(d: dict) -> TaskResult:
+    evals = None
+    evals_d = d.get('evals')
+    if isinstance(evals_d, dict):
+        me = evals_d.get('me', {}) or {}
+        ce = evals_d.get('ce', {}) or {}
+        cx = evals_d.get('cx', {}) or {}
+        evals = EvalScores(
+            me_passed=bool(me.get('passed', False)),
+            me_score=float(me.get('score', 0.0)),
+            ce_passed=bool(ce.get('passed', False)),
+            ce_score=float(ce.get('score', 0.0)),
+            cx_passed=bool(cx.get('passed', False)),
+            cx_score=float(cx.get('score', 0.0)),
+        )
+
+    return TaskResult(
+        task_id=str(d.get('task_id', '')),
+        task_seed=str(d.get('task_seed', '')),
+        config_name=str(d.get('config_name', '')),
+        valid=bool(d.get('valid', False)),
+        validation_errors=[str(x) for x in (d.get('validation_errors') or [])],
+        num_tasks=int(d.get('num_tasks', 0)),
+        depth=int(d.get('depth', 0)),
+        evals=evals,
+        critic_score=d.get('critic_score'),
+        final_score=d.get('final_score'),
+        penalty=float(d.get('penalty', 0.0)),
+        decomposition_time_s=float(d.get('decomposition_time_s', 0.0)),
+        eval_time_s=float(d.get('eval_time_s', 0.0)),
+        total_cost_usd=float(d.get('total_cost_usd', 0.0)),
+    )
+
+
+def _load_resume_results(path: Path) -> dict[str, dict[str, TaskResult]]:
+    if not path.exists():
+        logger.warning(f'Resume file not found: {path}')
+        return {}
+
+    data = json.loads(path.read_text())
+    cfg_map: dict[str, dict[str, TaskResult]] = {}
+    for cfg in data.get('configs', []):
+        cfg_name = str(cfg.get('config_name', ''))
+        if not cfg_name:
+            continue
+        task_map: dict[str, TaskResult] = {}
+        for tr in cfg.get('task_results', []):
+            try:
+                parsed = _task_result_from_dict(tr)
+            except Exception as e:
+                logger.warning(f'Skipping malformed resume result for {cfg_name}: {e}')
+                continue
+            if parsed.task_id:
+                # Trust config section name, not embedded per-task config_name.
+                parsed.config_name = cfg_name
+                task_map[parsed.task_id] = parsed
+        cfg_map[cfg_name] = task_map
+    return cfg_map
+
+
+def _write_checkpoint(
+    path: Path,
+    configs: list[ModelConfig],
+    all_results: dict[str, list[TaskResult]],
+) -> None:
+    payload = {
+        'checkpoint': True,
+        'configs': [
+            {
+                'config_name': c.name,
+                'task_results': [_result_to_dict(r) for r in all_results.get(c.name, [])],
+            }
+            for c in configs
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.replace(path)
+
+
 # ---------------------------------------------------------------------------
 # Bradley-Terry ELO from critic pairwise comparisons
 # ---------------------------------------------------------------------------
@@ -397,6 +486,8 @@ async def benchmark_task(
     system_prompt: str,
     use_critic: bool = True,
     critic_model_id: str = 'reward_model',
+    critic_only: bool = False,
+    critic_semaphore: Optional[asyncio.Semaphore] = None,
 ) -> TaskResult:
     """Benchmark a single task with a specific model config."""
     total_cost = 0.0
@@ -410,15 +501,21 @@ async def benchmark_task(
     for attempt in range(3):
         try:
             if is_rose:
-                candidate, decomp_usage = await decompose_once(
-                    task,
-                    model=config.model,
-                    model_seed=None,
-                    system_prompt=system_prompt,
+                candidate, decomp_usage = await asyncio.wait_for(
+                    decompose_once(
+                        task,
+                        model=config.model,
+                        model_seed=None,
+                        system_prompt=system_prompt,
+                    ),
+                    timeout=DECOMPOSE_ATTEMPT_TIMEOUT_S,
                 )
             else:
-                candidate, decomp_usage = await _decompose_openrouter(
-                    task, model=config.model, system_prompt=system_prompt,
+                candidate, decomp_usage = await asyncio.wait_for(
+                    _decompose_openrouter(
+                        task, model=config.model, system_prompt=system_prompt,
+                    ),
+                    timeout=DECOMPOSE_ATTEMPT_TIMEOUT_S,
                 )
             break
         except Exception as e:
@@ -462,65 +559,92 @@ async def benchmark_task(
             total_cost_usd=total_cost,
         )
 
-    # 2. ME/CE/CX in parallel
-    t1 = time.monotonic()
-    try:
-        me_result, ce_result, cx_result = await asyncio.gather(
-            _eval_me(task.raw_seed, pr, task.agent_context),
-            _eval_ce(task.raw_seed, pr, task.agent_context),
-            _eval_cx(task.raw_seed, pr, task.agent_context),
-        )
-    except Exception as e:
+    # 2. Optional ME/CE/CX judging
+    evals = None
+    eval_time = 0.0
+    if not critic_only:
+        t1 = time.monotonic()
+        try:
+            me_result, ce_result, cx_result = await asyncio.gather(
+                _eval_me(task.raw_seed, pr, task.agent_context),
+                _eval_ce(task.raw_seed, pr, task.agent_context),
+                _eval_cx(task.raw_seed, pr, task.agent_context),
+            )
+        except Exception as e:
+            eval_time = time.monotonic() - t1
+            logger.warning(f'Eval failed [{config.name}] {task.raw_seed[:40]}: {type(e).__name__}: {e}')
+            return TaskResult(
+                task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
+                valid=True, validation_errors=[f'eval_error: {type(e).__name__}: {e}'],
+                num_tasks=len(pr.tasks), depth=_compute_depth(pr), evals=None,
+                critic_score=None, final_score=None, penalty=0.0,
+                decomposition_time_s=decomp_time, eval_time_s=eval_time,
+                total_cost_usd=total_cost,
+            )
         eval_time = time.monotonic() - t1
-        logger.warning(f'Eval failed [{config.name}] {task.raw_seed[:40]}: {type(e).__name__}: {e}')
-        return TaskResult(
-            task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
-            valid=True, validation_errors=[f'eval_error: {type(e).__name__}: {e}'],
-            num_tasks=len(pr.tasks), depth=_compute_depth(pr), evals=None,
-            critic_score=None, final_score=None, penalty=0.0,
-            decomposition_time_s=decomp_time, eval_time_s=eval_time,
-            total_cost_usd=total_cost,
+
+        me_eval, me_usage = me_result
+        ce_eval, ce_usage = ce_result
+        cx_eval, cx_usage = cx_result
+        total_cost += _sum_usage_cost(me_usage or {})
+        total_cost += _sum_usage_cost(ce_usage or {})
+        total_cost += _sum_usage_cost(cx_usage or {})
+
+        evals = EvalScores(
+            me_passed=me_eval.passed, me_score=me_eval.score,
+            ce_passed=ce_eval.passed, ce_score=ce_eval.score,
+            cx_passed=cx_eval.passed, cx_score=cx_eval.score,
         )
-    eval_time = time.monotonic() - t1
 
-    me_eval, me_usage = me_result
-    ce_eval, ce_usage = ce_result
-    cx_eval, cx_usage = cx_result
-    total_cost += _sum_usage_cost(me_usage or {})
-    total_cost += _sum_usage_cost(ce_usage or {})
-    total_cost += _sum_usage_cost(cx_usage or {})
-
-    evals = EvalScores(
-        me_passed=me_eval.passed, me_score=me_eval.score,
-        ce_passed=ce_eval.passed, ce_score=ce_eval.score,
-        cx_passed=cx_eval.passed, cx_score=cx_eval.score,
-    )
-
-    # 3. Penalties + depth
+    # 3. Critic + final score
     depth = _compute_depth(pr)
-    penalty = soft_penalties(me_eval.passed, ce_eval.passed, cx_eval.passed)
-
-    # 4. Critic
     critic_val = None
     final_val = None
     if use_critic:
-        try:
-            from ..critic import score_candidates
-            cand_dict = _candidate_to_dict(pr, evals)
-            raw_scores = score_candidates(
+        from ..critic import score_candidates
+        cand_dict = _candidate_to_dict(pr, evals)
+
+        async def _score_once():
+            return await asyncio.to_thread(
+                score_candidates,
                 [cand_dict], task.raw_seed, task.agent_context,
-                model_id=critic_model_id,
+                critic_model_id,
             )
-            critic_val = 1.0 / (1.0 + math.exp(-raw_scores[0]))
-            final_val = final_score(critic_val, penalty, len(pr.tasks), depth)
-        except Exception as e:
-            logger.warning(f'Critic failed for [{config.name}] {task.raw_seed[:40]}: {e}')
+
+        last_critic_err = None
+        for attempt in range(3):
+            try:
+                if critic_semaphore is not None:
+                    async with critic_semaphore:
+                        raw_scores = await asyncio.wait_for(_score_once(), timeout=CRITIC_ATTEMPT_TIMEOUT_S)
+                else:
+                    raw_scores = await asyncio.wait_for(_score_once(), timeout=CRITIC_ATTEMPT_TIMEOUT_S)
+                critic_val = 1.0 / (1.0 + math.exp(-raw_scores[0]))
+                me = evals.me_score if evals else 1.0
+                ce = evals.ce_score if evals else 1.0
+                cx = evals.cx_score if evals else 1.0
+                final_val = final_score(critic_val, me, ce, cx)
+                break
+            except Exception as e:
+                last_critic_err = e
+                if attempt < 2:
+                    backoff_s = 2.0 * (attempt + 1)
+                    logger.warning(
+                        f'Critic retry {attempt + 1}/3 [{config.name}] {task.raw_seed[:40]}: '
+                        f'{type(e).__name__}: {e} (sleep {backoff_s:.1f}s)'
+                    )
+                    await asyncio.sleep(backoff_s)
+                else:
+                    logger.warning(
+                        f'Critic failed after 3 attempts for [{config.name}] '
+                        f'{task.raw_seed[:40]}: {type(last_critic_err).__name__}: {last_critic_err}'
+                    )
 
     return TaskResult(
         task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
         valid=True, validation_errors=[],
         num_tasks=len(pr.tasks), depth=depth, evals=evals,
-        critic_score=critic_val, final_score=final_val, penalty=penalty,
+        critic_score=critic_val, final_score=final_val, penalty=0.0,
         decomposition_time_s=decomp_time, eval_time_s=eval_time,
         total_cost_usd=total_cost,
     )
@@ -544,6 +668,9 @@ async def run_benchmark(
     critic_model_id: str = 'reward_model',
     gepa_strategy: Optional[str] = None,
     concurrency: int = 3,
+    resume_results: Optional[dict[str, dict[str, TaskResult]]] = None,
+    checkpoint_path: Optional[Path] = None,
+    critic_only: bool = False,
 ) -> BenchmarkReport:
     """Run the full benchmark across all configs and tasks.
 
@@ -569,13 +696,27 @@ async def run_benchmark(
     semaphore = asyncio.Semaphore(concurrency)
     all_results: dict[str, list[TaskResult]] = {c.name: [] for c in configs}
     t_start = time.monotonic()
+    critic_semaphore = asyncio.Semaphore(1) if use_critic else None
 
-    async def run_one(config: ModelConfig, task: ClarifiedTask, idx: int) -> tuple[str, TaskResult]:
+    resume_results = resume_results or {}
+    resume_by_norm: dict[str, dict[str, TaskResult]] = {}
+    for cfg_name, task_map in resume_results.items():
+        norm = _normalize_config_name(cfg_name)
+        merged = resume_by_norm.setdefault(norm, {})
+        merged.update(task_map)
+
+    resumed_count = 0
+    for c in configs:
+        resumed_count += len(resume_by_norm.get(_normalize_config_name(c.name), {}))
+    if resumed_count:
+        logger.info(f'Resuming with {resumed_count} precomputed task results')
+
+    async def run_one(config: ModelConfig, task: ClarifiedTask, idx: int) -> tuple[str, str, TaskResult]:
         async with semaphore:
             logger.info(f'  [{config.name}] ({idx + 1}/{len(tasks)}) {task.raw_seed[:50]}')
             try:
                 result = await benchmark_task(
-                    task, config, prompts[config.name], use_critic, critic_model_id,
+                    task, config, prompts[config.name], use_critic, critic_model_id, critic_only, critic_semaphore,
                 )
             except Exception as e:
                 logger.error(f'  [{config.name}] CRASHED on {task.raw_seed[:40]}: {type(e).__name__}: {e}')
@@ -591,16 +732,59 @@ async def run_benchmark(
             ce = f'{result.evals.ce_score:.2f}' if result.evals else '-'
             cx = f'{result.evals.cx_score:.2f}' if result.evals else '-'
             logger.info(f'    [{status}] ME={me} CE={ce} CX={cx}')
-            return config.name, result
+            return config.name, task.id, result
 
-    coros = []
+    pending = []
     for config in configs:
         for i, task in enumerate(tasks):
-            coros.append(run_one(config, task, i))
-    results_flat = await asyncio.gather(*coros)
+            task_map = resume_by_norm.get(_normalize_config_name(config.name), {})
+            existing = task_map.get(task.id)
+            should_resume = existing is not None
+            # If critic scoring is requested, rerun only valid tasks missing critic scores.
+            # Keep invalid rows resumed to avoid redoing decomposition calls.
+            if should_resume and use_critic and existing.valid and existing.critic_score is None:
+                should_resume = False
 
-    for config_name, result in results_flat:
-        all_results[config_name].append(result)
+            if should_resume:
+                all_results[config.name].append(existing)
+                logger.info(f'  [RESUME {config.name}] ({i + 1}/{len(tasks)}) {task.raw_seed[:50]}')
+            else:
+                pending.append(asyncio.create_task(run_one(config, task, i)))
+
+    if pending:
+        logger.info(f'Running {len(pending)} remaining evaluations (skipping resumed tasks)')
+        for fut in asyncio.as_completed(pending):
+            config_name, task_id, result = await fut
+            norm = _normalize_config_name(config_name)
+            resume_by_norm.setdefault(norm, {})[task_id] = result
+
+            # Rebuild ordered lists from tasks to keep stable per-task alignment.
+            for config in configs:
+                task_map = resume_by_norm.get(_normalize_config_name(config.name), {})
+                all_results[config.name] = [task_map[t.id] for t in tasks if t.id in task_map]
+
+            if checkpoint_path is not None:
+                _write_checkpoint(checkpoint_path, configs, all_results)
+
+    # Final ordered materialization (ensures complete coverage and stable order).
+    for config in configs:
+        task_map = resume_by_norm.get(_normalize_config_name(config.name), {})
+        ordered = []
+        for task in tasks:
+            r = task_map.get(task.id)
+            if r is None:
+                r = TaskResult(
+                    task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
+                    valid=False, validation_errors=['missing_result_after_run'],
+                    num_tasks=0, depth=0, evals=None,
+                    critic_score=None, final_score=None, penalty=0.0,
+                    decomposition_time_s=0.0, eval_time_s=0.0, total_cost_usd=0.0,
+                )
+            ordered.append(r)
+        all_results[config.name] = ordered
+
+    if checkpoint_path is not None:
+        _write_checkpoint(checkpoint_path, configs, all_results)
 
     total_time = time.monotonic() - t_start
 
@@ -840,6 +1024,12 @@ def main():
                         help='Path to file containing optimized GEPA strategy text')
     parser.add_argument('--configs', type=str, nargs='+', default=None,
                         help='Subset of configs to run (e.g. "Opus 4.6" "GPT 5.2")')
+    parser.add_argument('--resume-from', type=str, default=None,
+                        help='Path to prior output/checkpoint JSON to reuse completed task results')
+    parser.add_argument('--checkpoint-output', type=str, default=None,
+                        help='Path to rolling checkpoint JSON written during execution')
+    parser.add_argument('--critic-only', action='store_true',
+                        help='Skip ME/CE/CX judges and run decomposition + critic only')
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -863,6 +1053,19 @@ def main():
     if args.gepa_strategy:
         gepa_strategy = Path(args.gepa_strategy).read_text().strip()
 
+    resume_results = None
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        resume_results = _load_resume_results(resume_path)
+        loaded = sum(len(v) for v in resume_results.values())
+        logger.info(f'Loaded {loaded} resumable task results from {resume_path}')
+
+    checkpoint_path = None
+    if args.checkpoint_output:
+        checkpoint_path = Path(args.checkpoint_output)
+    elif args.resume_from:
+        checkpoint_path = Path(args.resume_from)
+
     report = asyncio.run(run_benchmark(
         tasks_dir=tasks_dir,
         limit=args.tasks,
@@ -871,6 +1074,9 @@ def main():
         critic_model_id=args.critic_model,
         gepa_strategy=gepa_strategy,
         concurrency=args.concurrency,
+        resume_results=resume_results,
+        checkpoint_path=checkpoint_path,
+        critic_only=args.critic_only,
     ))
 
     print_report(report)

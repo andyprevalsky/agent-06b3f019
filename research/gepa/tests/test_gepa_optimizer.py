@@ -9,7 +9,8 @@ import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+import asyncio
+from unittest.mock import patch, AsyncMock
 
 import pytest
 
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / 'a
 from helpers.prompts import build_planner_system_prompt
 from tools.set_plan import _get_planner_tools_description
 
+from research.gepa.pipelines.benchmark import _compute_depth
 from research.gepa.pipelines.gepa_optimizer import (
     STRATEGY_START,
     STRATEGY_END,
@@ -26,7 +28,6 @@ from research.gepa.pipelines.gepa_optimizer import (
     compose_prompt,
     get_initial_strategy,
     _build_prompt_skeleton,
-    _compute_depth,
     _parse_plan,
     _load_trainset,
     make_gepa_metric,
@@ -233,10 +234,18 @@ class TestGepaMetric:
         pred = SimpleNamespace(plan_json=json.dumps(plan))
         assert float(metric(example, pred)) == 0.0
 
+    @patch('research.gepa.pipelines.benchmark._eval_cx', new_callable=AsyncMock)
+    @patch('research.gepa.pipelines.benchmark._eval_ce', new_callable=AsyncMock)
+    @patch('research.gepa.pipelines.benchmark._eval_me', new_callable=AsyncMock)
     @patch('research.gepa.pipelines.gepa_optimizer.score_candidates')
-    def test_valid_plan_calls_critic(self, mock_score):
-        """Valid plan should call score_candidates and return a score."""
+    def test_valid_plan_calls_critic(self, mock_score, mock_me, mock_ce, mock_cx):
+        """Valid plan should call score_candidates + evaluators and return a score."""
+        from research.gepa.types import EvalResult
         mock_score.return_value = [0.8]
+        mock_eval = EvalResult(passed=True, score=0.9, reasoning='good')
+        mock_me.return_value = (mock_eval, {})
+        mock_ce.return_value = (mock_eval, {})
+        mock_cx.return_value = (mock_eval, {})
         metric = make_gepa_metric('test_model')
         plan = {
             'title': 'Good',
@@ -258,11 +267,15 @@ class TestGepaMetric:
         score = metric(example, pred)
 
         mock_score.assert_called_once()
+        mock_me.assert_called_once()
+        mock_ce.assert_called_once()
+        mock_cx.assert_called_once()
         assert score > 0.0
 
+    @patch('research.gepa.pipelines.gepa_optimizer.RETRY_DELAY_S', 0.0)
     @patch('research.gepa.pipelines.gepa_optimizer.score_candidates')
-    def test_metric_exception_returns_zero(self, mock_score):
-        """If critic call throws, metric should return 0.0."""
+    def test_metric_persistent_failure_raises(self, mock_score):
+        """If critic fails after all retries, metric raises to pause the run."""
         mock_score.side_effect = RuntimeError('Modal unavailable')
         metric = make_gepa_metric()
         plan = {
@@ -280,7 +293,8 @@ class TestGepaMetric:
         }
         example = SimpleNamespace(goal='test', context='[]')
         pred = SimpleNamespace(plan_json=json.dumps(plan))
-        assert float(metric(example, pred)) == 0.0
+        with pytest.raises(RuntimeError, match='failed after'):
+            metric(example, pred)
 
 
 # ---------------------------------------------------------------------------
