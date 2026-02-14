@@ -233,6 +233,8 @@ export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
   error?: boolean;
   /** Output schema for init message */
   output_schema?: OutputSchema;
+  /** GitHub repo URL for this session */
+  github_repo_url?: string;
 }
 
 /**

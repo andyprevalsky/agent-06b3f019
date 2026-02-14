@@ -80,6 +80,7 @@ async def save_claude_code_message(
     ws_url: str = None,
     output_schema: dict = None,
     structured_response: dict = None,
+    github_repo_url: str = None,
 ):
     """Save Claude Code sub-action message directly to DB."""
     config = load_config()
@@ -104,6 +105,9 @@ async def save_claude_code_message(
     # Include structured response in task_complete message for FE display
     if structured_response:
         metadata["structured_response"] = structured_response
+
+    if github_repo_url:
+        metadata["github_repo_url"] = github_repo_url
 
     if not is_init_message:
         metadata["subAgentId"] = task_id
@@ -398,6 +402,7 @@ async def spawn_claude_code_activity(
             sandbox_id = session_data["sandbox_id"]
             ws_url = session_data["ws_url"]
             uploaded_files = session_data.get("uploaded_files", [])
+            actual_github_repo_url = session_data.get("github_repo_url")
 
         logger.info(
             "[ClaudeCode] Session created",
@@ -427,6 +432,7 @@ async def spawn_claude_code_activity(
             is_init_message=True,
             ws_url=ws_url,
             output_schema=output_schema,
+            github_repo_url=actual_github_repo_url,
         )
 
         await save_claude_code_message(

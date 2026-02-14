@@ -76,3 +76,49 @@ export async function checkGithubRepoAccess(
 
   return { allowed: true, normalizedUrl };
 }
+
+/**
+ * Create a fresh public GitHub repo under the rose-gh-agent account.
+ * Uses GITHUB_TOKEN (PAT with repo scope).
+ *
+ * @param repoName - The repo name (e.g., "agent-a1b2c3d4")
+ * @returns The HTTPS URL of the created repo, or null on failure
+ */
+export async function createGithubRepo(repoName: string): Promise<string | null> {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    console.error('[GitHub] GITHUB_TOKEN not configured — cannot create repo');
+    return null;
+  }
+
+  try {
+    const response = await fetch('https://api.github.com/user/repos', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github+json',
+      },
+      body: JSON.stringify({
+        name: repoName,
+        description: 'Auto-created workspace for Rose Labs agent',
+        private: false,
+        auto_init: true,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error(`[GitHub] Failed to create repo ${repoName}: HTTP ${response.status}`, errorBody);
+      return null;
+    }
+
+    const data = await response.json() as { html_url: string };
+    const repoUrl = data.html_url;
+    console.log(`[GitHub] Created repo: ${repoUrl}`);
+    return repoUrl;
+  } catch (error) {
+    console.error(`[GitHub] Error creating repo ${repoName}:`, error);
+    return null;
+  }
+}

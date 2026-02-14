@@ -13,6 +13,7 @@ import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSch
 import { handleChatMessage, broadcastAgentModeStarted, broadcastAgentUpdate } from '../lib/chat';
 import { createMessage } from '../lib/messages';
 import { getClientIP, getGeoFromIP, DEFAULT_GEOLOCATION } from '../lib/geoip';
+import { createGithubRepo } from '../lib/github';
 import {
   processUploadedFile,
   validateTotalSize,
@@ -433,6 +434,27 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       } else {
         console.log('⏳ Root agent - schema will be generated during set_plan', { agentId: agent.agent.id });
       }
+
+      // Fire-and-forget: create GitHub repo for root agent
+      const repoName = `agent-${agentId.substring(0, 8)}`;
+      createGithubRepo(repoName).then(async (repoUrl) => {
+        if (repoUrl) {
+          try {
+            await prisma.agent.update({
+              where: { id: agent.agent.id },
+              data: { githubRepoUrl: repoUrl },
+            });
+            await prisma.githubRepoAccess.create({
+              data: { userId, repoUrl },
+            });
+            console.log(`[GitHub] Repo ${repoUrl} linked to agent ${agent.agent.id}`);
+          } catch (err) {
+            console.error(`[GitHub] Failed to persist repo URL for agent ${agent.agent.id}:`, err);
+          }
+        }
+      }).catch((err) => {
+        console.error(`[GitHub] Repo creation failed for agent ${agent.agent.id}:`, err);
+      });
 
       // Handle chat message (non-blocking for response)
       // Run in background so we can return the agent immediately

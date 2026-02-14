@@ -50,21 +50,54 @@ router.post('/create', authenticate, async (req: AuthRequest, res) => {
   try {
     const { agent_id, goal, attachments, github_repo_url, user_id } = createSessionSchema.parse(req.body);
 
-    console.log(`[ClaudeCode] Creating session for agent ${agent_id}${attachments?.length ? ` with ${attachments.length} attachments` : ''}${github_repo_url ? ` with GitHub repo ${github_repo_url}` : ''}`);
+    // Auto-inject GitHub repo URL from agent record if not explicitly provided.
+    // Claude Code is typically spawned by sub-agents, but githubRepoUrl lives on the
+    // root agent. Use busId (which equals the root agent's ID) to walk up.
+    let effectiveGithubRepoUrl = github_repo_url;
+    let effectiveUserId = user_id;
+    if (!effectiveGithubRepoUrl) {
+      try {
+        const agent = await prisma.agent.findUnique({
+          where: { id: agent_id },
+          select: { githubRepoUrl: true, userId: true, busId: true },
+        });
+        if (agent?.githubRepoUrl) {
+          effectiveGithubRepoUrl = agent.githubRepoUrl;
+          effectiveUserId = effectiveUserId || agent.userId;
+        } else if (agent?.busId && agent.busId !== agent_id) {
+          // This is a sub-agent — look up root agent via busId
+          const rootAgent = await prisma.agent.findUnique({
+            where: { id: agent.busId },
+            select: { githubRepoUrl: true, userId: true },
+          });
+          if (rootAgent?.githubRepoUrl) {
+            effectiveGithubRepoUrl = rootAgent.githubRepoUrl;
+            effectiveUserId = effectiveUserId || rootAgent.userId;
+          }
+        }
+        if (effectiveGithubRepoUrl) {
+          console.log(`[ClaudeCode] Auto-injecting GitHub repo from agent tree: ${effectiveGithubRepoUrl}`);
+        }
+      } catch (err) {
+        console.error(`[ClaudeCode] Failed to look up agent GitHub repo:`, err);
+      }
+    }
+
+    console.log(`[ClaudeCode] Creating session for agent ${agent_id}${attachments?.length ? ` with ${attachments.length} attachments` : ''}${effectiveGithubRepoUrl ? ` with GitHub repo ${effectiveGithubRepoUrl}` : ''}`);
 
     // Check GitHub repo access if specified
     let normalizedRepoUrl: string | undefined;
-    if (github_repo_url) {
-      if (!user_id) {
+    if (effectiveGithubRepoUrl) {
+      if (!effectiveUserId) {
         return res.status(400).json({
           error: 'user_id is required when using github_repo_url',
           code: 'MISSING_USER_ID',
         });
       }
 
-      const accessCheck = await checkGithubRepoAccess(user_id, github_repo_url);
+      const accessCheck = await checkGithubRepoAccess(effectiveUserId, effectiveGithubRepoUrl);
       if (!accessCheck.allowed) {
-        console.log(`[ClaudeCode] GitHub access denied for user ${user_id}: ${accessCheck.error}`);
+        console.log(`[ClaudeCode] GitHub access denied for user ${effectiveUserId}: ${accessCheck.error}`);
         return res.status(403).json({
           error: accessCheck.error,
           code: 'GITHUB_ACCESS_DENIED',
@@ -88,6 +121,7 @@ router.post('/create', authenticate, async (req: AuthRequest, res) => {
       sandbox_id: session.sandboxId,
       ws_url: session.wsUrl,
       uploaded_files: session.uploadedFiles,
+      github_repo_url: normalizedRepoUrl || null,
     });
 
   } catch (error) {

@@ -130,6 +130,14 @@ For any services that require a API Key or Credential, mock the service for now 
     prompt: 'Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.',
   },
   {
+    title: 'Test Website Mapping',
+    description: 'Tests Claude Code agents rebuilding a website with sub-agents',
+    prompt: `recreate https://dallasmmaboxing.com w a modern stack using claude code agents and sub agents
+- first understand the content there comprehensively
+- secondly, add a additional link to signup for memberships that is hidden at /memberships
+- make sure u test your changes as needed`,
+  },
+  {
     title: 'Raise My Round',
     description: 'Fundraising outreach with VC/angel CSV and application references',
     prompt: `Raise me my round

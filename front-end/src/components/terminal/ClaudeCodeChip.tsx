@@ -29,7 +29,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Maximize2, X, FileJson, FileIcon, Download } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Maximize2, X, FileJson, FileIcon, Download, ExternalLink } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { Terminal as XTermTerminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -321,7 +321,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
   const [fetchedOutput, setFetchedOutput] = useState(false);
 
   // Extract data from context messages
-  const { isComplete, isSuccess, isVerifying, outputSchema, structuredResponse, failureMessage } = useMemo(() => {
+  const { isComplete, isSuccess, isVerifying, outputSchema, structuredResponse, failureMessage, githubRepoUrl } = useMemo(() => {
     const claudeCodeMessages = messages.filter(m => m.metadata?.task_id === taskId);
     const lastMessage = claudeCodeMessages[claudeCodeMessages.length - 1];
 
@@ -350,13 +350,17 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
       failureText = completionMsg.text;
     }
 
+    // Extract GitHub repo URL from init message
+    const githubUrl = initMessage?.metadata?.github_repo_url as string | undefined;
+
     return {
       isComplete: complete,
       isSuccess: success,
       isVerifying: verifying,
       outputSchema: schema,
       structuredResponse: extracted,
-      failureMessage: failureText
+      failureMessage: failureText,
+      githubRepoUrl: githubUrl,
     };
   }, [messages, taskId]);
 
@@ -603,6 +607,19 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
 
   const { indicator: statusIndicator, text: statusText } = STATUS_CONFIG[chipState];
 
+  const githubLink = githubRepoUrl ? (
+    <a
+      href={githubRepoUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+    >
+      <ExternalLink className="h-3 w-3" />
+      <span>Repo</span>
+    </a>
+  ) : null;
+
   // Fullscreen portal
   if (isFullscreen) {
     return createPortal(
@@ -614,6 +631,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
             {statusIndicator}
             <span className="text-sm font-medium">{statusText}</span>
             <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
+            {githubLink}
           </div>
           <button
             onClick={() => setIsFullscreen(false)}
@@ -659,8 +677,9 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
             <span className="text-sm font-medium truncate">{statusText}</span>
           </div>
 
-          {/* Schema chip + Expand/Collapse */}
+          {/* Schema chip + GitHub link + Expand/Collapse */}
           <div className="flex items-center gap-1">
+            {githubLink}
             <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
             <button
               onClick={(e) => {
@@ -717,6 +736,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
                 <Loader2 className="h-4 w-4 animate-spin text-yellow-500" />
                 <span className="text-xs font-medium">Claude Code Spinning up...</span>
                 <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
+                {githubLink}
               </div>
               <button
                 onClick={() => setIsFullscreen(true)}
@@ -743,6 +763,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
           <span className="text-sm text-muted-foreground">Claude Code Spinning up...</span>
         </div>
         <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
+        {githubLink}
       </div>
     );
   }
@@ -758,6 +779,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
             {statusIndicator}
             <span className="text-xs font-medium">{statusText}</span>
             <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
+            {githubLink}
           </div>
           <button
             onClick={() => setIsFullscreen(true)}
