@@ -1,0 +1,132 @@
+{
+  "description": "GEPA benchmark results \u2014 holdout 100 tasks, all models",
+  "generated": "2026-02-15T09:59:13.891798",
+  "benchmark_set": "holdout-100 (tasks with no A/B preference labels)",
+  "num_tasks": 100,
+  "evaluators": {
+    "ME": "Methodological Excellence \u2014 structural quality of decomposition",
+    "CE": "Contract Enforcement \u2014 adherence to output schema/format",
+    "CX": "Contextual Execution \u2014 goal-appropriate tool/dependency choices",
+    "Critic": "Modal-hosted reward model (pairwise scoring)"
+  },
+  "elo_method": "Bradley-Terry MLE from pairwise critic comparisons, centered at Opus 4.6 base = 1000",
+  "source_files": {
+    "baseline_evals": "research/gepa/data/benchmark_baseline.json",
+    "critic_pairwise": ".context/bench_all_models_critic_only_holdout100.json",
+    "gepa_v2_evals": ".context/bench_opus46_gepa_v2_full_holdout100.json"
+  },
+  "results": [
+    {
+      "model": "Opus 4.6 (GEPA v2)",
+      "elo": 1251,
+      "validation_rate": 0.97,
+      "num_valid": 97,
+      "me_pass_rate": 0.938,
+      "me_mean": 0.929,
+      "ce_pass_rate": 0.948,
+      "ce_mean": 0.958,
+      "cx_pass_rate": 0.938,
+      "cx_mean": 0.833,
+      "all_3_pass_rate": 0.856,
+      "all_3_pass_count": 83,
+      "critic_mean": 0.46,
+      "cost_usd": 7.04,
+      "tree_pass_depth_3": 0.132483
+    },
+    {
+      "model": "Opus 4.6",
+      "elo": 1000,
+      "validation_rate": 0.95,
+      "num_valid": 95,
+      "me_pass_rate": 0.723,
+      "me_mean": 0.773,
+      "ce_pass_rate": 0.968,
+      "ce_mean": 0.911,
+      "cx_pass_rate": 0.936,
+      "cx_mean": 0.78,
+      "all_3_pass_rate": 0.638,
+      "all_3_pass_count": 60,
+      "critic_mean": 0.41,
+      "cost_usd": 6.05,
+      "tree_pass_depth_3": 0.002902
+    },
+    {
+      "model": "GPT 5.2",
+      "elo": 864,
+      "validation_rate": 0.95,
+      "num_valid": 95,
+      "me_pass_rate": 0.755,
+      "me_mean": 0.786,
+      "ce_pass_rate": 0.989,
+      "ce_mean": 0.917,
+      "cx_pass_rate": 0.894,
+      "cx_mean": 0.755,
+      "all_3_pass_rate": 0.649,
+      "all_3_pass_count": 61,
+      "critic_mean": 0.378,
+      "cost_usd": 5.69,
+      "tree_pass_depth_3": 0.003624
+    },
+    {
+      "model": "Rose Ultra (GEPA v1)",
+      "elo": 844,
+      "validation_rate": 0.92,
+      "num_valid": 92,
+      "me_pass_rate": null,
+      "me_mean": null,
+      "ce_pass_rate": null,
+      "ce_mean": null,
+      "cx_pass_rate": null,
+      "cx_mean": null,
+      "all_3_pass_rate": null,
+      "all_3_pass_count": null,
+      "critic_mean": 0.385,
+      "cost_usd": 3.7,
+      "note": "Critic-only evaluation; ME/CE/CX evals failed (OpenRouter 400 errors)",
+      "tree_pass_depth_3": null
+    },
+    {
+      "model": "Kimi 2.5",
+      "elo": 716,
+      "validation_rate": 0.85,
+      "num_valid": 85,
+      "me_pass_rate": 0.7,
+      "me_mean": 0.771,
+      "ce_pass_rate": 0.975,
+      "ce_mean": 0.884,
+      "cx_pass_rate": 0.9,
+      "cx_mean": 0.753,
+      "all_3_pass_rate": 0.575,
+      "all_3_pass_count": 46,
+      "critic_mean": 0.346,
+      "cost_usd": 5.73,
+      "tree_pass_depth_3": 0.000751
+    },
+    {
+      "model": "Gemini 3 Pro",
+      "elo": 530,
+      "validation_rate": 0.87,
+      "num_valid": 87,
+      "me_pass_rate": 0.843,
+      "me_mean": 0.83,
+      "ce_pass_rate": 0.892,
+      "ce_mean": 0.849,
+      "cx_pass_rate": 0.94,
+      "cx_mean": 0.781,
+      "all_3_pass_rate": 0.687,
+      "all_3_pass_count": 57,
+      "critic_mean": 0.31,
+      "cost_usd": 6.86,
+      "tree_pass_depth_3": 0.007593
+    }
+  ],
+  "tree_pass_derivation": {
+    "description": "Derived full-tree pass probability assuming independent per-node All-3-Pass rate",
+    "formula": "p^N where p = all_3_pass_rate, N = total nodes in complete b-ary tree",
+    "branching_factor": 3,
+    "depth_3": {
+      "depth": 3,
+      "total_nodes": 13
+    }
+  }
+}
