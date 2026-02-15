@@ -85,7 +85,7 @@ primary_region = "iad"  # Ashburn, Virginia
 [[vm]]
   cpu_kind = "performance"
   cpus = 1
-  memory_mb = 1024
+  memory_mb = 2048
 
 # Auto-scaling configuration (optional - Fly.io will scale based on load)
 # With auto_stop_machines = false, you'll always have min_machines_running active
