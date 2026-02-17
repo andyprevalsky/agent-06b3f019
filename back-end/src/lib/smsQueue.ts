@@ -10,62 +10,57 @@
  */
 
 import { prisma } from './prisma';
-import { ROSE_SMS_NUMBER } from './smsTemplates';
 
-interface TwilioResponse {
-  sid: string;
-  status: string;
+interface SurgeMessageResponse {
+  id: string;
+  body?: string;
   [key: string]: unknown;
 }
 
 /**
- * Send SMS via Twilio directly (internal helper)
+ * Send SMS via Surge API (internal helper)
  */
 export async function sendSms(
   phoneNumber: string,
   message: string
 ): Promise<{ success: boolean; messageSid?: string; error?: string }> {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const apiKey = process.env.SURGE_API_KEY;
+  const accountId = process.env.SURGE_ACCOUNT_ID;
 
-  if (!accountSid || !authToken) {
-    console.error('[SMS] Twilio credentials not configured');
-    return { success: false, error: 'Twilio not configured' };
+  if (!apiKey || !accountId) {
+    console.error('[SMS] Surge credentials not configured');
+    return { success: false, error: 'Surge not configured' };
   }
-
-  const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
 
   try {
     const response = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+      `https://api.surge.app/accounts/${accountId}/messages`,
       {
         method: 'POST',
         headers: {
-          Authorization: `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
-        body: new URLSearchParams({
-          From: ROSE_SMS_NUMBER,
-          To: phoneNumber,
-          Body: message,
+        body: JSON.stringify({
+          to: phoneNumber,
+          body: message,
         }),
       }
     );
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[SMS] Twilio API error:', response.status, errorText);
-      return { success: false, error: `Twilio API error: ${response.status}` };
+      console.error('[SMS] Surge API error:', response.status, errorText);
+      return { success: false, error: `Surge API error: ${response.status}` };
     }
 
-    const result = (await response.json()) as TwilioResponse;
-    console.log('[SMS] Sent via Twilio', {
-      messageSid: result.sid,
+    const result = (await response.json()) as SurgeMessageResponse;
+    console.log('[SMS] Sent via Surge', {
+      messageId: result.id,
       phone: phoneNumber.substring(0, 7) + '****',
-      status: result.status,
     });
 
-    return { success: true, messageSid: result.sid };
+    return { success: true, messageSid: result.id };
   } catch (error) {
     console.error('[SMS] Error sending:', error);
     return { success: false, error: String(error) };
@@ -73,55 +68,51 @@ export async function sendSms(
 }
 
 /**
- * Send MMS with media attachment via Twilio (for vCard, images, etc.)
+ * Send MMS with media attachment via Surge (for vCard, images, etc.)
  */
 export async function sendMms(
   phoneNumber: string,
   message: string,
   mediaUrl: string
 ): Promise<{ success: boolean; messageSid?: string; error?: string }> {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const apiKey = process.env.SURGE_API_KEY;
+  const accountId = process.env.SURGE_ACCOUNT_ID;
 
-  if (!accountSid || !authToken) {
-    console.error('[MMS] Twilio credentials not configured');
-    return { success: false, error: 'Twilio not configured' };
+  if (!apiKey || !accountId) {
+    console.error('[MMS] Surge credentials not configured');
+    return { success: false, error: 'Surge not configured' };
   }
-
-  const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
 
   try {
     const response = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+      `https://api.surge.app/accounts/${accountId}/messages`,
       {
         method: 'POST',
         headers: {
-          Authorization: `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
-        body: new URLSearchParams({
-          From: ROSE_SMS_NUMBER,
-          To: phoneNumber,
-          Body: message,
-          MediaUrl: mediaUrl,
+        body: JSON.stringify({
+          to: phoneNumber,
+          body: message,
+          attachments: [{ url: mediaUrl }],
         }),
       }
     );
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[MMS] Twilio API error:', response.status, errorText);
-      return { success: false, error: `Twilio API error: ${response.status}` };
+      console.error('[MMS] Surge API error:', response.status, errorText);
+      return { success: false, error: `Surge API error: ${response.status}` };
     }
 
-    const result = (await response.json()) as TwilioResponse;
-    console.log('[MMS] Sent via Twilio', {
-      messageSid: result.sid,
+    const result = (await response.json()) as SurgeMessageResponse;
+    console.log('[MMS] Sent via Surge', {
+      messageId: result.id,
       phone: phoneNumber.substring(0, 7) + '****',
-      status: result.status,
     });
 
-    return { success: true, messageSid: result.sid };
+    return { success: true, messageSid: result.id };
   } catch (error) {
     console.error('[MMS] Error sending:', error);
     return { success: false, error: String(error) };

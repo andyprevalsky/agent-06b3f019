@@ -20,7 +20,7 @@ logger = structlog.get_logger()
 
 
 class SendSmsManager(ToolManager):
-    """Manager for sending SMS messages via MessageBird API."""
+    """Manager for sending SMS messages via Surge SMS API."""
     
     tool_name = "send_sms"
     
@@ -120,14 +120,14 @@ class SendSmsManager(ToolManager):
                 "result": result,
                 "usage": {
                     "llm": [],
-                    "service": [{"cost_cents": cost_cents, "provider": "MessageBird SMS"}],
+                    "service": [{"cost_cents": cost_cents, "provider": "Surge SMS"}],
                 }
             }
             
         except Exception as e:
             # Error status - extract root cause from Temporal exception chain
             error_msg = extract_root_error(e)
-            logger.error("SMS send failed", error=error_msg, to=to[:4] + "****")
+            logger.error("SMS send failed", error=error_msg, phone=phone_number[:4] + "****")
             await handle_tool_event(
                 event=ToolEvent(
                     type=EventType.POST_MESSAGE,
@@ -204,9 +204,9 @@ async def send_sms(
 @activity.defn
 async def send_sms_activity(phone_number: str, message: str) -> Dict[str, Any]:
     """
-    Activity: Send SMS message via backend API (backend handles MessageBird).
+    Activity: Send SMS message via backend API (backend handles Surge).
     
-    Agent doesn't need MessageBird credentials - backend does the API call.
+    Agent doesn't need Surge credentials - backend does the API call.
     
     Args:
         phone_number: Phone number in E.164 format (e.g., +19729777432)
@@ -216,7 +216,7 @@ async def send_sms_activity(phone_number: str, message: str) -> Dict[str, Any]:
         Dict with:
             - success: Boolean
             - phone_number: Recipient phone
-            - message_id: MessageBird message ID (if available)
+            - message_id: Surge message ID (if available)
     """
     try:
         activity.heartbeat(f"Sending SMS to {phone_number[:4]}****")
@@ -224,7 +224,7 @@ async def send_sms_activity(phone_number: str, message: str) -> Dict[str, Any]:
         config = load_config()
         
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # Call backend API to send SMS (backend handles MessageBird credentials)
+            # Call backend API to send SMS (backend handles Surge credentials)
             response = await client.post(
                 f"{config.backend.api_url}/api/send-sms",
                 headers={
