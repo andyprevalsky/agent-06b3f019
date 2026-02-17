@@ -23,7 +23,7 @@ from helpers.tool_schemas import (
     ProgressScore,
     create_agent_action_model,
 )
-from helpers.messages import stream_assistant_chunk, stream_tool_event, stream_attention_event
+from helpers.messages import stream_assistant_chunk, stream_tool_event, stream_attention_event, stream_plan_event
 from tools.base import ToolSchema
 from helpers.attachments import (
     FilePointer,
@@ -551,13 +551,14 @@ async def call_llm_structured_streaming(
     agent_id: Optional[str] = None,  # For cancellation checking
     on_tool_detected: Optional[Callable[[str, str], Awaitable[None]]] = None,  # Called when any tool detected (tool_name, tool_call_id)
     on_attention_stream: Optional[Callable[[str, str, bool], Awaitable[None]]] = None,  # Called with (tool_call_id, message, is_question) for send_message_to_user
+    on_raw_progress: Optional[Callable[[int], Awaitable[None]]] = None,  # Called with total accumulated bytes (reasoning + json)
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
-    
+
     This variant streams the response and calls `on_chunk` when 18+ new characters have
     accumulated since the last emit. A final flush is done at the end for any remaining content.
-    
+
     Args:
         messages: List of message dicts with 'role' and 'content'
         model: Model to use
@@ -569,7 +570,8 @@ async def call_llm_structured_streaming(
         model_preference: Optional Rose model preference ("SMART", "FAST", "CHEAP")
         agent_id: Optional agent ID for cancellation checking (stops streaming if agent is paused)
         on_tool_detected: Optional callback(tool_name, tool_call_id) when any tool is first detected
-        
+        on_raw_progress: Optional callback(total_bytes) called on every chunk with total accumulated bytes
+
     Returns:
         Tuple of (response_model instance, usage dict with token counts, plan_tool_call_id or None, detected_tools_ordered list)
         Usage dict includes 'cancelled': True if streaming was stopped early
@@ -874,6 +876,10 @@ async def call_llm_structured_streaming(
                                 else:
                                     phase = "json"
                                 _safe_heartbeat(f"C{chunk_count} [{phase}] r={len(accumulated_reasoning)} j={len(accumulated_json)}")
+
+                            # Raw progress callback (every chunk)
+                            if on_raw_progress:
+                                await on_raw_progress(len(accumulated_reasoning) + len(accumulated_json))
                         except json.JSONDecodeError:
                             logger.error(f"Failed to parse chunk: {data_str}")
                             continue
@@ -2068,12 +2074,14 @@ async def call_planner_llm_activity(
     tools_description: str,
     user_context: str,
     response_schema: Optional[Dict[str, Any]] = None,
+    agent_id: Optional[str] = None,
+    tool_call_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Temporal activity for calling the dedicated planner LLM.
 
     The planner receives conversation context and generates an execution plan
-    with tasks and dependencies. No streaming to frontend.
+    with tasks and dependencies. Streams char count to frontend via PLAN_STREAM.
 
     Args:
         messages: Conversation history (user/assistant messages)
@@ -2081,6 +2089,8 @@ async def call_planner_llm_activity(
         tools_description: Description of tools available in execute phase
         user_context: User context for personalization
         response_schema: Optional structured output schema the agent should return
+        agent_id: Agent ID for streaming plan progress to frontend
+        tool_call_id: Tool call ID for linking streaming to final plan
 
     Returns:
         Dict from PlannerResponse.model_dump() with title, content, tasks, dependencies_graph, join
@@ -2103,9 +2113,26 @@ async def call_planner_llm_activity(
     total_chars = sum(len(m.get("content", "")) for m in full_messages)
     logger.info(f"[TIMING] Planner input: {len(full_messages)} messages, {total_chars} chars total")
 
-    # No-op callback - planner doesn't stream to frontend
-    async def noop(text: str, count: int):
+    # Stream plan char count to frontend via PLAN_STREAM events
+    plan_stream_id = str(uuid.uuid4())
+    last_broadcast_len = [0]
+
+    async def on_plan_heartbeat(text: str, count: int):
         _safe_heartbeat(f"Planner thinking... {len(text)} chars")
+
+    async def on_plan_progress(total_bytes: int):
+        """Called every 5 chunks with total accumulated bytes (reasoning + json)."""
+        if agent_id and tool_call_id:
+            # Only broadcast when 50+ new bytes since last broadcast
+            if total_bytes - last_broadcast_len[0] >= 50:
+                last_broadcast_len[0] = total_bytes
+                await stream_plan_event(
+                    agent_id=agent_id,
+                    stream_id=plan_stream_id,
+                    tool_call_id=tool_call_id,
+                    title="Generating Plan",
+                    char_count=total_bytes,
+                )
 
     try:
         llm_start = time.perf_counter()
@@ -2115,7 +2142,8 @@ async def call_planner_llm_activity(
             temperature=0.7,
             max_tokens=2048,
             response_model=PlannerResponse,
-            on_chunk=noop,
+            on_chunk=on_plan_heartbeat,
+            on_raw_progress=on_plan_progress,
         )
         llm_elapsed = time.perf_counter() - llm_start
         activity_elapsed = time.perf_counter() - activity_start

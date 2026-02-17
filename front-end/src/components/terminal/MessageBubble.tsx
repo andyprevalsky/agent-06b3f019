@@ -77,6 +77,8 @@ interface MessageBubbleProps {
   onOpenAuthModal?: () => void;
   /** Callback to submit feedback (for completion summary) */
   onSubmitFeedback?: (feedback: FeedbackData) => Promise<void>;
+  /** Streaming plan char count (for set_plan IN_PROGRESS PlanChip) */
+  planCharCount?: number;
 }
 
 interface ToolMessageData {
@@ -814,7 +816,7 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback, planCharCount }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -1033,6 +1035,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
               status: planData?.status || 'planning',
             }}
             toolStatus={toolStatus}
+            charCount={planCharCount}
           />
         </div>
       </div>

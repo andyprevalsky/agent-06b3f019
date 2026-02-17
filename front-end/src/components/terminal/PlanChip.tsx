@@ -15,14 +15,16 @@
  * Props determine visual state:
  * - plan.status: 'planning' | 'ready' | 'executing' | 'complete'
  * - toolStatus: 'IN_PROGRESS' | 'FINISHED' (shimmer effect)
+ * - charCount: number (animated char counter shown during streaming)
  */
 
 import { memo, useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronDown, FileText } from 'lucide-react';
+import { ChevronDown, FileText, ArrowDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MarkdownText } from './MarkdownText';
 import { PlanTask } from '@/lib/realtime-types';
+import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
 
 interface PlanData {
   title: string;
@@ -38,6 +40,8 @@ interface PlanChipProps {
   className?: string;
   /** Tool status - IN_PROGRESS shows shimmer effect on title */
   toolStatus?: 'IN_PROGRESS' | 'FINISHED';
+  /** Character count to display with spring animation when streaming */
+  charCount?: number;
 }
 
 interface TaskWithDeps {
@@ -202,9 +206,10 @@ function formatToolName(toolName: string): string {
  * Shows as a compact chip when collapsed, expands vertically to show full plan content.
  * Displays tasks as a flat numbered list in topological order with inline dependency notation.
  */
-export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = 'FINISHED' }: PlanChipProps) {
+export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = 'FINISHED', charCount = 0 }: PlanChipProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const isStreaming = toolStatus === 'IN_PROGRESS';
+  const animatedCharCount = useAnimatedCounter(charCount, 0.3);
 
   // Compute sorted tasks and header text
   const { sortedTasks, headerText } = useMemo(() => {
@@ -270,6 +275,14 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
             )}>
               {plan.title}
             </span>
+
+            {/* Char counter - shown during streaming */}
+            {isStreaming && charCount > 0 && (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground ml-auto">
+                <ArrowDown className="w-3 h-3" />
+                <span className="tabular-nums">{animatedCharCount.toLocaleString()}</span>
+              </span>
+            )}
           </div>
 
           {/* Chevron indicator - only show if there's content to expand */}

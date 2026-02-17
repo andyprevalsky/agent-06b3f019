@@ -110,6 +110,7 @@ export interface StreamingPlan {
   stream_id: string;
   tool_call_id: string;
   title: string;
+  char_count?: number;
   subAgentId?: string;
 }
 
@@ -627,6 +628,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
               stream_id: plan.stream_id,
               tool_call_id: plan.tool_call_id,
               title: plan.title,
+              char_count: plan.char_count ?? 0,
             });
           },
           

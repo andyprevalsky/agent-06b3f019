@@ -570,6 +570,8 @@ export interface PlanStreamPayload {
   tool_call_id: string;
   /** Display title (e.g., "Creating Plan") */
   title: string;
+  /** Current character count of plan content being generated */
+  char_count?: number;
 }
 
 // -----------------------------------------------------------------------------

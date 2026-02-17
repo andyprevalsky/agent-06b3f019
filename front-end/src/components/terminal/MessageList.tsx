@@ -576,6 +576,13 @@ export function MessageList({
           onSendMessage={selectedAgentId ? handleSendMessage : undefined}
           compact={compact}
           onSubmitFeedback={onSubmitFeedback}
+          planCharCount={
+            message.metadata?.toolName === 'set_plan' &&
+            message.metadata?.toolStatus === 'IN_PROGRESS' &&
+            filteredStreamingPlan?.char_count
+              ? filteredStreamingPlan.char_count
+              : undefined
+          }
         />
       ))}
 
@@ -760,6 +767,7 @@ export function MessageList({
                       status: 'planning',
                     }}
                     toolStatus="IN_PROGRESS"
+                    charCount={filteredStreamingPlan.char_count ?? 0}
                   />
                 </div>
               )}

@@ -107,26 +107,28 @@ async def stream_plan_event(
     stream_id: str,
     tool_call_id: str,
     title: str,
+    char_count: int = 0,
 ) -> None:
     """
     Broadcast plan streaming state DIRECTLY to Supabase Realtime (no DB insert).
-    
+
     This is used to show the PlanChip with shimmer effect during LLM streaming,
     without creating a database record. The FINISHED state comes later via
     normal tool execution which does create a DB record.
-    
+
     Args:
         agent_id: The agent ID
         stream_id: Unique ID for this streaming session (same as assistant stream)
         tool_call_id: The tool_call_id that will be used for the final set_plan
-        title: The plan title (or "Generating Plan..." initially)
+        title: The plan title (or "Generating Plan" initially)
+        char_count: Current character count of plan content being generated
     """
     try:
-        
+
         config = load_config()
-        
+
         broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
-        
+
         payload = {
             "messages": [{
                 "topic": f"agent:{agent_id}",
@@ -137,6 +139,7 @@ async def stream_plan_event(
                         "stream_id": stream_id,
                         "tool_call_id": tool_call_id,
                         "title": title,
+                        "char_count": char_count,
                     }
                 },
                 "private": True

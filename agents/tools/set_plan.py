@@ -197,8 +197,8 @@ class SetPlanManager(ToolManager):
         # 1. Yield in-progress status
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title="Generating plan...",
-            message="Analyzing context and generating execution plan...",
+            title="Generating Plan",
+            message="Analyzing context and generating execution plan",
             status=MessageStatus.IN_PROGRESS
         )
 
@@ -262,7 +262,8 @@ class SetPlanManager(ToolManager):
                     # Planner always uses rose-ultra for best DAG generation quality
                     planner_task = workflow.execute_activity(
                         call_planner_llm_activity,
-                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema],
+                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema,
+                              workflow_instance.agent_id, tool_call_id],
                         start_to_close_timeout=timedelta(seconds=120),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
@@ -294,7 +295,8 @@ class SetPlanManager(ToolManager):
                     # Planner always uses rose-ultra for best DAG generation quality
                     planner_result_raw = await workflow.execute_activity(
                         call_planner_llm_activity,
-                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema],
+                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema,
+                              workflow_instance.agent_id, tool_call_id],
                         start_to_close_timeout=timedelta(seconds=120),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
@@ -326,8 +328,8 @@ class SetPlanManager(ToolManager):
             if attempt < self.MAX_RETRIES - 1:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Retrying plan generation...",
-                    message=f"Validation error: {validation_error}\n\nRetrying with correction...",
+                    title="Retrying plan generation",
+                    message=f"Validation error: {validation_error}\n\nRetrying with correction",
                     status=MessageStatus.IN_PROGRESS
                 )
 
