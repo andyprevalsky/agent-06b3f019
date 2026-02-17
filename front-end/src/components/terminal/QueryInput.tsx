@@ -600,12 +600,14 @@ export default function QueryInput({
             {/* Top Bar */}
             <div className="flex items-center justify-between gap-2 px-3 pb-2">
             <div className="flex items-center gap-2">
-              {/* Write Lock Toggle */}
-              <WriteLockToggle
-                agentId={agentDetail?.agent_id}
-                writeLockEnabled={agentDetail?.write_lock_enabled ?? true}
-                onUpdate={onAgentUpdate}
-              />
+              {/* Write Lock Toggle - hidden on mobile */}
+              <div className="hidden md:block">
+                <WriteLockToggle
+                  agentId={agentDetail?.agent_id}
+                  writeLockEnabled={agentDetail?.write_lock_enabled ?? true}
+                  onUpdate={onAgentUpdate}
+                />
+              </div>
               {/* Rose-ToolSet Chip */}
               <RoseToolSetChip />
               {/* Test Prompts Selector - Dev only */}

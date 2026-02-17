@@ -1575,22 +1575,20 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
           </button>
         </div>
         
-        {/* Research Button - Absolutely centered in viewport */}
+        {/* Research Button - Mobile only, centered in header */}
         <button
-          onClick={(e) => {
-            e.stopPropagation();
+          onClick={() => {
             // TODO: Enable when research page is public
             // navigate('/research');
           }}
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors z-10"
+          className="md:hidden absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors z-10"
         >
           Research
         </button>
-        
+
         {/* Attention Inbox */}
         <AttentionInbox onSelectAgent={setSelectedAgentIdContext} realtimeReady={realtimeReady} />
       </header>
-
 
       <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
         {/* Left Sidebar - Always visible */}
@@ -1617,6 +1615,28 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         {/* Main Content - Centered */}
         <main className="flex-1 flex justify-center h-screen overflow-hidden" style={{ height: '100dvh' }}>
           <div className="flex flex-col relative max-w-5xl w-full px-2 md:px-6 h-full overflow-hidden">
+          {/* Research + Download - right-aligned with content column, same row as header, hidden on mobile */}
+          <div className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50">
+            <button
+              onClick={() => {
+                // TODO: Enable when research page is public
+                // navigate('/research');
+              }}
+              className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
+            >
+              Research
+            </button>
+            {clientSource === 'WEB' && (
+              <a
+                href="/download"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 bg-navi-black text-white text-xs font-medium rounded-full hover:bg-navi-black/80 transition-colors shadow-lg"
+              >
+                Download
+              </a>
+            )}
+          </div>
           {/* Breadcrumb for sub-agents - Below Header */}
           {selectedAgentId && agentDetail?.parent_agent_id && (
             <div className="absolute top-20 left-0 right-0 z-40 px-6">
