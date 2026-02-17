@@ -1,36 +1,18 @@
 import { Router } from 'express';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 // @ts-ignore - vcards-js doesn't have type declarations
 import vCardsJS from 'vcards-js';
 import { prisma } from '../lib/prisma';
 
 const router = Router();
 
-// Default Rose contact photo (same as frontend DEFAULT_PROFILE_PICTURE)
-const DEFAULT_CONTACT_PHOTO = 'https://roselabs.ai/rose-contact.png';
+// Pre-load the default Rose contact photo as base64 (256x256, ~35KB)
+// This avoids fetching the full-size 556KB image at runtime and keeps vCards under MMS size limits
+const DEFAULT_PHOTO_BASE64 = readFileSync(join(__dirname, '../assets/rose-contact-256.png')).toString('base64');
 
-// Cache for base64-encoded photos (URL -> { base64, mediaType })
-const photoCache = new Map<string, { base64: string; mediaType: string }>();
-
-const ALLOWED_PHOTO_HOSTS = ['roselabs.ai', 'kzlurqihzaolhzsbkctf.supabase.co'];
-
-async function fetchPhotoBase64(url: string): Promise<{ base64: string; mediaType: string } | null> {
-  const cached = photoCache.get(url);
-  if (cached) return cached;
-
-  try {
-    const parsed = new URL(url);
-    if (!ALLOWED_PHOTO_HOSTS.includes(parsed.hostname)) return null;
-
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const isJpeg = url.toLowerCase().includes('.jpg') || url.toLowerCase().includes('.jpeg');
-    const result = { base64: buffer.toString('base64'), mediaType: isJpeg ? 'JPEG' : 'PNG' };
-    photoCache.set(url, result);
-    return result;
-  } catch {
-    return null;
-  }
+function applyDefaultPhoto(vCard: any) {
+  vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');
 }
 
 /**
@@ -44,7 +26,7 @@ async function fetchPhotoBase64(url: string): Promise<{ base64: string; mediaTyp
  * - Content-Disposition: inline (allows preview)
  * - Cache-Control: no-cache (prevents iOS caching issues)
  */
-router.get('/rose.vcf', async (req, res) => {
+router.get('/rose.vcf', (req, res) => {
   const vCard = vCardsJS();
 
   // Name
@@ -65,11 +47,8 @@ router.get('/rose.vcf', async (req, res) => {
   // Birthday (Jan 1, 2026)
   vCard.birthday = new Date(2026, 0, 1);
 
-  // Photo - embed as base64 so it shows in SMS clients
-  const photo = await fetchPhotoBase64(DEFAULT_CONTACT_PHOTO);
-  if (photo) {
-    vCard.photo.embedFromString(photo.base64, photo.mediaType);
-  }
+  // Photo - embedded base64 (256x256 PNG)
+  applyDefaultPhoto(vCard);
 
   // Set headers for vCard delivery
   res.set('Content-Type', 'text/vcard; name="rose.vcf"');
@@ -120,12 +99,8 @@ router.get('/:userId.vcf', async (req, res) => {
     // Birthday (Jan 1, 2026)
     vCard.birthday = new Date(2026, 0, 1);
 
-    // Photo - embed as base64 so it shows in SMS clients
-    const photoUrl = user?.profilePicture || DEFAULT_CONTACT_PHOTO;
-    const photo = await fetchPhotoBase64(photoUrl);
-    if (photo) {
-      vCard.photo.embedFromString(photo.base64, photo.mediaType);
-    }
+    // Photo - always use default (custom photos may exceed MMS size limits)
+    applyDefaultPhoto(vCard);
 
     // Set headers for vCard delivery
     const filename = `${systemName.toLowerCase().replace(/\s+/g, '-')}.vcf`;
@@ -146,10 +121,7 @@ router.get('/:userId.vcf', async (req, res) => {
     vCard.title = 'SI';
     vCard.url = 'https://roselabs.ai';
     vCard.birthday = new Date(2026, 0, 1);
-    const fallbackPhoto = await fetchPhotoBase64(DEFAULT_CONTACT_PHOTO);
-    if (fallbackPhoto) {
-      vCard.photo.embedFromString(fallbackPhoto.base64, fallbackPhoto.mediaType);
-    }
+    applyDefaultPhoto(vCard);
 
     res.set('Content-Type', 'text/vcard; name="rose.vcf"');
     res.set('Content-Disposition', 'inline; filename="rose.vcf"');

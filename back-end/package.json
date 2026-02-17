@@ -8,7 +8,7 @@
     "dev:server": "rm -f backend-logs.log && tsx watch src/server.ts 2>&1 | tee backend-logs.log",
     "ngrok": "ngrok http 3001 --pooling-enabled",
     "kill:ngrok": "./scripts/kill-ngrok.sh",
-    "build": "tsc",
+    "build": "tsc && cp -r src/assets dist/assets",
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
