@@ -763,6 +763,16 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
         where: { id: agentId },
       });
 
+      // If agent is COMPLETED/FAILED, clear the dead workflow so it falls through to chat mode
+      if (agentForChat?.temporalWorkflowId &&
+          (agentForChat.status === 'COMPLETED' || agentForChat.status === 'FAILED')) {
+        await prisma.agent.update({
+          where: { id: agentId },
+          data: { temporalWorkflowId: null, status: 'ACTIVE' },
+        });
+        agentForChat.temporalWorkflowId = null;
+      }
+
       if (agentForChat?.temporalWorkflowId) {
         // Agent mode: signal Temporal workflow
         try {
