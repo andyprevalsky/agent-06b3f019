@@ -901,7 +901,7 @@ def generate_charts(report: BenchmarkReport, output_dir: Path):
 
     def _make_eval_chart(filename: str, title: str, means: list, stds: list, ylabel: str):
         fig, ax = plt.subplots(figsize=(10, 6))
-        bars = ax.bar(x, means, bar_width, yerr=stds, capsize=5, color=colors, edgecolor='white', linewidth=1.2)
+        bars = ax.bar(x, means, bar_width, color=colors, edgecolor='white', linewidth=1.2)
         ax.set_ylabel(ylabel, fontsize=12)
         ax.set_title(title, fontsize=14, fontweight='bold')
         ax.set_xticks(x)

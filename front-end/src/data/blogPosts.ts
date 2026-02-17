@@ -63,11 +63,11 @@ You may say, wait a minute, what if a problem <em>P</em> is NOT decomposable at 
 
 <strong>Feb 2, 2026</strong> <a href="https://www.kimi.com/blog/kimi-k2-5.html" target="_blank" rel="noopener noreferrer">Kimi 2.5 | Swarm</a> Kimi shows how as task complexity increases, execution time increases linear with swarms as opposed to exponentially with a single agent system. It also shows how Agent Swarms serve as a form of "Proactive Context Management", scaling effective context length along an additional architectural dimension while preserving modularity, information locality, and reasoning integrity.
 
-<strong>Feb 05, 2026</strong> Opus 4.6 | Agent Teams show how scaling the number of agents, in this case to 16, can dramatically reduce the time it takes to complete a C compiler, a traditionally extremely complex task that would realistically cost 100s of thousands of dollars in engineering costs.
+<strong>Feb 05, 2026</strong> <a href="https://www.anthropic.com/engineering/building-c-compiler" target="_blank" rel="noopener noreferrer">Opus 4.6 | Agent Teams</a> show how scaling the number of agents, in this case to 16, can dramatically reduce the time it takes to complete a C compiler, a traditionally extremely complex task that would realistically cost 100s of thousands of dollars in engineering costs.
 
 <strong>Jan 17, 2026</strong> <a href="https://ensue.dev/blog/stop-throwing-a-single-agent-at-complex-problems/" target="_blank" rel="noopener noreferrer">Ensue | Stop Throwing A Single Agent At Complex Problems</a> Shows how recursive decomposition can extend LLM capabilities to new SOTA levels for math work, solving a Putnam problem previously out of reach of Opus 4.5
 
-<strong>Jan 28, 2026</strong> Recursive Language Models  While not a tool orchestrator per se, recursive language models show how effective context of a model can be extended drastically, by externalizing the input prompt as an environment variable, from which the core LLM can query over and interact with.`
+<strong>Jan 28, 2026</strong> <a href="https://arxiv.org/abs/2512.24601v1" target="_blank" rel="noopener noreferrer">Recursive Language Models</a>  While not a tool orchestrator per se, recursive language models show how effective context of a model can be extended drastically, by externalizing the input prompt as an environment variable, from which the core LLM can query over and interact with.`
       },
       {
         id: 'whats-missing',
@@ -80,9 +80,7 @@ Additionally, existing benchmarks for tool orchestrators focus on a narrow set o
 
 Credit assignment for recursive task decomposition (knowing which decomposition in the entire decomposition tree was bad/good) is currently an open research problem. Previous algorithms like AlphaGo solve this problem because the problem space is perfectly simulatable, and thus, are able to generate massive amounts of end-to-end runs that make approximating any given state in the tree possible.
 
-Decentralized tool orchestrators, like Agent Teams or Cursors Long Running Code Agent are highly costly, require continued maintenance to avoid stagnation, and are bottlenecked by the complexity of creating a perfect verifier, which they rely on to ensure target drift doesn't happen. For real-world applications these are unacceptable conditions.
-
-No concept of AND vs OR`
+Decentralized tool orchestrators, like Agent Teams or Cursors Long Running Code Agent are highly costly, require continued maintenance to avoid stagnation, and are bottlenecked by the complexity of creating a perfect verifier, which they rely on to ensure target drift doesn't happen. For real-world applications these are unacceptable conditions.`
       },
       {
         id: 'how-we-built',
@@ -90,13 +88,17 @@ No concept of AND vs OR`
         content: `We started by hand-crafting our tool orchestration prompt to adhere to the principles of what a good plan entails.
 
 1. <strong>ME</strong>: All sub-tasks should be mutually exclusive, there should be no work duplicated across sub-tasks.
+
 2. <strong>CE</strong>: All sub-tasks should collectively be exhaustive, CE, completion of all sub-tasks should imply completion of the task that is being decomposed.
+
 3. <strong>CX</strong>: Each sub-task should be strictly less complex than the task being decomposed, CX.
+
 4. The expected cost of each sub-task should be minimized.
+
 5. The total time required to complete each sub-task should be minimized.
 
 Thus, the equation for how good any given decomposition is can be described as
-<em>ME<sup>a</sup> × CE<sup>b</sup> × CX<sup>c</sup> × Normalized(Expected(Cost)) × Normalized(Expected(Time))</em>
+<em>ME<sup>w1</sup> × CE<sup>w2</sup> × CX<sup>w3</sup> × Normalized(Expected(Cost)) × Normalized(Expected(Time))</em>
 
 In order to derive Expected Cost and Expected Time of any given decomposition in a tree of recursive decompositions, we take inspiration from Alpha Go to tackle the Credit Assignment problem. Instead of running a massive simulation though, we bootstrap Expected Cost and Expected Time via a proxy metric derived from a custom trained Bradley-Terry reward model.
 
@@ -110,7 +112,7 @@ We used this dataset to fine-tune a Gemma-2-9B-it Bradley Terry Model and used L
 
 We considered multiple approaches for training a generalizable tool decomposer, and settled on using GEPA for its ability to maintain generalization across unseen data and its remarkable sample efficiency.
 
-<table><thead><tr><th>Metric</th><th>Opus 4.6 (baseline)</th><th>Rose-Decompose</th><th>Δ</th></tr></thead><tbody><tr><td>ME Pass Rate</td><td>72.3%</td><td>93.8%</td><td style="color:#16a34a">+21.5%</td></tr><tr><td>CE Pass Rate</td><td>96.8%</td><td>94.8%</td><td>−2.0%</td></tr><tr><td>CX Pass Rate</td><td>93.6%</td><td>93.8%</td><td style="color:#16a34a">+0.2%</td></tr><tr><td>All-3 Pass Rate</td><td>63.8%</td><td>85.6%</td><td style="color:#16a34a"><strong>+21.8%</strong></td></tr><tr><td>ELO</td><td>1000</td><td>1251</td><td style="color:#16a34a"><strong>+251</strong></td></tr></tbody></table>
+<table><thead><tr><th>Metric</th><th>Opus 4.6</th><th>Rose-Decompose</th><th>Δ</th></tr></thead><tbody><tr><td>ME Pass Rate</td><td>72.3%</td><td>93.8%</td><td style="color:#16a34a">+21.5%</td></tr><tr><td>CE Pass Rate</td><td>96.8%</td><td>94.8%</td><td>−2.0%</td></tr><tr><td>CX Pass Rate</td><td>93.6%</td><td>93.8%</td><td style="color:#16a34a">+0.2%</td></tr><tr><td>All-3 Pass Rate</td><td>63.8%</td><td>85.6%</td><td style="color:#16a34a"><strong>+21.8%</strong></td></tr><tr><td>ELO</td><td>1000</td><td>1251</td><td style="color:#16a34a"><strong>+251</strong></td></tr></tbody></table>
 
 The resulting model, Rose-Decompose, performs dramatically better on our hold-out set, and due to the nature of the task at hand, recursive decomposition, these large increases in performance compound within a single task dramatically.
 
