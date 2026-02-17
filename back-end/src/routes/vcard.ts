@@ -31,7 +31,7 @@ router.get('/rose.vcf', (req, res) => {
 
   // Name
   vCard.firstName = 'Rose';
-  vCard.lastName = 'L.';
+  vCard.lastName = '';
 
   // Contact info
   vCard.cellPhone = '+14154498445';
@@ -39,7 +39,7 @@ router.get('/rose.vcf', (req, res) => {
 
   // Organization
   vCard.organization = 'Rose Labs';
-  vCard.title = 'SI';
+  // No job title
 
   // URLs
   vCard.url = 'https://roselabs.ai';
@@ -83,7 +83,7 @@ router.get('/:userId.vcf', async (req, res) => {
     // Name - use customized name or default to Rose
     const systemName = user?.systemName || 'Rose';
     vCard.firstName = systemName;
-    vCard.lastName = 'L.';
+    vCard.lastName = '';
 
     // Contact info (always Rose Labs)
     vCard.cellPhone = '+14154498445';
@@ -91,7 +91,7 @@ router.get('/:userId.vcf', async (req, res) => {
 
     // Organization
     vCard.organization = 'Rose Labs';
-    vCard.title = 'SI';
+    // No job title
 
     // URLs
     vCard.url = 'https://roselabs.ai';
@@ -114,11 +114,11 @@ router.get('/:userId.vcf', async (req, res) => {
     // Fall back to default Rose vCard on error
     const vCard = vCardsJS();
     vCard.firstName = 'Rose';
-    vCard.lastName = 'L.';
+    vCard.lastName = '';
     vCard.cellPhone = '+14154498445';
     vCard.email = 'rose@roselabs.ai';
     vCard.organization = 'Rose Labs';
-    vCard.title = 'SI';
+    // No job title
     vCard.url = 'https://roselabs.ai';
     vCard.birthday = new Date(2026, 0, 1);
     applyDefaultPhoto(vCard);
