@@ -179,6 +179,58 @@ jobs:
           xcrun stapler staple dist/Rose-mac.dmg
           xcrun stapler validate dist/Rose-mac.dmg
 
+      # ============================================
+      # UPLOAD DMG TO SUPABASE STORAGE (public downloads)
+      # ============================================
+
+      - name: Upload DMG to Supabase Storage
+        working-directory: mac-app
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG_FILE="dist/Rose-mac.dmg"
+
+          echo "Uploading DMG to Supabase Storage..."
+          echo "  Version: $VERSION"
+          echo "  File size: $(stat -f%z "$DMG_FILE") bytes"
+
+          # Upload to versioned path (archive)
+          echo "Uploading to Releases/mac/v${VERSION}/Rose-mac.dmg..."
+          VERSIONED_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            "${SUPABASE_URL}/storage/v1/object/Releases/mac/v${VERSION}/Rose-mac.dmg" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Content-Type: application/octet-stream" \
+            -H "x-upsert: true" \
+            --data-binary @"$DMG_FILE")
+
+          if [[ "$VERSIONED_STATUS" -ne 200 ]]; then
+            echo "WARNING: Versioned upload returned HTTP $VERSIONED_STATUS"
+          else
+            echo "Versioned upload successful"
+          fi
+
+          # Upload to latest path (overwrite for public download link)
+          echo "Uploading to Releases/mac/latest/Rose-mac.dmg..."
+          LATEST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            "${SUPABASE_URL}/storage/v1/object/Releases/mac/latest/Rose-mac.dmg" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Content-Type: application/octet-stream" \
+            -H "x-upsert: true" \
+            --data-binary @"$DMG_FILE")
+
+          if [[ "$LATEST_STATUS" -ne 200 ]]; then
+            echo "ERROR: Latest upload returned HTTP $LATEST_STATUS"
+            echo "Public download link will NOT be updated."
+            exit 1
+          else
+            echo "Latest upload successful"
+            echo "Public URL: ${SUPABASE_URL}/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg"
+          fi
+
       - name: Upload stapled DMG to release
         uses: softprops/action-gh-release@v1
         with:

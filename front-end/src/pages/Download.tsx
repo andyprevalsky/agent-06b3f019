@@ -3,13 +3,13 @@
  *
  * This component triggers an automatic download redirect on mount.
  *
- * [MOUNTED] --> redirect to GitHub releases download URL
+ * [MOUNTED] --> redirect to Supabase Storage download URL
  */
 
 import { useEffect } from "react";
 
-// Always downloads the latest release (filename is version-agnostic)
-const DOWNLOAD_URL = "https://github.com/andyprevalsky/navi-whisper-lux/releases/latest/download/Rose-mac.dmg";
+// Always downloads the latest release from Supabase Storage (public bucket)
+const DOWNLOAD_URL = "https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg";
 
 export default function Download() {
   useEffect(() => {

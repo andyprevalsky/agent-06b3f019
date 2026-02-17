@@ -36,7 +36,7 @@ export default function ResearchBlog() {
           <span className="text-xl font-semibold tracking-tight text-slate-900">Rose Labs</span>
         </Link>
         <a
-          href="https://github.com/andyprevalsky/navi-whisper-lux/releases/latest/download/Rose-mac.dmg"
+          href="https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg"
           className="px-4 py-2 text-sm font-medium text-white rounded-lg bg-navi-black hover:bg-navi-black/90 transition-colors"
         >
           Download
