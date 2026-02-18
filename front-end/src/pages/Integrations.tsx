@@ -33,6 +33,12 @@
  * - passwordRequestInput: string --> password request text
  * - passwordRequestSending: boolean --> sending password request
  * - passwordRequestSent: boolean --> password request sent successfully
+ * - messagesSyncExpanded: boolean --> messages sync list expanded
+ * - socialsExpanded: boolean --> socials list expanded
+ * - iMessageSynced: boolean --> iMessage connected
+ * - whatsAppConnected: boolean --> WhatsApp connected
+ * - telegramConnected: boolean --> Telegram connected
+ * - messageSyncLoading: 'imessage' | 'whatsapp' | 'telegram' | null --> syncing specific messaging client
  * - error: string | null (shown as banner)
  * - success: string | null (shown as banner)
  * - connectedIntegrations: list of connected integrations
@@ -42,7 +48,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import { Linkedin, Twitter, MessageSquare, Mail, MessageCircle, Send, Instagram, Facebook, Loader2, Users, Upload, RefreshCw, Check, type LucideIcon } from 'lucide-react';
+import { Loader2, RefreshCw, Check } from 'lucide-react';
 import { useIntegrationHandlers, type BrowserType, type BrowserInfo } from '@/contexts/IntegrationHandlersContext';
 import { getStoredSession } from '@/lib/supabase';
 import AtlasPasswordModal from '@/components/AtlasPasswordModal';
@@ -147,16 +153,6 @@ function getAuthHeaders() {
   };
 }
 
-interface Integration {
-  name: string;
-  Icon: LucideIcon;
-  handlerKey?: 'iMessage' | 'chromeCookies';
-  provider?: 'gmail';
-  fileUpload?: 'vcf' | 'email-zip';
-  /** The key used in the backend to identify this integration */
-  backendKey?: string;
-}
-
 interface ConnectedIntegration {
   id: string;
   name: string;
@@ -209,6 +205,14 @@ export default function Integrations() {
   const [claudeCodeSynced, setClaudeCodeSynced] = useState(false);
   const [claudeCodeSyncLoading, setClaudeCodeSyncLoading] = useState(false);
 
+  // Messages Sync state
+  const [messagesSyncExpanded, setMessagesSyncExpanded] = useState(false);
+  const [socialsExpanded, setSocialsExpanded] = useState(false);
+  const [iMessageSynced, setIMessageSynced] = useState(false);
+  const [whatsAppConnected, setWhatsAppConnected] = useState(false);
+  const [telegramConnected, setTelegramConnected] = useState(false);
+  const [messageSyncLoading, setMessageSyncLoading] = useState<'imessage' | 'whatsapp' | 'telegram' | null>(null);
+
   const fetchIntegrations = useCallback(async () => {
     try {
       const headers = getAuthHeaders();
@@ -221,11 +225,11 @@ export default function Integrations() {
         setConnectedIntegrations(integrations);
 
         // Check for browser cookie integrations
+        const validBrowserTypes: BrowserType[] = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas'];
         const newConnectedBrowsers = new Set<BrowserType>();
         for (const integration of integrations) {
-          if (integration.name.endsWith('_cookies') && integration.status === 'CONNECTED') {
-            const browserType = integration.name.replace('_cookies', '') as BrowserType;
-            newConnectedBrowsers.add(browserType);
+          if (validBrowserTypes.includes(integration.name as BrowserType) && integration.status === 'CONNECTED') {
+            newConnectedBrowsers.add(integration.name as BrowserType);
           }
         }
         setConnectedBrowsers(newConnectedBrowsers);
@@ -246,6 +250,14 @@ export default function Integrations() {
         // Claude Code credentials
         const claudeCodeIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'claude_code' && i.status === 'CONNECTED');
         setClaudeCodeSynced(!!claudeCodeIntegration);
+
+        // Messaging integrations
+        const imessageIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'imessage' && i.status === 'CONNECTED');
+        setIMessageSynced(!!imessageIntegration);
+        const whatsappIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'whatsapp' && i.status === 'CONNECTED');
+        setWhatsAppConnected(!!whatsappIntegration);
+        const telegramIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'telegram' && i.status === 'CONNECTED');
+        setTelegramConnected(!!telegramIntegration);
       }
     } catch (err) {
       console.error('Failed to fetch integrations:', err);
@@ -273,26 +285,7 @@ export default function Integrations() {
     fetchIntegrations();
   }, [fetchIntegrations]);
 
-  const getConnectedIntegration = (integration: Integration): ConnectedIntegration | undefined => {
-    const key = integration.backendKey || integration.provider || integration.name.toLowerCase();
-    return connectedIntegrations.find(
-      (ci) => ci.name.toLowerCase() === key.toLowerCase() && ci.status === 'CONNECTED'
-    );
-  };
-
-  // Browser Cookies is rendered separately as an expandable section
-  const integrations: Integration[] = [
-    // { name: 'Contacts (VCF)', Icon: Users, fileUpload: 'vcf', backendKey: 'contacts' },
-    // { name: 'Email Export (ZIP)', Icon: Upload, fileUpload: 'email-zip', backendKey: 'email' },
-    { name: 'Gmail', Icon: Mail, provider: 'gmail', backendKey: 'gmail' },
-    { name: 'iMessage', Icon: MessageSquare, handlerKey: 'iMessage', backendKey: 'imessage' },
-    { name: 'Twitter/X', Icon: Twitter },
-    { name: 'LinkedIn', Icon: Linkedin },
-    { name: 'WhatsApp', Icon: MessageCircle },
-    { name: 'Telegram', Icon: Send },
-    { name: 'Instagram', Icon: Instagram },
-    { name: 'Facebook Messenger', Icon: Facebook },
-  ];
+  // All integrations are now rendered as expandable sections (Browser Cookies, Passwords, Messages Sync, Socials, Claude Code)
 
   // Handle browser sync click
   const handleBrowserSync = async (browserType: BrowserType) => {
@@ -474,21 +467,19 @@ export default function Integrations() {
     }
   };
 
-  const handleUpload = async (handlerKey: 'iMessage' | 'chromeCookies', integrationName: string) => {
-    setUploading(integrationName);
+  // Handle iMessage sync via handler
+  const handleIMessageSync = async () => {
+    if (!handlers.iMessage?.isAvailable) return;
+    setMessageSyncLoading('imessage');
     setError(null);
-
     try {
-      const handler = handlers[handlerKey];
-      if (handler?.onClick) {
-        await handler.onClick();
-      }
-      // Refetch integrations after successful upload
+      await handlers.iMessage.onClick();
+      setIMessageSynced(true);
       await fetchIntegrations();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      setError(err instanceof Error ? err.message : 'Failed to sync iMessage');
     } finally {
-      setUploading(null);
+      setMessageSyncLoading(null);
     }
   };
 
@@ -945,6 +936,218 @@ export default function Integrations() {
                 )}
               </div>
 
+              {/* Messages Sync - Expandable Section */}
+              <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
+                {/* Main row */}
+                <div className="p-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                        <defs>
+                          <linearGradient id="chatSyncGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#34d399" />
+                            <stop offset="100%" stopColor="#10b981" />
+                          </linearGradient>
+                        </defs>
+                        <path fill="url(#chatSyncGradient)" transform="scale(-1,1)" transform-origin="center" d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z"/>
+                      </svg>
+                    </div>
+                    <div className="flex flex-col">
+                      <h3 className="font-medium">Messages Sync</h3>
+                      <span className="text-xs text-muted-foreground">Sync messaging clients</span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => setMessagesSyncExpanded(!messagesSyncExpanded)}
+                    className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                      iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED')
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                    }`}
+                  >
+                    {iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED') ? (
+                      <Check className="w-4 h-4" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Expanded messaging options */}
+                {messagesSyncExpanded && (
+                  <div className="border-t border-border">
+                    {/* iMessage */}
+                    {handlers.iMessage?.isAvailable ? (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <svg className="w-6 h-6" viewBox="0 0 24 24">
+                            <defs>
+                              <linearGradient id="imessageGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                                <stop offset="0%" stopColor="#5bf675" />
+                                <stop offset="100%" stopColor="#1fcc3f" />
+                              </linearGradient>
+                            </defs>
+                            <rect width="24" height="24" rx="5" fill="url(#imessageGrad)" />
+                            <path fill="white" d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z" />
+                          </svg>
+                          <span className="text-sm">iMessage</span>
+                        </div>
+
+                        <button
+                          onClick={handleIMessageSync}
+                          disabled={messageSyncLoading === 'imessage'}
+                          className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                            iMessageSynced
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                              : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          {messageSyncLoading === 'imessage' ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : iMessageSynced ? (
+                            <Check className="w-3.5 h-3.5" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <svg className="w-6 h-6" viewBox="0 0 24 24">
+                            <defs>
+                              <linearGradient id="imessageGradAlt" x1="0%" y1="0%" x2="0%" y2="100%">
+                                <stop offset="0%" stopColor="#5bf675" />
+                                <stop offset="100%" stopColor="#1fcc3f" />
+                              </linearGradient>
+                            </defs>
+                            <rect width="24" height="24" rx="5" fill="url(#imessageGradAlt)" />
+                            <path fill="white" d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z" />
+                          </svg>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm">iMessage</span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                              Desktop Only
+                            </span>
+                          </div>
+                        </div>
+                        <Button size="sm" variant="ghost" asChild className="h-8 px-2">
+                          <a href="/download" className="text-xs">Get App</a>
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* WhatsApp */}
+                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6" viewBox="0 0 24 24">
+                          <rect width="24" height="24" rx="5" fill="#25D366" />
+                          <path fill="white" d="M12 4c-4.42 0-8 3.58-8 8 0 1.41.37 2.73 1.01 3.88L4 20l4.26-1.12A7.93 7.93 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8zm4.14 11.07c-.17.48-1 .93-1.38.99-.37.06-.84.09-1.35-.09-.31-.11-.71-.25-1.23-.49-2.16-1-3.57-3.18-3.68-3.33-.1-.15-.86-1.14-.86-2.18s.55-1.55.74-1.76c.2-.21.43-.27.57-.27h.42c.13 0 .31-.05.48.37.18.43.61 1.49.66 1.59.05.1.08.22.02.35-.07.14-.1.22-.2.34-.1.12-.21.26-.3.35-.1.1-.2.2-.09.4.12.2.53.87 1.13 1.41.78.7 1.43.91 1.63 1.02.2.1.32.09.44-.06.12-.14.5-.58.64-.78.13-.2.27-.16.45-.1.18.07 1.15.54 1.34.64.2.1.33.15.38.23.05.09.05.51-.12.99z"/>
+                        </svg>
+                        <span className="text-sm">WhatsApp</span>
+                      </div>
+
+                      <button
+                        disabled
+                        className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                          whatsAppConnected
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                            : 'bg-muted text-muted-foreground'
+                        }`}
+                      >
+                        {whatsAppConnected ? (
+                          <Check className="w-3.5 h-3.5" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Telegram */}
+                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6" viewBox="0 0 24 24">
+                          <rect width="24" height="24" rx="5" fill="#229ED9" />
+                          <path fill="white" d="M5.5 11.5l10.7-4.3c.6-.24 1.1.12.9.92l-1.9 9c-.14.64-.52.8-1.06.5l-2.9-2.1-1.4 1.4c-.12.1-.2.2-.4.2-.26 0-.37-.15-.5-.52l-1.1-3.5-2.7-.84c-.32-.11-.34-.41.06-.56zm4.7 1.7l.6 2.55.17-1.85 4.5-4c.2-.18-.05-.27-.32-.1l-5.5 3.4z" transform="translate(12, 12) scale(1.05) translate(-12, -12)"/>
+                        </svg>
+                        <span className="text-sm">Telegram</span>
+                      </div>
+
+                      <button
+                        disabled
+                        className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                          telegramConnected
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                            : 'bg-muted text-muted-foreground'
+                        }`}
+                      >
+                        {telegramConnected ? (
+                          <Check className="w-3.5 h-3.5" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Facebook Messenger */}
+                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6" viewBox="0 0 24 24">
+                          <defs>
+                            <linearGradient id="messengerGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                              <stop offset="0%" stopColor="#00B2FF" />
+                              <stop offset="100%" stopColor="#006AFF" />
+                            </linearGradient>
+                          </defs>
+                          <rect width="24" height="24" rx="5" fill="url(#messengerGrad)" />
+                          <path fill="white" d="M12 4c-4.42 0-8 3.13-8 7 0 2.2 1.1 4.16 2.8 5.45V19l2.4-1.32c.64.18 1.32.27 2.03.27h.77c4.42 0 8-3.13 8-7s-3.58-7-8-7zm.8 9.43l-2.04-2.17-3.98 2.17 4.37-4.64 2.09 2.17 3.93-2.17-4.37 4.64z" transform="scale(0.85) translate(2.1, 2.1)"/>
+                        </svg>
+                        <span className="text-sm">Messenger</span>
+                      </div>
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        Coming Soon
+                      </span>
+                    </div>
+
+                    {/* Gmail */}
+                    <div className="px-4 py-2 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6" viewBox="0 0 24 24">
+                          <path fill="#EA4335" d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/>
+                        </svg>
+                        <div className="flex flex-col">
+                          <span className="text-sm">Gmail</span>
+                          {connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED' && i.config?.connectedEmail) && (
+                            <span className="text-xs text-muted-foreground truncate max-w-[140px]">
+                              {connectedIntegrations.find(i => i.name === 'gmail' && i.status === 'CONNECTED')?.config?.connectedEmail}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => handleEmailConnect('gmail')}
+                        disabled={connectingProvider === 'gmail'}
+                        className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                          connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED')
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                            : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {connectingProvider === 'gmail' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED') ? (
+                          <Check className="w-3.5 h-3.5" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Claude Code Credentials */}
               {handlers.claudeCode?.isAvailable ? (
                 <div className="flex items-center justify-between p-4 border border-border rounded-lg bg-card/60">
@@ -957,9 +1160,6 @@ export default function Integrations() {
                       <span className="text-xs text-muted-foreground">
                         Sync Claude Code credentials to reduce usage costs
                       </span>
-                      {claudeCodeSynced && (
-                        <span className="text-xs text-green-600 dark:text-green-400">Connected</span>
-                      )}
                     </div>
                   </div>
                   <button
@@ -1004,172 +1204,98 @@ export default function Integrations() {
                 </div>
               )}
 
-              {/* Other integrations */}
-              {integrations.map((integration) => {
-              const Icon = integration.Icon;
-              const handler = integration.handlerKey ? handlers[integration.handlerKey] : undefined;
-              const hasHandler = handler?.isAvailable;
-              const isEmailProvider = Boolean(integration.provider);
-              const isConnecting =
-                isEmailProvider && connectingProvider === integration.provider;
-              const isUploading = uploading === integration.name;
-              const connected = getConnectedIntegration(integration);
-              const isConnected = Boolean(connected);
-
-              const buttonDisabled = (() => {
-                if (integration.fileUpload) {
-                  return uploading !== null;
-                }
-                if (integration.provider) {
-                  if (isConnecting) {
-                    return true;
-                  }
-                  return connectingProvider !== null && connectingProvider !== integration.provider;
-                }
-                if (integration.handlerKey) {
-                  if (!hasHandler) {
-                    return true;
-                  }
-                  return uploading !== null;
-                }
-                return true;
-              })();
-
-              const handleClick = () => {
-                if (integration.fileUpload === 'vcf') {
-                  vcfInputRef.current?.click();
-                  return;
-                }
-                if (integration.fileUpload === 'email-zip') {
-                  emailZipInputRef.current?.click();
-                  return;
-                }
-                if (integration.provider) {
-                  return handleEmailConnect(integration.provider);
-                }
-                if (integration.handlerKey && hasHandler) {
-                  return handleUpload(integration.handlerKey, integration.name);
-                }
-                setError('This integration is not available yet.');
-              };
-
-              const renderButtonContent = () => {
-                if (integration.fileUpload && isUploading) {
-                  return (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                      Uploading...
-                    </>
-                  );
-                }
-                if (integration.fileUpload) {
-                  return isConnected ? 'Re-upload' : 'Upload';
-                }
-                if (integration.provider && isConnecting) {
-                  return (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                      Connecting...
-                    </>
-                  );
-                }
-                if (integration.handlerKey && isUploading) {
-                  return (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                      Connecting...
-                    </>
-                  );
-                }
-                if (isConnected) {
-                  return <RefreshCw className="h-4 w-4" />;
-                }
-                return 'Connect';
-              };
-
-              // Build connection info text
-              const getConnectionInfo = (): string | null => {
-                if (!connected) return null;
-                
-                // For email providers, show the connected email
-                if (connected.config?.connectedEmail) {
-                  return connected.config.connectedEmail;
-                }
-                
-                // For iMessage, show contact/message counts
-                if (connected.config?.contacts || connected.config?.messages) {
-                  const parts = [];
-                  if (connected.config.contacts) {
-                    parts.push(`${connected.config.contacts} contacts`);
-                  }
-                  if (connected.config.messages) {
-                    parts.push(`${connected.config.messages} messages`);
-                  }
-                  return parts.join(', ');
-                }
-                
-                // For Chrome Cookies, show cookie count
-                if (connected.config?.cookieCount) {
-                  return `${connected.config.cookieCount} cookies synced`;
-                }
-                
-                return null;
-              };
-
-              const connectionInfo = getConnectionInfo();
-
-              // Desktop-only integrations on web
-              const isDesktopOnly = integration.handlerKey && !hasHandler;
-
-              return (
-                <div
-                  key={integration.name}
-                  className="flex items-center justify-between p-4 border border-border rounded-lg bg-card/60"
-                >
+              {/* Socials - Expandable Section */}
+              <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
+                {/* Main row */}
+                <div className="p-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 flex items-center justify-center">
-                      <Icon className="h-5 w-5" />
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                        <defs>
+                          <linearGradient id="socialsGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stopColor="#8b5cf6" />
+                            <stop offset="100%" stopColor="#6366f1" />
+                          </linearGradient>
+                        </defs>
+                        <circle cx="5" cy="12" r="2.5" fill="url(#socialsGradient)"/>
+                        <circle cx="19" cy="5" r="2.5" fill="url(#socialsGradient)"/>
+                        <circle cx="19" cy="19" r="2.5" fill="url(#socialsGradient)"/>
+                        <line x1="7.5" y1="11" x2="16.5" y2="6" stroke="url(#socialsGradient)" strokeWidth="1.5"/>
+                        <line x1="7.5" y1="13" x2="16.5" y2="18" stroke="url(#socialsGradient)" strokeWidth="1.5"/>
+                      </svg>
                     </div>
                     <div className="flex flex-col">
-                      <div className="flex items-center gap-2">
-                        <h3 className="font-medium">{integration.name}</h3>
-                        {isDesktopOnly && (
-                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                            Desktop Only
-                          </span>
-                        )}
-                      </div>
-                      {isConnected && (
-                        <span className="text-xs text-green-600 dark:text-green-400 flex items-center gap-1">
-                          Connected{connectionInfo && <span className="text-muted-foreground">· {connectionInfo}</span>}
-                        </span>
-                      )}
+                      <h3 className="font-medium">Socials</h3>
+                      <span className="text-xs text-muted-foreground">Connect social media accounts</span>
                     </div>
                   </div>
-                  {isDesktopOnly ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      asChild
-                    >
-                      <a href="/download">
-                        Download for Mac
-                      </a>
-                    </Button>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant={isConnected ? 'outline' : 'default'}
-                      onClick={handleClick}
-                      disabled={buttonDisabled}
-                      title={isConnected ? 'Reconnect' : undefined}
-                    >
-                      {renderButtonContent()}
-                    </Button>
-                  )}
+
+                  <button
+                    onClick={() => setSocialsExpanded(!socialsExpanded)}
+                    className="h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 bg-primary text-primary-foreground hover:bg-primary/90"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
                 </div>
-              );
-            })}
+
+                {/* Expanded social options */}
+                {socialsExpanded && (
+                  <div className="border-t border-border">
+                    {/* Twitter/X */}
+                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6" viewBox="0 0 24 24">
+                          <rect width="24" height="24" rx="5" fill="#000000" />
+                          <path fill="white" d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z" transform="scale(0.72) translate(4.7, 4.7)"/>
+                        </svg>
+                        <span className="text-sm">Twitter/X</span>
+                      </div>
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        Coming Soon
+                      </span>
+                    </div>
+
+                    {/* LinkedIn */}
+                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6" viewBox="0 0 24 24">
+                          <rect width="24" height="24" rx="5" fill="#0A66C2" />
+                          <path fill="white" d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z" transform="scale(0.85) translate(2.1, 2.1)"/>
+                        </svg>
+                        <span className="text-sm">LinkedIn</span>
+                      </div>
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        Coming Soon
+                      </span>
+                    </div>
+
+                    {/* Instagram */}
+                    <div className="px-4 py-2 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6" viewBox="0 0 24 24">
+                          <defs>
+                            <linearGradient id="igGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+                              <stop offset="0%" stopColor="#FFDC80" />
+                              <stop offset="25%" stopColor="#F77737" />
+                              <stop offset="50%" stopColor="#E1306C" />
+                              <stop offset="75%" stopColor="#C13584" />
+                              <stop offset="100%" stopColor="#833AB4" />
+                            </linearGradient>
+                          </defs>
+                          <rect width="24" height="24" rx="5" fill="url(#igGrad)" />
+                          <rect x="6" y="6" width="12" height="12" rx="3.5" stroke="white" strokeWidth="1.5" fill="none" />
+                          <circle cx="12" cy="12" r="3" stroke="white" strokeWidth="1.5" fill="none" />
+                          <circle cx="16.5" cy="7.5" r="1" fill="white" />
+                        </svg>
+                        <span className="text-sm">Instagram</span>
+                      </div>
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        Coming Soon
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>
