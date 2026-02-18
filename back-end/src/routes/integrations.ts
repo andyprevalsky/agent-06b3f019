@@ -14,6 +14,7 @@ import { sendSms } from '../lib/smsQueue';
 import { prisma } from '../lib/prisma';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
+import { fetchClaudeCodeAccessToken } from '../lib/claudeCredentials';
 
 const router = express.Router();
 
@@ -3187,6 +3188,40 @@ router.post('/claude-code/credentials/upload', authenticate, async (req: AuthReq
     console.error('Error uploading Claude Code credentials:', error);
     return res.status(500).json({
       error: 'Failed to upload Claude Code credentials',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * GET /api/integrations/claude-code/credentials/token
+ *
+ * Returns the decrypted Claude Code OAuth access token for the authenticated user.
+ * Used by the completions edge function for claude-mode requests.
+ */
+router.get('/claude-code/credentials/token', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    // For internal calls (X-API-Key), read userId from X-User-Id header
+    // For JWT calls, read from req.user
+    const userId = req.isInternal
+      ? (req.headers['x-user-id'] as string)
+      : req.user?.id;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'Missing user ID' });
+    }
+
+    const accessToken = await fetchClaudeCodeAccessToken(userId);
+
+    if (!accessToken) {
+      return res.status(404).json({ error: 'Claude Code credentials not found. Sync credentials from the Mac app.' });
+    }
+
+    return res.json({ accessToken });
+  } catch (error) {
+    console.error('[Integrations] Error fetching Claude Code token:', error);
+    return res.status(500).json({
+      error: 'Failed to fetch Claude Code credentials',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }

@@ -260,6 +260,8 @@ interface BrowserUseRequest {
   action_history: ActionHistoryEntry[];
   available_actions: string[];
   model_seed?: number;
+  mode?: 'default' | 'claude';
+  user_id?: string;  // Real user ID for claude-mode credential lookup (API key may map to a shared worker user)
 }
 
 interface UnifiedAction {
@@ -2896,14 +2898,17 @@ async function validateApiKey(apiKey: string, supabase: any): Promise<{ apiKeyId
 }
 
 // Calculate cost based on token usage
-function calculateCost(promptTokens: number, completionTokens: number, model: string): number {
+function calculateCost(promptTokens: number, completionTokens: number, model: string, mode?: string): number {
+  // Claude-mode uses user's Claude Code subscription — no Rose API cost
+  if (mode === 'claude') return 0;
+
   // Simplified cost calculation - in production, fetch actual pricing
   const costPerMillionPrompt = 50; // $0.50 per million
   const costPerMillionCompletion = 150; // $1.50 per million
-  
+
   const promptCost = (promptTokens / 1000000) * costPerMillionPrompt;
   const completionCost = (completionTokens / 1000000) * costPerMillionCompletion;
-  
+
   return Math.ceil((promptCost + completionCost) * 100); // Return in cents
 }
 
@@ -3445,6 +3450,223 @@ serve(async (req) => {
         return { action: normalizedAction, ttftMs: result.ttftMs, actualModel, usage: result.usage };
       }
       
+      // ============================================
+      // CLAUDE MODE: Direct Anthropic call with Claude Code credentials + prompt caching
+      // ============================================
+      if (browserUseReq.mode === 'claude') {
+        // For claude-mode, use user_id from request body if provided (the API key may map to a shared
+        // worker user, but the real user who owns the agent/credentials is passed via user_id)
+        const claudeUserId = browserUseReq.user_id || authInfo.userId;
+        console.log(`🔷 [${requestId}] Claude mode: direct Opus 4.6 with cache controls (userId: ${claudeUserId})`);
+
+        // Fetch Claude Code OAuth token from backend
+        const backendUrl = Deno.env.get('BACKEND_API_URL') || 'https://navi-j9a9.onrender.com';
+        const backendApiKey = Deno.env.get('BACKEND_API_KEY');
+        if (!backendApiKey) {
+          return new Response(JSON.stringify({ error: 'BACKEND_API_KEY not configured for claude mode' }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500,
+          });
+        }
+
+        // Fetch and decrypt the OAuth token via backend endpoint
+        // (backend handles Integration lookup, decryption, and token refresh)
+        let oauthToken: string;
+        try {
+          const tokenResp = await fetch(`${backendUrl}/api/integrations/claude-code/credentials/token`, {
+            headers: {
+              'X-API-Key': backendApiKey,
+              'X-User-Id': claudeUserId,
+            },
+          });
+          if (!tokenResp.ok) {
+            const errData = await tokenResp.json().catch(() => null);
+            const errMsg = errData?.error || `Backend token fetch failed: ${tokenResp.status}`;
+            console.error(`❌ [${requestId}] Claude Code token fetch failed:`, errMsg);
+            return new Response(JSON.stringify({
+              error: errMsg,
+              request_id: requestId,
+            }), {
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+              status: tokenResp.status === 404 ? 400 : 500,
+            });
+          }
+          const tokenData = await tokenResp.json();
+          oauthToken = tokenData.accessToken;
+        } catch (tokenErr) {
+          console.error(`❌ [${requestId}] Failed to fetch Claude Code token:`, tokenErr);
+          return new Response(JSON.stringify({
+            error: 'Failed to fetch Claude Code credentials',
+            details: tokenErr instanceof Error ? tokenErr.message : 'Unknown error',
+            request_id: requestId,
+          }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500,
+          });
+        }
+
+        // Build messages with screenshots ON (including history screenshots)
+        const { messages } = transformToBrowserUseFormat(browserUseReq, { includeScreenshot: true });
+
+        // Build history screenshot blocks for the user message
+        // Each action_history entry with a screenshot gets an image block
+        const historyImageBlocks: any[] = [];
+        for (const entry of browserUseReq.action_history) {
+          if (entry.screenshot) {
+            const imageUrl = entry.screenshot.startsWith('http')
+              ? entry.screenshot
+              : `data:image/png;base64,${entry.screenshot}`;
+            historyImageBlocks.push({
+              type: 'text',
+              text: `Step ${entry.step}: ${entry.action}${entry.index !== undefined ? ` (index: ${entry.index})` : ''} ${entry.result.success ? '✓' : '✗'}`,
+            });
+            historyImageBlocks.push({
+              type: 'image_url',
+              image_url: { url: imageUrl },
+            });
+          }
+        }
+
+        // Inject history screenshots into user message content
+        if (historyImageBlocks.length > 0) {
+          const userMsg = messages.find((m: any) => m.role === 'user');
+          if (userMsg) {
+            // Ensure content is an array
+            if (!Array.isArray(userMsg.content)) {
+              userMsg.content = [{ type: 'text', text: userMsg.content }];
+            }
+            // Insert history screenshots before the last content block
+            userMsg.content = [
+              ...userMsg.content,
+              { type: 'text', text: '\n--- Action History Screenshots ---' },
+              ...historyImageBlocks,
+            ];
+          }
+        }
+
+        // Transform to Anthropic format — system as array with cache_control
+        const systemParts: string[] = [];
+        const anthropicMessages: any[] = [];
+
+        for (const msg of messages) {
+          if (msg.role === 'system') {
+            systemParts.push(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
+          } else {
+            if (Array.isArray(msg.content)) {
+              const transformedContent = msg.content.map(transformContentBlockForAnthropic);
+              anthropicMessages.push({ ...msg, content: transformedContent });
+            } else {
+              anthropicMessages.push(msg);
+            }
+          }
+        }
+
+        // Add cache_control breakpoint only to the last user message's last content block
+        for (let i = anthropicMessages.length - 1; i >= 0; i--) {
+          if (anthropicMessages[i].role === 'user' && Array.isArray(anthropicMessages[i].content) && anthropicMessages[i].content.length > 0) {
+            anthropicMessages[i].content[anthropicMessages[i].content.length - 1].cache_control = { type: 'ephemeral' };
+            break;
+          }
+        }
+
+        // Build system as array of blocks with cache_control (required for prompt caching)
+        const systemBlocks = systemParts.map((text, i) => ({
+          type: 'text' as const,
+          text,
+          ...(i === systemParts.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}),
+        }));
+
+        const anthropicBody = {
+          model: 'claude-opus-4-6',
+          system: systemBlocks,
+          messages: anthropicMessages,
+          max_tokens: 4096,
+          temperature: 0.3,
+        };
+
+        console.log(`🚀 [${requestId}] Claude mode: calling Anthropic with cache controls`);
+        console.log(`[Claude Mode] System blocks: ${systemBlocks.length}, Messages: ${anthropicMessages.length}`);
+
+        const startTime = Date.now();
+        const response = await fetch(ANTHROPIC_API_URL, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${oauthToken}`,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05',
+            'x-app': 'cli',
+            'User-Agent': 'claude-cli/2.1.45 (external, rose-browser-use)',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(anthropicBody),
+        });
+
+        const ttftMs = Date.now() - startTime;
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`❌ [${requestId}] Claude mode API error:`, response.status, errorText);
+          return new Response(JSON.stringify({
+            error: `Anthropic API error: ${response.status}`,
+            details: errorText,
+            request_id: requestId,
+          }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            status: response.status === 401 ? 401 : 500,
+          });
+        }
+
+        const data = await response.json();
+        console.log('📥 Claude mode raw response:', JSON.stringify(truncateForLogging(data), null, 2));
+
+        // Extract text content from Anthropic response
+        const textContent = data.content?.find((c: any) => c.type === 'text')?.text || '';
+        let completion: any;
+        try {
+          completion = typeof textContent === 'string' ? JSON.parse(textContent) : textContent;
+        } catch {
+          const extracted = extractJSON(textContent);
+          completion = extracted || { action: [], thinking: textContent };
+        }
+
+        const usage = {
+          prompt_tokens: data.usage?.input_tokens || 0,
+          completion_tokens: data.usage?.output_tokens || 0,
+          total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0),
+          cache_creation_input_tokens: data.usage?.cache_creation_input_tokens || 0,
+          cache_read_input_tokens: data.usage?.cache_read_input_tokens || 0,
+        };
+
+        const normalizedAction = normalizeBrowserUseResponse({ completion });
+        console.log(`✅ [${requestId}] Claude mode: action=${normalizedAction.action}, ttft=${ttftMs}ms, cache_read=${usage.cache_read_input_tokens}, cache_write=${usage.cache_creation_input_tokens}`);
+
+        // Log usage with $0 cost (billed to user's Claude subscription)
+        const claudeModeResponse = {
+          action: normalizedAction,
+          actual_model: 'anthropic/claude-opus-4.6',
+          mode: 'claude',
+          usage,
+          ttft_ms: ttftMs,
+        };
+        await logUsage(supabase, authInfo.apiKeyId, authInfo.userId, {
+          model: browserUseReq.model,
+          mode: 'claude',
+          task: browserUseReq.task,
+        }, claudeModeResponse, 0, 0);
+
+        return new Response(JSON.stringify({
+          action: normalizedAction,
+          requested_model: browserUseReq.model,
+          actual_model: 'anthropic/claude-opus-4.6',
+          mode: 'claude',
+          pool_name: 'rose-1-browser-use',
+          ttft_ms: ttftMs,
+          usage,
+          request_id: requestId,
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+
       // ============================================
       // MODE 1: model_seed provided - direct call to specific provider (for testing)
       // ============================================

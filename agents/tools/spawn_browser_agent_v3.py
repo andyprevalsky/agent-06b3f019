@@ -16,6 +16,7 @@ import httpx
 import time
 import asyncio
 import json
+import os
 import uuid as uuid_module
 import base64
 
@@ -846,6 +847,8 @@ async def call_rose_browser_use(
     browser_state: Dict[str, Any],
     action_history: list,
     config: Any,
+    mode: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call Rose API rose-1-browser-use endpoint.
 
@@ -854,6 +857,8 @@ async def call_rose_browser_use(
         browser_state: Current browser state (url, dom_tree, screenshot, viewport, scroll_position)
         action_history: List of previous action entries
         config: App config with Rose API credentials
+        mode: Optional mode ('claude' for direct Opus 4.6 with user's Claude subscription)
+        user_id: Real user ID for claude-mode credential lookup
 
     Returns:
         Dict with 'action' (UnifiedAction) and metadata
@@ -868,6 +873,11 @@ async def call_rose_browser_use(
         "action_history": action_history,
         "available_actions": AVAILABLE_ACTIONS,
     }
+
+    if mode:
+        request_body["mode"] = mode
+    if user_id:
+        request_body["user_id"] = user_id
 
     # Log full request for debugging (truncate screenshot to avoid huge logs)
     log_body = {
@@ -1861,6 +1871,7 @@ async def spawn_browser_agent_activity_v3(
     start_url: str = "",
     write_lock_resume_state: Optional[Dict[str, Any]] = None,
     system_name: str = "Rose",
+    use_claude_mode: bool = True,
 ) -> Dict[str, Any]:
     """
     Browser agent activity using browser-use BrowserSession + Rose API.
@@ -1878,6 +1889,7 @@ async def spawn_browser_agent_activity_v3(
         start_url: URL to navigate to automatically before starting the agent loop
         write_lock_resume_state: State to resume from after write lock approval (contains pending_action, etc.)
         system_name: Custom system name for approval messages (default "Rose")
+        use_claude_mode: Use Claude mode (direct Opus 4.6 via user's Claude subscription)
     """
     from helpers.llm import check_progress
     from tools.knowledge_base import query_blueprints_activity
@@ -1888,6 +1900,8 @@ async def spawn_browser_agent_activity_v3(
     current_url = ""  # Initialize early for exception handlers
     config = load_config()
     start_time = _safe_time()
+
+    browser_use_mode = "claude" if use_claude_mode else None
 
     # Token tracking for usage
     total_input_tokens = 0
@@ -2447,6 +2461,8 @@ async def spawn_browser_agent_activity_v3(
                     browser_state=browser_state,
                     action_history=action_entries,
                     config=config,
+                    mode=browser_use_mode,
+                    user_id=user_id,
                 )
 
                 # Track usage from Rose API response

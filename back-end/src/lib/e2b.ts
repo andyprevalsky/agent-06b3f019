@@ -1,9 +1,9 @@
 import { Sandbox } from 'e2b';
 import { prisma } from './prisma';
 import { FilePointer, uploadToStorage, downloadFromStorage } from './storage';
-import crypto from 'crypto';
 import mime from 'mime-types';
 import { v4 as uuidv4 } from 'uuid';
+import { fetchClaudeCodeCredentials } from './claudeCredentials';
 
 // Validate required environment variables
 if (!process.env.E2B_API_KEY) {
@@ -12,110 +12,6 @@ if (!process.env.E2B_API_KEY) {
 
 if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
   console.warn('E2B_CLAUDE_CODE_TEMPLATE_ID environment variable not set - Claude Code sessions disabled');
-}
-
-if (!process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY) {
-  console.warn('CLAUDE_CREDENTIAL_DECRYPTION_KEY environment variable not set - Claude Code credential decryption disabled');
-}
-
-/**
- * Decrypt an RSA+AES-GCM encrypted envelope.
- * Mirrors the Python decrypt_password() in agents/tools/spawn_browser_agent_v3.py.
- *
- * @param encryptedEnvelope - Base64-encoded JSON envelope with encrypted_aes_key, iv, ciphertext
- * @param decryptionKeyB64 - Base64-encoded PEM RSA private key
- * @returns Decrypted plaintext string, or null on failure
- */
-export function decryptCredentialEnvelope(encryptedEnvelope: string, decryptionKeyB64: string): string | null {
-  try {
-    const envelopeJson = Buffer.from(encryptedEnvelope, 'base64').toString('utf8');
-    const envelope = JSON.parse(envelopeJson);
-
-    if (envelope.version !== 1) {
-      console.error('[E2B] Unknown envelope version:', envelope.version);
-      return null;
-    }
-
-    if (!envelope.encrypted_aes_key || !envelope.iv || !envelope.ciphertext) {
-      console.error('[E2B] Malformed envelope: missing encrypted_aes_key, iv, or ciphertext');
-      return null;
-    }
-
-    // Load RSA private key from base64-encoded PEM
-    const privateKeyPem = Buffer.from(decryptionKeyB64, 'base64').toString('utf8');
-
-    // Decrypt AES key with RSA-OAEP
-    const encryptedAesKey = Buffer.from(envelope.encrypted_aes_key, 'base64');
-    const aesKey = crypto.privateDecrypt(
-      {
-        key: privateKeyPem,
-        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: 'sha256',
-      },
-      encryptedAesKey
-    );
-
-    // Decrypt data with AES-256-GCM
-    const iv = Buffer.from(envelope.iv, 'base64');
-    const ciphertextWithTag = Buffer.from(envelope.ciphertext, 'base64');
-    const authTag = ciphertextWithTag.subarray(ciphertextWithTag.length - 16);
-    const ciphertext = ciphertextWithTag.subarray(0, ciphertextWithTag.length - 16);
-
-    const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
-    decipher.setAuthTag(authTag);
-    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-
-    return plaintext.toString('utf8');
-  } catch (error) {
-    console.error('[E2B] Failed to decrypt credential envelope:', error);
-    return null;
-  }
-}
-
-/**
- * Fetch and decrypt Claude Code credentials for a user.
- * Returns the decrypted credentials JSON string, or null if unavailable.
- */
-async function fetchClaudeCodeCredentials(userId: string): Promise<string | null> {
-  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
-  if (!decryptionKey) {
-    console.log('[E2B] CLAUDE_CREDENTIAL_DECRYPTION_KEY not set, skipping credential lookup');
-    return null;
-  }
-
-  try {
-    const integration = await prisma.integration.findFirst({
-      where: {
-        userId,
-        name: 'claude_code',
-        status: 'CONNECTED',
-      },
-    });
-
-    if (!integration) {
-      console.log(`[E2B] No claude_code integration found for user ${userId}`);
-      return null;
-    }
-
-    const config = integration.config as Record<string, unknown> | null;
-    const encryptedCredentials = config?.encryptedCredentials as string | undefined;
-    if (!encryptedCredentials) {
-      console.log(`[E2B] claude_code integration has no encryptedCredentials for user ${userId}`);
-      return null;
-    }
-
-    const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
-    if (!decrypted) {
-      console.error(`[E2B] Failed to decrypt Claude Code credentials for user ${userId}`);
-      return null;
-    }
-
-    console.log(`[E2B] Successfully decrypted Claude Code credentials for user ${userId}`);
-    return decrypted;
-  } catch (error) {
-    console.error(`[E2B] Error fetching Claude Code credentials for user ${userId}:`, error);
-    return null;
-  }
 }
 
 const WS_PORT = 3000;

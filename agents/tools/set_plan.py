@@ -234,6 +234,7 @@ class SetPlanManager(ToolManager):
         tools_description = _get_planner_tools_description()
         user_context = getattr(workflow_instance, 'user_context_section', '')
         response_schema = getattr(workflow_instance, 'output_schema', None)
+        claude_max_token = getattr(workflow_instance, 'claude_max_token', None)
         context_elapsed = (workflow.now() - context_start).total_seconds()
         workflow.logger.info(f"[TIMING] Context building: {context_elapsed*1000:.1f}ms (messages: {len(base_messages)}, has_schema: {response_schema is not None})")
 
@@ -262,7 +263,7 @@ class SetPlanManager(ToolManager):
                     # Planner always uses rose-ultra for best DAG generation quality
                     planner_task = workflow.execute_activity(
                         call_planner_llm_activity,
-                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema,
+                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema, claude_max_token,
                               workflow_instance.agent_id, tool_call_id],
                         start_to_close_timeout=timedelta(seconds=120),
                         retry_policy=RetryPolicy(maximum_attempts=2),
@@ -280,8 +281,19 @@ class SetPlanManager(ToolManager):
                     parallel_elapsed = (workflow.now() - parallel_start).total_seconds()
                     workflow.logger.info(f"[TIMING] Parallel activities completed: {parallel_elapsed*1000:.1f}ms")
 
-                    # Track planner usage (uses rose-ultra pricing, writes to ToolUsage)
-                    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
+                    # Track planner usage — Claude Max records tokens at $0 (subscription)
+                    if planner_result_raw.get("is_claude_max"):
+                        usage = planner_result_raw.get("usage", {})
+                        llm_item = (usage.get("llm") or [{}])[0]
+                        await workflow_instance._track_usage({
+                            "llm": [],
+                            "service": [{
+                                "cost_cents": 0,
+                                "provider": f"Claude Max (Planner, {llm_item.get('tokens_in', 0)}in/{llm_item.get('tokens_out', 0)}out)",
+                            }],
+                        }, tool_name="set_plan")
+                    else:
+                        await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
                     planner_result = planner_result_raw.get("result", planner_result_raw)
 
                     # Update workflow instance with generated schema
@@ -295,7 +307,7 @@ class SetPlanManager(ToolManager):
                     # Planner always uses rose-ultra for best DAG generation quality
                     planner_result_raw = await workflow.execute_activity(
                         call_planner_llm_activity,
-                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema,
+                        args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema, claude_max_token,
                               workflow_instance.agent_id, tool_call_id],
                         start_to_close_timeout=timedelta(seconds=120),
                         retry_policy=RetryPolicy(maximum_attempts=2),
@@ -303,8 +315,19 @@ class SetPlanManager(ToolManager):
                     planner_only_elapsed = (workflow.now() - planner_only_start).total_seconds()
                     workflow.logger.info(f"[TIMING] Planner LLM only completed: {planner_only_elapsed*1000:.1f}ms")
 
-                    # Track planner usage (uses rose-ultra pricing, writes to ToolUsage)
-                    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
+                    # Track planner usage — Claude Max records tokens at $0 (subscription)
+                    if planner_result_raw.get("is_claude_max"):
+                        usage = planner_result_raw.get("usage", {})
+                        llm_item = (usage.get("llm") or [{}])[0]
+                        await workflow_instance._track_usage({
+                            "llm": [],
+                            "service": [{
+                                "cost_cents": 0,
+                                "provider": f"Claude Max (Planner, {llm_item.get('tokens_in', 0)}in/{llm_item.get('tokens_out', 0)}out)",
+                            }],
+                        }, tool_name="set_plan")
+                    else:
+                        await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
                     planner_result = planner_result_raw.get("result", planner_result_raw)
             except Exception as e:
                 yield ToolEvent(

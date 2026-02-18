@@ -37,6 +37,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.messages import broadcast_to_bus, update_agent_tree_state
     from helpers.prompts import build_system_prompt, build_verifier_prompt
     from helpers.handle_tool_event import handle_tool_event
+    from helpers.llm import fetch_claude_max_token_activity
     from helpers.save_tool_usage import save_tool_usage
     from helpers.tool_schemas import PLAN_PHASE_TOOLS, EXECUTE_PHASE_TOOLS
     from tools.base import ToolEvent, AssistantEvent, EventType, MessageStatus
@@ -191,6 +192,9 @@ class AgentWorkflow:
         self.children_tokens_out: Dict[str, int] = {}  # child_agent_id -> subtree_tokens_out
         self.tree_tokens_in: int = 0  # own + sum(children) - for display
         self.tree_tokens_out: int = 0  # own + sum(children) - for display
+
+        # Claude Max token (for direct Anthropic planner calls)
+        self.claude_max_token: Optional[str] = None
 
         # Model pricing (fetched at workflow start for cost calculation)
         self.input_cents_per_1k: float = 0.0  # Price per 1k input tokens in cents
@@ -523,6 +527,19 @@ class AgentWorkflow:
                 workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch custom system prompt: {e}")
+
+        # Fetch Claude Max token for direct Anthropic planner calls
+        try:
+            self.claude_max_token = await workflow.execute_activity(
+                fetch_claude_max_token_activity,
+                args=[user_id],
+                start_to_close_timeout=timedelta(seconds=20),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            if self.claude_max_token:
+                workflow.logger.info("🔑 Claude Max token available for planner")
+        except Exception as e:
+            workflow.logger.warning(f"Failed to fetch Claude Max token: {e}")
 
         # Inject custom system prompt as hidden USER message for new agents
         # Only inject if: 1) custom prompt exists, 2) this is not a resume (no context passed)
