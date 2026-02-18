@@ -225,7 +225,10 @@ export class IMessageReader {
   static checkAccess(): boolean {
     try {
       console.log(`[IMessageReader] Checking access to: ${IMESSAGE_DB_PATH}`);
-      fs.accessSync(IMESSAGE_DB_PATH, fs.constants.R_OK);
+      // Use openSync+closeSync instead of accessSync — actually opening the file
+      // triggers macOS TCC registration so the app appears in Full Disk Access settings
+      const fd = fs.openSync(IMESSAGE_DB_PATH, 'r');
+      fs.closeSync(fd);
       console.log('[IMessageReader] ✅ Access granted');
       return true;
     } catch (err) {
