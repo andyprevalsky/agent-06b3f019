@@ -73,20 +73,27 @@ const electronHandlers = {
 };
 
 const DragOverlay = () => (
-  <div
-    style={
-      {
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        height: '48px',
-        zIndex: 9999,
-        pointerEvents: 'none',
-        WebkitAppRegion: 'drag',
-      } as React.CSSProperties
-    }
-  />
+  <>
+    {/* Thin strip above the header (top-4 = 16px gap) for window dragging */}
+    <div
+      style={
+        {
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: '16px',
+          zIndex: 9999,
+          WebkitAppRegion: 'drag',
+        } as React.CSSProperties
+      }
+    />
+    {/* Make header a drag region; buttons inside get no-drag as children */}
+    <style>{`
+      header { -webkit-app-region: drag; }
+      header button, header a, header [role="button"], header input { -webkit-app-region: no-drag; }
+    `}</style>
+  </>
 );
 
 // Render main app with electron handlers

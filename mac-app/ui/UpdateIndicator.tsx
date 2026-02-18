@@ -6,7 +6,7 @@ const NONE_DISMISS_DELAY = 3000;
 const portalId = "rose-update-indicator";
 
 // Rose gradient colors for progress bar
-const ROSE_GRADIENT = "linear-gradient(90deg, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)";
+const ROSE_GRADIENT = "linear-gradient(to right, #094EFF, #537FFF, #84E4FF, #65CBDF)";
 
 // Gift icon SVG path
 const GiftIcon = () => (

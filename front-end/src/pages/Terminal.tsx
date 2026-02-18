@@ -1552,16 +1552,18 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
           </button>
         </div>
         
-        {/* Research Button - Mobile only, centered in header */}
-        <button
-          onClick={() => {
-            // TODO: Enable when research page is public
-            // navigate('/research');
-          }}
-          className="md:hidden absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors z-10"
-        >
-          Research
-        </button>
+        {/* Research Button - Mobile web only, centered in header */}
+        {clientSource === 'WEB' && (
+          <button
+            onClick={() => {
+              // TODO: Enable when research page is public
+              // navigate('/research');
+            }}
+            className="md:hidden absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors z-10"
+          >
+            Research
+          </button>
+        )}
 
         {/* Attention Inbox */}
         <AttentionInbox onSelectAgent={setSelectedAgentIdContext} realtimeReady={realtimeReady} />
@@ -1592,18 +1594,18 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         {/* Main Content - Centered */}
         <main className="flex-1 flex justify-center h-screen overflow-hidden" style={{ height: '100dvh' }}>
           <div className="flex flex-col relative max-w-5xl w-full px-2 md:px-6 h-full overflow-hidden">
-          {/* Research + Download - right-aligned with content column, same row as header, hidden on mobile */}
-          <div className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50">
-            <button
-              onClick={() => {
-                // TODO: Enable when research page is public
-                // navigate('/research');
-              }}
-              className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
-            >
-              Research
-            </button>
-            {clientSource === 'WEB' && (
+          {/* Research + Download - right-aligned with content column, same row as header, web only, hidden on mobile */}
+          {clientSource === 'WEB' && (
+            <div className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50">
+              <button
+                onClick={() => {
+                  // TODO: Enable when research page is public
+                  // navigate('/research');
+                }}
+                className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
+              >
+                Research
+              </button>
               <a
                 href="/download"
                 target="_blank"
@@ -1612,8 +1614,8 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
               >
                 Download
               </a>
-            )}
-          </div>
+            </div>
+          )}
           {/* Breadcrumb for sub-agents - Below Header */}
           {selectedAgentId && agentDetail?.parent_agent_id && (
             <div className="absolute top-20 left-0 right-0 z-40 px-6">

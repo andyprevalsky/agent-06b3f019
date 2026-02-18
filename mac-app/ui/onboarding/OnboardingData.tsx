@@ -1183,7 +1183,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             <IntegrationItem
               icon={<img src={claudeIcon} alt="Claude Code" className="w-5 h-5" />}
               name="Claude Code"
-              description="Sync credentials for Claude Code agents (e2e encrypted)"
+              description="Sync Claude Code credentials to reduce usage costs"
               connected={claudeCodeSynced}
               loading={claudeCodeSyncLoading}
               onConnect={handleClaudeCodeSync}

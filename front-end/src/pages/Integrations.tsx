@@ -955,7 +955,7 @@ export default function Integrations() {
                     <div className="flex flex-col">
                       <h3 className="font-medium">Claude Code</h3>
                       <span className="text-xs text-muted-foreground">
-                        Sync credentials for Claude Code agents (e2e encrypted)
+                        Sync Claude Code credentials to reduce usage costs
                       </span>
                       {claudeCodeSynced && (
                         <span className="text-xs text-green-600 dark:text-green-400">Connected</span>
@@ -994,7 +994,7 @@ export default function Integrations() {
                         </span>
                       </div>
                       <span className="text-xs text-muted-foreground">
-                        Sync credentials for Claude Code agents (e2e encrypted)
+                        Sync Claude Code credentials to reduce usage costs
                       </span>
                     </div>
                   </div>
