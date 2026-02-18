@@ -108,6 +108,9 @@ async def run_agent(
 
     # Dynamic schema getter - called at verification time (handles race condition with async schema generation)
     get_response_schema: Optional[Callable[[], Awaitable[Optional[Dict[str, Any]]]]] = None,
+
+    # Claude OAuth token for direct Anthropic calls via Rose endpoint
+    claude_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -358,6 +361,7 @@ async def run_agent(
                     on_chunk=on_chunk,
                     reasoning_max_tokens=reasoning_max_tokens,
                     agent_id=agent_id,
+                    claude_token=claude_token,
                 )
                 
                 # Convert Pydantic tool_calls to dicts (same as call_llm_activity does)
@@ -401,7 +405,7 @@ async def run_agent(
                 # Workflow context - call LLM via activity (streams to Supabase Realtime inside)
                 llm_result = await workflow.execute_activity(
                     call_llm_activity,
-                    args=[messages, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id],
+                    args=[messages, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id, claude_token],
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=30),

@@ -1836,6 +1836,7 @@ async def call_llm_activity(
     agent_id: Optional[str] = None,
     stream_id: Optional[str] = None,
     task_id: Optional[str] = None,
+    claude_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -1905,6 +1906,7 @@ async def call_llm_activity(
             reasoning_max_tokens=reasoning_max_tokens if reasoning_max_tokens > 0 else None,
             agent_id=agent_id,
             on_tool_detected=on_tool_detected_callback,
+            claude_token=claude_token,
         )
         
         # Send final done=True chunk

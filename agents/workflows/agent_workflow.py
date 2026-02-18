@@ -644,6 +644,7 @@ class AgentWorkflow:
                 is_plan_loop=True,  # PLAN phase: requires set_plan, posts "sit back" message
                 response_schema=response_schema,
                 get_response_schema=self._make_response_schema_getter(),
+                claude_token=self.claude_max_token,
             )
 
             await self._track_tokens_and_cost(plan_result)
@@ -707,6 +708,9 @@ class AgentWorkflow:
         # Note: Don't pass initial_context - run_agent polls from DB each step
         # DAG already posted all results to DB via post_message callback
 
+        # Refresh Claude token before execute phase (may have expired during PLAN)
+        await self._refresh_claude_token(user_id)
+
         execute_result = await run_agent(
             agent_id=agent_id,
             user_id=user_id,
@@ -731,6 +735,7 @@ class AgentWorkflow:
             skip_blueprint_query=not skip_plan,  # Only skip if we ran PLAN phase
             response_schema=response_schema,
             get_response_schema=self._make_response_schema_getter(),
+            claude_token=self.claude_max_token,
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
 

@@ -1644,6 +1644,7 @@ const VISION_CAPABLE_MODELS = new Set([
   'anthropic/claude-haiku-4.5',
   'anthropic/claude-opus-4',
   'anthropic/claude-opus-4.6',
+  'anthropic/claude-sonnet-4.6',
   // X.AI
   'x-ai/grok-4.1-fast',
   'x-ai/grok-4.1',
@@ -2831,6 +2832,7 @@ function getAnthropicModelName(openRouterModel: string): string {
     'anthropic/claude-sonnet-4': 'claude-sonnet-4-20250514',
     'anthropic/claude-opus-4': 'claude-opus-4-20250514',
     'anthropic/claude-opus-4.6': 'claude-opus-4-6',
+    'anthropic/claude-sonnet-4.6': 'claude-sonnet-4-6',
   };
   return mapping[openRouterModel] || openRouterModel.replace('anthropic/', '');
 }
@@ -3010,8 +3012,8 @@ async function handleStreaming(
           });
         } else if (isAnthropicModel(actualModel) || claudeAuth) {
           // Call Anthropic API directly for Claude models (structured outputs require beta header)
-          // When claudeAuth is set, actualModel may be "claude-opus-4-6-claude" (for $0 pricing) — use claude-opus-4-6 for the API call
-          const anthropicModel = claudeAuth ? 'claude-opus-4-6' : getAnthropicModelName(actualModel);
+          // When claudeAuth is set, actualModel is e.g. "claude-opus-4-6-claude" or "claude-sonnet-4-6-claude" — strip "-claude" suffix for API
+          const anthropicModel = claudeAuth ? actualModel.replace('-claude', '') : getAnthropicModelName(actualModel);
           const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
 
           console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}`);
@@ -3977,12 +3979,17 @@ serve(async (req) => {
     // CLAUDE TOKEN PASSTHROUGH: Direct Anthropic call using user's Claude subscription ($0 cost)
     // If it fails, fall through to normal racing.
     // ============================================
-    if (claude_token && (poolName === 'rose-1-ultra' || poolName === 'rose-ultra')) {
-      console.log(`🔑 [${requestId}] Claude token present, attempting direct Anthropic call (skipping racing)`);
+    const isClaudeTokenPool = poolName === 'rose-1-ultra' || poolName === 'rose-ultra' || poolName === 'rose-1-lite' || poolName === 'rose-lite';
+    if (claude_token && isClaudeTokenPool) {
+      const isLitePool = poolName === 'rose-1-lite' || poolName === 'rose-lite';
+      const claudeActualModel = isLitePool ? 'claude-sonnet-4-6-claude' : 'claude-opus-4-6-claude';
+      const claudeApiModel = isLitePool ? 'claude-sonnet-4-6' : 'claude-opus-4-6';
+      const claudePassthroughModel = isLitePool ? 'anthropic/claude-sonnet-4.6' : 'anthropic/claude-opus-4.6';
+      console.log(`🔑 [${requestId}] Claude token present, attempting direct Anthropic call with ${claudeApiModel} (skipping racing)`);
       try {
         if (stream) {
           return await handleStreaming(
-            'claude-opus-4-6-claude',  // actual_model reported in SSE — maps to $0 pricing
+            claudeActualModel,  // actual_model reported in SSE — maps to $0 pricing
             messages,
             temperature,
             maxTokens,
@@ -4001,12 +4008,11 @@ serve(async (req) => {
           );
         } else {
           // Non-streaming claude token path
-          const claudePassthrough = 'anthropic/claude-opus-4.6';
-          const modelMessages = getMessagesForModel(messages, claudePassthrough);
+          const modelMessages = getMessagesForModel(messages, claudePassthroughModel);
           const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
 
           const anthropicBody: any = {
-            model: 'claude-opus-4-6',
+            model: claudeApiModel,
             messages: anthropicMessages,
             max_tokens: maxTokens || 4096,
           };
@@ -4081,7 +4087,7 @@ serve(async (req) => {
               total_tokens: (apiUsage.input_tokens || 0) + (apiUsage.output_tokens || 0),
             },
             requested_model: model,
-            actual_model: 'claude-opus-4-6-claude',
+            actual_model: claudeActualModel,
             pool_name: 'claude-token',
             pool_size: 1,
           };
