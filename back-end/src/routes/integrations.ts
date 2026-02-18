@@ -14,7 +14,7 @@ import { sendSms } from '../lib/smsQueue';
 import { prisma } from '../lib/prisma';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
-import { fetchClaudeCodeAccessToken } from '../lib/claudeCredentials';
+import { fetchClaudeCodeAccessToken, fetchPoolToken, markPoolTokenRateLimited } from '../lib/claudeCredentials';
 
 const router = express.Router();
 
@@ -3196,13 +3196,15 @@ router.post('/claude-code/credentials/upload', authenticate, async (req: AuthReq
 /**
  * GET /api/integrations/claude-code/credentials/token
  *
- * Returns the decrypted Claude Code OAuth access token for the authenticated user.
- * Used by the completions edge function for claude-mode requests.
+ * Returns a Claude Code OAuth access token for the authenticated user.
+ * Tries user's own token first, then falls back to pool if user is onboarded.
+ *
+ * Headers:
+ *   X-Force-Pool: 'true' — skip user's own token, go straight to pool
+ *   X-Exclude-Pool-Tokens: 'id1,id2' — skip specific pool tokens (for retry after 429)
  */
 router.get('/claude-code/credentials/token', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    // For internal calls (X-API-Key), read userId from X-User-Id header
-    // For JWT calls, read from req.user
     const userId = req.isInternal
       ? (req.headers['x-user-id'] as string)
       : req.user?.id;
@@ -3211,19 +3213,66 @@ router.get('/claude-code/credentials/token', authenticate, async (req: AuthReque
       return res.status(400).json({ error: 'Missing user ID' });
     }
 
-    const accessToken = await fetchClaudeCodeAccessToken(userId);
+    const forcePool = req.headers['x-force-pool'] === 'true';
 
-    if (!accessToken) {
+    // 1. Try user's own token first (unless forcing pool)
+    if (!forcePool) {
+      const userToken = await fetchClaudeCodeAccessToken(userId);
+      if (userToken) {
+        return res.json({ accessToken: userToken, source: 'user' });
+      }
+    }
+
+    // 2. Check if user is onboarded (pool access requires completed onboarding)
+    const user = await prisma.user.findUnique({ where: { userId } });
+    if (!user?.onboardingCompletedAt) {
       return res.status(404).json({ error: 'Claude Code credentials not found. Sync credentials from the Mac app.' });
     }
 
-    return res.json({ accessToken });
+    // 3. Try pool token
+    const excludeHeader = req.headers['x-exclude-pool-tokens'] as string | undefined;
+    const excludeIds = excludeHeader ? excludeHeader.split(',').map(id => id.trim()) : undefined;
+
+    const poolResult = await fetchPoolToken(excludeIds);
+    if (!poolResult) {
+      return res.status(404).json({ error: 'NO_TOKENS_AVAILABLE' });
+    }
+
+    return res.json({
+      accessToken: poolResult.accessToken,
+      source: 'pool',
+      poolTokenId: poolResult.poolTokenId,
+    });
   } catch (error) {
     console.error('[Integrations] Error fetching Claude Code token:', error);
     return res.status(500).json({
       error: 'Failed to fetch Claude Code credentials',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
+  }
+});
+
+/**
+ * POST /api/integrations/claude-code/pool-token/rate-limited
+ *
+ * Marks a pool token as rate-limited. Internal-only (X-API-Key auth).
+ */
+router.post('/claude-code/pool-token/rate-limited', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.isInternal) {
+      return res.status(403).json({ error: 'Internal only' });
+    }
+
+    const { poolTokenId } = req.body;
+    if (!poolTokenId) {
+      return res.status(400).json({ error: 'Missing poolTokenId' });
+    }
+
+    await markPoolTokenRateLimited(poolTokenId);
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('[Integrations] Error marking pool token rate-limited:', error);
+    return res.status(500).json({ error: 'Failed to mark pool token rate-limited' });
   }
 });
 

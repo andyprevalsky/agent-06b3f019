@@ -262,6 +262,7 @@ interface BrowserUseRequest {
   model_seed?: number;
   mode?: 'default' | 'claude';
   user_id?: string;  // Real user ID for claude-mode credential lookup (API key may map to a shared worker user)
+  oauth_token?: string;  // Claude OAuth token provided by caller (agent worker)
 }
 
 interface UnifiedAction {
@@ -3500,39 +3501,44 @@ serve(async (req) => {
           });
         }
 
-        // Fetch and decrypt the OAuth token via backend endpoint
-        // (backend handles Integration lookup, decryption, and token refresh)
         let oauthToken: string;
-        try {
-          const tokenResp = await fetch(`${backendUrl}/api/integrations/claude-code/credentials/token`, {
-            headers: {
-              'X-API-Key': backendApiKey,
-              'X-User-Id': claudeUserId,
-            },
-          });
-          if (!tokenResp.ok) {
-            const errData = await tokenResp.json().catch(() => null);
-            const errMsg = errData?.error || `Backend token fetch failed: ${tokenResp.status}`;
-            console.error(`❌ [${requestId}] Claude Code token fetch failed:`, errMsg);
+        if (browserUseReq.oauth_token) {
+          // Token provided by caller (agent worker handles token management)
+          oauthToken = browserUseReq.oauth_token;
+          console.log(`🔷 [${requestId}] Using caller-provided OAuth token`);
+        } else {
+          // Fallback: fetch from backend (backwards compat)
+          try {
+            const tokenResp = await fetch(`${backendUrl}/api/integrations/claude-code/credentials/token`, {
+              headers: {
+                'X-API-Key': backendApiKey,
+                'X-User-Id': claudeUserId,
+              },
+            });
+            if (!tokenResp.ok) {
+              const errData = await tokenResp.json().catch(() => null);
+              const errMsg = errData?.error || `Backend token fetch failed: ${tokenResp.status}`;
+              console.error(`❌ [${requestId}] Claude Code token fetch failed:`, errMsg);
+              return new Response(JSON.stringify({
+                error: errMsg,
+                request_id: requestId,
+              }), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+                status: tokenResp.status === 404 ? 400 : 500,
+              });
+            }
+            const tokenData = await tokenResp.json();
+            oauthToken = tokenData.accessToken;
+          } catch (tokenErr) {
+            console.error(`❌ [${requestId}] Failed to fetch Claude Code token:`, tokenErr);
             return new Response(JSON.stringify({
-              error: errMsg,
+              error: 'Failed to fetch Claude Code credentials',
+              details: tokenErr instanceof Error ? tokenErr.message : 'Unknown error',
               request_id: requestId,
             }), {
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-              status: tokenResp.status === 404 ? 400 : 500,
+              headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500,
             });
           }
-          const tokenData = await tokenResp.json();
-          oauthToken = tokenData.accessToken;
-        } catch (tokenErr) {
-          console.error(`❌ [${requestId}] Failed to fetch Claude Code token:`, tokenErr);
-          return new Response(JSON.stringify({
-            error: 'Failed to fetch Claude Code credentials',
-            details: tokenErr instanceof Error ? tokenErr.message : 'Unknown error',
-            request_id: requestId,
-          }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500,
-          });
         }
 
         // Build messages with screenshots ON (including history screenshots)
@@ -3636,6 +3642,20 @@ serve(async (req) => {
         if (!response.ok) {
           const errorText = await response.text();
           console.error(`❌ [${requestId}] Claude mode API error:`, response.status, errorText);
+
+          // Rate limited — signal caller to fall back to racing
+          if (response.status === 429) {
+            console.warn(`⚠️ [${requestId}] Claude mode rate limited, signaling fallback to racing`);
+            return new Response(JSON.stringify({
+              error: 'CLAUDE_RATE_LIMITED',
+              fallback: 'racing',
+              request_id: requestId,
+            }), {
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+              status: 200,
+            });
+          }
+
           return new Response(JSON.stringify({
             error: `Anthropic API error: ${response.status}`,
             details: errorText,

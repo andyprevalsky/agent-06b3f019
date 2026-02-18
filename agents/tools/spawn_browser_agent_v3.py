@@ -45,6 +45,79 @@ def _safe_time() -> float:
 
 
 # ========================================
+# CLAUDE AUTH TOKEN MANAGEMENT
+# ========================================
+
+class ClaudeTokenState:
+    """Tracks Claude OAuth token state for pool rotation and fallback."""
+    def __init__(self):
+        self.access_token: Optional[str] = None
+        self.source: Optional[str] = None  # 'user' | 'pool'
+        self.pool_token_id: Optional[str] = None
+        self.excluded_pool_ids: List[str] = []
+        self.fallen_back_to_racing: bool = False
+
+
+async def fetch_claude_token(
+    config: Any,
+    user_id: str,
+    force_pool: bool = False,
+    exclude_pool_ids: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch a Claude OAuth token from the backend.
+
+    Returns dict with {accessToken, source, poolTokenId?} or None.
+    """
+    backend_url = config.backend.api_url.rstrip("/")
+    backend_api_key = config.backend.api_key
+    if not backend_api_key:
+        logger.warning("[ClaudeAuth] BACKEND_API_KEY not configured")
+        return None
+
+    headers = {
+        "X-API-Key": backend_api_key,
+        "X-User-Id": user_id,
+    }
+    if force_pool:
+        headers["X-Force-Pool"] = "true"
+    if exclude_pool_ids:
+        headers["X-Exclude-Pool-Tokens"] = ",".join(exclude_pool_ids)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{backend_url}/api/integrations/claude-code/credentials/token",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                logger.info(f"[ClaudeAuth] Token fetch returned {resp.status_code}", user_id=user_id)
+                return None
+            return resp.json()
+    except Exception as e:
+        logger.error(f"[ClaudeAuth] Token fetch failed: {e}", user_id=user_id)
+        return None
+
+
+async def report_pool_token_rate_limited(config: Any, pool_token_id: str) -> None:
+    """Report a pool token as rate-limited to the backend."""
+    backend_url = config.backend.api_url.rstrip("/")
+    backend_api_key = config.backend.api_key
+    if not backend_api_key:
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{backend_url}/api/integrations/claude-code/pool-token/rate-limited",
+                headers={"X-API-Key": backend_api_key, "Content-Type": "application/json"},
+                json={"poolTokenId": pool_token_id},
+            )
+            logger.info(f"[ClaudeAuth] Reported pool token {pool_token_id} as rate-limited")
+    except Exception as e:
+        logger.error(f"[ClaudeAuth] Failed to report rate limit: {e}")
+
+
+# ========================================
 # MESSAGE HELPERS
 # ========================================
 
@@ -849,6 +922,7 @@ async def call_rose_browser_use(
     config: Any,
     mode: Optional[str] = None,
     user_id: Optional[str] = None,
+    oauth_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call Rose API rose-1-browser-use endpoint.
 
@@ -859,6 +933,7 @@ async def call_rose_browser_use(
         config: App config with Rose API credentials
         mode: Optional mode ('claude' for direct Opus 4.6 with user's Claude subscription)
         user_id: Real user ID for claude-mode credential lookup
+        oauth_token: Pre-fetched Claude OAuth token (agent worker manages token lifecycle)
 
     Returns:
         Dict with 'action' (UnifiedAction) and metadata
@@ -878,6 +953,8 @@ async def call_rose_browser_use(
         request_body["mode"] = mode
     if user_id:
         request_body["user_id"] = user_id
+    if oauth_token:
+        request_body["oauth_token"] = oauth_token
 
     # Log full request for debugging (truncate screenshot to avoid huge logs)
     log_body = {
@@ -1903,6 +1980,19 @@ async def spawn_browser_agent_activity_v3(
 
     browser_use_mode = "claude" if use_claude_mode else None
 
+    # Claude auth token state (for pool rotation and fallback to racing)
+    token_state = ClaudeTokenState()
+    if browser_use_mode == "claude":
+        token_data = await fetch_claude_token(config, user_id)
+        if token_data:
+            token_state.access_token = token_data.get("accessToken")
+            token_state.source = token_data.get("source")
+            token_state.pool_token_id = token_data.get("poolTokenId")
+            logger.info(f"[ClaudeAuth] Got token (source={token_state.source})", user_id=user_id)
+        else:
+            logger.info("[ClaudeAuth] No token available, falling back to racing", user_id=user_id)
+            browser_use_mode = None
+
     # Token tracking for usage
     total_input_tokens = 0
     total_output_tokens = 0
@@ -2463,7 +2553,52 @@ async def spawn_browser_agent_activity_v3(
                     config=config,
                     mode=browser_use_mode,
                     user_id=user_id,
+                    oauth_token=token_state.access_token if browser_use_mode == "claude" else None,
                 )
+
+                # Handle claude auth rate-limit fallback
+                if llm_result.get("fallback") == "racing" and browser_use_mode == "claude":
+                    # Try pool token rotation before falling back to racing
+                    retried = False
+                    if token_state.pool_token_id:
+                        # Current pool token was rate-limited
+                        await report_pool_token_rate_limited(config, token_state.pool_token_id)
+                        token_state.excluded_pool_ids.append(token_state.pool_token_id)
+                    # Try to get another pool token
+                    new_token = await fetch_claude_token(
+                        config, user_id, force_pool=True,
+                        exclude_pool_ids=token_state.excluded_pool_ids or None,
+                    )
+                    if new_token:
+                        token_state.access_token = new_token.get("accessToken")
+                        token_state.source = new_token.get("source")
+                        token_state.pool_token_id = new_token.get("poolTokenId")
+                        logger.info(f"[ClaudeAuth] Retrying with pool token (source={token_state.source})")
+                        llm_result = await call_rose_browser_use(
+                            task=enriched_task,
+                            browser_state=browser_state,
+                            action_history=action_entries,
+                            config=config,
+                            mode=browser_use_mode,
+                            user_id=user_id,
+                            oauth_token=token_state.access_token,
+                        )
+                        if llm_result.get("fallback") != "racing":
+                            retried = True
+
+                    if not retried and llm_result.get("fallback") == "racing":
+                        # All tokens exhausted — fall back to racing for rest of session
+                        logger.warning("[ClaudeAuth] All tokens exhausted, falling back to racing mode")
+                        browser_use_mode = None
+                        token_state.fallen_back_to_racing = True
+                        llm_result = await call_rose_browser_use(
+                            task=enriched_task,
+                            browser_state=browser_state,
+                            action_history=action_entries,
+                            config=config,
+                            mode=None,
+                            user_id=user_id,
+                        )
 
                 # Track usage from Rose API response
                 # Skip token accumulation for claude mode (billed to user's Claude subscription)

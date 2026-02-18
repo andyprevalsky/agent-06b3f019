@@ -367,6 +367,9 @@ model Integration {
   lastFailedSyncAt     DateTime?
   failureReason        String?
   config               Json?
+  poolingEnabled       Boolean                      @default(false)
+  rateLimitedUntil     DateTime?
+  lastUsedAt           DateTime?
   createdAt            DateTime                     @default(now())
   updatedAt            DateTime                     @updatedAt
   emailCredentials     EmailIntegrationCredential[]
@@ -375,6 +378,7 @@ model Integration {
   @@index([userId])
   @@index([type])
   @@index([status])
+  @@index([poolingEnabled, rateLimitedUntil])
 }
 
 model EmailIntegrationCredential {
@@ -654,6 +658,7 @@ model SharedMemory {
 
   @@index([busId])
 }
+
 
 enum AgentStatus {
   STARTING_UP

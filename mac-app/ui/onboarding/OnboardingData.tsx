@@ -203,6 +203,9 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
   // Chat Sync state
   const [chatSyncExpanded, setChatSyncExpanded] = useState(false);
+
+  // Compute state
+  const [computeExpanded, setComputeExpanded] = useState(false);
   const [iMessageSynced, setIMessageSynced] = useState(false);
   const [whatsAppConnected, setWhatsAppConnected] = useState(false);
   const [telegramConnected, setTelegramConnected] = useState(false);
@@ -221,6 +224,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     if (!browsersExpanded) {
       setPasswordsExpanded(false);
       setChatSyncExpanded(false);
+      setComputeExpanded(false);
     }
   };
 
@@ -229,6 +233,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     if (!passwordsExpanded) {
       setBrowsersExpanded(false);
       setChatSyncExpanded(false);
+      setComputeExpanded(false);
     }
   };
 
@@ -237,6 +242,16 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     if (!chatSyncExpanded) {
       setBrowsersExpanded(false);
       setPasswordsExpanded(false);
+      setComputeExpanded(false);
+    }
+  };
+
+  const handleComputeExpand = () => {
+    setComputeExpanded(!computeExpanded);
+    if (!computeExpanded) {
+      setBrowsersExpanded(false);
+      setPasswordsExpanded(false);
+      setChatSyncExpanded(false);
     }
   };
 
@@ -1178,17 +1193,87 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             )}
           </div>
 
-          {/* Claude Code Credentials */}
-          {window.api.claudeCode && (
-            <IntegrationItem
-              icon={<img src={claudeIcon} alt="Claude Code" className="w-5 h-5" />}
-              name="Claude Code"
-              description="Sync Claude Code credentials to reduce usage costs"
-              connected={claudeCodeSynced}
-              loading={claudeCodeSyncLoading}
-              onConnect={handleClaudeCodeSync}
-            />
-          )}
+          {/* Compute - Expandable */}
+          <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
+            {/* Main row */}
+            <div className="p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                    <defs>
+                      <linearGradient id="computeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stopColor="#ef4444" />
+                        <stop offset="100%" stopColor="#f87171" />
+                      </linearGradient>
+                    </defs>
+                    <path d="M13 2L4.5 14h6l-1 8L19.5 10h-6l1-8z" fill="url(#computeGradient)" stroke="url(#computeGradient)" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="font-medium text-sm text-foreground">Compute</div>
+                  <div className="text-xs text-muted-foreground">Connect AI subscriptions</div>
+                </div>
+              </div>
+
+              <button
+                onClick={handleComputeExpand}
+                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                  claudeCodeSynced
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-foreground text-background hover:bg-foreground/90'
+                }`}
+              >
+                {claudeCodeSynced ? (
+                  <Check className="w-4 h-4" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+
+            {/* Expanded compute options */}
+            {computeExpanded && (
+              <div className="border-t border-border">
+                {/* Claude Subscription */}
+                {window.api.claudeCode && (
+                  <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                    <div className="flex items-center gap-3">
+                      <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
+                      <span className="text-sm text-foreground">Claude Subscription</span>
+                    </div>
+
+                    <button
+                      onClick={handleClaudeCodeSync}
+                      disabled={claudeCodeSyncLoading}
+                      className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                        claudeCodeSynced
+                          ? 'bg-green-100 text-green-700'
+                          : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {claudeCodeSyncLoading ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : claudeCodeSynced ? (
+                        <Check className="w-3.5 h-3.5" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {/* ChatGPT Subscription - Coming Soon */}
+                <div className="px-4 py-2 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <img src={chatgptIcon} alt="ChatGPT" className="w-6 h-6 rounded" />
+                    <span className="text-sm text-foreground">ChatGPT Subscription</span>
+                  </div>
+
+                  <span className="text-xs text-muted-foreground italic">Coming soon</span>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Continue button */}
