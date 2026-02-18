@@ -2466,9 +2466,12 @@ async def spawn_browser_agent_activity_v3(
                 )
 
                 # Track usage from Rose API response
+                # Skip token accumulation for claude mode (billed to user's Claude subscription)
                 usage = llm_result.get("usage", {})
-                total_input_tokens += usage.get("prompt_tokens", 0)
-                total_output_tokens += usage.get("completion_tokens", 0)
+                response_mode = llm_result.get("mode", "")
+                if response_mode != "claude":
+                    total_input_tokens += usage.get("prompt_tokens", 0)
+                    total_output_tokens += usage.get("completion_tokens", 0)
 
             except Exception as e:
                 logger.error(f"Rose API call failed: {e}")

@@ -193,8 +193,9 @@ class AgentWorkflow:
         self.tree_tokens_in: int = 0  # own + sum(children) - for display
         self.tree_tokens_out: int = 0  # own + sum(children) - for display
 
-        # Claude Max token (for direct Anthropic planner calls)
+        # Claude token (passed to Rose endpoint for direct Anthropic calls)
         self.claude_max_token: Optional[str] = None
+        self.claude_max_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
 
         # Model pricing (fetched at workflow start for cost calculation)
         self.input_cents_per_1k: float = 0.0  # Price per 1k input tokens in cents
@@ -528,18 +529,8 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch custom system prompt: {e}")
 
-        # Fetch Claude Max token for direct Anthropic planner calls
-        try:
-            self.claude_max_token = await workflow.execute_activity(
-                fetch_claude_max_token_activity,
-                args=[user_id],
-                start_to_close_timeout=timedelta(seconds=20),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-            if self.claude_max_token:
-                workflow.logger.info("🔑 Claude Max token available for planner")
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch Claude Max token: {e}")
+        # Fetch Claude token for Anthropic calls via Rose endpoint
+        await self._refresh_claude_token(user_id)
 
         # Inject custom system prompt as hidden USER message for new agents
         # Only inject if: 1) custom prompt exists, 2) this is not a resume (no context passed)
@@ -878,6 +869,31 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Credit check failed (continuing): {e}")
     
+    # Claude token TTL: 5 minutes
+    CLAUDE_TOKEN_TTL = timedelta(minutes=5)
+
+    async def _refresh_claude_token(self, user_id: str) -> None:
+        """Fetch or refresh the Claude OAuth token if missing or expired (5-min TTL)."""
+        now = workflow.now()
+        if self.claude_max_token_fetched_at:
+            age = now - self.claude_max_token_fetched_at
+            if age < self.CLAUDE_TOKEN_TTL:
+                return  # Still fresh
+            workflow.logger.info(f"🔑 Claude token expired ({age.total_seconds():.0f}s old), refreshing")
+
+        try:
+            self.claude_max_token = await workflow.execute_activity(
+                fetch_claude_max_token_activity,
+                args=[user_id],
+                start_to_close_timeout=timedelta(seconds=20),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            self.claude_max_token_fetched_at = now
+            if self.claude_max_token:
+                workflow.logger.info("🔑 Claude token available for planner")
+        except Exception as e:
+            workflow.logger.warning(f"Failed to fetch Claude token: {e}")
+
     async def _post_message(self, text: str, role: str = "ASSISTANT", metadata: Optional[Dict] = None) -> None:
         """Post message to database."""
         try:

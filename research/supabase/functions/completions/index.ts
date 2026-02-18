@@ -935,9 +935,11 @@ async function callYutoriLLM(
   const data = await response.json();
   console.log('📥 Yutori raw response:', JSON.stringify(data, null, 2));
 
-  // Yutori returns 200 with { detail: [...] } for validation errors
+  // Yutori returns 200 with { detail: [...] } or { detail: "string" } for validation errors
   if (data.detail) {
-    const msg = data.detail.map((d: any) => d.msg || d.message || JSON.stringify(d)).join('; ');
+    const msg = Array.isArray(data.detail)
+      ? data.detail.map((d: any) => d.msg || d.message || JSON.stringify(d)).join('; ')
+      : String(data.detail);
     throw new Error(`Yutori validation error: ${msg}`);
   }
 
@@ -2947,17 +2949,18 @@ async function handleStreaming(
   requestedModel: string,
   isCerebras: boolean,
   poolName: string,     // Added: for debugging
-  poolSize: number      // Added: for debugging
+  poolSize: number,     // Added: for debugging
+  claudeAuth?: { token: string }  // Optional: user's Claude OAuth token (uses Bearer auth + Claude Code headers)
 ) {
   // Get model-specific messages (transforms screenshots for vision models)
   const modelMessages = getMessagesForModel(messages, actualModel);
-  
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       try {
         let response: globalThis.Response;
-        
+
         if (isCerebras) {
           // Call Cerebras API directly for rose-hyper
           const cerebrasKey = Deno.env.get('CEREBRAS_API_KEY');
@@ -3005,51 +3008,71 @@ async function handleStreaming(
             },
             body: JSON.stringify(cerebrasStreamBody)
           });
-        } else if (isAnthropicModel(actualModel)) {
+        } else if (isAnthropicModel(actualModel) || claudeAuth) {
           // Call Anthropic API directly for Claude models (structured outputs require beta header)
-          const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
-          if (!anthropicKey) {
-            throw new Error(`ANTHROPIC_API_KEY required for ${actualModel}`);
-          }
-          
-          const anthropicModel = getAnthropicModelName(actualModel);
+          // When claudeAuth is set, actualModel may be "claude-opus-4-6-claude" (for $0 pricing) — use claude-opus-4-6 for the API call
+          const anthropicModel = claudeAuth ? 'claude-opus-4-6' : getAnthropicModelName(actualModel);
           const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
-          
-          console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}`);
-          
+
+          console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}`);
+
           const anthropicBody: any = {
             model: anthropicModel,
             messages: anthropicMessages,
             max_tokens: maxTokens || 4096,
             stream: true
           };
-          
+
           if (system) {
             anthropicBody.system = system;
           }
           if (temperature !== undefined) {
             anthropicBody.temperature = temperature;
           }
-          
-          // Transform response_format to Anthropic's output_format
+
+          // Transform response_format to Anthropic's structured output format
           if (responseFormat?.json_schema?.schema) {
             const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
-            anthropicBody.output_format = {
-              type: 'json_schema',
-              schema: transformedSchema
-            };
+            if (claudeAuth) {
+              // Claude OAuth API uses output_config.format (output_format is deprecated)
+              anthropicBody.output_config = {
+                format: {
+                  type: 'json_schema',
+                  schema: transformedSchema
+                }
+              };
+            } else {
+              anthropicBody.output_format = {
+                type: 'json_schema',
+                schema: transformedSchema
+              };
+            }
+          }
+
+          // Use Claude OAuth token (user's subscription) or Rose's API key
+          const anthropicHeaders: Record<string, string> = {
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          };
+          if (claudeAuth) {
+            anthropicHeaders['Authorization'] = `Bearer ${claudeAuth.token}`;
+            anthropicHeaders['anthropic-beta'] = 'oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05';
+            anthropicHeaders['x-app'] = 'cli';
+            anthropicHeaders['User-Agent'] = 'claude-cli/2.1.45 (external, rose-planner)';
+          } else {
+            const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+            if (!anthropicKey) {
+              throw new Error(`ANTHROPIC_API_KEY required for ${actualModel}`);
+            }
+            anthropicHeaders['x-api-key'] = anthropicKey;
+            anthropicHeaders['anthropic-beta'] = ANTHROPIC_BETA_HEADER;
           }
 
           console.log(`[Anthropic Stream] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
 
           response = await fetch(ANTHROPIC_API_URL, {
             method: 'POST',
-            headers: {
-              'x-api-key': anthropicKey,
-              'anthropic-version': '2023-06-01',
-              'anthropic-beta': ANTHROPIC_BETA_HEADER,
-              'content-type': 'application/json'
-            },
+            headers: anthropicHeaders,
             body: JSON.stringify(anthropicBody)
           });
         } else {
@@ -3454,6 +3477,13 @@ serve(async (req) => {
       // CLAUDE MODE: Direct Anthropic call with Claude Code credentials + prompt caching
       // ============================================
       if (browserUseReq.mode === 'claude') {
+        // Every 3rd step, route to Yutori via the existing model_seed path (index 1 in pool)
+        const stepNumber = browserUseReq.action_history.length;
+        if (stepNumber > 0 && stepNumber % 3 === 0 && browserUseReq.browser_state.screenshot) {
+          console.log(`🔶 [${requestId}] Claude mode: routing step ${stepNumber} to Yutori via model_seed=1`);
+          browserUseReq.model_seed = 1; // yutori/n1 is index 1 in rose-1-browser-use pool
+          // Fall through to model_seed handler below
+        } else {
         // For claude-mode, use user_id from request body if provided (the API key may map to a shared
         // worker user, but the real user who owns the agent/credentials is passed via user_id)
         const claudeUserId = browserUseReq.user_id || authInfo.userId;
@@ -3665,6 +3695,7 @@ serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
           status: 200,
         });
+        } // end else (non-Yutori claude mode)
       }
 
       // ============================================
@@ -3903,6 +3934,7 @@ serve(async (req) => {
       model_seed,  // Optional: index into model pool for testing
       model_preference,  // Optional: 'SMART' | 'FAST' | 'CHEAP' for hardcoded model selection
       conversation_id,  // Optional: ensures same model used for entire conversation
+      claude_token,  // Optional: user's Claude OAuth token for direct Anthropic call (skips racing, $0 cost)
       ...otherParams
     } = rawBody;
 
@@ -3940,7 +3972,131 @@ serve(async (req) => {
     if (poolName.startsWith('rose-labs/')) {
       poolName = poolName.replace('rose-labs/', '');
     }
-    
+
+    // ============================================
+    // CLAUDE TOKEN PASSTHROUGH: Direct Anthropic call using user's Claude subscription ($0 cost)
+    // If it fails, fall through to normal racing.
+    // ============================================
+    if (claude_token && (poolName === 'rose-1-ultra' || poolName === 'rose-ultra')) {
+      console.log(`🔑 [${requestId}] Claude token present, attempting direct Anthropic call (skipping racing)`);
+      try {
+        if (stream) {
+          return await handleStreaming(
+            'claude-opus-4-6-claude',  // actual_model reported in SSE — maps to $0 pricing
+            messages,
+            temperature,
+            maxTokens,
+            seed,
+            tools,
+            tool_choice,
+            response_format,
+            cappedReasoning,
+            '', // openRouterKey not needed
+            supabaseUrl,
+            model,
+            false,  // isCerebras
+            'claude-token',
+            1,
+            { token: claude_token }  // claudeAuth
+          );
+        } else {
+          // Non-streaming claude token path
+          const claudePassthrough = 'anthropic/claude-opus-4.6';
+          const modelMessages = getMessagesForModel(messages, claudePassthrough);
+          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
+
+          const anthropicBody: any = {
+            model: 'claude-opus-4-6',
+            messages: anthropicMessages,
+            max_tokens: maxTokens || 4096,
+          };
+          if (system) anthropicBody.system = system;
+          if (temperature !== undefined) anthropicBody.temperature = temperature;
+          if (tools?.length) {
+            anthropicBody.tools = tools.map((t: any) => ({
+              name: t.function?.name ?? t.name,
+              description: t.function?.description ?? t.description,
+              input_schema: t.function?.parameters ?? t.input_schema,
+            }));
+            if (tool_choice) {
+              if (tool_choice === 'auto') anthropicBody.tool_choice = { type: 'auto' };
+              else if (tool_choice === 'required' || tool_choice === 'any') anthropicBody.tool_choice = { type: 'any' };
+              else if (tool_choice?.function?.name) anthropicBody.tool_choice = { type: 'tool', name: tool_choice.function.name };
+            }
+          }
+          if (cappedReasoning?.max_tokens) {
+            anthropicBody.thinking = { type: 'enabled', budget_tokens: cappedReasoning.max_tokens };
+          }
+          if (response_format?.json_schema?.schema) {
+            // Claude OAuth API uses output_config.format (output_format is deprecated)
+            anthropicBody.output_config = {
+              format: {
+                type: 'json_schema',
+                schema: transformSchemaForAnthropic(response_format.json_schema.schema)
+              }
+            };
+          }
+
+          const response = await fetch(ANTHROPIC_API_URL, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${claude_token}`,
+              'anthropic-version': '2023-06-01',
+              'anthropic-beta': 'oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05',
+              'x-app': 'cli',
+              'User-Agent': 'claude-cli/2.1.45 (external, rose-planner)',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(anthropicBody)
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Anthropic API error: ${response.status} - ${errorText.slice(0, 200)}`);
+          }
+
+          const data = await response.json() as any;
+          // Extract text and tool_use content from Anthropic response
+          let textContent = '';
+          const toolCalls: any[] = [];
+          for (const block of (data.content || [])) {
+            if (block.type === 'text') textContent += block.text || '';
+            else if (block.type === 'tool_use') {
+              toolCalls.push({
+                id: block.id,
+                type: 'function',
+                function: { name: block.name, arguments: JSON.stringify(block.input) },
+              });
+            }
+          }
+
+          const apiUsage = data.usage || {};
+          const message: any = { content: textContent };
+          if (toolCalls.length) message.tool_calls = toolCalls;
+          const finalResponse = {
+            choices: [{ message }],
+            usage: {
+              prompt_tokens: apiUsage.input_tokens || 0,
+              completion_tokens: apiUsage.output_tokens || 0,
+              total_tokens: (apiUsage.input_tokens || 0) + (apiUsage.output_tokens || 0),
+            },
+            requested_model: model,
+            actual_model: 'claude-opus-4-6-claude',
+            pool_name: 'claude-token',
+            pool_size: 1,
+          };
+
+          return new Response(JSON.stringify(finalResponse), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            status: 200,
+          });
+        }
+      } catch (error) {
+        console.warn(`⚠️ [${requestId}] Claude token call failed, falling back to racing: ${error}`);
+        // Fall through to normal racing path
+      }
+    }
+
     // Check if it's a direct model passthrough (for testing)
     const DIRECT_MODEL_PREFIXES = ['openai/', 'google/', 'anthropic/', 'deepseek/', 'qwen/', 'x-ai/', 'meta/', 'moonshotai/'];
     const isDirectModel = DIRECT_MODEL_PREFIXES.some(prefix => model.toLowerCase().startsWith(prefix));

@@ -552,6 +552,7 @@ async def call_llm_structured_streaming(
     on_tool_detected: Optional[Callable[[str, str], Awaitable[None]]] = None,  # Called when any tool detected (tool_name, tool_call_id)
     on_attention_stream: Optional[Callable[[str, str, bool], Awaitable[None]]] = None,  # Called with (tool_call_id, message, is_question) for send_message_to_user
     on_raw_progress: Optional[Callable[[int], Awaitable[None]]] = None,  # Called with total accumulated bytes (reasoning + json)
+    claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -614,7 +615,11 @@ async def call_llm_structured_streaming(
         if model_seed is not None:
             request_body["model_seed"] = model_seed
             logger.info(f"🎯 Streaming with model_seed: {model_seed}")
-        
+
+        if claude_token:
+            request_body["claude_token"] = claude_token
+            logger.info("🔑 Passing claude_token to Rose endpoint for direct Anthropic call")
+
         # Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
         if reasoning_max_tokens:
             request_body["reasoning"] = {"max_tokens": reasoning_max_tokens}
@@ -677,10 +682,11 @@ async def call_llm_structured_streaming(
             )
             
             # Log FULL request for replay/debugging slow requests
+            log_body = {k: v for k, v in request_body.items() if k != "claude_token"}
             logger.info(
                 "📋 Rose structured request FULL (for replay)",
                 url=config.rose.api_url,
-                request_body_json=json.dumps(request_body, default=str),
+                request_body_json=json.dumps(log_body, default=str),
             )
             
             # Heartbeat before starting - catches cancellation if pause was already clicked
@@ -2102,84 +2108,6 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[str]:
     return None
 
 
-# Anthropic direct API constants (for Claude Max planner calls)
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_BETA_HEADER = "oauth-2025-04-20,prompt-caching-scope-2026-01-05"
-
-
-async def _call_planner_anthropic_direct(
-    system_prompt: str,
-    messages: List[Dict[str, Any]],
-    claude_max_token: str,
-) -> Dict[str, Any]:
-    """
-    Call Anthropic Messages API directly using Claude Max OAuth token.
-
-    Returns dict with 'result' (PlannerResponse dict) and 'usage'.
-    """
-    from helpers.tool_schemas import PlannerResponse
-
-    # Convert messages: skip system messages (already extracted), map to Anthropic format
-    anthropic_messages = []
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if role == "system" or not content:
-            continue
-        anthropic_messages.append({"role": role, "content": content})
-
-    body = {
-        "model": "claude-opus-4-6",
-        "system": system_prompt,
-        "messages": anthropic_messages,
-        "max_tokens": 2048,
-        "temperature": 0.7,
-    }
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            ANTHROPIC_API_URL,
-            headers={
-                "Authorization": f"Bearer {claude_max_token}",
-                "anthropic-version": "2023-06-01",
-                "anthropic-beta": ANTHROPIC_BETA_HEADER,
-                "content-type": "application/json",
-            },
-            json=body,
-            timeout=120.0,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-    # Extract text content
-    text_content = ""
-    for block in data.get("content", []):
-        if block.get("type") == "text":
-            text_content += block.get("text", "")
-
-    # Parse JSON from response
-    result = PlannerResponse.model_validate_json(text_content)
-
-    # Extract usage
-    api_usage = data.get("usage", {})
-    tokens_in = api_usage.get("input_tokens", 0)
-    tokens_out = api_usage.get("output_tokens", 0)
-
-    return {
-        "result": result.model_dump(),
-        "usage": {
-            "llm": [{
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-                "model": "claude-opus-4-6",
-                "provider": "Claude Max (Planner)",
-            }],
-            "service": [],
-        },
-        "is_claude_max": True,
-    }
-
-
 @activity.defn
 async def call_planner_llm_activity(
     messages: List[Dict[str, Any]],
@@ -2197,8 +2125,9 @@ async def call_planner_llm_activity(
     The planner receives conversation context and generates an execution plan
     with tasks and dependencies. Streams char count to frontend via PLAN_STREAM.
 
-    When claude_max_token is provided, calls Anthropic directly (free via Claude Max subscription).
-    Otherwise falls back to Rose completions endpoint.
+    When claude_max_token is provided, it's passed to the Rose completions endpoint
+    which calls Anthropic directly ($0 cost via user's Claude subscription).
+    If that fails, the endpoint falls back to racing automatically.
 
     Args:
         messages: Conversation history (user/assistant messages)
@@ -2206,7 +2135,7 @@ async def call_planner_llm_activity(
         tools_description: Description of tools available in execute phase
         user_context: User context for personalization
         response_schema: Optional structured output schema the agent should return
-        claude_max_token: Optional Claude Max OAuth token for direct Anthropic calls
+        claude_max_token: Optional Claude OAuth token for direct Anthropic calls via Rose endpoint
         agent_id: Agent ID for streaming plan progress to frontend
         tool_call_id: Tool call ID for linking streaming to final plan
 
@@ -2231,36 +2160,9 @@ async def call_planner_llm_activity(
     total_chars = sum(len(m.get("content", "")) for m in full_messages)
     logger.info(f"[TIMING] Planner input: {len(full_messages)} messages, {total_chars} chars total")
 
-    # If Claude Max token available, call Anthropic directly ($0 cost)
-    if claude_max_token:
-        logger.info("🔑 Using Claude Max token for planner (direct Anthropic call)")
-        try:
-            llm_start = time.perf_counter()
-            result = await _call_planner_anthropic_direct(system_prompt, full_messages, claude_max_token)
-            llm_elapsed = time.perf_counter() - llm_start
-            activity_elapsed = time.perf_counter() - activity_start
-
-            plan = result["result"]
-            usage = result["usage"]
-            tokens_in = usage["llm"][0]["tokens_in"]
-            tokens_out = usage["llm"][0]["tokens_out"]
-            logger.info(
-                "Planner LLM completed (Claude Max)",
-                title=plan.get("title"),
-                task_count=len(plan.get("tasks", [])),
-                join=plan.get("join"),
-                tokens_in=tokens_in,
-                tokens_out=tokens_out,
-            )
-            logger.info(f"[TIMING] Planner Anthropic direct: {llm_elapsed*1000:.1f}ms ({llm_elapsed:.2f}s), total: {activity_elapsed*1000:.1f}ms")
-            return result
-
-        except Exception as e:
-            logger.warning(f"Claude Max planner failed, falling back to Rose: {extract_error_message(e)}")
-            # Fall through to Rose endpoint
-
     # Stream plan char count to frontend via PLAN_STREAM events
-    plan_stream_id = str(uuid.uuid4())
+    # Use tool_call_id as stream_id so Temporal retries update the same chip (not create duplicates)
+    plan_stream_id = tool_call_id or str(uuid.uuid4())
     last_broadcast_len = [0]
 
     async def on_plan_heartbeat(text: str, count: int):
@@ -2290,6 +2192,7 @@ async def call_planner_llm_activity(
             response_model=PlannerResponse,
             on_chunk=on_plan_heartbeat,
             on_raw_progress=on_plan_progress,
+            claude_token=claude_max_token,
         )
         llm_elapsed = time.perf_counter() - llm_start
         activity_elapsed = time.perf_counter() - activity_start
@@ -2307,13 +2210,15 @@ async def call_planner_llm_activity(
         logger.info(f"[TIMING] Planner LLM API call: {llm_elapsed*1000:.1f}ms ({llm_elapsed:.2f}s), total activity: {activity_elapsed*1000:.1f}ms")
 
         # Return plan with usage for cost tracking
+        # Use actual_model from Rose response (may be "claude-opus-4-6-claude" for $0 pricing)
+        actual_model = usage.get("actual_model", model)
         return {
             "result": result.model_dump(),
             "usage": {
                 "llm": [{
                     "tokens_in": tokens_in,
                     "tokens_out": tokens_out,
-                    "model": model,
+                    "model": actual_model,
                     "provider": "Rose Planner",
                 }],
                 "service": [],
