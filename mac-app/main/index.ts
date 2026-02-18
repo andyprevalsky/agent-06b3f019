@@ -4,6 +4,7 @@ import Store from 'electron-store';
 import { config } from './base/config';
 import './handlers/registry'; // Register IPC handlers
 import { getOnboardingComplete } from './handlers/registry';
+import { IMessageReader } from './services/iMessageReader';
 import {
   initAutoUpdater,
   manualCheckForUpdates,
@@ -530,6 +531,10 @@ app.whenReady().then(() => {
   if (process.platform === 'darwin') {
     app.dock.show();
   }
+
+  // Attempt iMessage DB access early so macOS TCC registers the app
+  // in Full Disk Access settings (the app won't appear there until it tries)
+  IMessageReader.checkAccess();
 
   createAppMenu();
   createMainWindow();

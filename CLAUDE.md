@@ -26,7 +26,7 @@ docs/          → API documentation (Mintlify)
 - `mac-app/main/index.ts` - Electron main process
 - `docs/mint.json` - Mintlify docs config
 
-**Mac app releases:** Push a git tag (e.g., `git tag v1.0.14 && git push origin v1.0.14`) to trigger the release workflow which builds, signs, notarizes, and uploads to GitHub Releases.
+**Mac app releases:** Push a git tag (e.g., `git tag v1.0.14 && git push origin v1.0.14`) to trigger the release workflow which builds, signs, notarizes, and uploads to GitHub Releases. If a PR includes changes to `mac-app/`, create and push a new incremented tag when merging and notify the user that a new mac-app release will be created. Always keep `mac-app/package.json` version in sync with the latest git tag.
 
 ## Development
 

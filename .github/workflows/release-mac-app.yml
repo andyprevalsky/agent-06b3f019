@@ -107,6 +107,13 @@ jobs:
       # BUILD STEPS
       # ============================================
 
+      - name: Sync package.json version with tag
+        working-directory: mac-app
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Setting package.json version to $VERSION"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
       - name: Install frontend dependencies (shared UI)
         working-directory: front-end
         run: npm install --ignore-scripts
