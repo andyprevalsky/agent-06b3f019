@@ -12,7 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../lib/prisma';
 import { createSignupBonusCredit, createInitialCredit } from '../lib/credits';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { sendMms } from '../lib/smsQueue';
+import { sendSms, sendMms } from '../lib/smsQueue';
 import { SMS_TEMPLATES, getPersonalizedVcardUrl } from '../lib/smsTemplates';
 
 // Twilio Verify response types
@@ -661,14 +661,16 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
 
     console.log(`✅ Marked onboarding complete for user ${userId}`);
 
-    // Send welcome MMS with personalized vCard if user has a phone number
+    // Send welcome SMS + vCard as separate messages so the card appears below the text
     if (user.phone) {
       const firstName = user.name?.split(' ')[0] || 'there';
       const personalizedVcardUrl = getPersonalizedVcardUrl(userId);
-      sendMms(user.phone, SMS_TEMPLATES.welcome(firstName), personalizedVcardUrl).catch((error) => {
-        console.error(`⚠️ Failed to send welcome MMS to user ${userId}:`, error);
-      });
-      console.log(`✅ Sending welcome MMS with personalized vCard to user ${userId}`);
+      sendSms(user.phone, SMS_TEMPLATES.welcome(firstName))
+        .then(() => sendMms(user.phone!, '', personalizedVcardUrl))
+        .catch((error) => {
+          console.error(`⚠️ Failed to send welcome messages to user ${userId}:`, error);
+        });
+      console.log(`✅ Sending welcome SMS + vCard to user ${userId}`);
     }
 
     res.json({
