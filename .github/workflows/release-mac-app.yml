@@ -215,53 +215,59 @@ jobs:
       # UPLOAD DMG TO SUPABASE STORAGE (public downloads)
       # ============================================
 
-      - name: Upload DMG to Supabase Storage
+      - name: Rewrite latest-mac.yml URLs to Supabase
+        working-directory: mac-app
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        run: |
+          # Rewrite download URLs in latest-mac.yml to point at Supabase public bucket
+          PUBLIC_BASE="${SUPABASE_URL}/storage/v1/object/public/Releases/mac/latest"
+          sed -i '' "s|url:.*Rose-mac.dmg|url: ${PUBLIC_BASE}/Rose-mac.dmg|" dist/latest-mac.yml
+          sed -i '' "s|url:.*Rose-mac.zip|url: ${PUBLIC_BASE}/Rose-mac.zip|" dist/latest-mac.yml
+          echo "Rewritten latest-mac.yml:"
+          cat dist/latest-mac.yml
+
+      - name: Upload release artifacts to Supabase Storage
         working-directory: mac-app
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          DMG_FILE="dist/Rose-mac.dmg"
 
-          echo "Uploading DMG to Supabase Storage..."
-          echo "  Version: $VERSION"
-          echo "  File size: $(stat -f%z "$DMG_FILE") bytes"
+          upload_file() {
+            local FILE="$1"
+            local DEST="$2"
+            local CONTENT_TYPE="${3:-application/octet-stream}"
+            echo "Uploading $FILE -> $DEST"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST \
+              "${SUPABASE_URL}/storage/v1/object/${DEST}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+              -H "Content-Type: ${CONTENT_TYPE}" \
+              -H "x-upsert: true" \
+              --data-binary @"$FILE")
+            if [[ "$STATUS" -ne 200 ]]; then
+              echo "  WARNING: HTTP $STATUS"
+              return 1
+            fi
+            echo "  OK"
+          }
 
           # Upload to versioned path (archive)
-          echo "Uploading to Releases/mac/v${VERSION}/Rose-mac.dmg..."
-          VERSIONED_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST \
-            "${SUPABASE_URL}/storage/v1/object/Releases/mac/v${VERSION}/Rose-mac.dmg" \
-            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-            -H "Content-Type: application/octet-stream" \
-            -H "x-upsert: true" \
-            --data-binary @"$DMG_FILE")
+          upload_file "dist/Rose-mac.dmg" "Releases/mac/v${VERSION}/Rose-mac.dmg"
 
-          if [[ "$VERSIONED_STATUS" -ne 200 ]]; then
-            echo "WARNING: Versioned upload returned HTTP $VERSIONED_STATUS"
-          else
-            echo "Versioned upload successful"
-          fi
+          # Upload to latest path (auto-updater + public download)
+          upload_file "dist/Rose-mac.dmg" "Releases/mac/latest/Rose-mac.dmg" || exit 1
+          upload_file "dist/Rose-mac.zip" "Releases/mac/latest/Rose-mac.zip" || exit 1
+          upload_file "dist/Rose-mac.dmg.blockmap" "Releases/mac/latest/Rose-mac.dmg.blockmap" || true
+          upload_file "dist/Rose-mac.zip.blockmap" "Releases/mac/latest/Rose-mac.zip.blockmap" || true
+          upload_file "dist/latest-mac.yml" "Releases/mac/latest/latest-mac.yml" "text/yaml" || exit 1
 
-          # Upload to latest path (overwrite for public download link)
-          echo "Uploading to Releases/mac/latest/Rose-mac.dmg..."
-          LATEST_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST \
-            "${SUPABASE_URL}/storage/v1/object/Releases/mac/latest/Rose-mac.dmg" \
-            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-            -H "Content-Type: application/octet-stream" \
-            -H "x-upsert: true" \
-            --data-binary @"$DMG_FILE")
-
-          if [[ "$LATEST_STATUS" -ne 200 ]]; then
-            echo "ERROR: Latest upload returned HTTP $LATEST_STATUS"
-            echo "Public download link will NOT be updated."
-            exit 1
-          else
-            echo "Latest upload successful"
-            echo "Public URL: ${SUPABASE_URL}/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg"
-          fi
+          echo ""
+          echo "Public URLs:"
+          echo "  DMG: ${SUPABASE_URL}/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg"
+          echo "  YML: ${SUPABASE_URL}/storage/v1/object/public/Releases/mac/latest/latest-mac.yml"
 
       - name: Upload stapled DMG to release
         uses: softprops/action-gh-release@v1

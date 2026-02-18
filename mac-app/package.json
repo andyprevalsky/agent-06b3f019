@@ -79,10 +79,8 @@
       ]
     },
     "publish": {
-      "provider": "github",
-      "owner": "andyprevalsky",
-      "repo": "navi-whisper-lux",
-      "releaseType": "release"
+      "provider": "generic",
+      "url": "https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/public/Releases/mac/latest"
     },
     "mac": {
       "category": "public.app-category.productivity",

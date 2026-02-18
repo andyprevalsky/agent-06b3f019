@@ -3,6 +3,8 @@ import { BrowserWindow, ipcMain } from 'electron';
 import { config } from '../base/config';
 import type { UpdateStatusPayload } from '../../shared/types/ipc';
 
+const SUPABASE_UPDATE_URL = `${config.supabase.url}/storage/v1/object/public/Releases/mac/latest`;
+
 let mainWindow: BrowserWindow | null = null;
 let updateDownloaded = false;
 let pendingVersion: string | undefined;
@@ -53,16 +55,10 @@ export function initAutoUpdater(window: BrowserWindow) {
     return;
   }
 
-  const ghToken = process.env.GH_UPDATE_TOKEN;
-  if (ghToken) {
-    autoUpdater.setFeedURL({
-      provider: 'github',
-      owner: 'andyprevalsky',
-      repo: 'navi-whisper-lux',
-      private: true,
-      token: ghToken,
-    });
-  }
+  autoUpdater.setFeedURL({
+    provider: 'generic',
+    url: SUPABASE_UPDATE_URL,
+  });
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;

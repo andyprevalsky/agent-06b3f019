@@ -405,11 +405,22 @@ export const getStoredSession = getSession;
 export const clearStoredSession = clearSession;
 
 // Electron auth bridge priming (for mac-app)
+// Bidirectional: Electron store → localStorage, and localStorage → Electron store
 if (typeof window !== 'undefined' && window.api?.auth) {
-  window.api.auth.check().then((session) => {
-    if (session) {
+  window.api.auth.check().then((electronSession) => {
+    if (electronSession) {
       console.log('[Supabase] Primed session from Electron auth bridge');
-      window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify(electronSession));
+    } else {
+      // Electron store empty but localStorage may have a session — sync it over
+      // so main-process services (BrowserStateSync, etc.) can authenticate
+      const localSession = getSession();
+      if (localSession) {
+        console.log('[Supabase] Syncing localStorage session to Electron auth bridge');
+        window.api.auth.save(localSession).catch((err: unknown) => {
+          console.warn('[Supabase] Failed to sync session to Electron auth bridge', err);
+        });
+      }
     }
   }).catch((error) => {
     console.warn('[Supabase] Failed to check Electron auth bridge', error);

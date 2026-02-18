@@ -30,6 +30,9 @@ const ElectronAppInner = () => {
   // Check onboarding status from backend when auth changes
   useEffect(() => {
     const checkOnboarding = async () => {
+      // Wait for auth to finish loading before deciding
+      if (authLoading) return;
+
       // Only check if user is signed in
       if (!isFullySignedIn) {
         setOnboardingComplete(false);
@@ -77,7 +80,7 @@ const ElectronAppInner = () => {
       }
     };
     checkOnboarding();
-  }, [isFullySignedIn]);
+  }, [authLoading, isFullySignedIn]);
 
   const handleOnboardingComplete = async () => {
     try {
