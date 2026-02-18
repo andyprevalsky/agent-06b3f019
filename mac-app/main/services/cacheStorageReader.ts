@@ -1,17 +1,7 @@
-import { app } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-
-const CHROME_CACHE_STORAGE_PATH = path.join(
-  app.getPath('home'),
-  'Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage'
-);
-
-const CHROME_SW_DATABASE_PATH = path.join(
-  app.getPath('home'),
-  'Library/Application Support/Google/Chrome/Default/Service Worker/Database'
-);
+import { resolveChromeProfilePath } from './chromeProfileResolver';
 
 export interface CacheInfo {
   name: string;
@@ -37,18 +27,19 @@ function extractOriginsFromSwDatabase(): string[] {
   const origins = new Set<string>();
 
   try {
-    if (!fs.existsSync(CHROME_SW_DATABASE_PATH)) {
+    const swDbPath = resolveChromeProfilePath('Service Worker', 'Database');
+    if (!swDbPath) {
       console.log('[CacheStorageReader] Service Worker database not found');
       return [];
     }
 
     // Read all .log and .ldb files in the database directory
-    const entries = fs.readdirSync(CHROME_SW_DATABASE_PATH);
+    const entries = fs.readdirSync(swDbPath);
 
     for (const entry of entries) {
       if (!entry.endsWith('.log') && !entry.endsWith('.ldb')) continue;
 
-      const filePath = path.join(CHROME_SW_DATABASE_PATH, entry);
+      const filePath = path.join(swDbPath, entry);
 
       try {
         const content = fs.readFileSync(filePath);
@@ -196,8 +187,9 @@ export class CacheStorageReader {
    * 3. If directory exists, parse index.txt for cache names
    */
   static async readCacheStorage(): Promise<CacheStorageData> {
-    // Check if Chrome CacheStorage directory exists
-    if (!fs.existsSync(CHROME_CACHE_STORAGE_PATH)) {
+    // Resolve Chrome CacheStorage directory across profile directories
+    const cachePath = resolveChromeProfilePath('Service Worker', 'CacheStorage');
+    if (!cachePath) {
       console.log('[CacheStorageReader] Chrome CacheStorage directory not found');
       return {
         origins: [],
@@ -218,7 +210,7 @@ export class CacheStorageReader {
         const dirHash = computeCacheStorageDirHash(origin);
         if (!dirHash) continue;
 
-        const originPath = path.join(CHROME_CACHE_STORAGE_PATH, dirHash);
+        const originPath = path.join(cachePath, dirHash);
 
         if (!fs.existsSync(originPath)) continue;
 

@@ -6,13 +6,9 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import crypto from 'crypto';
 import type { CookieData } from '../../shared/types/ipc';
+import { resolveChromeProfilePath } from './chromeProfileResolver';
 
 const execAsync = promisify(exec);
-
-const CHROME_COOKIES_PATH = path.join(
-  app.getPath('home'),
-  'Library/Application Support/Google/Chrome/Default/Cookies'
-);
 
 export class CookieReader {
   private static async getEncryptionKey(): Promise<Buffer> {
@@ -114,15 +110,16 @@ export class CookieReader {
   }
   
   static async readCookies(): Promise<CookieData[]> {
-    // Check if Chrome cookies file exists
-    if (!fs.existsSync(CHROME_COOKIES_PATH)) {
+    // Resolve Chrome cookies file across profile directories
+    const chromeCookiesPath = resolveChromeProfilePath('Cookies');
+    if (!chromeCookiesPath) {
       console.log('[CookieReader] Chrome cookies file not found');
       return [];
     }
-    
+
     // Copy database (Chrome locks it)
     const tempPath = path.join(app.getPath('temp'), 'Cookies-copy');
-    fs.copyFileSync(CHROME_COOKIES_PATH, tempPath);
+    fs.copyFileSync(chromeCookiesPath, tempPath);
     
     const db = new Database(tempPath, { readonly: true });
     const key = await this.getEncryptionKey();

@@ -1908,6 +1908,11 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
             />
             </div>
           </div>
+          <div className="absolute bottom-1 left-0 right-0 flex justify-center gap-2 text-[11px] text-muted-foreground/50 z-10">
+            <Link to="/privacy" className="hover:text-muted-foreground transition-colors">Privacy</Link>
+            <span>·</span>
+            <Link to="/terms" className="hover:text-muted-foreground transition-colors">Terms</Link>
+          </div>
           </>
           )}
           </div>

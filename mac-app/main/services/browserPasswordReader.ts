@@ -66,7 +66,7 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
   chrome: {
     type: 'chrome',
     name: 'Chrome',
-    loginDataPathPattern: path.join(HOME, 'Library/Application Support/Google/Chrome/Default/Login Data'),
+    loginDataPathPattern: path.join(HOME, 'Library/Application Support/Google/Chrome/*/Login Data'),
     keychainEntry: 'Chrome Safe Storage',
     keychainAccount: 'Chrome',
   },

@@ -164,10 +164,27 @@ def read_indexeddb(idb_path: str) -> Dict[str, Any]:
     return result
 
 
+def find_chrome_profile_dir() -> str:
+    """Find the active Chrome profile directory (Default, Profile 1, etc.)."""
+    home = os.path.expanduser("~")
+    chrome_base = os.path.join(home, "Library/Application Support/Google/Chrome")
+    if not os.path.exists(chrome_base):
+        return None
+    # Find profile dirs that contain a Preferences file, pick most recently modified
+    import glob as glob_mod
+    matches = glob_mod.glob(os.path.join(chrome_base, "*/Preferences"))
+    if not matches:
+        return None
+    matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return os.path.dirname(matches[0])
+
+
 def find_indexeddb_folders(origin_filter: str = None) -> List[str]:
     """Find all IndexedDB folders, optionally filtered by origin."""
-    home = os.path.expanduser("~")
-    idb_base = os.path.join(home, "Library/Application Support/Google/Chrome/Default/IndexedDB")
+    profile_dir = find_chrome_profile_dir()
+    if not profile_dir:
+        return []
+    idb_base = os.path.join(profile_dir, "IndexedDB")
 
     if not os.path.exists(idb_base):
         return []

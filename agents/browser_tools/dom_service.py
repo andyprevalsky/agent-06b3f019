@@ -370,30 +370,44 @@ class DOMService:
         if hasattr(state, 'closed_popup_messages') and state.closed_popup_messages:
             result["closed_popups"] = state.closed_popup_messages
         
-        # Add screenshot if requested
-        logger.info(
-            f"📸 [DEBUG] Screenshot check: include_screenshot={include_screenshot}, "
-            f"has_screenshot={bool(state.screenshot)}, "
-            f"screenshot_len={len(state.screenshot) if state.screenshot else 0}"
-        )
+        # Take screenshot using CDP's Page.captureScreenshot with fromSurface=True.
+        # Unlike Playwright's page.screenshot(), this captures from Chrome's compositing
+        # surface, which includes browser-chrome-level overlays (e.g. passkey popups)
+        # that the agent needs to see and dismiss.
+        screenshot_to_use = None
+        if include_screenshot:
+            try:
+                target_id = self._session.agent_focus_target_id
+                if target_id:
+                    cdp_sess = await self._session.get_or_create_cdp_session(target_id, focus=False)
+                    cdp_result = await cdp_sess.cdp_client.send_raw(
+                        "Page.captureScreenshot",
+                        {"format": "png", "fromSurface": True},
+                        session_id=cdp_sess.session_id,
+                    )
+                    screenshot_to_use = cdp_result.get("data")
+                    logger.info(f"📸 CDP surface screenshot captured (len={len(screenshot_to_use) if screenshot_to_use else 0})")
+                else:
+                    logger.warning("📸 No focused target, falling back to browser-use screenshot")
+                    screenshot_to_use = state.screenshot
+            except Exception as e:
+                logger.warning(f"📸 CDP screenshot failed, falling back to browser-use: {e}")
+                screenshot_to_use = state.screenshot
 
         # Generate blank screenshot if none provided (e.g., about:blank pages)
-        screenshot_to_use = state.screenshot
-        if include_screenshot and not state.screenshot:
-            logger.info(f"📸 [DEBUG] No screenshot from browser-use, generating blank screenshot for {result.get('url', 'unknown')}")
+        if include_screenshot and not screenshot_to_use:
+            logger.info(f"📸 No screenshot available, generating blank for {result.get('url', 'unknown')}")
             try:
                 import base64
                 from io import BytesIO
                 from PIL import Image
 
-                # Create a white image with viewport dimensions
                 blank_img = Image.new('RGB', (viewport_width, viewport_height), color='white')
                 buffer = BytesIO()
                 blank_img.save(buffer, format='PNG')
                 screenshot_to_use = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                logger.info(f"📸 [DEBUG] Generated blank screenshot: {viewport_width}x{viewport_height}")
             except Exception as e:
-                logger.warning(f"📸 [DEBUG] Failed to generate blank screenshot: {e}")
+                logger.warning(f"📸 Failed to generate blank screenshot: {e}")
 
         if include_screenshot and screenshot_to_use:
             result["screenshot"] = screenshot_to_use

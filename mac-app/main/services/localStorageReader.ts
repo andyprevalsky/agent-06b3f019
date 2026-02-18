@@ -3,11 +3,7 @@ import { app } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-
-const CHROME_LOCAL_STORAGE_PATH = path.join(
-  app.getPath('home'),
-  'Library/Application Support/Google/Chrome/Default/Local Storage/leveldb'
-);
+import { resolveChromeProfilePath } from './chromeProfileResolver';
 
 export interface LocalStorageEntry {
   origin: string;
@@ -129,8 +125,9 @@ export class LocalStorageReader {
    * Returns entries grouped by origin with hashes for cache invalidation.
    */
   static async readLocalStorage(): Promise<LocalStorageData> {
-    // Check if Chrome localStorage directory exists
-    if (!fs.existsSync(CHROME_LOCAL_STORAGE_PATH)) {
+    // Resolve Chrome localStorage directory across profile directories
+    const chromeLocalStoragePath = resolveChromeProfilePath('Local Storage', 'leveldb');
+    if (!chromeLocalStoragePath) {
       console.log('[LocalStorageReader] Chrome localStorage directory not found');
       return {
         entries: [],
@@ -145,7 +142,7 @@ export class LocalStorageReader {
     const tempPath = path.join(app.getPath('temp'), 'localStorage-copy-' + Date.now());
 
     try {
-      fs.cpSync(CHROME_LOCAL_STORAGE_PATH, tempPath, { recursive: true });
+      fs.cpSync(chromeLocalStoragePath, tempPath, { recursive: true });
     } catch (error) {
       console.error('[LocalStorageReader] Failed to copy database:', error);
       return {

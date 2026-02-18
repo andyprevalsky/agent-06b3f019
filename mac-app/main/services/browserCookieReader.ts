@@ -44,7 +44,7 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
   chrome: {
     type: 'chrome',
     name: 'Chrome',
-    cookiePathPattern: path.join(HOME, 'Library/Application Support/Google/Chrome/Default/Cookies'),
+    cookiePathPattern: path.join(HOME, 'Library/Application Support/Google/Chrome/*/Cookies'),
     keychainEntry: 'Chrome Safe Storage',
     keychainAccount: 'Chrome',
     needsManualPassword: false,

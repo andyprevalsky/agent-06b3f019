@@ -1,12 +1,6 @@
-import { app } from 'electron';
-import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-
-const CHROME_PREFERENCES_PATH = path.join(
-  app.getPath('home'),
-  'Library/Application Support/Google/Chrome/Default/Preferences'
-);
+import { resolveChromeProfilePath } from './chromeProfileResolver';
 
 // Chrome content_settings permission types we care about
 const PERMISSION_TYPES = [
@@ -86,8 +80,9 @@ export class PermissionReader {
    * Returns grants with allow (1) or block (2) settings.
    */
   static async readPermissions(): Promise<PermissionData> {
-    // Check if Chrome Preferences file exists
-    if (!fs.existsSync(CHROME_PREFERENCES_PATH)) {
+    // Resolve Chrome Preferences file across profile directories
+    const chromePrefsPath = resolveChromeProfilePath('Preferences');
+    if (!chromePrefsPath) {
       console.log('[PermissionReader] Chrome Preferences file not found');
       return {
         grants: [],
@@ -100,7 +95,7 @@ export class PermissionReader {
 
     try {
       // Read and parse Preferences JSON
-      const prefsContent = fs.readFileSync(CHROME_PREFERENCES_PATH, 'utf-8');
+      const prefsContent = fs.readFileSync(chromePrefsPath, 'utf-8');
       const prefs = JSON.parse(prefsContent);
 
       // Navigate to content_settings.exceptions
