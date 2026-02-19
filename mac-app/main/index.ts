@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeImage, globalShortcut, ipcMain, screen, Menu } from 'electron';
+import { app, BrowserWindow, nativeImage, globalShortcut, ipcMain, screen, Menu, shell } from 'electron';
 import path from 'path';
 import Store from 'electron-store';
 import { config } from './base/config';
@@ -171,6 +171,19 @@ function createMainWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../ui/index.html'));
   }
+
+  // Open external links in the user's default browser
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const appOrigin = config.isDev ? 'http://localhost:5174' : 'file://';
+    if (!url.startsWith(appOrigin)) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
 
   // Save window state on resize/move
   mainWindow.on('resize', () => saveWindowState(mainWindow!));
