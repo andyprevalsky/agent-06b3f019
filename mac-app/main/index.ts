@@ -7,6 +7,7 @@ import { getOnboardingComplete } from './handlers/registry';
 import { IMessageReader } from './services/iMessageReader';
 import {
   initAutoUpdater,
+  setAutoUpdaterWindow,
   manualCheckForUpdates,
   restartToUpdate,
   isUpdateDownloaded,
@@ -572,6 +573,9 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (!mainWindow) {
     createMainWindow();
+    if (mainWindow) {
+      setAutoUpdaterWindow(mainWindow);
+    }
   }
 
   if (!quickQueryWindow) {

@@ -2793,6 +2793,12 @@ function transformSchemaForAnthropic(schema: any): any {
   for (const key of unsupported) {
     delete transformed[key];
   }
+
+  // Anthropic doesn't support additionalProperties as a schema object (e.g. Dict[str, str]).
+  // Convert to additionalProperties: false so the request doesn't get rejected.
+  if (transformed.type === 'object' && typeof transformed.additionalProperties === 'object' && transformed.additionalProperties !== null) {
+    transformed.additionalProperties = false;
+  }
   
   // Recurse into properties
   if (transformed.properties) {
@@ -2823,6 +2829,129 @@ function transformSchemaForAnthropic(schema: any): any {
   }
   
   return transformed;
+}
+
+/**
+ * Extract tool definitions from a response_format JSON schema that embeds tools
+ * as anyOf variants inside a tool_calls array. Converts them to native Anthropic
+ * tool format so we avoid the "compiled grammar is too large" error.
+ *
+ * Returns null if the schema doesn't match the expected pattern.
+ */
+function extractToolsFromResponseFormat(responseFormat: any): {
+  tools: Array<{ name: string; description: string; input_schema: any }>;
+  responseFieldSchema: any;
+} | null {
+  const schema = responseFormat?.json_schema?.schema;
+  if (!schema?.properties?.tool_calls?.items?.anyOf) return null;
+
+  const anyOfVariants: any[] = schema.properties.tool_calls.items.anyOf;
+  // Each variant must have properties.tool.const to be a valid tool discriminator
+  if (!anyOfVariants.every((v: any) => v.properties?.tool?.const)) return null;
+
+  const tools: Array<{ name: string; description: string; input_schema: any }> = [];
+
+  for (const variant of anyOfVariants) {
+    const toolName: string = variant.properties.tool.const;
+    const description: string = variant.description || '';
+
+    // Clone properties, remove the "tool" discriminator field
+    const inputProperties: any = { ...variant.properties };
+    delete inputProperties.tool;
+
+    // Build required array without "tool"
+    const required = (variant.required || []).filter((r: string) => r !== 'tool');
+
+    const inputSchema: any = {
+      type: 'object',
+      properties: inputProperties,
+      required,
+    };
+
+    // Preserve additionalProperties if present
+    if (variant.additionalProperties !== undefined) {
+      inputSchema.additionalProperties = variant.additionalProperties;
+    }
+
+    tools.push({
+      name: toolName,
+      description,
+      input_schema: transformSchemaForAnthropic(inputSchema),
+    });
+  }
+
+  // Extract the response field schema for reference
+  const responseFieldSchema = schema.properties.response || { type: 'string' };
+
+  return { tools, responseFieldSchema };
+}
+
+/**
+ * Reconstruct the JSON response the agent expects from Anthropic's native
+ * text + tool_use content blocks.
+ *
+ * Agent expects: {"response": "<thinking text>", "tool_calls": [{"tool": "<name>", ...params}]}
+ */
+function reconstructAgentResponse(textContent: string, toolUseBlocks: Array<{ name: string; input: any }>): string {
+  const toolCalls = toolUseBlocks.map(t => ({
+    tool: t.name,
+    ...t.input,
+  }));
+  return JSON.stringify({ response: textContent, tool_calls: toolCalls });
+}
+
+/**
+ * Apply tool config or structured output to an Anthropic request body.
+ * Shared by both streaming and non-streaming claude_token paths.
+ *
+ * Priority: native tools (from response_format) > explicit tools > structured output schema
+ *
+ * Returns true if native tool mode is active (response needs reconstruction).
+ */
+function applyAnthropicToolConfig(
+  anthropicBody: any,
+  responseFormat: any,
+  isClaudeAuth: boolean,
+  explicitTools?: any[],
+  explicitToolChoice?: any
+): boolean {
+  const extractedTools = extractToolsFromResponseFormat(responseFormat);
+
+  if (extractedTools) {
+    anthropicBody.tools = extractedTools.tools;
+    anthropicBody.tool_choice = { type: 'auto' };
+    return true;
+  }
+
+  if (explicitTools?.length) {
+    anthropicBody.tools = explicitTools.map((t: any) => ({
+      name: t.function?.name ?? t.name,
+      description: t.function?.description ?? t.description,
+      input_schema: t.function?.parameters ?? t.input_schema,
+    }));
+    if (explicitToolChoice) {
+      if (explicitToolChoice === 'auto') anthropicBody.tool_choice = { type: 'auto' };
+      else if (explicitToolChoice === 'required' || explicitToolChoice === 'any') anthropicBody.tool_choice = { type: 'any' };
+      else if (explicitToolChoice?.function?.name) anthropicBody.tool_choice = { type: 'tool', name: explicitToolChoice.function.name };
+    }
+    return false;
+  }
+
+  if (responseFormat?.json_schema?.schema) {
+    const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
+    if (isClaudeAuth) {
+      anthropicBody.output_config = {
+        format: { type: 'json_schema', schema: transformedSchema }
+      };
+    } else {
+      anthropicBody.output_format = {
+        type: 'json_schema',
+        schema: transformedSchema
+      };
+    }
+  }
+
+  return false;
 }
 
 // Map OpenRouter model names to Anthropic model names
@@ -2963,6 +3092,7 @@ async function handleStreaming(
     async start(controller) {
       try {
         let response: globalThis.Response;
+        let nativeToolMode = false;
 
         if (isCerebras) {
           // Call Cerebras API directly for rose-hyper
@@ -3017,8 +3147,6 @@ async function handleStreaming(
           const anthropicModel = claudeAuth ? actualModel.replace('-claude', '') : getAnthropicModelName(actualModel);
           const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
 
-          console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}`);
-
           const anthropicBody: any = {
             model: anthropicModel,
             messages: anthropicMessages,
@@ -3033,24 +3161,9 @@ async function handleStreaming(
             anthropicBody.temperature = temperature;
           }
 
-          // Transform response_format to Anthropic's structured output format
-          if (responseFormat?.json_schema?.schema) {
-            const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
-            if (claudeAuth) {
-              // Claude OAuth API uses output_config.format (output_format is deprecated)
-              anthropicBody.output_config = {
-                format: {
-                  type: 'json_schema',
-                  schema: transformedSchema
-                }
-              };
-            } else {
-              anthropicBody.output_format = {
-                type: 'json_schema',
-                schema: transformedSchema
-              };
-            }
-          }
+          nativeToolMode = applyAnthropicToolConfig(anthropicBody, responseFormat, !!claudeAuth);
+
+          console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`);
 
           // Use Claude OAuth token (user's subscription) or Rose's API key
           const anthropicHeaders: Record<string, string> = {
@@ -3136,10 +3249,46 @@ async function handleStreaming(
         let anthropicInputTokens = 0;
         let anthropicOutputTokens = 0;
 
+        // Native tool mode state: track text and tool_use blocks to reconstruct
+        // the JSON response the agent expects: {"response": "...", "tool_calls": [...]}
+        let nativeToolResponseText = '';
+        let nativeToolCurrentBlock: 'text' | 'tool_use' | null = null;
+        let nativeToolCurrentName = '';
+        let nativeToolCurrentInputJson = '';
+        const nativeToolUseBlocks: Array<{ name: string; input: any }> = [];
+        let nativeToolEmittedPrefix = false;
+
+        const emitDelta = (content: string) => {
+          const chunk = {
+            choices: [{ index: 0, delta: { content } }],
+            requested_model: requestedModel,
+            actual_model: actualModel,
+            pool_name: poolName,
+            pool_size: poolSize
+          };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        };
+
         while (true) {
           const { done, value } = await reader.read();
 
           if (done) {
+            // In native tool mode, emit the closing of the JSON response
+            if (nativeToolMode && isAnthropicModel(actualModel)) {
+              // Escape any unescaped characters in the response text for JSON embedding
+              const escapedResponse = JSON.stringify(nativeToolResponseText);
+              // Build the tool_calls array
+              const toolCallsArray = nativeToolUseBlocks.map(t => ({ tool: t.name, ...t.input }));
+              if (!nativeToolEmittedPrefix) {
+                // Model returned nothing (edge case) - emit complete JSON
+                emitDelta(JSON.stringify({ response: nativeToolResponseText, tool_calls: toolCallsArray }));
+              } else {
+                // Close the response string and add tool_calls
+                emitDelta(`", "tool_calls": ${JSON.stringify(toolCallsArray)}}`);
+              }
+              console.log(`🔧 Native tool mode complete: ${nativeToolUseBlocks.length} tool(s), response length: ${nativeToolResponseText.length}`);
+            }
+
             // For Anthropic models, emit final usage chunk before [DONE]
             if (isAnthropicModel(actualModel) && (anthropicInputTokens > 0 || anthropicOutputTokens > 0)) {
               const usageChunk = {
@@ -3196,6 +3345,62 @@ async function handleStreaming(
                     continue;
                   }
 
+                  if (nativeToolMode) {
+                    // === NATIVE TOOL MODE: handle text + tool_use content blocks ===
+
+                    if (parsed.type === 'content_block_start') {
+                      if (parsed.content_block?.type === 'text') {
+                        nativeToolCurrentBlock = 'text';
+                        // Emit the JSON prefix on first text block
+                        if (!nativeToolEmittedPrefix) {
+                          emitDelta('{"response": "');
+                          nativeToolEmittedPrefix = true;
+                        }
+                      } else if (parsed.content_block?.type === 'tool_use') {
+                        nativeToolCurrentBlock = 'tool_use';
+                        nativeToolCurrentName = parsed.content_block.name || '';
+                        nativeToolCurrentInputJson = '';
+                      }
+                      continue;
+                    }
+
+                    if (parsed.type === 'content_block_delta') {
+                      if (nativeToolCurrentBlock === 'text' && parsed.delta?.text) {
+                        // Stream text deltas in real-time (visible as "thinking" text)
+                        // Escape for JSON string embedding: backslash, quotes, newlines, tabs
+                        const escaped = parsed.delta.text
+                          .replace(/\\/g, '\\\\')
+                          .replace(/"/g, '\\"')
+                          .replace(/\n/g, '\\n')
+                          .replace(/\r/g, '\\r')
+                          .replace(/\t/g, '\\t');
+                        nativeToolResponseText += parsed.delta.text;
+                        emitDelta(escaped);
+                      } else if (nativeToolCurrentBlock === 'tool_use' && parsed.delta?.partial_json) {
+                        nativeToolCurrentInputJson += parsed.delta.partial_json;
+                      }
+                      continue;
+                    }
+
+                    if (parsed.type === 'content_block_stop') {
+                      if (nativeToolCurrentBlock === 'tool_use' && nativeToolCurrentName) {
+                        try {
+                          const input = JSON.parse(nativeToolCurrentInputJson);
+                          nativeToolUseBlocks.push({ name: nativeToolCurrentName, input });
+                        } catch (e) {
+                          console.error(`Failed to parse tool input for ${nativeToolCurrentName}:`, e);
+                        }
+                      }
+                      nativeToolCurrentBlock = null;
+                      continue;
+                    }
+
+                    // Skip other events in native tool mode
+                    continue;
+                  }
+
+                  // === STANDARD MODE: original streaming logic ===
+
                   // Skip other non-content events
                   if (parsed.type !== 'content_block_delta') {
                     continue;
@@ -3203,19 +3408,7 @@ async function handleStreaming(
 
                   // Transform to OpenAI format
                   // Handle both delta.text (normal) and delta.partial_json (JSON schema output)
-                  const openAIFormat = {
-                    choices: [{
-                      index: 0,
-                      delta: {
-                        content: parsed.delta?.text || parsed.delta?.partial_json || ''
-                      }
-                    }],
-                    requested_model: requestedModel,
-                    actual_model: actualModel,
-                    pool_name: poolName,
-                    pool_size: poolSize
-                  };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(openAIFormat)}\n\n`));
+                  emitDelta(parsed.delta?.text || parsed.delta?.partial_json || '');
                 } else {
                   // OpenRouter/Cerebras - pass through with metadata
                   parsed.requested_model = requestedModel;
@@ -4038,30 +4231,13 @@ serve(async (req) => {
           };
           if (system) anthropicBody.system = system;
           if (temperature !== undefined) anthropicBody.temperature = temperature;
-          if (tools?.length) {
-            anthropicBody.tools = tools.map((t: any) => ({
-              name: t.function?.name ?? t.name,
-              description: t.function?.description ?? t.description,
-              input_schema: t.function?.parameters ?? t.input_schema,
-            }));
-            if (tool_choice) {
-              if (tool_choice === 'auto') anthropicBody.tool_choice = { type: 'auto' };
-              else if (tool_choice === 'required' || tool_choice === 'any') anthropicBody.tool_choice = { type: 'any' };
-              else if (tool_choice?.function?.name) anthropicBody.tool_choice = { type: 'tool', name: tool_choice.function.name };
-            }
-          }
           if (cappedReasoning?.max_tokens) {
             anthropicBody.thinking = { type: 'enabled', budget_tokens: cappedReasoning.max_tokens };
           }
-          if (response_format?.json_schema?.schema) {
-            // Claude OAuth API uses output_config.format (output_format is deprecated)
-            anthropicBody.output_config = {
-              format: {
-                type: 'json_schema',
-                schema: transformSchemaForAnthropic(response_format.json_schema.schema)
-              }
-            };
-          }
+
+          const nativeToolMode = applyAnthropicToolConfig(anthropicBody, response_format, true, tools, tool_choice);
+
+          console.log(`🔑 [${requestId}] Non-streaming claude token${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`);
 
           const response = await fetch(ANTHROPIC_API_URL, {
             method: 'POST',
@@ -4082,7 +4258,43 @@ serve(async (req) => {
           }
 
           const data = await response.json() as any;
-          // Extract text and tool_use content from Anthropic response
+          const apiUsage = data.usage || {};
+
+          if (nativeToolMode) {
+            // In native tool mode, reconstruct the JSON format the agent expects:
+            // {"response": "<thinking text>", "tool_calls": [{"tool": "<name>", ...params}]}
+            let textContent = '';
+            const toolUseBlocks: Array<{ name: string; input: any }> = [];
+            for (const block of (data.content || [])) {
+              if (block.type === 'text') textContent += block.text || '';
+              else if (block.type === 'tool_use') {
+                toolUseBlocks.push({ name: block.name, input: block.input });
+              }
+            }
+
+            const reconstructedJson = reconstructAgentResponse(textContent, toolUseBlocks);
+            console.log(`🔧 [${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`);
+
+            const finalResponse = {
+              choices: [{ message: { content: reconstructedJson } }],
+              usage: {
+                prompt_tokens: apiUsage.input_tokens || 0,
+                completion_tokens: apiUsage.output_tokens || 0,
+                total_tokens: (apiUsage.input_tokens || 0) + (apiUsage.output_tokens || 0),
+              },
+              requested_model: model,
+              actual_model: claudeActualModel,
+              pool_name: 'claude-token',
+              pool_size: 1,
+            };
+
+            return new Response(JSON.stringify(finalResponse), {
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+              status: 200,
+            });
+          }
+
+          // Standard mode: extract text and tool_use content from Anthropic response
           let textContent = '';
           const toolCalls: any[] = [];
           for (const block of (data.content || [])) {
@@ -4096,7 +4308,6 @@ serve(async (req) => {
             }
           }
 
-          const apiUsage = data.usage || {};
           const message: any = { content: textContent };
           if (toolCalls.length) message.tool_calls = toolCalls;
           const finalResponse = {

@@ -18,14 +18,16 @@ function isMissingChannelFileError(err: unknown) {
 }
 
 function sendStatus(status: UpdateStatusPayload) {
-  mainWindow?.webContents.send('update:status', {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('update:status', {
     ...status,
     version: status.version ?? pendingVersion,
   });
 }
 
 function sendProgress(percent: number) {
-  mainWindow?.webContents.send('update:progress', { percent });
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('update:progress', { percent });
 }
 
 export function isUpdateDownloaded() {
@@ -46,6 +48,10 @@ export async function manualCheckForUpdates() {
   await runCheck();
 }
 
+export function setAutoUpdaterWindow(window: BrowserWindow) {
+  mainWindow = window;
+}
+
 export function initAutoUpdater(window: BrowserWindow) {
   mainWindow = window;
 
@@ -63,10 +69,10 @@ export function initAutoUpdater(window: BrowserWindow) {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 
-  // Check for updates shortly after launch (wait for renderer to be ready)
-  setTimeout(() => {
-    checkForUpdates();
-  }, 2000);
+  // Wait for renderer to fully load so IPC listeners are attached before sending status
+  mainWindow.webContents.once('did-finish-load', () => {
+    setTimeout(() => checkForUpdates(), 500);
+  });
 
   setInterval(() => {
     checkForUpdates();
