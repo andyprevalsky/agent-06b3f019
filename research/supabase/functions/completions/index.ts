@@ -2991,13 +2991,6 @@ function applyAnthropicToolConfig(
   explicitTools?: any[],
   explicitToolChoice?: any
 ): boolean {
-  // NOTE: We intentionally skip extractToolsFromResponseFormat() here.
-  // Native tool mode strips the JSON schema from the request, so the model
-  // loses format guidance for text output and emits tool_calls as
-  // {"name","parameters"} instead of the flat {"tool",...args} the agent expects.
-  // Structured output (output_config/output_format) enforces the schema, so
-  // partial_json deltas stream through in the correct shape with no transformation.
-
   if (explicitTools?.length) {
     anthropicBody.tools = explicitTools.map((t: any) => ({
       name: t.function?.name ?? t.name,
@@ -3324,18 +3317,15 @@ async function handleStreaming(
         let anthropicInputTokens = 0;
         let anthropicOutputTokens = 0;
 
-        // Native tool mode state: track text and tool_use blocks to reconstruct
-        // the JSON response the agent expects: {"reasoning": "...", "response": "...", "tool_calls": [...]}
-        let nativeToolResponseText = '';
-        let nativeToolCurrentBlock: 'text' | 'tool_use' | null = null;
-        let nativeToolCurrentName = '';
-        let nativeToolCurrentInputJson = '';
-        const nativeToolUseBlocks: Array<{ name: string; input: any }> = [];
-        let nativeToolEmittedPrefix = false;
-        let nativeToolPendingText = '';
-        // Detect when model outputs JSON as text (instead of using native tools).
-        // null = undecided, true = text IS JSON (passthrough), false = text is plain (wrap)
-        let nativeToolTextIsJson: boolean | null = null;
+        // Native tool mode: reconstruct streaming JSON matching structured output format.
+        // With tool_choice=auto, model produces text + tool_use blocks naturally.
+        // Only active for execute phase (>8 tools). Plan phase uses structured output.
+        // We wrap text in {"response": "...", "tool_calls": [...]} and inject tool names into partial_json.
+        let ntState: 'initial' | 'in_response' | 'in_tool_calls' = 'initial';
+        let ntCurrentBlock: 'text' | 'tool_use' | null = null;
+        let ntCurrentToolName = '';
+        let ntToolInputStarted = false;
+        let ntToolCount = 0;
 
         const emitDelta = (content: string) => {
           if (!content) return;
@@ -3355,26 +3345,16 @@ async function handleStreaming(
           const { done, value } = await reader.read();
 
           if (done) {
-            // In native tool mode, emit the closing of the JSON response
+            // In native tool mode, close the JSON envelope
             if (nativeToolMode && isAnthropicModel(actualModel)) {
-              const toolCallsArray = nativeToolUseBlocks.map(t => ({ tool: t.name, ...t.input }));
-
-              if (nativeToolTextIsJson) {
-                // Model output JSON as text — already streamed as-is.
-                // If native tool_use blocks were also used (rare), log a warning.
-                if (nativeToolUseBlocks.length > 0) {
-                  console.warn(`⚠️ Native tool mode: model output JSON text AND ${nativeToolUseBlocks.length} native tool(s) — native tools ignored`);
-                }
-                console.log(`🔧 Native tool mode (JSON passthrough): response length: ${nativeToolResponseText.length}`);
-              } else if (!nativeToolEmittedPrefix) {
-                // Model returned nothing (edge case) - emit complete JSON
-                emitDelta(JSON.stringify({ reasoning: '', response: nativeToolResponseText, tool_calls: toolCallsArray }));
-                console.log(`🔧 Native tool mode complete: ${nativeToolUseBlocks.length} tool(s), response length: ${nativeToolResponseText.length}`);
-              } else {
-                // Close the response string and add tool_calls
-                emitDelta(`", "tool_calls": ${JSON.stringify(toolCallsArray)}}`);
-                console.log(`🔧 Native tool mode complete: ${nativeToolUseBlocks.length} tool(s), response length: ${nativeToolResponseText.length}`);
+              if (ntState === 'initial') {
+                emitDelta('{"response": "", "tool_calls": []}');
+              } else if (ntState === 'in_response') {
+                emitDelta('", "tool_calls": []}');
+              } else if (ntState === 'in_tool_calls') {
+                emitDelta(']}');
               }
+              console.log(`🔧 Native tool mode complete: ${ntToolCount} tool(s), final state: ${ntState}`);
             }
 
             // For Anthropic models, emit final usage chunk before [DONE]
@@ -3438,73 +3418,62 @@ async function handleStreaming(
                   }
 
                   if (nativeToolMode) {
-                    // === NATIVE TOOL MODE: handle text + tool_use content blocks ===
+                    // === NATIVE TOOL MODE ===
+                    // With tool_choice=any, model MUST produce tool_use blocks.
+                    // Reconstruct: {"response": "<text>", "tool_calls": [{"tool": "<name>", ...}]}
 
                     if (parsed.type === 'content_block_start') {
                       if (parsed.content_block?.type === 'text') {
-                        nativeToolCurrentBlock = 'text';
+                        ntCurrentBlock = 'text';
+                        if (ntState === 'initial') {
+                          emitDelta('{"response": "');
+                          ntState = 'in_response';
+                        }
                       } else if (parsed.content_block?.type === 'tool_use') {
-                        nativeToolCurrentBlock = 'tool_use';
-                        nativeToolCurrentName = parsed.content_block.name || '';
-                        nativeToolCurrentInputJson = '';
+                        ntCurrentBlock = 'tool_use';
+                        ntCurrentToolName = parsed.content_block.name || '';
+                        ntToolInputStarted = false;
+                        if (ntState === 'initial') {
+                          emitDelta('{"response": "", "tool_calls": [');
+                          ntState = 'in_tool_calls';
+                        } else if (ntState === 'in_response') {
+                          emitDelta('", "tool_calls": [');
+                          ntState = 'in_tool_calls';
+                        }
+                        if (ntToolCount > 0) {
+                          emitDelta(', ');
+                        }
+                        ntToolCount++;
                       }
                       continue;
                     }
 
                     if (parsed.type === 'content_block_delta') {
-                      if (nativeToolCurrentBlock === 'text' && parsed.delta?.text) {
-                        nativeToolResponseText += parsed.delta.text;
-
-                        if (nativeToolTextIsJson === null) {
-                          // Delay decision until we can see past optional markdown fences.
-                          nativeToolPendingText += parsed.delta.text;
-                          const detection = detectJsonTextStart(nativeToolPendingText);
-                          if (detection === null) {
-                            continue;
-                          }
-
-                          nativeToolTextIsJson = detection;
-                          if (nativeToolTextIsJson) {
-                            console.log('🔍 Native tool mode: detected JSON text output, using passthrough');
-                            emitDelta(nativeToolResponseText);
+                      if (ntCurrentBlock === 'text' && parsed.delta?.text) {
+                        emitDelta(escapeForJsonString(parsed.delta.text));
+                      } else if (ntCurrentBlock === 'tool_use' && parsed.delta?.partial_json) {
+                        const fragment = parsed.delta.partial_json;
+                        if (!ntToolInputStarted) {
+                          ntToolInputStarted = true;
+                          if (fragment === '{}') {
+                            emitDelta(`{"tool": "${ntCurrentToolName}"}`);
+                          } else if (fragment.startsWith('{')) {
+                            emitDelta(`{"tool": "${ntCurrentToolName}", ` + fragment.slice(1));
                           } else {
-                            // Emit wrapping prefix + escaped text
-                            if (!nativeToolEmittedPrefix) {
-                              emitDelta('{"reasoning": "", "response": "');
-                              nativeToolEmittedPrefix = true;
-                            }
-                            const escaped = escapeForJsonString(nativeToolResponseText);
-                            emitDelta(escaped);
+                            emitDelta(`{"tool": "${ntCurrentToolName}", ` + fragment);
                           }
-                          nativeToolPendingText = '';
-                        } else if (nativeToolTextIsJson) {
-                          // JSON passthrough — emit text as-is
-                          emitDelta(parsed.delta.text);
                         } else {
-                          // Plain text wrapping — escape for JSON string embedding
-                          const escaped = escapeForJsonString(parsed.delta.text);
-                          emitDelta(escaped);
+                          emitDelta(fragment);
                         }
-                      } else if (nativeToolCurrentBlock === 'tool_use' && parsed.delta?.partial_json) {
-                        nativeToolCurrentInputJson += parsed.delta.partial_json;
                       }
                       continue;
                     }
 
                     if (parsed.type === 'content_block_stop') {
-                      if (nativeToolCurrentBlock === 'tool_use' && nativeToolCurrentName) {
-                        try {
-                          const input = JSON.parse(nativeToolCurrentInputJson);
-                          nativeToolUseBlocks.push({ name: nativeToolCurrentName, input });
-                        } catch (e) {
-                          console.error(`Failed to parse tool input for ${nativeToolCurrentName}:`, e);
-                        }
-                      }
-                      nativeToolCurrentBlock = null;
+                      ntCurrentBlock = null;
                       continue;
                     }
 
-                    // Skip other events in native tool mode
                     continue;
                   }
 

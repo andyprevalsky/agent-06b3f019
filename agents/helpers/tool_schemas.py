@@ -30,9 +30,9 @@ EXECUTE_PHASE_TOOLS = [
     "spawn_claude_code_agent",
     "spawn_sub_agent",
     "wait_seconds",
-    "web_search",
-    "web_fetch",
-    "people_search",
+    # "web_search",        # available in plan phase; removed from execute to stay within 8 anyOf limit
+    # "web_fetch",         # available in plan phase; removed from execute to stay within 8 anyOf limit
+    # "people_search",     # removed from execute to stay within 8 anyOf limit
     "send_message_to_user_execute_phase",
     "call_phone_number",
     "send_sms_as_user",
