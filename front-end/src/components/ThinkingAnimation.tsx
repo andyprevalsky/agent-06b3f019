@@ -25,6 +25,10 @@
  *     v
  * [STOPPED] or [LOOPING] (if loop: true)
  *
+ * GRADIENT THEMING:
+ * When `gradient` prop is provided, all rgb() colors in SVG frames are remapped
+ * to the given palette based on luminance. Used for Claude orange theming.
+ *
  * State:
  * - svgRef: current frame SVG content
  * - isPlaying, play(), pause() from hook
@@ -34,6 +38,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useState,
   type CSSProperties,
 } from 'react';
@@ -48,6 +53,8 @@ export interface ThinkingAnimationProps {
   className?: string;
   style?: CSSProperties;
   onDone?: () => void;
+  /** Optional color palette (hex strings) to remap SVG colors via luminance mapping */
+  gradient?: string[];
 }
 
 export interface ThinkingAnimationHandle {
@@ -61,7 +68,6 @@ export interface ThinkingAnimationHandle {
 const classNames = (...values: Array<string | undefined>) =>
   values.filter(Boolean).join(' ').trim();
 
-const ROSE_GRADIENT = ['#FE7503', '#FC585C', '#FD5776', '#E062CC', '#A76CED', '#7A6BEC'];
 const RGB_REGEX = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/g;
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
@@ -95,7 +101,7 @@ const interpolatePalette = (palette: string[], t: number) => {
   };
 };
 
-const buildColorMapper = (colors: string[]) => {
+const buildColorMapper = (colors: string[], palette: string[]) => {
   const luminances = colors.map((c) => {
     const match = c.match(/(\d+)/g);
     if (!match) return 0;
@@ -113,16 +119,12 @@ const buildColorMapper = (colors: string[]) => {
     const [r, g, b] = match.map(Number);
     const lum = luminance(r, g, b);
     const t = clamp01((lum - minLum) / range);
-    const mapped = interpolatePalette(ROSE_GRADIENT, t);
+    const mapped = interpolatePalette(palette, t);
     return `rgb(${Math.round(mapped.r)},${Math.round(mapped.g)},${Math.round(mapped.b)})`;
   };
 };
 
-const applyRoseGradient = (data: XmlFrameData | null): XmlFrameData | null => {
-  // TEMPORARILY DISABLED - return data unchanged
-  return data;
-  
-  /* Original implementation:
+function applyGradient(data: XmlFrameData | null, palette: string[]): XmlFrameData | null {
   if (!data?.frames?.length) return data;
 
   const allColors = new Set<string>();
@@ -133,8 +135,10 @@ const applyRoseGradient = (data: XmlFrameData | null): XmlFrameData | null => {
     }
   });
 
+  console.log(`[applyGradient] Found ${allColors.size} unique colors in ${data.frames.length} frames`, [...allColors].slice(0, 5));
+
   if (!allColors.size) return data;
-  const mapColor = buildColorMapper([...allColors]);
+  const mapColor = buildColorMapper([...allColors], palette);
 
   const remapXml = (xml: string) =>
     xml.replace(RGB_REGEX, (_full, r: string, g: string, b: string) =>
@@ -148,8 +152,7 @@ const applyRoseGradient = (data: XmlFrameData | null): XmlFrameData | null => {
       xml: frame.xml ? remapXml(frame.xml) : frame.xml,
     })),
   };
-  */
-};
+}
 
 export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAnimationProps>(
   (
@@ -162,18 +165,18 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
       className,
       style,
       onDone,
+      gradient,
     },
     ref,
   ) => {
-    const [resolvedData, setResolvedData] = useState<XmlFrameData | null>(
-      data ? applyRoseGradient(data) : null,
-    );
+    // Store raw (unprocessed) data separately from gradient-mapped data
+    const [rawData, setRawData] = useState<XmlFrameData | null>(data ?? null);
     const [isFetching, setIsFetching] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
 
     useEffect(() => {
       if (data) {
-        setResolvedData(applyRoseGradient(data));
+        setRawData(data);
         setFetchError(null);
         setIsFetching(false);
         return;
@@ -200,14 +203,14 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
         .then((text) => {
           if (cancelled) return;
           const parsed = JSON.parse(text) as XmlFrameData;
-          setResolvedData(applyRoseGradient(parsed));
+          setRawData(parsed);
           setFetchError(null);
         })
         .catch((error) => {
           if (controller.signal.aborted || cancelled) return;
           const message = error instanceof Error ? error.message : String(error);
           setFetchError(message);
-          setResolvedData(null);
+          setRawData(null);
         })
         .finally(() => {
           if (!cancelled) {
@@ -220,6 +223,13 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
         controller.abort();
       };
     }, [data, dataUrl]);
+
+    // Apply gradient mapping reactively when gradient prop or raw data changes
+    const resolvedData = useMemo(() => {
+      if (!rawData) return null;
+      if (!gradient?.length) return rawData;
+      return applyGradient(rawData, gradient);
+    }, [rawData, gradient]);
 
     const replay = useXmlFrameReplay({
       data: resolvedData,
@@ -248,11 +258,16 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
       position: 'relative',
       ...style,
     };
+    const hasGradient = !!gradient?.length;
     const containerStyle: CSSProperties = {
       width: '100%',
       height: '100%',
       position: 'relative',
+      // CSS filter to shift blue SVG to orange when gradient palette is provided
+      // invert flips blue→yellow range, then sepia+hue-rotate+saturate tunes to warm orange
+      ...(hasGradient ? { filter: 'invert(0.5) sepia(1) saturate(3) hue-rotate(330deg) brightness(1.4)' } : {}),
     };
+
 
     return (
       <div className={wrapperClass} style={wrapperStyle}>

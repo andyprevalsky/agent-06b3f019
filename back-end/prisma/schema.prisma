@@ -41,6 +41,7 @@ model Agent {
   proxyState                String?
   priceLimitCents           Int         @default(100)
   treeCostCents             Int         @default(0)
+  ownCostCents              Float       @default(0)
   writeLockEnabled          Boolean     @default(true)
   githubRepoUrl             String?
   parent                    Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])

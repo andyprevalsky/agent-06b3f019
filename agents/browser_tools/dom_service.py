@@ -233,6 +233,12 @@ class DOMService:
             # Note: Download behavior is configured automatically by browser-use DownloadsWatchdog
             # using the downloads_path="/files" setting in BrowserProfile
 
+            # Suppress native browser overlays that CDP can't capture in screenshots.
+            # CDP's Page.captureScreenshot only captures page content, not browser-chrome-level UI
+            # (passkey popups, permission prompts, etc.). These invisible overlays block interaction
+            # and confuse the agent. Instead of trying to capture them, we suppress them.
+            await self._suppress_browser_overlays()
+
         except ImportError as e:
             logger.error(f"browser-use not installed or import error: {e}")
             raise
@@ -258,6 +264,44 @@ class DOMService:
                 self._selector_map = {}
                 logger.info("🔌 Disconnected from browser")
     
+    async def _suppress_browser_overlays(self) -> None:
+        """Suppress native browser-chrome overlays that CDP screenshots can't capture.
+
+        CDP's Page.captureScreenshot only captures the page content layer. Browser-level UI
+        like passkey popups, permission prompts, and download bars are rendered by Chrome's
+        browser process and are invisible to CDP screenshots. This creates a mismatch: the
+        agent can't see the overlay but it blocks page interaction.
+
+        Fix: use CDP domains to suppress these overlays at the source so the agent's
+        screenshots always accurately represent what's interactive on the page.
+        """
+        try:
+            page = await self._session.get_current_page()
+            cdp_session = await page.context.new_cdp_session(page)
+
+            # 1. WebAuthn: suppress native passkey/credential popup
+            #    Without this, Chrome shows a modal passkey chooser that blocks the page
+            #    but is invisible to CDP screenshots. With enableUI=false, WebAuthn requests
+            #    fail gracefully and sites fall back to password login.
+            try:
+                await cdp_session.send("WebAuthn.enable", {"enableUI": False})
+                logger.info("🛡️ [overlay-suppress] WebAuthn native UI disabled (passkey popups suppressed)")
+            except Exception as e:
+                logger.warning(f"⚠️ [overlay-suppress] Failed to disable WebAuthn UI: {e}")
+
+            # 2. File chooser: intercept so native file dialog doesn't block
+            #    The agent can handle file uploads programmatically instead.
+            try:
+                await cdp_session.send("Page.setInterceptFileChooserDialog", {"enabled": True})
+                logger.info("🛡️ [overlay-suppress] File chooser dialog interception enabled")
+            except Exception as e:
+                logger.warning(f"⚠️ [overlay-suppress] Failed to intercept file chooser: {e}")
+
+            # Don't detach — CDP session must stay alive for WebAuthn state to persist
+            # (same pattern as fingerprint_injection.py)
+        except Exception as e:
+            logger.warning(f"⚠️ [overlay-suppress] Failed to suppress browser overlays: {e}")
+
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
 
@@ -371,9 +415,10 @@ class DOMService:
             result["closed_popups"] = state.closed_popup_messages
         
         # Take screenshot using CDP's Page.captureScreenshot with fromSurface=True.
-        # Unlike Playwright's page.screenshot(), this captures from Chrome's compositing
-        # surface, which includes browser-chrome-level overlays (e.g. passkey popups)
-        # that the agent needs to see and dismiss.
+        # NOTE: This captures the page compositing surface only — it does NOT include
+        # browser-chrome-level overlays (passkey popups, permission prompts, download bars).
+        # Those are suppressed at connect time via _suppress_browser_overlays() so the
+        # agent's screenshots always match what's actually interactive on the page.
         screenshot_to_use = None
         if include_screenshot:
             try:

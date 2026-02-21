@@ -2320,6 +2320,47 @@ router.post('/passwords/upload', authenticate, upload.none() as any, async (req:
 
       console.log(`[Integrations] ✅ Upserted ${deduplicatedPasswords.length} passwords for user ${userId}`);
 
+      // Create integration records per browser source so the frontend can track sync status
+      const browserSources = new Set(deduplicatedPasswords.map(p => p.browserSource));
+      for (const source of browserSources) {
+        const integrationName = `${source}_passwords`;
+        const sourceCount = deduplicatedPasswords.filter(p => p.browserSource === source).length;
+        await prisma.integration.upsert({
+          where: {
+            userId_name: {
+              userId,
+              name: integrationName,
+            },
+          },
+          create: {
+            userId,
+            name: integrationName,
+            type: IntegrationType.DATA_SOURCE,
+            status: IntegrationStatus.CONNECTED,
+            isActive: true,
+            lastSyncAt: new Date(),
+            lastSuccessfulSyncAt: new Date(),
+            config: {
+              browserSource: source,
+              passwordCount: sourceCount,
+              uploadedAt: new Date().toISOString(),
+            },
+          },
+          update: {
+            status: IntegrationStatus.CONNECTED,
+            isActive: true,
+            lastSyncAt: new Date(),
+            lastSuccessfulSyncAt: new Date(),
+            config: {
+              browserSource: source,
+              passwordCount: sourceCount,
+              uploadedAt: new Date().toISOString(),
+            },
+          },
+        });
+        console.log(`[Integrations] ✅ Upserted ${integrationName} integration for user ${userId}`);
+      }
+
       return res.json({
         message: 'Passwords uploaded successfully',
         passwordCount: deduplicatedPasswords.length,

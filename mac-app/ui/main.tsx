@@ -60,6 +60,12 @@ const electronHandlers = {
         }
       }
     },
+    syncBrowserPasswords: async (browserType: string, config?: { keychainPassword?: string }) => {
+      return window.api.syncBrowserPasswords(
+        browserType as import('../shared/types/ipc').BrowserType,
+        config
+      );
+    },
     storeAtlasPassword: async (password: string) => {
       if (window.api.atlas?.storePassword) {
         return window.api.atlas.storePassword(password);

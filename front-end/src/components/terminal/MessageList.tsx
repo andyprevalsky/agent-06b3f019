@@ -55,13 +55,16 @@ import { cn } from '@/lib/utils';
 import { useAgentContext, StreamingBubble } from '@/contexts/AgentContext';
 import { Message, startAgent } from '@/lib/api';
 import MessageBubble from './MessageBubble';
-import { PlanChip } from './PlanChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { Button } from '@/components/ui/button';
 import { FeedbackData } from './FeedbackBanner';
 import { Copy, ArrowDown } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
+
+// Claude orange gradient palette for thinking animation SVG recoloring
+// Warm terracotta tones centered on Claude's brand orange
+const CLAUDE_GRADIENT = ['#F5C4A1', '#E8976A', '#D97757', '#CC5B33', '#B84A22', '#9E3A18'];
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // StreamingMarkdown - Renders text with fade-in animation for each chunk
@@ -413,7 +416,7 @@ export function MessageList({
   }, [streamingTools, subAgentId]);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // THINKING CHAR COUNT - calculate from streaming bubbles
+  // THINKING CHAR COUNT + CLAUDE DETECTION - calculate from streaming bubbles
   // ═══════════════════════════════════════════════════════════════════════════
 
   const streamingCharCount = useMemo(() => {
@@ -422,6 +425,14 @@ export function MessageList({
       totalChars += bubble.text.length;
     });
     return totalChars;
+  }, [filteredStreamingBubbles]);
+
+  // Default to false (blue). Switches to orange when any bubble has isClaude=true.
+  const isClaudeStreaming = useMemo(() => {
+    for (const [, bubble] of filteredStreamingBubbles) {
+      if (bubble.isClaude) return true;
+    }
+    return false;
   }, [filteredStreamingBubbles]);
 
   const animatedCharCount = useAnimatedCounter(streamingCharCount, 0.3);
@@ -741,8 +752,11 @@ export function MessageList({
                   loop
                   className="w-4 h-4 flex-shrink-0"
                   style={{ width: '16px', height: '16px' }}
+                  gradient={isClaudeStreaming ? CLAUDE_GRADIENT : undefined}
                 />
-                <span className="text-sm font-medium animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent">
+                <span
+                  className="text-sm font-medium animate-shimmer bg-gradient-to-r bg-[length:200%_100%] bg-clip-text text-transparent from-foreground via-muted-foreground to-foreground"
+                >
                   Thinking
                 </span>
                 {/* Char counter */}
@@ -754,23 +768,6 @@ export function MessageList({
                 )}
               </div>
 
-              {/* Streaming plan */}
-              {filteredStreamingPlan && (
-                <div className="pl-6 mt-2">
-                  <PlanChip
-                    plan={{
-                      title: filteredStreamingPlan.title,
-                      content: '',
-                      tasks: [],
-                      dependencies: null,
-                      join: 'all',
-                      status: 'planning',
-                    }}
-                    toolStatus="IN_PROGRESS"
-                    charCount={filteredStreamingPlan.char_count ?? 0}
-                  />
-                </div>
-              )}
             </div>
           </div>
       )}

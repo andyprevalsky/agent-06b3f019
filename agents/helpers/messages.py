@@ -32,14 +32,15 @@ async def stream_assistant_chunk(
     delta: str,
     done: bool = False,
     sequence: int = 0,
-    sub_agent_id: str = None
+    sub_agent_id: str = None,
+    is_claude: bool = False,
 ) -> None:
     """
     Send a streaming delta DIRECTLY to Supabase Realtime (bypasses backend).
-    
+
     This is NOT a Temporal activity - it's called directly during LLM streaming
     to minimize latency. Uses Supabase Realtime broadcast REST API with connection reuse.
-    
+
     Args:
         agent_id: The agent ID
         stream_id: Unique ID for this streaming session
@@ -47,14 +48,15 @@ async def stream_assistant_chunk(
         done: Whether this is the final chunk
         sequence: Sequence number for ordering
         sub_agent_id: Optional sub-agent ID (e.g., browser task_id) for routing to specific MessageList
+        is_claude: Whether the model is a Claude/Anthropic model
     """
     try:
         config = load_config()
-        
+
         # Broadcast directly to Supabase Realtime (skip backend for speed)
         # https://supabase.com/docs/guides/realtime/broadcast#send-messages-using-rest-api
         broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
-        
+
         record = {
             "agentId": agent_id,
             "stream_id": stream_id,
@@ -66,6 +68,10 @@ async def stream_assistant_chunk(
         # Include sub_agent_id if provided (for routing to browser panel's MessageList)
         if sub_agent_id:
             record["subAgentId"] = sub_agent_id
+
+        # Include is_claude marker for frontend thinking animation theming
+        if is_claude:
+            record["is_claude"] = True
         
         payload = {
             "messages": [{

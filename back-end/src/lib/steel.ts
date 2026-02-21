@@ -1596,27 +1596,9 @@ export async function getFingerprintInjectionData(userId: string): Promise<{
         });
       } catch (e) {}
 
-      // Override viewport dimensions
-      if (fp.viewport) {
-        try {
-          Object.defineProperty(window, 'innerWidth', {
-            get: () => fp.viewport.innerWidth,
-            configurable: true,
-          });
-          Object.defineProperty(window, 'innerHeight', {
-            get: () => fp.viewport.innerHeight,
-            configurable: true,
-          });
-          Object.defineProperty(window, 'outerWidth', {
-            get: () => fp.viewport.outerWidth,
-            configurable: true,
-          });
-          Object.defineProperty(window, 'outerHeight', {
-            get: () => fp.viewport.outerHeight,
-            configurable: true,
-          });
-        } catch (e) {}
-      }
+      // NOTE: Viewport dimensions (innerWidth/Height, outerWidth/Height) are intentionally
+      // NOT overridden. The agent's browser has its own viewport size that must match its
+      // actual rendering dimensions for correct interaction.
 
       // Override WebGL
       const getParameterProxyHandler = {

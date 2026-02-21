@@ -549,6 +549,8 @@ export interface AssistantStreamPayload {
   sequence: number;
   /** Routes to sub-agent's MessageList (e.g., browser panel) */
   subAgentId?: string;
+  /** True when the streaming model is Claude (Anthropic) - used for thinking animation theming */
+  is_claude?: boolean;
 }
 
 // -----------------------------------------------------------------------------

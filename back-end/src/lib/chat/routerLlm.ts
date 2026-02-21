@@ -325,6 +325,9 @@ export async function callRouterLlm(params: {
     },
   });
 
+  // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
+  let isClaude = false;
+
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
   let accumulatedJson = ''; // From delta.content (JSON structure)
@@ -337,6 +340,17 @@ export async function callRouterLlm(params: {
   // Process stream chunks - stream every delta immediately
   for await (const chunk of stream) {
     chunkCount++;
+
+    // Detect user's Claude token usage from "-claude" suffix in actual_model
+    // e.g. "claude-sonnet-4-6-claude" = user token ($0), "anthropic/claude-sonnet-4.6" = racing ($)
+    const actualModel = chunk.actual_model;
+    if (chunkCount === 1) {
+      console.log(`[RouterLLM] First chunk: actual_model="${actualModel}", requested_model="${chunk.requested_model}"`);
+    }
+    if (!isClaude && actualModel?.endsWith('-claude')) {
+      isClaude = true;
+      console.log(`[RouterLLM] User Claude token detected: actual_model="${actualModel}"`);
+    }
 
     // Get delta from chunk
     const delta = chunk.choices[0]?.delta;
@@ -367,7 +381,8 @@ export async function callRouterLlm(params: {
           streamId,
           newText,
           false,
-          sequence++
+          sequence++,
+          isClaude
         );
       }
     }
@@ -407,7 +422,8 @@ export async function callRouterLlm(params: {
     streamId,
     '',
     true,
-    sequence
+    sequence,
+    isClaude
   );
 
   const streamDuration = Date.now() - startTime;

@@ -44,20 +44,27 @@ export interface CompletionOptions {
   };
 }
 
+/**
+ * RoseCompletionChunk — canonical SSE shape from Rose completions endpoint.
+ * Source of truth: research/supabase/functions/completions/index.ts
+ * Python mirror: agents/helpers/rose_types.py
+ */
 export interface CompletionChunk {
-  id: string;
-  object: string;
-  created: number;
-  model: string;
   choices: Array<{
     index: number;
     delta: {
-      role?: string;
-      content?: string;
-      reasoning?: string; // From thinking models (GPT-5.2, Gemini, DeepSeek, Claude)
+      content?: string;    // Text or JSON tokens
+      reasoning?: string;  // Thinking/reasoning from reasoning-capable models
+      role?: string;       // Only on first chunk (OpenRouter includes this)
     };
-    finish_reason: string | null;
+    finish_reason?: string | null;  // 'stop' on final content chunk
   }>;
+  // Rose metadata — always present on every chunk
+  requested_model: string;
+  actual_model: string;
+  pool_name: string;
+  pool_size: number;
+  // Token usage — only on the final chunk (when stream_options.include_usage=true)
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;

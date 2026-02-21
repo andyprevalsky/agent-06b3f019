@@ -23,7 +23,8 @@ export async function broadcastAssistantStream(
   streamId: string,
   delta: string,
   done: boolean = false,
-  sequence: number = 0
+  sequence: number = 0,
+  isClaude: boolean = false
 ): Promise<void> {
   console.log('[Broadcast] ASSISTANT_STREAM', {
     agentId,
@@ -31,17 +32,20 @@ export async function broadcastAssistantStream(
     delta: delta.substring(0, 100),
     done,
     sequence,
+    isClaude,
   });
+  const payload: Record<string, unknown> = {
+    agentId: agentId,
+    stream_id: streamId,  // snake_case to match Python
+    delta: delta,
+    done: done,
+    sequence: sequence,
+  };
+  payload.is_claude = isClaude;
   await broadcast({
     topic: `agent:${agentId}`,
     event: 'ASSISTANT_STREAM',
-    payload: {
-      agentId: agentId,
-      stream_id: streamId,  // snake_case to match Python
-      delta: delta,
-      done: done,
-      sequence: sequence,
-    },
+    payload,
   });
 }
 

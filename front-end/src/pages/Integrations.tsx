@@ -235,9 +235,10 @@ export default function Integrations() {
         setConnectedBrowsers(newConnectedBrowsers);
 
         // Check for password integrations
-        // Chrome passwords are synced as part of browser sync (integration name: 'chrome')
-        const chromeIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'chrome' && i.status === 'CONNECTED');
-        setChromePasswordsSynced(!!chromeIntegration);
+        const chromePasswordsIntegration = integrations.find((i: ConnectedIntegration) =>
+          (i.name === 'chrome_passwords' || i.name === 'chrome') && i.status === 'CONNECTED'
+        );
+        setChromePasswordsSynced(!!chromePasswordsIntegration);
 
         // Apple passwords have their own integration
         const applePasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'apple_passwords' && i.status === 'CONNECTED');

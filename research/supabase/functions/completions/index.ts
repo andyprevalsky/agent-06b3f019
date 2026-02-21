@@ -7,6 +7,35 @@ const corsHeaders = {
 };
 
 // ============================================
+// ROSE COMPLETION CHUNK — canonical SSE shape
+// All streaming paths (Anthropic direct, OpenRouter passthrough,
+// claude-auth) MUST produce chunks conforming to this interface.
+// Consumers: agents/helpers/llm.py, back-end/src/lib/chat/supabaseCompletions.ts
+// ============================================
+interface RoseCompletionChunk {
+  choices: Array<{
+    index: number;
+    delta: {
+      content?: string;    // Text or JSON tokens
+      reasoning?: string;  // Thinking/reasoning from reasoning-capable models
+      role?: string;       // Only on first chunk (OpenRouter includes this)
+    };
+    finish_reason?: string | null;  // 'stop' on final content chunk
+  }>;
+  // Rose metadata — always present on every chunk
+  requested_model: string;
+  actual_model: string;
+  pool_name: string;
+  pool_size: number;
+  // Token usage — only on the final chunk (when stream_options.include_usage=true)
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
+// ============================================
 // LATENCY RACING CONFIGURATION
 // ============================================
 const MAX_LATENCY_CAP_MS = 3000;    // Models with TTFT > 3s excluded entirely
@@ -148,6 +177,53 @@ function truncateForLogging(obj: any, maxBase64Length = 100): any {
     return result;
   }
   return obj;
+}
+
+function logOutgoingSseChunk(tag: string, payload: string): void {
+  // Log raw SSE lines so debugging can copy/paste exact "data: {...}" frames.
+  const lines = payload.split('\n').filter(Boolean);
+  for (const line of lines) {
+    if (line.startsWith('data:')) {
+      console.log(line);
+    } else {
+      console.log(`[SSE_OUT:${tag}] ${line}`);
+    }
+  }
+}
+
+function escapeForJsonString(content: string): string {
+  return content
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+}
+
+// Returns:
+// - true: stream appears to be JSON (raw or fenced)
+// - false: definitely plain text
+// - null: undecided, need more bytes
+function detectJsonTextStart(content: string): boolean | null {
+  if (!content) return null;
+
+  const trimmed = content.trimStart();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('{')) return true;
+
+  if (trimmed.startsWith('```')) {
+    const nlMatch = trimmed.match(/^```[^\r\n]*\r?\n([\s\S]*)$/);
+    if (!nlMatch) {
+      // Have opening fence but not the rest yet.
+      return null;
+    }
+    const afterFence = nlMatch[1].trimStart();
+    if (!afterFence) return null;
+    return afterFence.startsWith('{');
+  }
+
+  return false;
 }
 
 // Extract JSON from potentially markdown-wrapped content
@@ -2890,14 +2966,14 @@ function extractToolsFromResponseFormat(responseFormat: any): {
  * Reconstruct the JSON response the agent expects from Anthropic's native
  * text + tool_use content blocks.
  *
- * Agent expects: {"response": "<thinking text>", "tool_calls": [{"tool": "<name>", ...params}]}
+ * Agent expects: {"reasoning": "", "response": "<text>", "tool_calls": [{"tool": "<name>", ...params}]}
  */
 function reconstructAgentResponse(textContent: string, toolUseBlocks: Array<{ name: string; input: any }>): string {
   const toolCalls = toolUseBlocks.map(t => ({
     tool: t.name,
     ...t.input,
   }));
-  return JSON.stringify({ response: textContent, tool_calls: toolCalls });
+  return JSON.stringify({ reasoning: '', response: textContent, tool_calls: toolCalls });
 }
 
 /**
@@ -2915,13 +2991,12 @@ function applyAnthropicToolConfig(
   explicitTools?: any[],
   explicitToolChoice?: any
 ): boolean {
-  const extractedTools = extractToolsFromResponseFormat(responseFormat);
-
-  if (extractedTools) {
-    anthropicBody.tools = extractedTools.tools;
-    anthropicBody.tool_choice = { type: 'auto' };
-    return true;
-  }
+  // NOTE: We intentionally skip extractToolsFromResponseFormat() here.
+  // Native tool mode strips the JSON schema from the request, so the model
+  // loses format guidance for text output and emits tool_calls as
+  // {"name","parameters"} instead of the flat {"tool",...args} the agent expects.
+  // Structured output (output_config/output_format) enforces the schema, so
+  // partial_json deltas stream through in the correct shape with no transformation.
 
   if (explicitTools?.length) {
     anthropicBody.tools = explicitTools.map((t: any) => ({
@@ -3250,23 +3325,30 @@ async function handleStreaming(
         let anthropicOutputTokens = 0;
 
         // Native tool mode state: track text and tool_use blocks to reconstruct
-        // the JSON response the agent expects: {"response": "...", "tool_calls": [...]}
+        // the JSON response the agent expects: {"reasoning": "...", "response": "...", "tool_calls": [...]}
         let nativeToolResponseText = '';
         let nativeToolCurrentBlock: 'text' | 'tool_use' | null = null;
         let nativeToolCurrentName = '';
         let nativeToolCurrentInputJson = '';
         const nativeToolUseBlocks: Array<{ name: string; input: any }> = [];
         let nativeToolEmittedPrefix = false;
+        let nativeToolPendingText = '';
+        // Detect when model outputs JSON as text (instead of using native tools).
+        // null = undecided, true = text IS JSON (passthrough), false = text is plain (wrap)
+        let nativeToolTextIsJson: boolean | null = null;
 
         const emitDelta = (content: string) => {
-          const chunk = {
+          if (!content) return;
+          const chunk: RoseCompletionChunk = {
             choices: [{ index: 0, delta: { content } }],
             requested_model: requestedModel,
             actual_model: actualModel,
             pool_name: poolName,
             pool_size: poolSize
           };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          const payload = `data: ${JSON.stringify(chunk)}\n\n`;
+          logOutgoingSseChunk('direct-delta', payload);
+          controller.enqueue(encoder.encode(payload));
         };
 
         while (true) {
@@ -3275,23 +3357,29 @@ async function handleStreaming(
           if (done) {
             // In native tool mode, emit the closing of the JSON response
             if (nativeToolMode && isAnthropicModel(actualModel)) {
-              // Escape any unescaped characters in the response text for JSON embedding
-              const escapedResponse = JSON.stringify(nativeToolResponseText);
-              // Build the tool_calls array
               const toolCallsArray = nativeToolUseBlocks.map(t => ({ tool: t.name, ...t.input }));
-              if (!nativeToolEmittedPrefix) {
+
+              if (nativeToolTextIsJson) {
+                // Model output JSON as text — already streamed as-is.
+                // If native tool_use blocks were also used (rare), log a warning.
+                if (nativeToolUseBlocks.length > 0) {
+                  console.warn(`⚠️ Native tool mode: model output JSON text AND ${nativeToolUseBlocks.length} native tool(s) — native tools ignored`);
+                }
+                console.log(`🔧 Native tool mode (JSON passthrough): response length: ${nativeToolResponseText.length}`);
+              } else if (!nativeToolEmittedPrefix) {
                 // Model returned nothing (edge case) - emit complete JSON
-                emitDelta(JSON.stringify({ response: nativeToolResponseText, tool_calls: toolCallsArray }));
+                emitDelta(JSON.stringify({ reasoning: '', response: nativeToolResponseText, tool_calls: toolCallsArray }));
+                console.log(`🔧 Native tool mode complete: ${nativeToolUseBlocks.length} tool(s), response length: ${nativeToolResponseText.length}`);
               } else {
                 // Close the response string and add tool_calls
                 emitDelta(`", "tool_calls": ${JSON.stringify(toolCallsArray)}}`);
+                console.log(`🔧 Native tool mode complete: ${nativeToolUseBlocks.length} tool(s), response length: ${nativeToolResponseText.length}`);
               }
-              console.log(`🔧 Native tool mode complete: ${nativeToolUseBlocks.length} tool(s), response length: ${nativeToolResponseText.length}`);
             }
 
             // For Anthropic models, emit final usage chunk before [DONE]
             if (isAnthropicModel(actualModel) && (anthropicInputTokens > 0 || anthropicOutputTokens > 0)) {
-              const usageChunk = {
+              const usageChunk: RoseCompletionChunk = {
                 choices: [{
                   index: 0,
                   delta: {},
@@ -3307,10 +3395,14 @@ async function handleStreaming(
                 pool_name: poolName,
                 pool_size: poolSize
               };
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(usageChunk)}\n\n`));
+              const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
+              logOutgoingSseChunk('direct-usage', payload);
+              controller.enqueue(encoder.encode(payload));
               console.log(`📊 Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}`);
             }
-            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            const donePayload = 'data: [DONE]\n\n';
+            logOutgoingSseChunk('direct-done', donePayload);
+            controller.enqueue(encoder.encode(donePayload));
             controller.close();
             break;
           }
@@ -3351,11 +3443,6 @@ async function handleStreaming(
                     if (parsed.type === 'content_block_start') {
                       if (parsed.content_block?.type === 'text') {
                         nativeToolCurrentBlock = 'text';
-                        // Emit the JSON prefix on first text block
-                        if (!nativeToolEmittedPrefix) {
-                          emitDelta('{"response": "');
-                          nativeToolEmittedPrefix = true;
-                        }
                       } else if (parsed.content_block?.type === 'tool_use') {
                         nativeToolCurrentBlock = 'tool_use';
                         nativeToolCurrentName = parsed.content_block.name || '';
@@ -3366,16 +3453,38 @@ async function handleStreaming(
 
                     if (parsed.type === 'content_block_delta') {
                       if (nativeToolCurrentBlock === 'text' && parsed.delta?.text) {
-                        // Stream text deltas in real-time (visible as "thinking" text)
-                        // Escape for JSON string embedding: backslash, quotes, newlines, tabs
-                        const escaped = parsed.delta.text
-                          .replace(/\\/g, '\\\\')
-                          .replace(/"/g, '\\"')
-                          .replace(/\n/g, '\\n')
-                          .replace(/\r/g, '\\r')
-                          .replace(/\t/g, '\\t');
                         nativeToolResponseText += parsed.delta.text;
-                        emitDelta(escaped);
+
+                        if (nativeToolTextIsJson === null) {
+                          // Delay decision until we can see past optional markdown fences.
+                          nativeToolPendingText += parsed.delta.text;
+                          const detection = detectJsonTextStart(nativeToolPendingText);
+                          if (detection === null) {
+                            continue;
+                          }
+
+                          nativeToolTextIsJson = detection;
+                          if (nativeToolTextIsJson) {
+                            console.log('🔍 Native tool mode: detected JSON text output, using passthrough');
+                            emitDelta(nativeToolResponseText);
+                          } else {
+                            // Emit wrapping prefix + escaped text
+                            if (!nativeToolEmittedPrefix) {
+                              emitDelta('{"reasoning": "", "response": "');
+                              nativeToolEmittedPrefix = true;
+                            }
+                            const escaped = escapeForJsonString(nativeToolResponseText);
+                            emitDelta(escaped);
+                          }
+                          nativeToolPendingText = '';
+                        } else if (nativeToolTextIsJson) {
+                          // JSON passthrough — emit text as-is
+                          emitDelta(parsed.delta.text);
+                        } else {
+                          // Plain text wrapping — escape for JSON string embedding
+                          const escaped = escapeForJsonString(parsed.delta.text);
+                          emitDelta(escaped);
+                        }
                       } else if (nativeToolCurrentBlock === 'tool_use' && parsed.delta?.partial_json) {
                         nativeToolCurrentInputJson += parsed.delta.partial_json;
                       }
@@ -3415,7 +3524,9 @@ async function handleStreaming(
                   parsed.actual_model = actualModel;
                   parsed.pool_name = poolName;
                   parsed.pool_size = poolSize;
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
+                  const payload = `data: ${JSON.stringify(parsed)}\n\n`;
+                  logOutgoingSseChunk('direct-passthrough', payload);
+                  controller.enqueue(encoder.encode(payload));
                 }
               } catch (e) {
                 console.error('Error parsing streaming data:', e);
@@ -4262,7 +4373,7 @@ serve(async (req) => {
 
           if (nativeToolMode) {
             // In native tool mode, reconstruct the JSON format the agent expects:
-            // {"response": "<thinking text>", "tool_calls": [{"tool": "<name>", ...params}]}
+            // {"reasoning": "", "response": "<text>", "tool_calls": [{"tool": "<name>", ...params}]}
             let textContent = '';
             const toolUseBlocks: Array<{ name: string; input: any }> = [];
             for (const block of (data.content || [])) {
@@ -4272,8 +4383,28 @@ serve(async (req) => {
               }
             }
 
-            const reconstructedJson = reconstructAgentResponse(textContent, toolUseBlocks);
-            console.log(`🔧 [${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`);
+            // If text IS already valid JSON matching expected schema, pass through directly
+            let reconstructedJson: string;
+            try {
+              const parsed = JSON.parse(textContent);
+              if (parsed && typeof parsed === 'object' && 'response' in parsed) {
+                // Model output JSON as text — pass through, merge native tools if any
+                if (toolUseBlocks.length > 0) {
+                  const nativeTools = toolUseBlocks.map(t => ({ tool: t.name, ...t.input }));
+                  parsed.tool_calls = [...(parsed.tool_calls || []), ...nativeTools];
+                  reconstructedJson = JSON.stringify(parsed);
+                } else {
+                  reconstructedJson = textContent;
+                }
+                console.log(`🔧 [${requestId}] Native tool JSON passthrough: ${toolUseBlocks.length} native tool(s), response length: ${textContent.length}`);
+              } else {
+                reconstructedJson = reconstructAgentResponse(textContent, toolUseBlocks);
+                console.log(`🔧 [${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`);
+              }
+            } catch {
+              reconstructedJson = reconstructAgentResponse(textContent, toolUseBlocks);
+              console.log(`🔧 [${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`);
+            }
 
             const finalResponse = {
               choices: [{ message: { content: reconstructedJson } }],
@@ -4713,7 +4844,9 @@ serve(async (req) => {
                       }
                       openAIFormat.timings = timings;
 
-                      controller.enqueue(encoder.encode(`data: ${JSON.stringify(openAIFormat)}\n\n`));
+                      const payload = `data: ${JSON.stringify(openAIFormat)}\n\n`;
+                      logOutgoingSseChunk('racing-anthropic-delta', payload);
+                      controller.enqueue(encoder.encode(payload));
                       return;
                     }
 
@@ -4742,8 +4875,11 @@ serve(async (req) => {
                       console.log(`📊 Usage adjusted: ${winnerPromptTokens} input × ${modelsRaced} models = ${parsed.usage.prompt_tokens} total input tokens`);
                     }
 
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
+                    const payload = `data: ${JSON.stringify(parsed)}\n\n`;
+                    logOutgoingSseChunk('racing-passthrough', payload);
+                    controller.enqueue(encoder.encode(payload));
                   } catch (e) {
+                    logOutgoingSseChunk('racing-raw-line', `${line}\n`);
                     controller.enqueue(encoder.encode(`${line}\n`));
                   }
                 }
@@ -4783,10 +4919,14 @@ serve(async (req) => {
                       models_raced: modelsRaced,
                       timings
                     };
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(usageChunk)}\n\n`));
+                    const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
+                    logOutgoingSseChunk('racing-anthropic-usage', payload);
+                    controller.enqueue(encoder.encode(payload));
                     console.log(`📊 Anthropic usage adjusted: ${anthropicInputTokens} input × ${modelsRaced} models = ${adjustedInputTokens} total input tokens`);
                   }
-                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                  const donePayload = 'data: [DONE]\n\n';
+                  logOutgoingSseChunk('racing-done', donePayload);
+                  controller.enqueue(encoder.encode(donePayload));
                   controller.close();
                   break;
                 }
@@ -5102,4 +5242,3 @@ serve(async (req) => {
     });
   }
 });
-

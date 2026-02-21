@@ -357,9 +357,7 @@ REQUIRED OUTPUT - gather this data before calling attempt_completion:
 # Output Format
 
 Return valid JSON:
-```json
 {"reasoning": "internal scratchpad (private)", "response": "log text", "tool_calls": []}
-```
 - reasoning: never shown to user
 - response: internal log, may or may not surface in UI
 - tool_calls: must match registered schemas, [] if none

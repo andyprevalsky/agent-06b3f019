@@ -1402,9 +1402,10 @@ async def execute_action(
                 # Browser-use highlight (fire-and-forget)
                 asyncio.create_task(session.highlight_interaction_element(element))
 
-                # Human-like click to focus, then type
+                # Human-like click to focus, clear existing content, then type
                 if humanizer and element_coords:
                     await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
+                    await humanizer.press_key('Control+a')
                     await humanizer.type_text(text)
                 else:
                     # Fallback to browser-use
@@ -1412,7 +1413,11 @@ async def execute_action(
                         logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use TypeTextEvent")
                     else:
                         logger.error(f"⚠️ HUMANIZATION FALLBACK: No coordinates for element {index}, using browser-use TypeTextEvent (not humanized!)")
-                    event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text))
+                    # Select all existing content before typing to clear the field
+                    clear_event = session.event_bus.dispatch(SendKeysEvent(keys='Control+a'))
+                    await clear_event
+                    await clear_event.event_result(raise_if_any=True, raise_if_none=False)
+                    event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text, clear=True))
                     await event
                     await event.event_result(raise_if_any=True, raise_if_none=False)
 
@@ -1433,9 +1438,10 @@ async def execute_action(
                 # Browser-use highlight (fire-and-forget)
                 asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
 
-                # Human-like click to focus, then type
+                # Human-like click to focus, clear existing content, then type
                 if humanizer:
                     await humanizer.click_at_coords(int(coords["x"]), int(coords["y"]))
+                    await humanizer.press_key('Control+a')
                     await humanizer.type_text(text)
                 else:
                     logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use events")
@@ -1447,6 +1453,10 @@ async def execute_action(
                     await click_event
                     await click_event.event_result(raise_if_any=True, raise_if_none=False)
                     await asyncio.sleep(0.1)
+                    # Select all existing content before typing to clear the field
+                    clear_event = session.event_bus.dispatch(SendKeysEvent(keys='Control+a'))
+                    await clear_event
+                    await clear_event.event_result(raise_if_any=True, raise_if_none=False)
                     type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
                     await type_event
                     await type_event.event_result(raise_if_any=True, raise_if_none=False)
@@ -1461,11 +1471,16 @@ async def execute_action(
                 )
                 return {"success": True, "message": "", "typed_text": display_text}
             else:
-                # Fallback: no index or coords - type to currently focused element
+                # Fallback: no index or coords - clear and type to currently focused element
                 if humanizer:
+                    await humanizer.press_key('Control+a')
                     await humanizer.type_text(text)
                 else:
                     logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
+                    # Select all existing content before typing to clear the field
+                    clear_event = session.event_bus.dispatch(SendKeysEvent(keys='Control+a'))
+                    await clear_event
+                    await clear_event.event_result(raise_if_any=True, raise_if_none=False)
                     type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
                     await type_event
                     await type_event.event_result(raise_if_any=True, raise_if_none=False)

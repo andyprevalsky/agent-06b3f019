@@ -89,7 +89,40 @@ export class ClaudeCredentialSync {
   }
 
   /**
+   * Encrypt and upload a credentials JSON string to the backend.
+   */
+  private static async uploadCredentials(
+    credentialsJson: string,
+    accessToken: string
+  ): Promise<{ success: boolean; message?: string }> {
+    const encryptedEnvelope = this.encryptCredentials(credentialsJson);
+    const { encrypted, iv, key } = Crypto.encrypt(
+      { encryptedCredentials: encryptedEnvelope }
+    );
+
+    const response = await fetch(
+      `${config.apiUrl}/api/integrations/claude-code/credentials/upload`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ data: encrypted, iv, key }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      throw new Error(errorData?.error || `Upload failed: ${response.status}`);
+    }
+
+    return { success: true };
+  }
+
+  /**
    * Read, encrypt, and upload Claude Code credentials.
+   * Reads from macOS Keychain, encrypts, and uploads to backend.
    */
   static async syncCredentials(): Promise<{ success: boolean; message?: string }> {
     const session = await AuthService.getSession();
@@ -113,33 +146,9 @@ export class ClaudeCredentialSync {
       return { success: false, message: 'Claude Code credentials are not valid JSON' };
     }
 
-    // 2. RSA+AES-GCM encrypt the entire credentials JSON
-    const encryptedEnvelope = this.encryptCredentials(credentialsJson);
-
-    // 3. AES-256-CBC transport wrap (Crypto.encrypt handles JSON.stringify internally)
-    const { encrypted, iv, key } = Crypto.encrypt(
-      { encryptedCredentials: encryptedEnvelope }
-    );
-
-    // 4. Upload to backend
+    // 2. Encrypt and upload
     try {
-      const response = await fetch(
-        `${config.apiUrl}/api/integrations/claude-code/credentials/upload`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ data: encrypted, iv, key }),
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        throw new Error(errorData?.error || `Upload failed: ${response.status}`);
-      }
-
+      await this.uploadCredentials(credentialsJson, session.access_token);
       IntegrationCache.invalidate();
       logConsole('ClaudeCredentialSync', 'Credentials synced successfully');
       return { success: true };

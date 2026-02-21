@@ -104,6 +104,8 @@ export interface StreamingBubble {
   done: boolean;
   timeoutId?: number;
   subAgentId?: string;
+  /** True when the streaming model is Claude (Anthropic) */
+  isClaude?: boolean;
 }
 
 export interface StreamingPlan {
@@ -499,8 +501,8 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
             }
             
             // Clear streaming plan on set_plan FINISHED
-            if (message.role === 'TOOL' && 
-                message.metadata?.toolName === 'set_plan' && 
+            if (message.role === 'TOOL' &&
+                message.metadata?.toolName === 'set_plan' &&
                 message.metadata?.toolStatus === 'FINISHED') {
               setStreamingPlan(null);
             }
@@ -609,6 +611,8 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
                   timeoutId,
                   // Extract subAgentId from payload (for browser agent routing)
                   subAgentId: chunk.subAgentId ?? existing?.subAgentId,
+                  // Propagate Claude model marker for thinking animation theming
+                  isClaude: chunk.is_claude ?? existing?.isClaude ?? false,
                 });
               }
               

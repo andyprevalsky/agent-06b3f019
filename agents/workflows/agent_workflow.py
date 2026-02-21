@@ -39,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import fetch_claude_max_token_activity
     from helpers.save_tool_usage import save_tool_usage
+    from helpers.model_pricing import get_anthropic_pricing
     from helpers.tool_schemas import PLAN_PHASE_TOOLS, EXECUTE_PHASE_TOOLS
     from tools.base import ToolEvent, AssistantEvent, EventType, MessageStatus
     # Tool executors (map tool name → workflow helper)
@@ -201,6 +202,7 @@ class AgentWorkflow:
         self.input_cents_per_1k: float = 0.0  # Price per 1k input tokens in cents
         self.output_cents_per_1k: float = 0.0  # Price per 1k output tokens in cents
         self.model_pricing_cache: Dict[str, Dict[str, float]] = {}  # model -> {input_cents_per_1k, output_cents_per_1k}
+        self.actual_model: Optional[str] = None  # The model that actually served requests (from Rose response)
 
         # User customization (fetched at workflow start for dynamic name in approvals/SMS)
         self.system_name: str = "Rose"  # Default to "Rose", fetched from user settings
@@ -1533,7 +1535,7 @@ class AgentWorkflow:
             sum(self.children_tokens_out.values()),
         )
 
-    async def _on_tokens(self, tokens_in_delta: int, tokens_out_delta: int) -> None:
+    async def _on_tokens(self, tokens_in_delta: int, tokens_out_delta: int, actual_model: Optional[str] = None) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
         This enables real-time cost tracking and limit checking, not just at phase boundaries.
@@ -1542,11 +1544,30 @@ class AgentWorkflow:
         self.tokens_in += tokens_in_delta
         self.tokens_out += tokens_out_delta
 
-        # Calculate cost from tokens using stored pricing (fractional cents to avoid truncation)
-        if self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0:
+        # Track actual_model for credit billing
+        if actual_model:
+            self.actual_model = actual_model
+
+        # Use actual_model pricing if available (e.g., "-claude" suffix = $0)
+        input_rate = self.input_cents_per_1k
+        output_rate = self.output_cents_per_1k
+        if actual_model:
+            actual_pricing = get_anthropic_pricing(actual_model)
+            if actual_pricing is not None:
+                input_rate = actual_pricing["input_cents_per_1k"]
+                output_rate = actual_pricing["output_cents_per_1k"]
+                if input_rate == 0 and output_rate == 0:
+                    workflow.logger.info(
+                        f"💰 $0 cost (user Claude token): actual_model={actual_model}, "
+                        f"in={tokens_in_delta}, out={tokens_out_delta}"
+                    )
+
+        # Calculate cost from tokens using pricing (fractional cents to avoid truncation)
+        cost_cents = 0.0
+        if input_rate > 0 or output_rate > 0:
             cost_cents = (
-                (tokens_in_delta * self.input_cents_per_1k / 1000) +
-                (tokens_out_delta * self.output_cents_per_1k / 1000)
+                (tokens_in_delta * input_rate / 1000) +
+                (tokens_out_delta * output_rate / 1000)
             )
             if cost_cents > 0:
                 self.own_cost_cents += cost_cents
@@ -1557,6 +1578,24 @@ class AgentWorkflow:
 
                 # Recalculate subtree cost and check limit (for root) or signal parent
                 await self._update_cost_and_signal_parent()
+
+        # Save ToolUsage record for credit billing (with actual_model and correct cost)
+        model_for_usage = actual_model or self.model
+        try:
+            await workflow.execute_activity(
+                save_tool_usage,
+                args=[self.agent_id, self.user_id, "llm_reasoning", [{
+                    "type": "llm",
+                    "cost_cents": cost_cents,
+                    "tokens_in": tokens_in_delta,
+                    "tokens_out": tokens_out_delta,
+                    "model": model_for_usage,
+                }]],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to save LLM usage to DB: {e}")
 
     async def _update_cost_and_signal_parent(self) -> None:
         """Recalculate subtree cost/tokens and signal parent (or check limit if root)."""
@@ -1635,12 +1674,12 @@ class AgentWorkflow:
                     workflow.logger.warning(f"Failed to cascade cost_limit_reached to child: {e}")
 
     async def _persist_tree_cost(self) -> None:
-        """Persist subtree cost to DB (root only, for frontend display)."""
+        """Persist subtree cost and own cost to DB."""
         from helpers.update_tokens import update_agent_tree_cost_activity
         try:
             await workflow.execute_activity(
                 update_agent_tree_cost_activity,
-                args=[self.agent_id, int(self.subtree_cost_cents)],
+                args=[self.agent_id, int(self.subtree_cost_cents), self.own_cost_cents],
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=RetryPolicy(maximum_attempts=2)
             )

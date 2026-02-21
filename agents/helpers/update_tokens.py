@@ -87,18 +87,18 @@ async def update_agent_tokens_activity(
 async def update_agent_tree_cost_activity(
     agent_id: str,
     tree_cost_cents: int,
+    own_cost_cents: float = 0,
 ) -> None:
     """
-    Update Agent.treeCostCents in the database (for price limit feature).
-
-    Called by root agents to persist the accumulated tree cost for frontend display.
+    Update Agent.treeCostCents and ownCostCents in the database.
 
     Args:
         agent_id: Agent ID
-        tree_cost_cents: Total tree cost in cents
+        tree_cost_cents: Subtree cost in cents (for frontend display + price limit)
+        own_cost_cents: This agent's own cost in cents (actual_model-aware)
     """
     try:
-        activity.heartbeat(f"Updating tree cost for agent {agent_id}")
+        activity.heartbeat(f"Updating cost for agent {agent_id}")
 
         config = load_config()
 
@@ -107,6 +107,7 @@ async def update_agent_tree_cost_activity(
                 f"{config.backend.api_url}/api/agents/{agent_id}",
                 json={
                     "tree_cost_cents": tree_cost_cents,
+                    "own_cost_cents": own_cost_cents,
                 },
                 headers={
                     "X-API-Key": config.backend.api_key,
@@ -118,17 +119,17 @@ async def update_agent_tree_cost_activity(
             response.raise_for_status()
 
             logger.debug(
-                "Agent tree cost updated",
+                "Agent cost updated",
                 agent_id=agent_id,
-                tree_cost_cents=tree_cost_cents
+                tree_cost_cents=tree_cost_cents,
+                own_cost_cents=own_cost_cents,
             )
 
     except Exception as e:
-        # Non-fatal - just log and continue
         logger.warning(
-            f"Failed to update agent tree cost (non-fatal): {e}",
+            f"Failed to update agent cost (non-fatal): {e}",
             agent_id=agent_id,
-            tree_cost_cents=tree_cost_cents
+            tree_cost_cents=tree_cost_cents,
         )
 
 

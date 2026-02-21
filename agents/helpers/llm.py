@@ -553,6 +553,7 @@ async def call_llm_structured_streaming(
     on_attention_stream: Optional[Callable[[str, str, bool], Awaitable[None]]] = None,  # Called with (tool_call_id, message, is_question) for send_message_to_user
     on_raw_progress: Optional[Callable[[int], Awaitable[None]]] = None,  # Called with total accumulated bytes (reasoning + json)
     claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
+    on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -741,6 +742,8 @@ async def call_llm_structured_streaming(
                                 actual_model = chunk_data["actual_model"]
                                 actual_model_logged = True
                                 logger.info(f"🎯 Rose model selected: {actual_model}")
+                                if on_model_detected:
+                                    on_model_detected(actual_model)
                             if chunk_data.get("pool_name"):
                                 pool_name = chunk_data["pool_name"]
                             if chunk_data.get("pool_size"):
@@ -959,25 +962,92 @@ async def call_llm_structured_streaming(
                 explanation_text = accumulated_json[:code_block_match.start()].strip()
                 logger.info(f"📦 Extracted JSON from markdown code block, explanation={len(explanation_text)} chars")
             else:
-                # No code block - try to find raw JSON object
+                # No code block - try to find raw JSON object using balanced braces
                 json_start = accumulated_json.find('{')
-                json_end = accumulated_json.rfind('}')
-                if json_start != -1 and json_end != -1 and json_end > json_start:
+                if json_start != -1:
                     explanation_text = accumulated_json[:json_start].strip()
-                    json_content = accumulated_json[json_start:json_end + 1]
-                    logger.info(f"📦 Extracted raw JSON, explanation={len(explanation_text)} chars")
-            
+                    # Walk forward to find matching closing brace (handles nested braces)
+                    depth = 0
+                    in_string = False
+                    escape_next = False
+                    json_end = -1
+                    for i in range(json_start, len(accumulated_json)):
+                        c = accumulated_json[i]
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        if c == '\\' and in_string:
+                            escape_next = True
+                            continue
+                        if c == '"' and not escape_next:
+                            in_string = not in_string
+                            continue
+                        if in_string:
+                            continue
+                        if c == '{':
+                            depth += 1
+                        elif c == '}':
+                            depth -= 1
+                            if depth == 0:
+                                json_end = i
+                                break
+                    if json_end != -1:
+                        json_content = accumulated_json[json_start:json_end + 1]
+                        logger.info(f"📦 Extracted raw JSON, explanation={len(explanation_text)} chars")
+
             parsed_content = json.loads(json_content)
+
+            # Defensive recovery path: malformed upstream streams can sometimes wrap
+            # another agent JSON payload inside response text. If outer tool_calls are
+            # empty but nested tool_calls exist, unwrap and recover them.
+            outer_tool_calls = parsed_content.get("tool_calls")
+            outer_response = parsed_content.get("response")
+            if (not outer_tool_calls) and isinstance(outer_response, str):
+                nested = _extract_nested_agent_json_blob(outer_response)
+                if isinstance(nested, dict) and isinstance(nested.get("tool_calls"), list):
+                    normalized_nested_tools = []
+                    for tc in nested.get("tool_calls", []):
+                        if not isinstance(tc, dict):
+                            continue
+                        if isinstance(tc.get("tool"), str):
+                            normalized_nested_tools.append(tc)
+                            continue
+                        # Legacy/wrapped shape: {"name":"tool_name","arguments":{...}}
+                        if isinstance(tc.get("name"), str):
+                            args = tc.get("arguments")
+                            if isinstance(args, dict):
+                                normalized_nested_tools.append({"tool": tc["name"], **args})
+                            else:
+                                normalized_nested_tools.append({"tool": tc["name"]})
+
+                    if normalized_nested_tools:
+                        parsed_content["tool_calls"] = normalized_nested_tools
+                        nested_response = nested.get("response")
+                        if isinstance(nested_response, str):
+                            parsed_content["response"] = nested_response
+                        nested_reasoning = nested.get("reasoning")
+                        if isinstance(nested_reasoning, str) and nested_reasoning.strip():
+                            existing_reasoning = parsed_content.get("reasoning")
+                            if not isinstance(existing_reasoning, str) or not existing_reasoning.strip():
+                                parsed_content["reasoning"] = nested_reasoning
+                        logger.warning(
+                            f"Recovered nested tool_calls from wrapped response text: {len(normalized_nested_tools)} call(s)"
+                        )
             
             # Prepend explanation/reasoning to response so it shows in the same section
-            combined_reasoning = ""
-            if accumulated_reasoning:
-                combined_reasoning = accumulated_reasoning.strip()
+            combined_reasoning_parts = []
+            if accumulated_reasoning and accumulated_reasoning.strip():
+                combined_reasoning_parts.append(accumulated_reasoning.strip())
+
+            json_reasoning = parsed_content.get("reasoning")
+            if isinstance(json_reasoning, str) and json_reasoning.strip():
+                if not combined_reasoning_parts or json_reasoning.strip() != combined_reasoning_parts[0]:
+                    combined_reasoning_parts.append(json_reasoning.strip())
+
             if explanation_text:
-                if combined_reasoning:
-                    combined_reasoning += "\n\n" + explanation_text
-                else:
-                    combined_reasoning = explanation_text
+                combined_reasoning_parts.append(explanation_text)
+
+            combined_reasoning = "\n\n".join(part for part in combined_reasoning_parts if part)
             
             if combined_reasoning and "response" in parsed_content:
                 parsed_content["response"] = combined_reasoning + "\n\n" + parsed_content["response"]
@@ -1235,7 +1305,7 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
     Extract streamable text from reasoning and partial JSON content.
     
     Rose models output: [explanation text]```json\n{...}\n```
-    We extract both the explanation and the response field.
+    We extract explanation text plus JSON `reasoning` and `response` fields.
     
     Note: send_message_to_user.message is NOT streamed here because it creates
     a separate TOOL message in the DB - streaming it would cause duplicate display.
@@ -1245,7 +1315,7 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
         json_content: Accumulated content which may include explanation + markdown code block
     
     Returns:
-        Combined text: "explanation\n\nresponse" (whichever parts exist)
+        Combined text: "reasoning\n\nexplanation\n\nresponse" (whichever parts exist)
     """
     reasoning = reasoning.strip() if reasoning else ""
     
@@ -1270,6 +1340,7 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
             json_only = json_content[json_start:]
     
     response_text = ""
+    json_reasoning = ""
     
     # Try to extract response field from the JSON portion
     # First try complete JSON parse
@@ -1278,8 +1349,18 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
         clean_json = re.sub(r'^```(?:json)?\s*', '', json_only)
         clean_json = re.sub(r'\s*```$', '', clean_json)
         data = json.loads(clean_json)
-        response_text = data.get("response", "")
+        if isinstance(data, dict):
+            json_reasoning = data.get("reasoning", "") or ""
+            response_text = data.get("response", "") or ""
     except json.JSONDecodeError:
+        # Try regex extraction for partial reasoning
+        reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"?', json_only)
+        if reasoning_match:
+            try:
+                json_reasoning = json.loads(f'"{reasoning_match.group(1)}"')
+            except json.JSONDecodeError:
+                json_reasoning = reasoning_match.group(1)
+
         # Try regex extraction for partial JSON
         match = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)"?', json_only)
         if match:
@@ -1288,10 +1369,14 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
             except json.JSONDecodeError:
                 response_text = match.group(1)
     
-    # Combine all parts: reasoning + explanation + response
+    # Combine all parts: stream reasoning + json reasoning + explanation + response
     parts = []
     if reasoning:
         parts.append(reasoning)
+    if json_reasoning:
+        json_reasoning_str = str(json_reasoning) if not isinstance(json_reasoning, str) else json_reasoning
+        if not reasoning or json_reasoning_str.strip() != reasoning.strip():
+            parts.append(json_reasoning_str)
     if explanation:
         parts.append(explanation)
     if response_text:
@@ -1299,6 +1384,37 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
         parts.append(str(response_text) if not isinstance(response_text, str) else response_text)
     
     return "\n\n".join(parts) if parts else None
+
+
+def _extract_nested_agent_json_blob(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Best-effort extraction of a nested agent JSON object from text.
+    Handles raw JSON and markdown-fenced ```json blocks.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    trimmed = text.strip()
+    candidates: List[str] = [trimmed]
+
+    fence_match = re.search(r'```(?:json)?\s*(\{[\s\S]*\})\s*```', trimmed)
+    if fence_match:
+        candidates.insert(0, fence_match.group(1))
+    else:
+        start = trimmed.find('{')
+        end = trimmed.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            candidates.append(trimmed[start:end + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    return None
 
 
 @activity.defn
@@ -1865,10 +1981,20 @@ async def call_llm_activity(
         # Create dynamic action model
         AgentActionModel = create_agent_action_model(tool_names)
         
+        # _is_claude detected from actual_model in stream response, not from input model/token
+        _is_claude = [False]  # Mutable list so closures can update it
+
+        def on_model_detected(actual_model: str):
+            # "-claude" suffix = user's own Claude token ($0, skipped racing)
+            # e.g. "claude-sonnet-4-6-claude", "claude-opus-4-6-claude"
+            is_user_claude = actual_model.endswith("-claude")
+            _is_claude[0] = is_user_claude
+            logger.info(f"🎨 Claude detection: actual_model={actual_model}, is_claude={is_user_claude}")
+
         # Streaming callback - posts directly to Supabase Realtime
         sequence = [0]
         last_text = [""]
-        
+
         async def on_chunk(text_so_far: str, tokens: int):
             _safe_heartbeat(f"LLM streaming... {len(text_so_far)} chars")
             if agent_id and stream_id:
@@ -1881,10 +2007,11 @@ async def call_llm_activity(
                         done=False,
                         sequence=sequence[0],
                         sub_agent_id=task_id,
+                        is_claude=_is_claude[0],
                     )
                     sequence[0] += 1
                 last_text[0] = text_so_far
-        
+
         # Callback for early tool detection IN_PROGRESS messages
         async def on_tool_detected_callback(tool_name: str, tool_call_id: str):
             if agent_id and stream_id:
@@ -1895,7 +2022,7 @@ async def call_llm_activity(
                     tool_name=tool_name,
                     title=f"Starting {tool_name}...",
                 )
-        
+
         result, usage, detected_tools_ordered = await call_llm_structured_streaming(
             messages=messages,
             model=model,
@@ -1907,6 +2034,7 @@ async def call_llm_activity(
             agent_id=agent_id,
             on_tool_detected=on_tool_detected_callback,
             claude_token=claude_token,
+            on_model_detected=on_model_detected,
         )
         
         # Send final done=True chunk
@@ -1922,6 +2050,7 @@ async def call_llm_activity(
                     done=True,
                     sequence=sequence[0],
                     sub_agent_id=task_id,
+                    is_claude=_is_claude[0],
                 )
             except Exception as e:
                 logger.warning(f"Final stream chunk failed (non-fatal): {e}")

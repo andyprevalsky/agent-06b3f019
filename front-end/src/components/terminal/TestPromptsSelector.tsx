@@ -140,7 +140,7 @@ For any services that require a API Key or Credential, mock the service for now 
   {
     title: 'Raise My Round',
     description: 'Fundraising outreach with VC/angel CSV and application references',
-    prompt: `Raise me my round
+    prompt: `Reach out to every fund / angel / vc on my behalf.
 I've also attached a list of angels & vcs to contact, it is not comprehensive though so please make sure the process is exhaustive.
 
 Raising 500k -> 3M

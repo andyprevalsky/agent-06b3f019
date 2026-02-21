@@ -58,51 +58,19 @@ export async function calculateAvailableCredits(userId: string): Promise<number>
 }
 
 /**
- * Calculate total usage cost for a user based on actual model pricing
- * Counts ALL agents (including deleted ones) - usage is usage regardless of deletion
- * Includes both primary LLM costs and tool usage costs
+ * Calculate total usage cost for a user.
+ * All costs (LLM reasoning + tool usage) are tracked in ToolUsage records
+ * with correct per-call pricing based on actual_model.
+ * "-claude" suffix models have $0 cost (user's own Claude token).
  */
 export async function calculateTotalUsage(userId: string): Promise<number> {
-  // Get ALL agents for this user (including deleted)
-  const agents = await prisma.agent.findMany({
+  const result = await prisma.toolUsage.aggregate({
     where: { userId },
-    select: {
-      id: true,
-      tokensIn: true,
-      tokensOut: true,
-      tokenInPriceMicrodollars: true,
-      tokenOutPriceMicrodollars: true,
-    }
+    _sum: { totalCostCents: true },
   });
 
-  let totalCostMicrodollars = 0;
-  
-  for (const agent of agents) {
-    // Calculate cost from actual pricing saved at agent creation
-    // Formula: (tokens * microdollars_per_token) = total_microdollars
-    if (agent.tokenInPriceMicrodollars && agent.tokensIn > 0) {
-      totalCostMicrodollars += agent.tokensIn * agent.tokenInPriceMicrodollars;
-    }
-    
-    if (agent.tokenOutPriceMicrodollars && agent.tokensOut > 0) {
-      totalCostMicrodollars += agent.tokensOut * agent.tokenOutPriceMicrodollars;
-    }
-  }
-
-  // Add tool usage costs (stored in cents, need to convert to microdollars)
-  // Query directly by userId (no join needed - more efficient!)
-  const toolUsages = await prisma.toolUsage.findMany({
-    where: { userId },
-    select: { totalCostCents: true }
-  });
-
-  const toolCostCents = toolUsages.reduce((sum, usage) => sum + usage.totalCostCents, 0);
-  const toolCostMicrodollars = toolCostCents * 10_000; // cents to microdollars: cents * 10,000
-
-  totalCostMicrodollars += toolCostMicrodollars;
-
-  // Convert microdollars to dollars: microdollars / 1,000,000 = dollars
-  return totalCostMicrodollars / 1_000_000;
+  const totalCostCents = result._sum.totalCostCents ?? 0;
+  return totalCostCents / 100; // cents to dollars
 }
 
 /**

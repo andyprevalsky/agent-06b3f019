@@ -299,6 +299,9 @@ export async function callGeneratorLlm(params: {
     },
   });
 
+  // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
+  let isClaude = false;
+
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
   let accumulatedJson = ''; // From delta.content (JSON structure)
@@ -309,6 +312,12 @@ export async function callGeneratorLlm(params: {
   // Process stream chunks - stream every delta immediately
   for await (const chunk of stream) {
     chunkCount++;
+
+    // Detect user's Claude token usage from "-claude" suffix in actual_model
+    const actualModel = chunk.actual_model;
+    if (!isClaude && actualModel?.endsWith('-claude')) {
+      isClaude = true;
+    }
 
     // Get delta from chunk
     const delta = chunk.choices[0]?.delta;
@@ -339,7 +348,8 @@ export async function callGeneratorLlm(params: {
           streamId,
           newText,
           false,
-          sequence++
+          sequence++,
+          isClaude
         );
       }
     }
@@ -359,7 +369,8 @@ export async function callGeneratorLlm(params: {
     streamId,
     '',
     true,
-    sequence
+    sequence,
+    isClaude
   );
 
   const streamDuration = Date.now() - startTime;

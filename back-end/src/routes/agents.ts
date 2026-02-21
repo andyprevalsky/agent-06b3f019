@@ -1300,6 +1300,7 @@ const updateAgentSchema = z.object({
   response_schema: ResponseSchemaSchema.optional(), // For storing generated schema during set_plan
   price_limit_cents: z.number().int().min(1).optional(), // User sets this (min 1 cent)
   tree_cost_cents: z.number().int().min(0).optional(), // Workflow updates this
+  own_cost_cents: z.number().min(0).optional(), // Workflow updates this (actual_model-aware cost)
   write_lock_enabled: z.boolean().optional(), // Write lock for browser agent actions
   status: z.enum(['STARTING_UP', 'ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']).optional(), // For tree state status updates
 });
@@ -1349,6 +1350,9 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
     }
     if (body.tree_cost_cents !== undefined) {
       agentUpdateData.treeCostCents = body.tree_cost_cents;
+    }
+    if (body.own_cost_cents !== undefined) {
+      agentUpdateData.ownCostCents = body.own_cost_cents;
     }
     if (body.status !== undefined) {
       agentUpdateData.status = body.status;

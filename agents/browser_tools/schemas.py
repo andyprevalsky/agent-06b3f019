@@ -46,14 +46,14 @@ class ClickTool(BaseModel):
 
 
 class InputTextTool(BaseModel):
-    """Type text into an input element. Use for forms, search boxes, etc."""
-    
+    """Type text into an input element. Use for forms, search boxes, etc. This clears any existing content in the field before typing the new text."""
+
     tool: Literal["input_text"]
     index: int = Field(
         description="Element index of the input field from the DOM tree"
     )
     text: str = Field(
-        description="Text to type into the field"
+        description="Text to type into the field. Replaces any existing content in the field."
     )
 
 
