@@ -1,0 +1,1135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rose Labs - Pitch Deck</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  /* ========== RESET & BASE ========== */
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-primary: #f9f9fb;
+    --bg-surface: #f2f3f6;
+    --bg-muted: #ecedf0;
+    --border-color: #e5e7eb;
+    --text-primary: hsl(240, 15%, 8%);
+    --text-secondary: hsl(240, 8%, 30%);
+    --text-muted: hsl(240, 8%, 45%);
+    --rose-1: #FE7503;
+    --rose-2: #FC585C;
+    --rose-3: #FD5776;
+    --rose-4: #E062CC;
+    --rose-5: #A76CED;
+    --rose-6: #7A6BEC;
+    --rose-gradient: linear-gradient(135deg, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC);
+    --font-main: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --slide-w: 1280px;
+    --slide-h: 720px;
+    --tile-size: 143px;
+  }
+
+  html { background: #18181b; }
+
+  body {
+    font-family: var(--font-main);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 40px;
+    padding: 40px 0;
+  }
+
+  /* ========== SLIDE CONTAINER ========== */
+  .slide {
+    width: var(--slide-w);
+    height: var(--slide-h);
+    background: var(--bg-primary);
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+    border-radius: 8px;
+    box-shadow: 0 25px 60px rgba(0,0,0,0.3);
+  }
+
+  /* ========== TILE BACKGROUND ========== */
+  .slide::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(to right, var(--border-color) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--border-color) 1px, transparent 1px);
+    background-size: var(--tile-size) var(--tile-size);
+    opacity: 0.5;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Diamond accents at tile intersections */
+  .slide::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(circle 3px at center, var(--border-color) 2px, transparent 2px);
+    background-size: var(--tile-size) var(--tile-size);
+    background-position: -0.5px -0.5px;
+    opacity: 0.6;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .slide-content {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    padding: 64px 80px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ========== SLIDE NUMBER ========== */
+  .slide-number {
+    position: absolute;
+    bottom: 24px;
+    right: 32px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    z-index: 2;
+  }
+
+  /* ========== TYPOGRAPHY ========== */
+  .slide-title {
+    font-size: 42px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    color: var(--text-primary);
+  }
+
+  .slide-subtitle {
+    font-size: 18px;
+    font-weight: 400;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-top: 12px;
+  }
+
+  .rose-text {
+    background: var(--rose-gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .rose-accent {
+    width: 4px;
+    height: 24px;
+    background: var(--rose-gradient);
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  /* ========== PRINT / PDF ========== */
+  @media print {
+    html { background: white; }
+    body { padding: 0; gap: 0; }
+    .slide {
+      border-radius: 0;
+      box-shadow: none;
+      page-break-after: always;
+      page-break-inside: avoid;
+    }
+    .slide:last-child { page-break-after: avoid; }
+  }
+
+  @page {
+    size: 1280px 720px;
+    margin: 0;
+  }
+
+  /* ========== SLIDE 1: TITLE ========== */
+  .s1-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    height: 100%;
+    padding: 0;
+  }
+
+  .s1-left {
+    padding: 64px 60px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    position: relative;
+  }
+
+  .s1-logo {
+    font-size: 72px;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1;
+  }
+
+  .s1-logo-dot {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--rose-gradient);
+    margin-bottom: 8px;
+  }
+
+  .s1-tagline {
+    font-size: 19px;
+    font-weight: 400;
+    color: var(--text-secondary);
+    margin-top: 20px;
+    line-height: 1.5;
+  }
+
+  .s1-right {
+    background: var(--bg-surface);
+    padding: 64px 60px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 40px;
+    border-left: 1px solid var(--border-color);
+  }
+
+  .s1-headline {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .s1-headline-text {
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--text-primary);
+    line-height: 1.4;
+  }
+
+  .s1-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .s1-name {
+    font-size: 16px;
+    font-weight: 700;
+  }
+
+  .s1-detail {
+    font-size: 14px;
+    color: var(--text-muted);
+  }
+
+  .s1-detail-rose {
+    font-size: 14px;
+    color: var(--rose-2);
+    font-weight: 500;
+  }
+
+  /* ========== SLIDE 2: COMPETITIVE LANDSCAPE ========== */
+  .s2-chart-area {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-top: 24px;
+  }
+
+  .s2-chart {
+    position: relative;
+    width: 560px;
+    height: 440px;
+  }
+
+  .s2-axis-y {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 40px;
+    width: 2px;
+    background: var(--border-color);
+  }
+
+  .s2-axis-x {
+    position: absolute;
+    bottom: 40px;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--border-color);
+  }
+
+  .s2-axis-label {
+    position: absolute;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .s2-label-y-top { top: -4px; left: 12px; }
+  .s2-label-y-bottom { bottom: 48px; left: 12px; }
+  .s2-label-x-left { bottom: 16px; left: 12px; }
+  .s2-label-x-right { bottom: 16px; right: 0; }
+
+  .s2-arrow-y {
+    position: absolute;
+    left: -3px;
+    top: -10px;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 8px solid var(--border-color);
+  }
+
+  .s2-arrow-x {
+    position: absolute;
+    right: -10px;
+    bottom: 37px;
+    width: 0;
+    height: 0;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    border-left: 8px solid var(--border-color);
+  }
+
+  .s2-point {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    transform: translate(-50%, -50%);
+  }
+
+  .s2-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2.5px solid var(--text-primary);
+    background: white;
+  }
+
+  .s2-dot-rose {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--rose-gradient);
+    box-shadow: 0 0 0 3px rgba(253, 87, 118, 0.2);
+  }
+
+  .s2-point-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-primary);
+    white-space: nowrap;
+  }
+
+  .s2-point-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+    max-width: 140px;
+    line-height: 1.3;
+  }
+
+  .s2-point-label-rose {
+    font-size: 14px;
+    font-weight: 800;
+    background: var(--rose-gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    white-space: nowrap;
+  }
+
+  /* side legend */
+  .s2-body {
+    display: flex;
+    gap: 48px;
+    flex: 1;
+    margin-top: 24px;
+  }
+
+  .s2-legend {
+    width: 340px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    justify-content: center;
+  }
+
+  .s2-legend-item {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .s2-legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    margin-top: 5px;
+    flex-shrink: 0;
+  }
+
+  .s2-legend-dot-rose {
+    background: var(--rose-gradient);
+    width: 10px;
+    height: 10px;
+  }
+
+  .s2-legend-name {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+  }
+
+  .s2-legend-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  /* ========== SLIDE 3: HOW WE WIN ========== */
+  .s3-items {
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    margin-top: 36px;
+    flex: 1;
+  }
+
+  .s3-item {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+  }
+
+  .s3-num {
+    font-size: 32px;
+    font-weight: 800;
+    background: var(--rose-gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    line-height: 1;
+    flex-shrink: 0;
+    width: 40px;
+  }
+
+  .s3-item-content {
+    flex: 1;
+  }
+
+  .s3-item-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+  }
+
+  .s3-item-body {
+    font-size: 15px;
+    color: var(--text-secondary);
+    line-height: 1.55;
+  }
+
+  .s3-link {
+    color: var(--rose-2);
+    text-decoration: none;
+    font-weight: 500;
+  }
+
+  .s3-link:hover { text-decoration: underline; }
+
+  /* ========== SLIDE 4: PROGRESS ========== */
+  .s4-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .s4-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: 100px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .s4-badge-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #22c55e;
+  }
+
+  .s4-items {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    margin-top: 40px;
+    flex: 1;
+  }
+
+  .s4-item {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+  }
+
+  .s4-bullet {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .s4-item-content {
+    flex: 1;
+  }
+
+  .s4-item-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 3px;
+  }
+
+  .s4-item-body {
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.45;
+  }
+
+  /* ========== SLIDE 5: TEAM ========== */
+  .s5-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 48px;
+    max-width: 700px;
+    margin: 0 auto;
+    flex: 1;
+    margin-top: 36px;
+    align-items: start;
+  }
+
+  .s5-person {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+  }
+
+  .s5-photo-row {
+    display: flex;
+    align-items: center;
+    gap: 32px;
+  }
+
+  .s5-photo {
+    width: 180px;
+    height: 180px;
+    border-radius: 50%;
+    border: 3px solid var(--border-color);
+    flex-shrink: 0;
+    object-fit: cover;
+    object-position: center top;
+  }
+
+  .s5-name-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .s5-name {
+    font-size: 38px;
+    font-weight: 800;
+    color: var(--text-primary);
+  }
+
+  .s5-role {
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--rose-2);
+  }
+
+  .s5-bullets {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding-left: 0;
+  }
+
+  .s5-bullet {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    font-size: 19px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+
+  .s5-bullet-arrow {
+    color: var(--rose-2);
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .s5-bullet strong {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  /* ========== SLIDE 6: THE RAISE ========== */
+  .s6-layout {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    text-align: center;
+    gap: 40px;
+    padding: 64px 80px;
+  }
+
+  .s6-amount {
+    font-size: 80px;
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1;
+  }
+
+  .s6-valuation {
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-top: 8px;
+  }
+
+  .s6-divider {
+    width: 80px;
+    height: 3px;
+    background: var(--rose-gradient);
+    border-radius: 2px;
+  }
+
+  .s6-uses {
+    display: flex;
+    gap: 64px;
+  }
+
+  .s6-use {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .s6-use-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+  }
+
+  .s6-use-label {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .s6-use-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    max-width: 180px;
+    line-height: 1.4;
+  }
+
+  /* ========== SLIDE 7: CLOSING ========== */
+  .s7-layout {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    height: 100%;
+    padding: 0;
+  }
+
+  .s7-left {
+    padding: 64px 60px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .s7-headline {
+    font-size: 48px;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+  }
+
+  .s7-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 40px;
+  }
+
+  .s7-logo-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--rose-gradient);
+  }
+
+  .s7-logo-text {
+    font-size: 18px;
+    font-weight: 800;
+  }
+
+  .s7-right {
+    background: var(--bg-surface);
+    border-left: 1px solid var(--border-color);
+    padding: 64px 60px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 16px;
+  }
+
+  .s7-contact-email {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--rose-2);
+  }
+
+  .s7-contact-item {
+    font-size: 16px;
+    color: var(--text-secondary);
+  }
+
+  .s7-divider {
+    width: 100%;
+    height: 1px;
+    background: var(--border-color);
+    margin: 8px 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== SLIDE 1: TITLE ==================== -->
+<section class="slide">
+  <div class="slide-content s1-layout">
+    <div class="s1-left">
+      <div>
+        <div class="s1-logo-dot"></div>
+        <div class="s1-logo">Rose<br>Labs</div>
+        <div class="s1-tagline">Personal Superintelligence</div>
+      </div>
+    </div>
+    <div class="s1-right">
+      <div class="s1-headline">
+        <div class="rose-accent"></div>
+        <div class="s1-headline-text">Building Personal Agentic<br>Superintelligence.</div>
+      </div>
+      <div class="s1-info">
+        <div class="s1-name">Andy Prevalsky</div>
+        <div class="s1-detail-rose">Founder</div>
+        <div class="s1-detail">andy@roselabs.ai</div>
+        <div style="margin-top: 12px;">
+          <div class="label">San Francisco</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">01</div>
+</section>
+
+<!-- ==================== SLIDE 2: FRAMING ==================== -->
+<section class="slide">
+  <div class="slide-content" style="padding: 0;">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; height: 100%;">
+
+      <!-- Left: The Problem -->
+      <div style="padding: 64px 48px; display: flex; flex-direction: column; justify-content: center;">
+        <div class="slide-title" style="font-size: 34px; margin-bottom: 16px;">Current AI Systems Have Hit a Fundamental Scaling Limit</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 24px;">
+          <div class="rose-accent"></div>
+          <div style="font-size: 15px; color: var(--text-secondary); line-height: 1.5;">Monolithic and unable to parallelize intelligence.</div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
+            <span>Monolithic models function as single, indivisible units of compute.</span>
+          </div>
+          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
+            <span>Pre & post training returns are starting to diminish.</span>
+          </div>
+          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
+            <span>Super-Intelligence is not a model that can one-shot the perfect answer in a vacuum without real-world feedback. Super-Intelligence is a system that can explore its environment with mathematical precision.</span>
+          </div>
+          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
+            <span>This is a fundamental architectural constraint, not just a compute problem.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: The Solution -->
+      <div style="padding: 64px 48px; background: var(--bg-surface); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; justify-content: center;">
+        <div class="slide-title" style="font-size: 34px; margin-bottom: 16px;">Mass Agent Networks Are the Evolutionary Leap to Multicellular AI</div>
+        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 24px;">
+          <div class="rose-accent"></div>
+          <div style="font-size: 15px; color: var(--text-secondary); line-height: 1.5;">Minimizes costs while maximizing parallelizeability.</div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 14px; margin-top: 8px;">
+          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
+            <span>Divide complex tasks into small, tractable components</span>
+          </div>
+          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
+            <span>Run thousands of reasoning paths in parallel</span>
+          </div>
+          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
+            <span>Cross-verify work to eliminate errors and drift</span>
+          </div>
+          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
+            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
+            <span>Self-organize into higher-order structures</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  <div class="slide-number">02</div>
+</section>
+
+<!-- ==================== SLIDE 3: COMPETITIVE LANDSCAPE ==================== -->
+<section class="slide">
+  <div class="slide-content">
+    <div class="slide-title">The Competitive Landscape</div>
+    <div class="s2-body">
+      <div class="s2-chart-area" style="flex: 1;">
+        <div class="s2-chart">
+          <!-- Axes -->
+          <div class="s2-axis-y"></div>
+          <div class="s2-axis-x"></div>
+          <div class="s2-arrow-y"></div>
+          <div class="s2-arrow-x"></div>
+
+          <!-- Axis Labels -->
+          <div class="s2-axis-label s2-label-y-top">Multi-Agent Scalability</div>
+          <div class="s2-axis-label s2-label-x-right">Consumer Readiness</div>
+
+          <!-- Cursor: highest multi-agent, lowest consumer -->
+          <div class="s2-point" style="left: 10%; top: 12%;">
+            <div class="s2-point-label">Cursor</div>
+            <div class="s2-dot"></div>
+          </div>
+
+          <!-- Claude Code: high multi-agent, low consumer -->
+          <div class="s2-point" style="left: 22%; top: 24%;">
+            <div class="s2-point-label">Claude Code</div>
+            <div class="s2-dot"></div>
+          </div>
+
+          <!-- OAI / OpenClaw: high consumer, mid multi-agent -->
+          <div class="s2-point" style="left: 65%; top: 45%;">
+            <div class="s2-point-label">OAI / OpenClaw</div>
+            <div class="s2-dot"></div>
+          </div>
+
+          <!-- DoAnything: high consumer, low multi-agent -->
+          <div class="s2-point" style="left: 80%; top: 75%;">
+            <div class="s2-point-label">DoAnything</div>
+            <div class="s2-dot"></div>
+          </div>
+
+          <!-- Rose Labs: high multi-agent + high consumer (top right) -->
+          <div class="s2-point" style="left: 78%; top: 8%;">
+            <div class="s2-point-label-rose">Rose Labs</div>
+            <div class="s2-dot-rose"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="s2-legend">
+        <div class="s2-legend-item">
+          <div class="s2-legend-dot"></div>
+          <div>
+            <div class="s2-legend-name">Cursor</div>
+            <div class="s2-legend-desc">Strongest mass agent network, but farthest from general consumer use. Code-only.</div>
+          </div>
+        </div>
+        <div class="s2-legend-item">
+          <div class="s2-legend-dot"></div>
+          <div>
+            <div class="s2-legend-name">Claude Code</div>
+            <div class="s2-legend-desc">Developer focused & starting to produce agent networks that can coordinate to solve long-horizon problems.</div>
+          </div>
+        </div>
+        <div class="s2-legend-item">
+          <div class="s2-legend-dot"></div>
+          <div>
+            <div class="s2-legend-name">OAI / OpenClaw</div>
+            <div class="s2-legend-desc">Strong consumer mindshare, but still have to work through privacy concerns, tool integrations, and agent network scaling.</div>
+          </div>
+        </div>
+        <div class="s2-legend-item">
+          <div class="s2-legend-dot"></div>
+          <div>
+            <div class="s2-legend-name">DoAnything</div>
+            <div class="s2-legend-desc">Consumer-friendly, but lack context syncs and technical depth.</div>
+          </div>
+        </div>
+        <div class="s2-legend-item">
+          <div class="s2-legend-dot s2-legend-dot-rose"></div>
+          <div>
+            <div class="s2-legend-name" style="background: var(--rose-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Rose Labs</div>
+            <div class="s2-legend-desc">Stable mass agent network execution, SOTA task decomposition, out of the box tool integrations, a product anyone can set up in &lt;&nbsp;5&nbsp;minutes.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">03</div>
+</section>
+
+<!-- ==================== SLIDE 4: HOW WE WIN ==================== -->
+<section class="slide">
+  <div class="slide-content">
+    <div class="slide-title">How We Win</div>
+    <div class="s3-items">
+      <div class="s3-item">
+        <div class="s3-num">01</div>
+        <div class="s3-item-content">
+          <div class="s3-item-title">First Consumer-Ready Mass Agent Network</div>
+          <div class="s3-item-body">
+            Rose Labs has built a stable harness that can spawn 100s of agents for any given problem, handle failures gracefully, terminate execution when the goal is actually accomplished, and do this in a non-cost-prohibitive way. Out-of-the-box tool integrations for real-world tasks.
+            <br><a class="s3-link" href="https://roselabs.ai">roselabs.ai</a>
+          </div>
+        </div>
+      </div>
+      <div class="s3-item">
+        <div class="s3-num">02</div>
+        <div class="s3-item-content">
+          <div class="s3-item-title">Narrow Research Focus on Task Decomposition</div>
+          <div class="s3-item-body">
+            The remaining bottleneck to super-intelligence is task decomposition. Rose-Decompose outperforms every frontier model at breaking complex goals into parallelizable sub-tasks. 45x higher success rate than Opus 4.6 on deep recursive plans.
+            <br><a class="s3-link" href="https://www.roselabs.ai/research/tool-orchestrator">Read the research</a>
+          </div>
+        </div>
+      </div>
+      <div class="s3-item">
+        <div class="s3-num">03</div>
+        <div class="s3-item-content">
+          <div class="s3-item-title">Solving Agent-to-Agent Communication</div>
+          <div class="s3-item-body">
+            Super-intelligence requires context to be shared between users in order to accurately accomplish a large chunk of user goals. Rose Labs will be the first team to solve the two main challenges here: context-management and privacy preservation.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">04</div>
+</section>
+
+<!-- ==================== SLIDE 5: PROGRESS ==================== -->
+<section class="slide">
+  <div class="slide-content">
+    <div style="display: flex; align-items: center; gap: 20px;">
+      <div class="slide-title">Built in &lt; 90 Days</div>
+      <div class="s4-badge">
+        <div class="s4-badge-dot"></div>
+        Live at roselabs.ai
+      </div>
+    </div>
+    <div class="slide-subtitle">Real users. Real tasks. Shipping fast.</div>
+
+    <div class="s4-items">
+      <div class="s4-item">
+        <div class="s4-bullet">01</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">Live Product</div>
+          <div class="s4-item-body">Real users completing real tasks on roselabs.ai. Autonomous agents running in production daily.</div>
+        </div>
+      </div>
+      <div class="s4-item">
+        <div class="s4-bullet">02</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">Computer-to-Cloud Sync</div>
+          <div class="s4-item-body">Requisite infrastructure for scaling agent parallelism. Seamless state sync between local and cloud execution environments.</div>
+        </div>
+      </div>
+      <div class="s4-item">
+        <div class="s4-bullet">03</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">SOTA Task Decomposer</div>
+          <div class="s4-item-body">Rose-Decompose outperforms every frontier model at breaking complex goals into parallelizable sub-tasks. 45x higher success rate than Opus 4.6 on deep recursive plans. <a class="s3-link" href="https://www.roselabs.ai/research/tool-orchestrator">Read the research</a></div>
+        </div>
+      </div>
+      <div class="s4-item">
+        <div class="s4-bullet">04</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">SOTA Browser Agent</div>
+          <div class="s4-item-body">Custom prompt-braiding algorithm for escaping single-model-provider minima. Browser agents that actually converge to the correct answer over time.</div>
+        </div>
+      </div>
+      <div class="s4-item">
+        <div class="s4-bullet">05</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">Live Integrations</div>
+          <div class="s4-item-body">SMS, phone calling, and Claude Code. Real-world tool integrations fine-tuned and ready to use out of the box.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">05</div>
+</section>
+
+<!-- ==================== SLIDE 6: TEAM ==================== -->
+<section class="slide">
+  <div class="slide-content">
+    <div class="slide-title">The Founder</div>
+    <div class="s5-grid">
+
+      <!-- Andy -->
+      <div class="s5-person">
+        <div class="s5-photo-row">
+          <img class="s5-photo" src="andy.jpeg" alt="Andy Prevalsky" />
+          <div class="s5-name-block">
+            <div class="s5-name">Andy Prevalsky</div>
+            <div class="s5-role">CEO</div>
+          </div>
+        </div>
+        <div class="s5-bullets">
+          <div class="s5-bullet">
+            <span class="s5-bullet-arrow">&rarr;</span>
+            <span>Founded <strong>Hotplate</strong> (YC S20), led engineering, product & strategy from zero to PMF. Now <strong>7-figure ARR</strong> and profitable.</span>
+          </div>
+          <div class="s5-bullet">
+            <span class="s5-bullet-arrow">&rarr;</span>
+            <span><strong>10 years ML experience</strong>. HFT models (LSTMs, RNNs, Markov Chains), custom pipelines at Hotplate that found 90% of users, voice pipelines as Staff Eng @ <strong>Vapi</strong>.</span>
+          </div>
+          <div class="s5-bullet">
+            <span class="s5-bullet-arrow">&rarr;</span>
+            <span>Ex <strong>Google</strong>, Ex <strong>Meta AI</strong>.</span>
+          </div>
+          <div class="s5-bullet">
+            <span class="s5-bullet-arrow">&rarr;</span>
+            <span>Backed by <strong>Michael Seibel</strong>, <strong>Connie Chan</strong> (A16Z), <strong>YC</strong>. Mentored by Seibel for 6 years.</span>
+          </div>
+        </div>
+      </div>
+
+
+    </div>
+  </div>
+  <div class="slide-number">06</div>
+</section>
+
+<!-- ==================== SLIDE 7: THE RAISE ==================== -->
+<section class="slide">
+  <div class="slide-content s6-layout">
+    <div>
+      <div class="s6-amount"><span class="rose-text">$2M</span></div>
+      <div class="s6-valuation">Pre-Seed @ $10M Valuation</div>
+    </div>
+    <div class="s6-divider"></div>
+    <div class="s6-uses">
+      <div class="s6-use">
+        <div class="s6-use-icon">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+        </div>
+        <div class="s6-use-label">Compute</div>
+        <div class="s6-use-desc">GPU infrastructure for Mass Agent Network research & inference</div>
+      </div>
+      <div class="s6-use">
+        <div class="s6-use-icon">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+        </div>
+        <div class="s6-use-label">Hiring</div>
+        <div class="s6-use-desc">Engineering and research talent to accelerate development</div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">07</div>
+</section>
+
+<!-- ==================== SLIDE 8: CLOSING ==================== -->
+<section class="slide">
+  <div class="slide-content s7-layout">
+    <div class="s7-left">
+      <div class="s7-headline">Let's Build<br>Personal<br>Superintelligence<br>Together</div>
+      <div class="s7-logo">
+        <div class="s7-logo-dot"></div>
+        <div class="s7-logo-text">Rose Labs</div>
+      </div>
+    </div>
+    <div class="s7-right">
+      <div class="label">Get in Touch</div>
+      <div class="s7-contact-email">andy@roselabs.ai</div>
+      <div class="s7-contact-item">roselabs.ai</div>
+      <div class="s7-contact-item">San Francisco, CA</div>
+      <div class="s7-divider"></div>
+      <div class="s7-contact-item" style="margin-top: 4px;">
+        <a href="https://linkedin.com/in/andyprevalsky" style="color: var(--text-secondary); text-decoration: none;">linkedin.com/in/andyprevalsky</a>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">08</div>
+</section>
+
+</body>
+</html>

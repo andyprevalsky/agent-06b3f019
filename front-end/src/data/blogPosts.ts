@@ -32,55 +32,52 @@ export const blogPosts: BlogPost[] = [
     category: 'research',
     date: '2026-02-14',
     author: 'Andy Prevalsky',
-    intro: `The birth of personal assistants that take action in the world has begun, and soon everyone will have an AI system that does the majority of intelligence related work for them. However, these agentic systems still fail to perform well on long-horizon problems in practical settings for 3 main reasons: context overflow, cost prohibition & complexity explosion. This post aims to describe our efforts in solving these 3 problems by creating a generalized tool orchestrator that recursively decomposes tasks into a set of context-independent, parallelizable, and proximate sub tasks that each fit into the current complexity requirements for modern day agentic systems.`,
+    intro: `The birth of personal assistants that take action in the world has begun, and soon everyone will have an AI system that does the majority of intelligence-related work for them. However, these agentic systems still fail to perform well on long-horizon problems in practical settings for 3 main reasons: context overflow, cost prohibition & complexity explosion. This post aims to describe our efforts in solving these 3 problems by creating a generalized tool orchestrator that recursively decomposes tasks into a set of context-independent, parallelizable, and proximate sub-tasks that each fit into the current complexity requirements for modern-day agentic systems.`,
     sections: [
       {
         id: 'why-tool-orchestration',
         title: 'Why Tool Orchestration is the bottleneck for general-use Super Intelligence',
-        content: `Super-Intelligence, as we will know it in 10-20 years, will be a system that can achieve any goal the user asks of it, with the lowest energy cost possible, barring it doesn't violate existing structural constraints (laws of physics, geopolitical boundaries, user preferences etc). The most difficult of which are long-horizon tasks that may take weeks, months, or maybe in some cases years to resolve.
+        content: `Super-Intelligence, as we will know it in 10-20 years, will be a system that can achieve any goal the user asks of it, with the lowest energy cost possible, barring that it violates existing structural constraints (laws of physics, geopolitical boundaries, user preferences, etc.). The most difficult of which are long-horizon tasks that may take weeks, months, or maybe in some cases years to resolve.
 
 These long-horizon tasks fail to resolve with modern agentic systems because shallow agent networks quickly exhaust their context-window, fail to complete the task in a reasonable amount of time, and often cost the end user much more than it would take to complete the task themselves.
 
-However, if we take a complex, long-horizon problem <em>P</em>, and are able to decompose it into a set of sub-problems <em>P<sub>i</sub>, …, P<sub>j</sub></em> such that
+However, if we take a complex, long-horizon problem <em>P</em>, and are able to decompose it into a set of sub-problems <em>P<sub>i</sub></em> through <em>P<sub>j</sub></em> such that
 
-the complexity of <em>P<sub>n</sub></em> &lt; <em>P</em> and the completion of <em>P<sub>i</sub>, …, P<sub>j</sub></em>
-the completion of <em>P<sub>i</sub>, …, P<sub>j</sub></em> == the completion of <em>P</em>
+the complexity of <em>P<sub>n</sub></em> &lt; <em>P</em> and
+the completion of <em>P<sub>i</sub></em> through <em>P<sub>j</sub></em> == the completion of <em>P</em>
 
-then in theory we could recursively reduce <em>P</em> to a set of proximate problems that are independently solvable by modern day LLMs. And in this simple formula it becomes clear that the complexity of creating Super Intelligence, a system that can solve any user problem <em>P</em>, is equal to the complexity of creating a general purpose tool orchestrator that can satisfy our lemma.
+then, in theory, we could recursively reduce <em>P</em> to a set of proximate problems that are independently solvable by modern-day LLMs. And in this simple formula it becomes clear that the complexity of creating Super Intelligence, a system that can solve any user problem <em>P</em>, is equal to the complexity of creating a general-purpose tool orchestrator that can satisfy our lemma.
 
-You may say, wait a minute, what if a problem <em>P</em> is NOT decomposable at all? From our experience, almost ALL problems are decomposable in some way except for fringe problems in mathematics.`
+<span style="font-size: 0.85em; font-style: italic;">You may say, wait a minute, what if a problem <em>P</em> is NOT decomposable at all? From our experience, almost ALL problems are decomposable in some way except for fringe problems in mathematics.</span>`
       },
       {
         id: 'landscape',
         title: 'The Landscape of Tool Orchestrators',
         content: `We see the industry is already making large efforts to tackle the challenge of solving long-horizon problems in a similar way.
 
-<strong>Jan 14, 2026</strong> <a href="https://cursor.com/blog/scaling-agents" target="_blank" rel="noopener noreferrer">Cursor | Scaling long-running autonomous coding</a> Cursor makes the assumption that "planning planning ahead would be too rigid" for large projects, or in other words, the complexity of the decomposition problem itself, is too large for modern LLMs, and thus attempts to solve long-horizon tests by approximating the correct solution over time via decentralized tool orchestration. This approach has its benefits, namely each new generation of agents can fix hallucinations of their ancestors, and the problem of compounding errors in recursive decomposition is minimized. However, it avoids the hard problem here which is that without a strong verifier, the system stabilizes to a broken version.
-
+<strong>Jan 14, 2026</strong> <a href="https://cursor.com/blog/scaling-agents" target="_blank" rel="noopener noreferrer">Cursor | Scaling long-running autonomous coding</a> Cursor makes the assumption that "planning ahead would be too rigid" for large projects, or in other words, the complexity of the decomposition problem itself is too large for modern LLMs, and thus attempts to solve long-horizon tasks by approximating the correct solution over time via decentralized tool orchestration. This approach has its benefits, namely each new generation of agents can fix hallucinations of their ancestors, and the problem of compounding errors in recursive decomposition is minimized.
 <strong>Nov 26, 2025</strong> <a href="https://arxiv.org/pdf/2511.21689" target="_blank" rel="noopener noreferrer">Nvidia | Elevating Intelligence via Efficient Model and Tool Orchestration</a> Here Nvidia builds a general Tool Orchestrator (8 billion parameters) that beats frontier large models on Humanities Last Exam, FRAMEs, and T² Bench with a fraction of the number of steps and at much lower costs. Notably, they mention they "envision [a] more sophisticated recursive orchestrator systems to push the upper bound of intelligence but also to further enhance efficiency in solving increasingly complex agentic tasks".
 
-<strong>Feb 2, 2026</strong> <a href="https://arxiv.org/pdf/2602.01848" target="_blank" rel="noopener noreferrer">ROMA | Recursive Open Meta-Agent Framework for Long-Horizon Multi-Agent Systems</a> ROMA shows that recursive decomposition is SOTA across a multitude of highly complex reasoning tasks.
+<strong>Feb 2, 2026</strong> <a href="https://arxiv.org/pdf/2602.01848" target="_blank" rel="noopener noreferrer">ROMA | Recursive Open Meta-Agent Framework for Long-Horizon Multi-Agent Systems</a> ROMA shows that recursive decomposition is SOTA across a multitude of highly complex reasoning tasks, including Deep Research.
 
-<strong>Feb 2, 2026</strong> <a href="https://www.kimi.com/blog/kimi-k2-5.html" target="_blank" rel="noopener noreferrer">Kimi 2.5 | Swarm</a> Kimi shows how as task complexity increases, execution time increases linear with swarms as opposed to exponentially with a single agent system. It also shows how Agent Swarms serve as a form of "Proactive Context Management", scaling effective context length along an additional architectural dimension while preserving modularity, information locality, and reasoning integrity.
+<strong>Feb 2, 2026</strong> <a href="https://www.kimi.com/blog/kimi-k2-5.html" target="_blank" rel="noopener noreferrer">Kimi 2.5 | Swarm</a> Kimi shows how, as task complexity increases,, execution time increases linearly with swarms as opposed to exponentially with a single-agent system. It also shows how Agent Swarms serve as a form of "Proactive Context Management", scaling effective context length along an additional architectural dimension while preserving modularity, information locality, and reasoning integrity.
 
-<strong>Feb 05, 2026</strong> <a href="https://www.anthropic.com/engineering/building-c-compiler" target="_blank" rel="noopener noreferrer">Opus 4.6 | Agent Teams</a> show how scaling the number of agents, in this case to 16, can dramatically reduce the time it takes to complete a C compiler, a traditionally extremely complex task that would realistically cost 100s of thousands of dollars in engineering costs.
+<strong>Feb 05, 2026</strong> <a href="https://www.anthropic.com/engineering/building-c-compiler" target="_blank" rel="noopener noreferrer">Opus 4.6 | Agent Teams</a> shows how scaling the number of agents, in this case to 16, can dramatically reduce the time it takes to complete a C compiler, a traditionally extremely complex task that would realistically cost hundreds of thousands of dollars in engineering costs.
 
-<strong>Jan 17, 2026</strong> <a href="https://ensue.dev/blog/stop-throwing-a-single-agent-at-complex-problems/" target="_blank" rel="noopener noreferrer">Ensue | Stop Throwing A Single Agent At Complex Problems</a> Shows how recursive decomposition can extend LLM capabilities to new SOTA levels for math work, solving a Putnam problem previously out of reach of Opus 4.5
+<strong>Jan 17, 2026</strong> <a href="https://ensue.dev/blog/stop-throwing-a-single-agent-at-complex-problems/" target="_blank" rel="noopener noreferrer">Ensue | Stop Throwing A Single Agent At Complex Problems</a> Shows how recursive decomposition can extend LLM capabilities to new SOTA levels for math work, solving a Putnam problem previously out of reach of Opus 4.5.
 
-<strong>Jan 28, 2026</strong> <a href="https://arxiv.org/abs/2512.24601v1" target="_blank" rel="noopener noreferrer">Recursive Language Models</a>  While not a tool orchestrator per se, recursive language models show how effective context of a model can be extended drastically, by externalizing the input prompt as an environment variable, from which the core LLM can query over and interact with.`
+<strong>Jan 28, 2026</strong> <a href="https://arxiv.org/abs/2512.24601v1" target="_blank" rel="noopener noreferrer">Recursive Language Models</a> While not a tool orchestrator per se, recursive language models show how the effective context of a model can be extended drastically by externalizing the input prompt as an environment variable that the core LLM can query and interact with.`
       },
       {
         id: 'whats-missing',
         title: "What's Missing",
-        content: `The groundwork for how to create a generalized recursive tool orchestrator has been laid out, but so far, nobody has applied this orchestrator to real-world user tasks in a system that has the necessary suite of tools to take action in the real world. Additionally, the question of whether the complexity of creating a general purpose decomposer is within reach, has not been rigorously evaluated.
+        content: `The groundwork for how to create a generalized recursive tool orchestrator has been laid out, but so far, nobody has applied this orchestrator to real-world user tasks in a system that has the necessary suite of tools to take action in the real world. Additionally, the question of whether the complexity of creating a general-purpose decomposer is within reach has not been rigorously evaluated.
 
-In practical settings, it is often best to attempt multiple approaches in parallel simply due to a lack of context available. For example, if my goal was to generate a new drug target for [aadi give good example], then the ideal approach would include running multiple high quality experiments in parallel and terminate execution once one experiment is validated. Another way to say this is, existing systems have no way to distinguish between AND (<em>P<sub>i</sub>, …, P<sub>j</sub></em>) vs OR(<em>P<sub>i</sub>, …, P<sub>j</sub></em>).
-
-Additionally, existing benchmarks for tool orchestrators focus on a narrow set of easily verifiable tasks that in general, are not representative of common user goals. These benchmarks include things like long-form text generation, coding capabilities, or math proofs, but do not extend to common real-world problems like buying a car at the best price, growing & launching a business, landing the optimal job, or remediating illnesses.
+Additionally, existing benchmarks for tool orchestrators focus on a narrow set of easily verifiable tasks that, in general, are not representative of common user goals. These benchmarks include things like long-form text generation, coding capabilities, or math proofs, but do not extend to common real-world problems like buying a car at the best price, growing & launching a business, landing the optimal job, or treating illnesses.
 
 Credit assignment for recursive task decomposition (knowing which decomposition in the entire decomposition tree was bad/good) is currently an open research problem. Previous algorithms like AlphaGo solve this problem because the problem space is perfectly simulatable, and thus, are able to generate massive amounts of end-to-end runs that make approximating any given state in the tree possible.
 
-Decentralized tool orchestrators, like Agent Teams or Cursors Long Running Code Agent are highly costly, require continued maintenance to avoid stagnation, and are bottlenecked by the complexity of creating a perfect verifier, which they rely on to ensure target drift doesn't happen. For real-world applications these are unacceptable conditions.`
+Decentralized tool orchestrators, like Agent Teams or Cursor's Long Running Code Agent are highly costly, require continued maintenance to avoid stagnation, and are bottlenecked by the complexity of creating a perfect verifier, which they rely on to ensure target drift doesn't happen. For real-world applications, these are unacceptable conditions.`
       },
       {
         id: 'how-we-built',
@@ -100,7 +97,7 @@ Decentralized tool orchestrators, like Agent Teams or Cursors Long Running Code 
 Thus, the equation for how good any given decomposition is can be described as
 <em>ME<sup>w1</sup> × CE<sup>w2</sup> × CX<sup>w3</sup> × Normalized(Expected(Cost)) × Normalized(Expected(Time))</em>
 
-In order to derive Expected Cost and Expected Time of any given decomposition in a tree of recursive decompositions, we take inspiration from Alpha Go to tackle the Credit Assignment problem. Instead of running a massive simulation though, we bootstrap Expected Cost and Expected Time via a proxy metric derived from a custom trained Bradley-Terry reward model.
+In order to derive Expected Cost and Expected Time of any given decomposition in a tree of recursive decompositions, we take inspiration from AlphaGo to tackle the Credit Assignment problem. Instead of running a massive simulation though, we bootstrap Expected Cost and Expected Time via a proxy metric derived from a custom trained Bradley-Terry reward model.
 
 We collected roughly 500 tasks generated via real user queries @ <a href="https://roselabs.ai" target="_blank" rel="noopener noreferrer">https://roselabs.ai</a>, generated a decomposition of each task from GPT-5.2, Opus 4.6, Kimi 2.5, and Gemini 3 Pro, then expertly labeled pair-wise comparisons for each decomposition. We then synthetically enhanced this data set to increase the generality of our task coverage.
 
@@ -130,7 +127,7 @@ Because task decomposition is a skill with an extremely high skill ceiling, curt
       {
         id: 'whats-next',
         title: "What's Next",
-        content: `Inspired by the progress made in <a href="https://deepmind.google/discover/blog/genie-2-a-large-scale-foundation-world-model/" target="_blank" rel="noopener noreferrer">World Models | Google Genie</a>, the increasing viability of <a href="https://societies.io" target="_blank" rel="noopener noreferrer">Simulated Societies</a> and <a href="https://arxiv.org/pdf/2405.02957v1" target="_blank" rel="noopener noreferrer">simulated RL Environments</a>. Rose Labs anticipates creating a simulated, lazily-rendered, low-dimensionality, world for evolving a generalized tool orchestrator.
+        content: `Inspired by the progress made in <a href="https://deepmind.google/discover/blog/genie-2-a-large-scale-foundation-world-model/" target="_blank" rel="noopener noreferrer">World Models | Google Genie</a>, the increasing viability of <a href="https://societies.io" target="_blank" rel="noopener noreferrer">Simulated Societies</a> and <a href="https://arxiv.org/pdf/2405.02957v1" target="_blank" rel="noopener noreferrer">simulated RL Environments</a>, Rose Labs anticipates creating a simulated, lazily-rendered, low-dimensionality, world for evolving a generalized tool orchestrator.
 
 Additionally, scaling our expertly labeled & synthetically generated dataset is likely to continue to yield gains in decomposition performance.`
       }

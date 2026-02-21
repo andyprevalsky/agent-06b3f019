@@ -1555,10 +1555,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
         {/* Research Button - Mobile web only, centered in header */}
         {clientSource === 'WEB' && (
           <button
-            onClick={() => {
-              // TODO: Enable when research page is public
-              // navigate('/research');
-            }}
+            onClick={() => navigate('/research')}
             className="md:hidden absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors z-10"
           >
             Research
@@ -1598,10 +1595,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
           {clientSource === 'WEB' && (
             <div className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50">
               <button
-                onClick={() => {
-                  // TODO: Enable when research page is public
-                  // navigate('/research');
-                }}
+                onClick={() => navigate('/research')}
                 className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
               >
                 Research

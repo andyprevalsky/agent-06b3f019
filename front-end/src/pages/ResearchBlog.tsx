@@ -44,7 +44,7 @@ export default function ResearchBlog() {
       </div>
 
       {/* Content */}
-      <div className="max-w-6xl mx-auto px-6 py-16 flex-1 w-full">
+      <div className="max-w-6xl mx-auto px-6 py-16 flex-1 w-full" style={{ minHeight: '100vh' }}>
         <div className="grid grid-cols-1 md:grid-cols-12 gap-12">
           {/* Sidebar */}
           <aside className="md:col-span-3 lg:col-span-2">

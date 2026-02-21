@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Rose Labs - Chart Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', sans-serif;
+    background: #18181b;
+    color: #f9f9fb;
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 60px;
+  }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
+  .chart-container {
+    width: 900px;
+    background: #f9f9fb;
+    border-radius: 16px;
+    padding: 40px;
+    color: #1a1a2e;
+  }
+  .chart-title {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .chart-subtitle {
+    font-size: 14px;
+    color: #6b7280;
+    margin-bottom: 24px;
+  }
+  .chart-area {
+    position: relative;
+    height: 300px;
+    border-left: 2px solid #e5e7eb;
+    border-bottom: 2px solid #e5e7eb;
+    margin-left: 50px;
+    margin-bottom: 60px;
+  }
+  .y-label {
+    position: absolute;
+    left: -50px;
+    font-size: 11px;
+    color: #9ca3af;
+    transform: translateY(-50%);
+    text-align: right;
+    width: 44px;
+  }
+  .y-grid {
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-top: 1px solid #f0f0f0;
+  }
+  .bar-group {
+    position: absolute;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .bar {
+    width: 32px;
+    border-radius: 4px 4px 0 0;
+    background: linear-gradient(180deg, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC);
+    transition: opacity 0.2s;
+  }
+  .bar:hover { opacity: 0.85; }
+  .bar-value {
+    font-size: 10px;
+    font-weight: 600;
+    color: #4b5563;
+    margin-bottom: 4px;
+    white-space: nowrap;
+  }
+  .bar-label {
+    position: absolute;
+    bottom: -40px;
+    font-size: 10px;
+    color: #9ca3af;
+    transform: rotate(-35deg);
+    transform-origin: top left;
+    white-space: nowrap;
+  }
+  /* Line chart */
+  .line-chart {
+    position: relative;
+    height: 300px;
+    border-left: 2px solid #e5e7eb;
+    border-bottom: 2px solid #e5e7eb;
+    margin-left: 60px;
+    margin-bottom: 60px;
+  }
+  .line-chart .y-label { left: -60px; width: 54px; }
+  svg.line-svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  .dot-label {
+    font-size: 10px;
+    font-weight: 600;
+    fill: #4b5563;
+  }
+  .x-tick {
+    position: absolute;
+    bottom: -40px;
+    font-size: 10px;
+    color: #9ca3af;
+    transform: rotate(-35deg) translateX(-50%);
+    transform-origin: top center;
+    white-space: nowrap;
+  }
+  .total-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #FE7503, #7A6BEC);
+    color: white;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    margin-left: 12px;
+    vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+
+<h1>Rose Labs - Usage Data (Chart Preview)</h1>
+
+<!-- CHART 1: User Signups -->
+<div class="chart-container">
+  <div class="chart-title">User Signups <span class="total-badge">1,209 total</span></div>
+  <div class="chart-subtitle">Weekly new users, Oct 2025 - Feb 2026</div>
+  <div class="chart-area" id="signups-chart"></div>
+</div>
+
+<!-- CHART 2: Rose API Calls -->
+<div class="chart-container">
+  <div class="chart-title">Rose API Calls <span class="total-badge">7,924 total</span></div>
+  <div class="chart-subtitle">Weekly API requests, Jan - Feb 2026</div>
+  <div class="chart-area" id="api-chart"></div>
+</div>
+
+<!-- CHART 3: Agents Spawned -->
+<div class="chart-container">
+  <div class="chart-title">Agents Spawned <span class="total-badge">317 total</span></div>
+  <div class="chart-subtitle">Weekly agents (from GoalHistory + current), Jan - Feb 2026</div>
+  <div class="chart-area" id="agents-chart"></div>
+</div>
+
+<script>
+// ============ DATA ============
+
+const signupsData = [
+  { week: "Oct 20", value: 1 },
+  { week: "Nov 3", value: 1 },
+  { week: "Dec 1", value: 1 },
+  { week: "Dec 8", value: 6 },
+  { week: "Dec 15", value: 2 },
+  { week: "Dec 22", value: 4 },
+  { week: "Dec 29", value: 61 },
+  { week: "Jan 5", value: 99 },
+  { week: "Jan 12", value: 62 },
+  { week: "Jan 19", value: 56 },
+  { week: "Jan 26", value: 207 },
+  { week: "Feb 2", value: 186 },
+  { week: "Feb 9", value: 193 },
+  { week: "Feb 16", value: 330 },
+];
+
+const apiData = [
+  { week: "Jan 12", value: 76 },
+  { week: "Jan 19", value: 86 },
+  { week: "Jan 26", value: 109 },
+  { week: "Feb 2", value: 1817 },
+  { week: "Feb 9", value: 5038 },
+  { week: "Feb 16", value: 798 },
+];
+
+const agentsData = [
+  { week: "Jan 5", value: 19 },
+  { week: "Jan 12", value: 35 },
+  { week: "Jan 19", value: 10 },
+  { week: "Jan 26", value: 26 },
+  { week: "Feb 2", value: 54 },
+  { week: "Feb 9", value: 34 },
+  { week: "Feb 16", value: 139 },
+];
+
+// ============ RENDER BAR CHART ============
+
+function renderBarChart(containerId, data) {
+  const container = document.getElementById(containerId);
+  const maxVal = Math.max(...data.map(d => d.value));
+  const chartHeight = 300;
+  const barCount = data.length;
+  const gap = Math.max(4, Math.floor((container.offsetWidth - barCount * 32) / (barCount + 1)));
+
+  // Y-axis labels
+  const steps = 5;
+  for (let i = 0; i <= steps; i++) {
+    const val = Math.round((maxVal / steps) * i);
+    const pct = (i / steps) * 100;
+
+    const label = document.createElement('div');
+    label.className = 'y-label';
+    label.style.bottom = pct + '%';
+    label.textContent = val.toLocaleString();
+    container.appendChild(label);
+
+    if (i > 0) {
+      const grid = document.createElement('div');
+      grid.className = 'y-grid';
+      grid.style.bottom = pct + '%';
+      container.appendChild(grid);
+    }
+  }
+
+  // Bars
+  data.forEach((d, i) => {
+    const group = document.createElement('div');
+    group.className = 'bar-group';
+    const left = gap + i * (32 + gap);
+    group.style.left = left + 'px';
+
+    const heightPct = (d.value / maxVal) * 100;
+
+    const valLabel = document.createElement('div');
+    valLabel.className = 'bar-value';
+    valLabel.textContent = d.value.toLocaleString();
+
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.height = (heightPct / 100 * chartHeight) + 'px';
+
+    const xLabel = document.createElement('div');
+    xLabel.className = 'bar-label';
+    xLabel.textContent = d.week;
+
+    group.appendChild(valLabel);
+    group.appendChild(bar);
+    group.appendChild(xLabel);
+    container.appendChild(group);
+  });
+}
+
+renderBarChart('signups-chart', signupsData);
+renderBarChart('api-chart', apiData);
+renderBarChart('agents-chart', agentsData);
+</script>
+
+</body>
+</html>
