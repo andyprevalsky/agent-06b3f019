@@ -1,4 +1,4 @@
-"""Main entry point for GEPA tool orchestrator."""
+"""Main entry point for GEPA task decomposer."""
 
 import asyncio
 import json
@@ -9,7 +9,7 @@ from .pipelines.gepa_optimizer import optimize_prompt
 
 
 async def main():
-    print('GEPA Tool Orchestrator')
+    print('GEPA Task Decomposer')
     print('=' * 40)
 
     if '--test-mode' in sys.argv:
