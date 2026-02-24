@@ -1,3 +1,6 @@
+// IMPORTANT: When adding a new blog post, also add its metadata to
+// front-end/api/og/_blogMeta.ts for OG social card generation.
+
 export type BlogCategory = 'research' | 'product' | 'company';
 
 export interface BlogSection {
