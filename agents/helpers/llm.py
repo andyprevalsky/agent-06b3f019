@@ -2319,7 +2319,7 @@ async def call_planner_llm_activity(
             messages=full_messages,
             model=model,
             temperature=0.7,
-            max_tokens=2048,
+            max_tokens=4096,
             response_model=PlannerResponse,
             on_chunk=on_plan_heartbeat,
             on_raw_progress=on_plan_progress,

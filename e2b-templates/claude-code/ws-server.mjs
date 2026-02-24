@@ -74,8 +74,9 @@ wss.on('connection', (ws) => {
 
         // Write to Claude Code's stdin
         if (claude && claude.stdin && !claude.stdin.destroyed) {
-          // Ensure newline at end for prompt submission
-          const input = msg.data.endsWith('\n') ? msg.data : msg.data + '\n';
+          // Ensure carriage return at end for prompt submission
+          // Claude Code runs in raw PTY mode and expects \r (Enter key), not \n (line feed)
+          const input = msg.data.endsWith('\r') ? msg.data : msg.data + '\r';
           claude.stdin.write(input, (err) => {
             if (err) {
               log('error', 'stdin write error', { error: err.message });
@@ -272,9 +273,11 @@ IMPORTANT: Always push your changes before the session ends. The sandbox is ephe
 // Start Claude Code with PTY via script command
 log('info', 'Starting Claude Code', { goal: GOAL.slice(0, 100) });
 
-// Pass goal via environment variable to avoid shell injection vulnerabilities.
-// The shell command reads $CLAUDE_GOAL directly, which doesn't undergo shell
-// interpretation/expansion like command-line arguments would.
+// Pass goal via environment variable. "$CLAUDE_GOAL" in double quotes is safe —
+// shell parameter expansion is literal (no re-scanning for $, `, \ in the value).
+// Strip NUL bytes which would truncate at the C level.
+const sanitizedGoal = GOAL.replace(/\0/g, '');
+
 const claude = spawn('script', [
   '-q', '/dev/null',
   '-c', 'claude --dangerously-skip-permissions "$CLAUDE_GOAL"'
@@ -283,7 +286,7 @@ const claude = spawn('script', [
   env: {
     ...process.env,
     TERM: 'xterm-256color',
-    CLAUDE_GOAL: GOAL,
+    CLAUDE_GOAL: sanitizedGoal,
   },
 });
 
