@@ -28,7 +28,7 @@ from browser_tools.humanizer import BrowserHumanizer
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.prompts import build_verifier_prompt
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
-from helpers.attachments import extract_attachments_from_context
+from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from loop.activity_helper import call_temporal_activity_from_activity
 from config import load_config
 from helpers.error_utils import extract_error_message
@@ -1167,6 +1167,7 @@ async def execute_action(
     from browser_tools.write_lock import (
         is_social_domain,
         is_submit_button,
+        is_purchase_button,
         is_payment_field,
         get_write_lock_approval_question,
     )
@@ -1191,13 +1192,20 @@ async def execute_action(
         
         # Execute action based on type
         if action_name == "click":
-            # Write lock check for social posting
+            # Write lock checks for social posting and purchase buttons
             if write_lock_enabled and element:
-                # Get element text for submit button detection
+                # Get element text for button detection
                 # Note: EnhancedDOMTreeNode uses get_all_children_text() method, not text_content attribute
                 element_text = element.get_all_children_text() if hasattr(element, 'get_all_children_text') else ''
+                logger.info(
+                    "Write lock click check",
+                    element_text=element_text[:100] if element_text else "(empty)",
+                    index=index,
+                    url=current_url[:80] if current_url else None,
+                )
+
+                # Check for social posting
                 if is_social_domain(current_url) and is_submit_button(element_text):
-                    # Check if we already have valid approval for this domain
                     if not _is_approval_valid(write_lock_approvals, "social_post", current_url):
                         logger.info(
                             "Write lock triggered: social posting detected",
@@ -1220,6 +1228,33 @@ async def execute_action(
                         logger.info(
                             "Write lock bypassed: existing approval valid",
                             approval_type="social_post",
+                            url=current_url
+                        )
+
+                # Check for purchase/order buttons
+                if is_purchase_button(element_text):
+                    if not _is_approval_valid(write_lock_approvals, "purchase", current_url):
+                        logger.info(
+                            "Write lock triggered: purchase button detected",
+                            url=current_url,
+                            element_text=element_text[:50]
+                        )
+                        return {
+                            "status": "needs_write_approval",
+                            "approval_type": "purchase",
+                            "question": get_write_lock_approval_question(
+                                action_type="purchase",
+                                url=current_url,
+                                element_text=element_text[:100],
+                                system_name=system_name,
+                            ),
+                            "element_text": element_text[:100],
+                            "url": current_url,
+                        }
+                    else:
+                        logger.info(
+                            "Write lock bypassed: existing approval valid",
+                            approval_type="purchase",
                             url=current_url
                         )
 
@@ -1264,12 +1299,15 @@ async def execute_action(
                     coord_element_text = await dom_service.get_text_at_coordinates(
                         int(coords["x"]), int(coords["y"])
                     )
+                    logger.info(
+                        "Write lock coord click check",
+                        element_text=coord_element_text[:100] if coord_element_text else "(empty)",
+                        coords=coords,
+                        url=current_url[:80] if current_url else None,
+                    )
 
-                    is_social = is_social_domain(current_url)
-                    is_submit = is_submit_button(coord_element_text)
-
-                    if is_social and is_submit:
-                        # Check if we already have valid approval for this domain
+                    # Check for social posting
+                    if is_social_domain(current_url) and is_submit_button(coord_element_text):
                         if not _is_approval_valid(write_lock_approvals, "social_post", current_url):
                             logger.info(
                                 "Write lock triggered: social posting detected (coordinate click)",
@@ -1293,6 +1331,34 @@ async def execute_action(
                             logger.info(
                                 "Write lock bypassed: existing approval valid (coordinate click)",
                                 approval_type="social_post",
+                                url=current_url
+                            )
+
+                    # Check for purchase/order buttons
+                    if is_purchase_button(coord_element_text):
+                        if not _is_approval_valid(write_lock_approvals, "purchase", current_url):
+                            logger.info(
+                                "Write lock triggered: purchase button detected (coordinate click)",
+                                url=current_url,
+                                element_text=coord_element_text[:50],
+                                coords=coords
+                            )
+                            return {
+                                "status": "needs_write_approval",
+                                "approval_type": "purchase",
+                                "question": get_write_lock_approval_question(
+                                    action_type="purchase",
+                                    url=current_url,
+                                    element_text=coord_element_text[:100],
+                                    system_name=system_name,
+                                ),
+                                "element_text": coord_element_text[:100],
+                                "url": current_url,
+                            }
+                        else:
+                            logger.info(
+                                "Write lock bypassed: existing approval valid (coordinate click)",
+                                approval_type="purchase",
                                 url=current_url
                             )
 
@@ -1940,6 +2006,9 @@ CRITICAL SAFETY RULES:
 
 {custom_instructions}
 
+SCREENSHOT RETURN:
+When the task involves taking a screenshot or capturing the page state, you do NOT need to use any special action to return the image. The orchestrator automatically captures and returns the final screenshot when your task completes. Simply navigate to the target page and call attempt_completion.
+
 Think step-by-step about what action to take next. Always prefer using element indices from the DOM tree for precise interactions."""
 
 
@@ -2048,8 +2117,19 @@ async def spawn_browser_agent_activity_v3(
     session_passwords: List[Dict[str, Any]] = []
 
     try:
-        # ===== SESSION INITIALIZATION =====
-        fingerprint_injection = None  # Will be populated from backend response
+        # ===== SETUP TIMING TRACKER =====
+        setup_origin = time.monotonic()
+        timing_events: list[tuple[str, float, float]] = []  # (name, start_ms, end_ms)
+
+        def _record_timing(name: str, start: float, end: float = None):
+            if end is None:
+                end = time.monotonic()
+            timing_events.append((name, (start - setup_origin) * 1000, (end - setup_origin) * 1000))
+
+        # ===== PHASE 1: SESSION INIT (sequential, blocking) =====
+        t_session = time.monotonic()
+        fingerprint_injection = None
+        user_profile = {}
         logger.info(
             "Session init check",
             is_resume=is_resume,
@@ -2067,19 +2147,19 @@ async def spawn_browser_agent_activity_v3(
                     session_info = response.json()
                     session_id = session_info.get("session_id")
                     browser_url = session_info.get("debug_url")
-                    cdp_url = session_info.get("ws_url")  # CDP WebSocket URL
-                    fingerprint_injection = session_info.get("fingerprint_injection")  # For CDP re-injection
+                    cdp_url = session_info.get("ws_url")
+                    fingerprint_injection = session_info.get("fingerprint_injection")
                     session_passwords = session_info.get("passwords", [])
                 else:
                     raise RuntimeError(f"Failed to fetch session info: HTTP {response.status_code}")
             activity.heartbeat(f"Resuming task {task_id}")
         else:
             activity.heartbeat("Initializing browser session")
-            async with httpx.AsyncClient(timeout=120.0) as client:  # 120s for session init + user data injection
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{config.backend.api_url}/api/browser-session/init",
                     headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-                    json={"user_id": user_id, "agent_id": agent_id}
+                    json={"user_id": user_id, "agent_id": agent_id, "start_url": start_url}
                 )
                 if response.status_code not in [200, 201]:
                     raise Exception(f"Failed to init session: {response.text}")
@@ -2088,77 +2168,222 @@ async def spawn_browser_agent_activity_v3(
                 task_id = session_data["task_id"]
                 session_id = session_data["session_id"]
                 browser_url = session_data["debug_url"]
-                cdp_url = session_data.get("ws_url")  # CDP WebSocket URL from Steel
-                fingerprint_injection = session_data.get("fingerprint_injection")  # For CDP re-injection
+                cdp_url = session_data.get("ws_url")
+                fingerprint_injection = session_data.get("fingerprint_injection")
                 session_passwords = session_data.get("passwords", [])
-            
-            # Init message - include output_schema for FE display
-            await save_browser_action_message(
-                agent_id=agent_id, title="Browser Ready", task_id=task_id,
-                message="", status=MessageStatus.FINISHED, browser_url=browser_url,
-                action_type="browser", tool_call_id=tool_call_id, is_init_message=True,
-                output_schema=response_schema
-            )
-            await save_browser_action_message(
-                agent_id=agent_id, title="Task Started", task_id=task_id,
-                message=goal, status=MessageStatus.FINISHED, browser_url=browser_url,
-                action_type="task_started"
-            )
-        
-        # ===== BROWSER-USE SESSION INITIALIZATION =====
+                user_profile = session_data.get("user_settings") or {}
+        _record_timing("session_init", t_session)
+
         if not cdp_url:
             raise RuntimeError("No CDP URL provided - backend must return ws_url from Steel")
-        
+
         activity.heartbeat(f"Connecting via CDP: {cdp_url[:50]}...")
-        
-        dom_service = DOMService(cdp_url=cdp_url)
-        await dom_service.connect()
 
-        logger.info(f"🌐 Connected to browser via CDP")
+        # ===== PHASE 2: PARALLEL SETUP =====
+        # Group A: Browser connections + fingerprint + humanizer
+        # Group B: Init messages + user data processing + password decryption
+        t_parallel = time.monotonic()
 
-        # Initialize humanizer for human-like mouse movements and typing
-        # Architecture:
-        # - browser-use Page (dom_page): For DOM operations (evaluate, coordinate lookup) - READ ONLY
-        # - Playwright Page (input_page): For Input events (mouse, keyboard) - WRITE ONLY
-        # These use different CDP domains so no race conditions
-        from playwright.async_api import async_playwright
+        async def _setup_browser():
+            """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
+            # DOMService connect
+            t = time.monotonic()
+            _dom_service = DOMService(cdp_url=cdp_url)
+            await _dom_service.connect()
+            _record_timing("parallel.browser.dom_connect", t)
+            logger.info("🌐 Connected to browser via CDP")
 
-        # Get browser-use Page for DOM operations
-        dom_page = await dom_service.session.get_current_page()
+            _dom_page = await _dom_service.session.get_current_page()
 
-        # Create separate Playwright CDP connection for input events
-        playwright_instance = await async_playwright().start()
-        playwright_browser = await playwright_instance.chromium.connect_over_cdp(cdp_url)
-        playwright_context = playwright_browser.contexts[0]
-        input_page = playwright_context.pages[0]
+            # Playwright connect (separate CDP connection for input events)
+            t = time.monotonic()
+            from playwright.async_api import async_playwright
+            _playwright_instance = await async_playwright().start()
+            _playwright_browser = await _playwright_instance.chromium.connect_over_cdp(cdp_url)
+            _playwright_context = _playwright_browser.contexts[0]
+            _input_page = _playwright_context.pages[0]
+            _record_timing("parallel.browser.playwright_connect", t)
 
-        # ===== APPLY FINGERPRINT INJECTION VIA CDP =====
-        # CDP settings (Network.setUserAgentOverride, init scripts) don't persist across connections.
-        # The backend applied them and closed its connection, so we must re-apply them here.
-        if fingerprint_injection:
-            from helpers.fingerprint_injection import apply_fingerprint_injection
-            injection_success = await apply_fingerprint_injection(input_page, fingerprint_injection)
-            if injection_success:
-                logger.info("🔐 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)")
+            # Fingerprint injection via CDP (must happen before navigation)
+            t = time.monotonic()
+            if fingerprint_injection:
+                from helpers.fingerprint_injection import apply_fingerprint_injection
+                injection_success = await apply_fingerprint_injection(_input_page, fingerprint_injection)
+                if injection_success:
+                    logger.info("🔐 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)")
+                else:
+                    logger.warning("⚠️ Failed to apply fingerprint injection - browser may leak real fingerprint")
             else:
-                logger.warning("⚠️ Failed to apply fingerprint injection - browser may leak real fingerprint")
-        else:
-            logger.info("🔐 No fingerprint injection data provided - using Steel defaults")
+                logger.info("🔐 No fingerprint injection data provided - using Steel defaults")
+            _record_timing("parallel.browser.fingerprint", t)
 
-        # Create humanizer with both pages
-        humanizer = BrowserHumanizer(
-            dom_page=dom_page,      # browser-use Page for evaluate(), DOM reads
-            input_page=input_page,  # Playwright Page for mouse/keyboard input
-            fast=False
+            # Humanizer init
+            t = time.monotonic()
+            _humanizer = BrowserHumanizer(
+                dom_page=_dom_page, input_page=_input_page, fast=False
+            )
+            await _humanizer.initialize_cursor(start_pos=(640, 400))
+            logger.info("🤖 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
+            _record_timing("parallel.browser.humanizer", t)
+
+            return _dom_service, _dom_page, _input_page, _humanizer, _playwright_instance
+
+        async def _process_data():
+            """Save init messages + process user data (no browser needed)."""
+            # Init messages (only for fresh sessions)
+            if not is_resume:
+                t = time.monotonic()
+                await save_browser_action_message(
+                    agent_id=agent_id, title="Browser Ready", task_id=task_id,
+                    message="", status=MessageStatus.FINISHED, browser_url=browser_url,
+                    action_type="browser", tool_call_id=tool_call_id, is_init_message=True,
+                    output_schema=response_schema
+                )
+                await save_browser_action_message(
+                    agent_id=agent_id, title="Task Started", task_id=task_id,
+                    message=goal, status=MessageStatus.FINISHED, browser_url=browser_url,
+                    action_type="task_started"
+                )
+                _record_timing("parallel.data.init_messages", t)
+
+            # User profile processing
+            t = time.monotonic()
+            _shipping_section = ""
+            if user_profile.get("addressLine1"):
+                addr_lines = [
+                    user_profile.get("name", ""),
+                    user_profile["addressLine1"],
+                    user_profile.get("addressLine2", ""),
+                    f"{user_profile.get('city', '')}, {user_profile.get('state', '')} {user_profile.get('postalCode', '')}",
+                    user_profile.get("country", "United States")
+                ]
+                shipping_address = "\n".join(line for line in addr_lines if line)
+                _shipping_section = f"\n\nUSER SHIPPING ADDRESS:\n{shipping_address}\n\nIMPORTANT: During checkout, verify shipping address matches."
+
+            _autopay_section = ""
+            _card_refs: Dict[str, str] = {}
+            encrypted_payment = user_profile.get("encryptedPaymentInformation")
+            if encrypted_payment and config.payment.decryption_key:
+                payment_data = decrypt_payment_info(encrypted_payment, config.payment.decryption_key)
+                if payment_data:
+                    autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
+                    if autopay_limit_cents > 0:
+                        _autopay_section = build_autopay_prompt_section(payment_data, encrypted_payment)
+                        _card_refs = {
+                            "card_number": payment_data.get("card_number", ""),
+                            "card_name": payment_data.get("cardholder_name", ""),
+                            "card_expiry": payment_data.get("card_expiry", ""),
+                            "card_cvv": payment_data.get("card_cvv", ""),
+                        }
+                    else:
+                        _autopay_section = "\n\nPAYMENT AUTHORIZATION:\nAutopay DISABLED. For ALL purchases, use send_message_to_user to get explicit approval."
+            _record_timing("parallel.data.user_profile", t)
+
+            # Password processing + decryption
+            t = time.monotonic()
+            _passwords_section = ""
+            _ref_to_encrypted: Dict[str, str] = {}
+            _password_lookup: Dict[str, Dict[str, str]] = {}
+            if session_passwords:
+                _passwords_section, _ref_to_encrypted = build_passwords_prompt_section(session_passwords)
+                for pwd in session_passwords:
+                    encrypted = pwd.get("encryptedPassword", "")
+                    if encrypted:
+                        _password_lookup[encrypted] = {
+                            "origin": pwd.get("origin", ""),
+                            "username": pwd.get("username", ""),
+                        }
+                logger.info(f"Loaded {len(session_passwords)} passwords from session response")
+
+            _secret_refs: Dict[str, str] = {}
+            _password_origins: Dict[str, str] = {}
+
+            for ref, value in _card_refs.items():
+                if value:
+                    _secret_refs[ref] = value
+
+            if config.payment.decryption_key and _ref_to_encrypted:
+                from cryptography.hazmat.primitives import serialization
+                from cryptography.hazmat.backends import default_backend
+
+                private_key_pem = base64.b64decode(config.payment.decryption_key)
+                private_key = serialization.load_pem_private_key(
+                    private_key_pem, password=None, backend=default_backend()
+                )
+                logger.info(f"Pre-loaded RSA key, decrypting {len(_ref_to_encrypted)} passwords in parallel...")
+
+                async def decrypt_one(short_ref: str, encrypted: str) -> tuple[str, Optional[str]]:
+                    decrypted = await asyncio.to_thread(decrypt_password_with_key, encrypted, private_key)
+                    return (short_ref, decrypted)
+
+                decrypt_tasks = [
+                    decrypt_one(short_ref, encrypted)
+                    for short_ref, encrypted in _ref_to_encrypted.items()
+                ]
+                decrypt_results = await asyncio.gather(*decrypt_tasks)
+
+                for short_ref, decrypted in decrypt_results:
+                    if decrypted:
+                        _secret_refs[short_ref] = decrypted
+                        encrypted = _ref_to_encrypted[short_ref]
+                        info = _password_lookup.get(encrypted, {})
+                        _password_origins[short_ref] = info.get("origin", "")
+
+            logger.info(
+                "Built secret refs for type interception",
+                card_refs_count=len(_card_refs),
+                password_refs_count=len([k for k in _secret_refs if k not in _card_refs]),
+            )
+            _record_timing("parallel.data.passwords", t)
+
+            # Build instructions + model pricing
+            t = time.monotonic()
+            _base_custom_instructions = (
+                "Your browser is in full screen mode. No search bar or navigation bar. "
+                "Control+L will NOT focus the address bar - use the goto action to navigate to URLs. "
+                "Browser cookies have been injected - assume the user is logged in until proven otherwise. "
+                "Avoid login flows unless the site forces you to login to complete your directed goal."
+                + _shipping_section + _autopay_section + _passwords_section +
+                "\n\nWhen a site offers OTP delivery options, ALWAYS prefer EMAIL over SMS. "
+                "SMS OTPs require the user's Mac to be active; email is more reliable."
+                "\n\nUse send_message_to_user when you need human help (login, CAPTCHA, payments over limit). "
+                "Use attempt_completion tool when the task is done."
+            )
+            _model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
+            _record_timing("parallel.data.instructions", t)
+
+            return (
+                _shipping_section, _autopay_section, _card_refs,
+                _passwords_section, _ref_to_encrypted, _password_lookup,
+                _secret_refs, _password_origins,
+                _base_custom_instructions, _model_pricing,
+            )
+
+        # Run browser setup and data processing in parallel
+        browser_result, data_result = await asyncio.gather(
+            _setup_browser(),
+            _process_data(),
         )
-        logger.info(f"🤖 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
+        _record_timing("parallel_setup_total", t_parallel)
 
-        # Initialize cursor at starting position
-        await humanizer.initialize_cursor(start_pos=(640, 400))
+        # Unpack browser results
+        dom_service, dom_page, input_page, humanizer, playwright_instance = browser_result
 
-        # ===== UPLOAD ATTACHMENTS TO STEEL SESSION =====
-        available_file_paths: Dict[str, str] = {}  # filename -> remote path
+        # Unpack data results
+        (
+            shipping_section, autopay_section, card_refs,
+            passwords_section, ref_to_encrypted, password_lookup,
+            secret_refs, password_origins,
+            base_custom_instructions, model_pricing,
+        ) = data_result
+
+        # ===== PHASE 3: POST-SETUP (needs browser) =====
+        t_post = time.monotonic()
+
+        # Upload attachments
+        available_file_paths: Dict[str, str] = {}
         if attachments:
+            t = time.monotonic()
             logger.info(f"📎 Uploading {len(attachments)} attachments to Steel session")
             from helpers.attachments import download_from_storage
 
@@ -2170,11 +2395,9 @@ async def spawn_browser_agent_activity_v3(
                         logger.warning(f"Skipping invalid attachment: {fp}")
                         continue
 
-                    # Download file from Supabase Storage
                     activity.heartbeat(f"Downloading {filename}...")
                     file_content = await download_from_storage(storage_path)
 
-                    # Upload to Steel session via backend API
                     activity.heartbeat(f"Uploading {filename} to browser session...")
                     async with httpx.AsyncClient(timeout=60.0) as client:
                         response = await client.post(
@@ -2195,24 +2418,20 @@ async def spawn_browser_agent_activity_v3(
 
             if available_file_paths:
                 logger.info(f"📎 Available files for browser: {list(available_file_paths.keys())}")
+            _record_timing("post_setup.attachments", t)
 
-        # Visual cursor is now handled by CursorVisualizer inside BrowserHumanizer
-        # It's injected on demand and re-injected on navigation
-        
-        # ===== HIJACK IMG.SRC TO REPLACE BROWSER-USE LOGO WITH ROSE LOGO =====
+        # Logo hijack
+        t = time.monotonic()
         try:
             logo_hijack_script = """
                 (() => {
                     const ROSE_LOGO_URL = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIxIDYyIDIyMCAyMjIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjIyIj4KICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMwMykgc2NhbGUoMC4xLC0wLjEpIiBmaWxsPSIjZmZmZmZmIj4KICAgIDxwYXRoIGQ9Ik0xMjc2IDIzNzggYy0xNDUgLTE5MiAtMjMxIC00NDIgLTIxMSAtNjE2IDggLTY4IDQxIC0yMDIgNjEgLTI1MSA4IC0xOSAxMyAtMzUgMTEgLTM3IC0yIC0yIC0zMCA3IC02MiAyMSAtMjQ5IDEwMCAtNTM3IDU0IC03ODQgLTEyNCAtMzYgLTI1IC02OSAtNDkgLTc1IC01MyAtMTcgLTExIDIyIC00NiAxMTkgLTEwNSAxNjMgLTEwMSAzMDAgLTE0NCA0NjAgLTE0NCA5MiAtMSAyMjYgMjQgMzAxIDU2IDIwIDggMzggMTUgMzkgMTUgMiAwIC0xMCAtMzkgLTI1IC04NyAtNjkgLTIxMyAtNTggLTM5NSAzNiAtNjAwIDMxIC02OSAxMzYgLTIzNyAxNTQgLTI0OCAxMCAtNiAxMTQgMTQ0IDE1MiAyMjAgMzcgNzMgNzUgMTk5IDg4IDI5MyAxNCAxMDEgMSAyMDYgLTQwIDMzMCAtMTUgNDggLTI3IDg4IC0yNiA4OSAxIDIgMjYgLTcgNTUgLTE4IDE5NSAtNzQgNDIzIC02NiA2MTEgMjIgOTggNDYgMjE3IDExOCAyNDUgMTQ5IDE4IDIwIDE4IDIxIC0xIDM1IC0xNzcgMTM5IC0zOTYgMjI1IC01NzAgMjI1IC03OSAwIC0xOTUgLTIzIC0yODIgLTU2IC00NCAtMTYgLTYzIC0yMCAtNTkgLTExIDI3IDcyIDYwIDE5NiA2OCAyNjAgMTcgMTMyIC0xNyAzMDAgLTg5IDQ0MiAtMzYgNzIgLTEyNCAyMDkgLTE0MSAyMTkgLTUgNCAtMjEgLTggLTM1IC0yNnogbTQwIC05MzUgYzcgLTQ2IDUwIC05MiAxMDkgLTExOSAyNyAtMTMgNDEgLTIzIDMxIC0yMyAtMTEgLTEgLTM4IC0xMiAtNjIgLTI2IC00OSAtMjkgLTgzIC05MCAtODUgLTE1MSAtMSAtMzcgLTIgLTM2IC05IDEzIC00IDI5IC0xNyA2NyAtMjggODUgLTIyIDM1IC04NiA3NyAtMTE4IDc5IC0xMSAwIDEgOSAyNiAyMCA3OSAzNSAxMTggOTAgMTIxIDE2OCAxIDI1IDMgMjggNiAxMSAyIC0xNCA2IC0zOSA5IC01N3oiLz4KICA8L2c+Cjwvc3ZnPg==';
 
-                    // Only hijack once per context
                     if (window.__roseSrcHijacked) return;
                     window.__roseSrcHijacked = true;
 
-                    // Store original property descriptor
                     const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
 
-                    // Hijack img.src setter to intercept browser-use logo
                     Object.defineProperty(HTMLImageElement.prototype, 'src', {
                         get: function() {
                             return originalDescriptor.get.call(this);
@@ -2228,7 +2447,6 @@ async def spawn_browser_agent_activity_v3(
                         configurable: originalDescriptor.configurable
                     });
 
-                    // Also intercept setAttribute('src', ...) calls
                     const originalSetAttribute = Element.prototype.setAttribute;
                     Element.prototype.setAttribute = function(name, value) {
                         if (this instanceof HTMLImageElement && name === 'src' &&
@@ -2240,18 +2458,20 @@ async def spawn_browser_agent_activity_v3(
                     };
                 })();
             """
+            # Get CDP session from DOMService for addScriptToEvaluateOnNewDocument
+            logo_cdp_session = await dom_service._session.get_or_create_cdp_session(focus=True)
+
             # Register for future documents
-            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+            await logo_cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
                 params={"source": logo_hijack_script, "runImmediately": True},
-                session_id=cdp_session.session_id
+                session_id=logo_cdp_session.session_id
             )
 
-            # Also run immediately on all existing pages to replace already-loaded logos
+            # Replace logos on all existing page targets
             immediate_replace_script = """
                 (() => {
                     const ROSE_LOGO_URL = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIxIDYyIDIyMCAyMjIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjIyIj4KICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMwMykgc2NhbGUoMC4xLC0wLjEpIiBmaWxsPSIjZmZmZmZmIj4KICAgIDxwYXRoIGQ9Ik0xMjc2IDIzNzggYy0xNDUgLTE5MiAtMjMxIC00NDIgLTIxMSAtNjE2IDggLTY4IDQxIC0yMDIgNjEgLTI1MSA4IC0xOSAxMyAtMzUgMTEgLTM3IC0yIC0yIC0zMCA3IC02MiAyMSAtMjQ5IDEwMCAtNTM3IDU0IC03ODQgLTEyNCAtMzYgLTI1IC02OSAtNDkgLTc1IC01MyAtMTcgLTExIDIyIC00NiAxMTkgLTEwNSAxNjMgLTEwMSAzMDAgLTE0NCA0NjAgLTE0NCA5MiAtMSAyMjYgMjQgMzAxIDU2IDIwIDggMzggMTUgMzkgMTUgMiAwIC0xMCAtMzkgLTI1IC04NyAtNjkgLTIxMyAtNTggLTM5NSAzNiAtNjAwIDMxIC02OSAxMzYgLTIzNyAxNTQgLTI0OCAxMCAtNiAxMTQgMTQ0IDE1MiAyMjAgMzcgNzMgNzUgMTk5IDg4IDI5MyAxNCAxMDEgMSAyMDYgLTQwIDMzMCAtMTUgNDggLTI3IDg4IC0yNiA4OSAxIDIgMjYgLTcgNTUgLTE4IDE5NSAtNzQgNDIzIC02NiA2MTEgMjIgOTggNDYgMjE3IDExOCAyNDUgMTQ5IDE4IDIwIDE4IDIxIC0xIDM1IC0xNzcgMTM5IC0zOTYgMjI1IC01NzAgMjI1IC03OSAwIC0xOTUgLTIzIC0yODIgLTU2IC00NCAtMTYgLTYzIC0yMCAtNTkgLTExIDI3IDcyIDYwIDE5NiA2OCAyNjAgMTcgMTMyIC0xNyAzMDAgLTg5IDQ0MiAtMzYgNzIgLTEyNCAyMDkgLTE0MSAyMTkgLTUgNCAtMjEgLTggLTM1IC0yNnogbTQwIC05MzUgYzcgLTQ2IDUwIC05MiAxMDkgLTExOSAyNyAtMTMgNDEgLTIzIDMxIC0yMyAtMTEgLTEgLTM4IC0xMiAtNjIgLTI2IC00OSAtMjkgLTgzIC05MCAtODUgLTE1MSAtMSAtMzcgLTIgLTM2IC05IDEzIC00IDI5IC0xNyA2NyAtMjggODUgLTIyIDM1IC04NiA3NyAtMTE4IDc5IC0xMSAwIDEgOSAyNiAyMCA3OSAzNSAxMTggOTAgMTIxIDE2OCAxIDI1IDMgMjggNiAxMSAyIC0xNCA2IC0zOSA5IC01N3oiLz4KICA8L2c+Cjwvc3ZnPg==';
 
-                    // Replace any existing browser-use logos
                     document.querySelectorAll('img').forEach(img => {
                         if (img.src && img.src.includes('browser-use.com')) {
                             img.src = ROSE_LOGO_URL;
@@ -2260,8 +2480,6 @@ async def spawn_browser_agent_activity_v3(
                     });
                 })();
             """
-
-            # Run on all existing page targets
             try:
                 page_targets = await dom_service._session._cdp_get_all_pages()
                 for target in page_targets:
@@ -2274,154 +2492,26 @@ async def spawn_browser_agent_activity_v3(
                                 session_id=temp_session.session_id
                             )
                     except Exception:
-                        pass  # Skip targets that can't be accessed
+                        pass
             except Exception as e:
                 logger.debug(f"Could not replace logos on existing pages: {e}")
 
             logger.info("🎨 Hijacked img.src to replace browser-use logo with Rose logo")
         except Exception as e:
             logger.warning(f"Failed to replace logo: {e}")
-        
-        # ===== FETCH USER PROFILE =====
-        user_profile = {}
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{config.backend.api_url}/api/user-settings",
-                    headers={"X-API-Key": config.backend.api_key, "x-user-id": user_id}
-                )
-                if resp.status_code == 200:
-                    user_profile = resp.json()
-        except:
-            pass
-        
-        # Build shipping section
-        shipping_section = ""
-        if user_profile.get("addressLine1"):
-            addr_lines = [
-                user_profile.get("name", ""),
-                user_profile["addressLine1"],
-                user_profile.get("addressLine2", ""),
-                f"{user_profile.get('city', '')}, {user_profile.get('state', '')} {user_profile.get('postalCode', '')}",
-                user_profile.get("country", "United States")
-            ]
-            shipping_address = "\n".join(line for line in addr_lines if line)
-            shipping_section = f"\n\nUSER SHIPPING ADDRESS:\n{shipping_address}\n\nIMPORTANT: During checkout, verify shipping address matches."
-        
-        # Build autopay section (with reference IDs, not plaintext)
-        autopay_section = ""
-        encrypted_payment = user_profile.get("encryptedPaymentInformation")
-        card_refs: Dict[str, str] = {}  # For type interception
-        if encrypted_payment and config.payment.decryption_key:
-            payment_data = decrypt_payment_info(encrypted_payment, config.payment.decryption_key)
-            if payment_data:
-                autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
-                if autopay_limit_cents > 0:
-                    autopay_section = build_autopay_prompt_section(payment_data, encrypted_payment)
-                    # Store card refs for type interception
-                    card_refs = {
-                        "card_number": payment_data.get("card_number", ""),
-                        "card_name": payment_data.get("cardholder_name", ""),
-                        "card_expiry": payment_data.get("card_expiry", ""),
-                        "card_cvv": payment_data.get("card_cvv", ""),
-                    }
-                else:
-                    autopay_section = "\n\nPAYMENT AUTHORIZATION:\nAutopay DISABLED. For ALL purchases, use send_message_to_user to get explicit approval."
+        _record_timing("post_setup.logo_hijack", t)
+        _record_timing("post_setup_total", t_post)
 
-        # Use passwords from session response (no separate fetch needed)
-        passwords_section = ""
-        ref_to_encrypted: Dict[str, str] = {}  # short_ref -> encrypted_blob
-        password_lookup: Dict[str, Dict[str, str]] = {}  # encrypted -> {origin, username}
-        if session_passwords:
-            passwords_section, ref_to_encrypted = build_passwords_prompt_section(session_passwords)
-            # Build lookup for type interception (encrypted -> origin/username)
-            for pwd in session_passwords:
-                encrypted = pwd.get("encryptedPassword", "")
-                if encrypted:
-                    password_lookup[encrypted] = {
-                        "origin": pwd.get("origin", ""),
-                        "username": pwd.get("username", ""),
-                    }
-            logger.info(f"Loaded {len(session_passwords)} passwords from session response")
-
-        # Build secret_refs for type interception (short_ref -> decrypted value)
-        secret_refs: Dict[str, str] = {}
-        password_origins: Dict[str, str] = {}  # short_ref -> origin for validation
-
-        # Add card refs (no decryption needed, we already have the values from payment_data)
-        for ref, value in card_refs.items():
-            if value:
-                secret_refs[ref] = value
-
-        # Add password refs using short refs (decrypt each password)
-        # ref_to_encrypted maps: short_ref -> encrypted_blob
-        # password_lookup maps: encrypted_blob -> {origin, username}
-        # OPTIMIZED: Pre-load RSA key once and decrypt in parallel to avoid blocking
-        if config.payment.decryption_key and ref_to_encrypted:
-            from cryptography.hazmat.primitives import serialization
-            from cryptography.hazmat.backends import default_backend
-
-            # Pre-load RSA private key ONCE (was loading 667 times before!)
-            private_key_pem = base64.b64decode(config.payment.decryption_key)
-            private_key = serialization.load_pem_private_key(
-                private_key_pem, password=None, backend=default_backend()
-            )
-            logger.info(f"Pre-loaded RSA key, decrypting {len(ref_to_encrypted)} passwords in parallel...")
-
-            # Decrypt all passwords in parallel using thread pool
-            async def decrypt_one(short_ref: str, encrypted: str) -> tuple[str, Optional[str]]:
-                decrypted = await asyncio.to_thread(decrypt_password_with_key, encrypted, private_key)
-                return (short_ref, decrypted)
-
-            decrypt_tasks = [
-                decrypt_one(short_ref, encrypted)
-                for short_ref, encrypted in ref_to_encrypted.items()
-            ]
-            results = await asyncio.gather(*decrypt_tasks)
-
-            # Process results
-            for short_ref, decrypted in results:
-                if decrypted:
-                    # Map short ref to decrypted value for type interception
-                    secret_refs[short_ref] = decrypted
-                    # Map short ref to origin for validation
-                    encrypted = ref_to_encrypted[short_ref]
-                    info = password_lookup.get(encrypted, {})
-                    password_origins[short_ref] = info.get("origin", "")
-
-        logger.info(
-            "Built secret refs for type interception",
-            card_refs_count=len(card_refs),
-            password_refs_count=len([k for k in secret_refs if k not in card_refs]),
-        )
-
-        # Base custom instructions (static parts - OTP added each iteration)
-        base_custom_instructions = (
-            "Your browser is in full screen mode. No search bar or navigation bar. "
-            "Control+L will NOT focus the address bar - use the goto action to navigate to URLs. "
-            "Browser cookies have been injected - assume the user is logged in until proven otherwise. "
-            "Avoid login flows unless the site forces you to login to complete your directed goal."
-            + shipping_section + autopay_section + passwords_section +
-            "\n\nWhen a site offers OTP delivery options, ALWAYS prefer EMAIL over SMS. "
-            "SMS OTPs require the user's Mac to be active; email is more reliable."
-            "\n\nUse send_message_to_user when you need human help (login, CAPTCHA, payments over limit). "
-            "Use attempt_completion tool when the task is done."
-        )
-
-        # Model pricing
-        model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
-
-        # ===== AUTO-NAVIGATE TO START URL (skip when resuming from write lock) =====
+        # ===== PHASE 4: NAVIGATION =====
+        t_nav = time.monotonic()
         if not write_lock_resume_state:
             from browser_use.browser.events import NavigateToUrlEvent
 
-            # Auto-add https:// if no scheme provided
             nav_url = start_url
             if not nav_url.startswith(("http://", "https://", "about:", "file:")):
                 nav_url = f"https://{nav_url}"
                 logger.info(f"🔗 Auto-added https:// to start URL: {nav_url}")
 
-            # Post IN_PROGRESS message
             await save_browser_action_message(
                 agent_id=agent_id, title=f"Navigating → {nav_url[:50]}",
                 task_id=task_id,
@@ -2430,12 +2520,13 @@ async def spawn_browser_agent_activity_v3(
                 steps_taken=0, total_steps=25
             )
 
-            # Navigate
+            t = time.monotonic()
             event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url))
             await event
             await event.event_result(raise_if_any=True, raise_if_none=False)
+            _record_timing("navigation.navigate", t)
 
-            # Inject localStorage for this origin after navigation
+            t = time.monotonic()
             try:
                 from urllib.parse import urlparse
                 parsed = urlparse(nav_url)
@@ -2457,8 +2548,8 @@ async def spawn_browser_agent_activity_v3(
                         logger.warning(f"Failed to inject localStorage: HTTP {inject_response.status_code}")
             except Exception as e:
                 logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
+            _record_timing("navigation.inject_localStorage", t)
 
-            # Post FINISHED message
             await save_browser_action_message(
                 agent_id=agent_id, title=f"Navigated → {nav_url[:50]}",
                 task_id=task_id,
@@ -2470,9 +2561,22 @@ async def spawn_browser_agent_activity_v3(
             logger.info(f"🌐 Auto-navigated to start URL: {nav_url}")
         else:
             logger.info("🔄 Resuming from write lock approval - skipping start URL navigation")
+        _record_timing("navigation_total", t_nav)
+
+        # ===== LOG SETUP TIMING SUMMARY =====
+        total_ms = (time.monotonic() - setup_origin) * 1000
+        timing_events_sorted = sorted(timing_events, key=lambda x: x[1])
+        timing_lines = ["[TIMING] Browser agent setup timeline:"]
+        for name, start_ms, end_ms in timing_events_sorted:
+            duration = end_ms - start_ms
+            indent = "  │ " if "." in name else "  "
+            display_name = name.split(".")[-1] if "parallel." in name else name
+            timing_lines.append(f"{indent}{display_name:<25} {start_ms:>8.0f}ms → {end_ms:>8.0f}ms  ({duration:>7.1f}ms)")
+        timing_lines.append(f"  {'TOTAL':<25} {'0':>8}ms → {total_ms:>8.0f}ms  ({total_ms:>7.1f}ms / {total_ms/1000:.1f}s)")
+        logger.info("\n".join(timing_lines))
 
         # ===== MAIN AGENT LOOP =====
-        max_iterations = 25
+        max_iterations = 30
         iteration = resume_step_count  # Resume from step count if coming back from write lock approval
 
         while iteration < max_iterations:
@@ -2824,7 +2928,23 @@ async def spawn_browser_agent_activity_v3(
                         uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
                         output_files = await extract_session_files(session_id, user_id, config, exclude_paths=uploaded_paths)
 
-                        # 2. Resolve file pointers in structured_response using extracted files
+                        # 2. Upload final screenshot as output file
+                        last_screenshot_b64 = browser_state.get("screenshot")
+                        if last_screenshot_b64:
+                            try:
+                                screenshot_bytes = base64.b64decode(last_screenshot_b64)
+                                screenshot_fp = await upload_to_storage(
+                                    user_id=user_id,
+                                    file_content=screenshot_bytes,
+                                    filename="screenshot_final.png",
+                                    mime_type="image/png",
+                                )
+                                output_files.append(screenshot_fp)
+                                logger.info("[BrowserAgent] Uploaded final screenshot", agent_id=agent_id, size_bytes=screenshot_fp["size_bytes"])
+                            except Exception as e:
+                                logger.warning("[BrowserAgent] Failed to upload final screenshot", agent_id=agent_id, error=extract_error_message(e))
+
+                        # 3. Resolve file pointers in structured_response using extracted files
                         if structured_response and output_files:
                             structured_response = resolve_file_pointers_from_extracted(
                                 structured_response=structured_response,

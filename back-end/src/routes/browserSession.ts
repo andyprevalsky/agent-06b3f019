@@ -31,6 +31,7 @@ const router = Router();
 const initSessionSchema = z.object({
   user_id: z.string(),
   agent_id: z.string().uuid(),
+  start_url: z.string().min(1),
 });
 
 const closeSessionSchema = z.object({
@@ -55,15 +56,48 @@ const injectLocalStorageSchema = z.object({
  */
 router.post('/init', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { user_id, agent_id } = initSessionSchema.parse(req.body);
+    const { user_id, agent_id, start_url } = initSessionSchema.parse(req.body);
 
-    console.log(`🌐 Initializing browser session for user ${user_id}, agent ${agent_id}`);
+    console.log(`🌐 Initializing browser session for user ${user_id}, agent ${agent_id}, start_url: ${start_url || 'none'}`);
 
-    // Look up agent's proxy geolocation
-    const agent = await prisma.agent.findUnique({
-      where: { id: agent_id },
-      select: { proxyCountry: true, proxyState: true, proxyCity: true }
-    });
+    // Phase 1: All independent queries in parallel
+    const [agent, contextId, user, fingerprintInjection, passwords] = await Promise.all([
+      prisma.agent.findUnique({
+        where: { id: agent_id },
+        select: { proxyCountry: true, proxyState: true, proxyCity: true }
+      }),
+      getOrCreateContext(user_id),
+      prisma.user.findUnique({
+        where: { userId: user_id },
+        select: {
+          name: true,
+          phone: true,
+          addressLine1: true,
+          addressLine2: true,
+          city: true,
+          state: true,
+          postalCode: true,
+          country: true,
+          encryptedPaymentInformation: true,
+          systemName: true,
+          profilePicture: true,
+          customSystemPrompt: true,
+        }
+      }),
+      getFingerprintInjectionData(user_id),
+      prisma.browserPassword.findMany({
+        where: { userId: user_id },
+        select: {
+          origin: true,
+          username: true,
+          encryptedPassword: true,
+          dateLastUsed: true,
+        },
+        orderBy: {
+          dateLastUsed: 'desc',
+        },
+      }),
+    ]);
 
     const proxyGeo: ProxyGeoLocation = agent?.proxyCountry
       ? {
@@ -75,33 +109,11 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
 
     console.log(`🌍 Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
 
-    // 1. Get or create persistent context for user
-    const contextId = await getOrCreateContext(user_id);
-
-    // 2. Create temporary session for this task
+    // Phase 2: Create session (needs agent proxy + context)
     const session = await createSessionWithContext(contextId, agent_id, proxyGeo);
 
-    // 3. Inject user's cookies and fingerprint in a single CDP connection
-    // Note: CDP settings don't persist across connections, so we also return
-    // the fingerprint data for the agent to re-apply when it connects
-    const injectionResult = await injectUserData(session.sessionId, user_id);
-
-// 4. Get fingerprint data for the agent to apply via its own CDP connection
-    const fingerprintInjection = await getFingerprintInjectionData(user_id);
-
-    // 5. Fetch user's saved passwords (RSA-encrypted)
-    const passwords = await prisma.browserPassword.findMany({
-      where: { userId: user_id },
-      select: {
-        origin: true,
-        username: true,
-        encryptedPassword: true,
-        dateLastUsed: true,
-      },
-      orderBy: {
-        dateLastUsed: 'desc',
-      },
-    });
+    // Phase 3: Inject user's cookies and fingerprint via CDP
+    const injectionResult = await injectUserData(session.sessionId, user_id, start_url);
 
     // Convert BigInt to number for JSON serialization
     const serializedPasswords = passwords.map(p => ({
@@ -110,6 +122,22 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       encryptedPassword: p.encryptedPassword,
       dateLastUsed: p.dateLastUsed ? Number(p.dateLastUsed) : null,
     }));
+
+    // Build user settings for agent (avoids separate GET /api/user-settings call)
+    const userSettings = user ? {
+      name: user.name,
+      phone: user.phone,
+      addressLine1: user.addressLine1,
+      addressLine2: user.addressLine2,
+      city: user.city,
+      state: user.state,
+      postalCode: user.postalCode,
+      country: user.country,
+      encryptedPaymentInformation: user.encryptedPaymentInformation,
+      systemName: user.systemName,
+      profilePicture: user.profilePicture,
+      customSystemPrompt: user.customSystemPrompt,
+    } : null;
 
     console.log(`🔐 Including ${serializedPasswords.length} passwords in init response`);
 
@@ -123,9 +151,9 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       cookies_injected: injectionResult.cookies.injected,
       cookies_count: injectionResult.cookies.cookieCount,
       fingerprint_injected: injectionResult.fingerprint.injected,
-      // Fingerprint data for agent to apply via CDP (settings don't persist across connections)
       fingerprint_injection: fingerprintInjection,
-      passwords: serializedPasswords,  // RSA-encrypted passwords for type interception
+      passwords: serializedPasswords,
+      user_settings: userSettings,
     });
     
   } catch (error) {

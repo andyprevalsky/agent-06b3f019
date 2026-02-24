@@ -3,6 +3,7 @@
 This module provides functions to detect high-risk browser actions:
 1. Payment field detection - before entering card details
 2. Social posting detection - before clicking submit on social media
+3. Purchase button detection - before clicking checkout/order buttons
 
 When write lock is enabled and a high-risk action is detected,
 the agent must request user approval before proceeding.
@@ -107,6 +108,23 @@ SUBMIT_BUTTON_PATTERNS = [
     "submit",
 ]
 
+# Purchase/order button text patterns (case-insensitive)
+# These are matched as full phrases to avoid false positives (e.g. "place" alone)
+PURCHASE_BUTTON_PHRASES = [
+    "place your order",
+    "place order",
+    "complete purchase",
+    "complete order",
+    "confirm order",
+    "confirm purchase",
+    "confirm and pay",
+    "submit order",
+    "pay now",
+    "proceed to pay",
+    "checkout now",
+    "complete checkout",
+]
+
 
 def is_social_domain(url: str) -> bool:
     """Check if URL is a social media or forum domain.
@@ -164,6 +182,28 @@ def is_submit_button(element_text: str) -> bool:
     for pattern in SUBMIT_BUTTON_PATTERNS:
         if pattern in text_lower:
             logger.debug(f"Element text '{element_text}' matched submit pattern: {pattern}")
+            return True
+
+    return False
+
+
+def is_purchase_button(element_text: str) -> bool:
+    """Check if element text indicates a purchase/order button.
+
+    Args:
+        element_text: The text content of the button element
+
+    Returns:
+        True if the text contains purchase/order phrases
+    """
+    if not element_text:
+        return False
+
+    text_lower = element_text.lower().strip()
+
+    for phrase in PURCHASE_BUTTON_PHRASES:
+        if phrase in text_lower:
+            logger.debug(f"Element text '{element_text}' matched purchase pattern: {phrase}")
             return True
 
     return False
@@ -266,7 +306,7 @@ def get_write_lock_approval_question(
     """Generate an approval question for a write lock violation.
 
     Args:
-        action_type: "payment" or "social_post"
+        action_type: "payment", "purchase", or "social_post"
         url: Current page URL
         element_text: Text of the element being interacted with
         field_description: Description of the field (for payment)
@@ -280,6 +320,14 @@ def get_write_lock_approval_question(
             f"**Payment Input Detected**\n\n"
             f"{system_name} wants to enter payment details.\n\n"
             f"**Field:** {field_description or 'Payment field'}\n"
+            f"**Page:** {url}"
+        )
+    elif action_type == "purchase":
+        domain = urlparse(url).netloc if url else "unknown"
+        return (
+            f"**Purchase Detected**\n\n"
+            f"{system_name} wants to place an order on **{domain}**.\n\n"
+            f"**Button:** {element_text or 'Place order'}\n"
             f"**Page:** {url}"
         )
     elif action_type == "social_post":

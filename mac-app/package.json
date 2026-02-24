@@ -15,6 +15,7 @@
     "dev": "tsc -p tsconfig.main.json && concurrently \"tsc -p tsconfig.main.json --watch\" \"vite\" \"wait-on http://localhost:5174 && electron .\"",
     "build": "vite build && tsc -p tsconfig.main.json && electron-builder",
     "build:vite": "vite build && tsc -p tsconfig.main.json",
+    "postinstall": "node -e \"const v=require('electron/package.json').version;require('child_process').execSync('npx node-gyp rebuild --target='+v+' --arch='+process.arch+' --dist-url=https://electronjs.org/headers',{cwd:'node_modules/better-sqlite3',stdio:'inherit'})\"",
     "type-check": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit"
   },
   "dependencies": {

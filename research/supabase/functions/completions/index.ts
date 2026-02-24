@@ -3155,161 +3155,162 @@ async function handleStreaming(
   // Get model-specific messages (transforms screenshots for vision models)
   const modelMessages = getMessagesForModel(messages, actualModel);
 
+  // Perform fetch BEFORE creating ReadableStream so errors (401, 500, etc.)
+  // propagate to the caller and can trigger fallback (e.g. claude_token → racing).
+  let fetchResponse: globalThis.Response;
+  let nativeToolMode = false;
+
+  if (isCerebras) {
+    // Call Cerebras API directly for rose-hyper
+    const cerebrasKey = Deno.env.get('CEREBRAS_API_KEY');
+    console.log(`⚡ Streaming from Cerebras API with model: ${actualModel}`);
+
+    // Build Cerebras streaming request - supports tools with gpt-oss-120b
+    const cerebrasStreamBody: any = {
+      model: actualModel,
+      messages: modelMessages,  // Use transformed messages
+      temperature,
+      max_tokens: maxTokens,
+      stream: true
+    };
+
+    // Add tools for streaming (gpt-oss-120b supports this)
+    if (tools && tools.length > 0) {
+      cerebrasStreamBody.tools = tools;
+    }
+    if (toolChoice) {
+      cerebrasStreamBody.tool_choice = toolChoice;
+    }
+
+    // Add response_format with schema transformation for Cerebras
+    if (responseFormat) {
+      if (responseFormat.type === 'json_schema' && responseFormat.json_schema?.schema) {
+        const transformedSchema = transformSchemaForCerebras(responseFormat.json_schema.schema);
+        cerebrasStreamBody.response_format = {
+          type: 'json_schema',
+          json_schema: {
+            name: responseFormat.json_schema.name || 'response',
+            strict: true,
+            schema: transformedSchema
+          }
+        };
+      } else {
+        cerebrasStreamBody.response_format = responseFormat;
+      }
+    }
+
+    fetchResponse = await fetch(CEREBRAS_API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${cerebrasKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(cerebrasStreamBody)
+    });
+  } else if (isAnthropicModel(actualModel) || claudeAuth) {
+    // Call Anthropic API directly for Claude models (structured outputs require beta header)
+    // When claudeAuth is set, actualModel is e.g. "claude-opus-4-6-claude" or "claude-sonnet-4-6-claude" — strip "-claude" suffix for API
+    const anthropicModel = claudeAuth ? actualModel.replace('-claude', '') : getAnthropicModelName(actualModel);
+    const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
+
+    const anthropicBody: any = {
+      model: anthropicModel,
+      messages: anthropicMessages,
+      max_tokens: maxTokens || 4096,
+      stream: true
+    };
+
+    if (system) {
+      anthropicBody.system = system;
+    }
+    if (temperature !== undefined) {
+      anthropicBody.temperature = temperature;
+    }
+
+    nativeToolMode = applyAnthropicToolConfig(anthropicBody, responseFormat, !!claudeAuth);
+
+    console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`);
+
+    // Use Claude OAuth token (user's subscription) or Rose's API key
+    const anthropicHeaders: Record<string, string> = {
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    };
+    if (claudeAuth) {
+      anthropicHeaders['Authorization'] = `Bearer ${claudeAuth.token}`;
+      anthropicHeaders['anthropic-beta'] = 'oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05';
+      anthropicHeaders['x-app'] = 'cli';
+      anthropicHeaders['User-Agent'] = 'claude-cli/2.1.45 (external, rose-planner)';
+    } else {
+      const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+      if (!anthropicKey) {
+        throw new Error(`ANTHROPIC_API_KEY required for ${actualModel}`);
+      }
+      anthropicHeaders['x-api-key'] = anthropicKey;
+      anthropicHeaders['anthropic-beta'] = ANTHROPIC_BETA_HEADER;
+    }
+
+    console.log(`[Anthropic Stream] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
+
+    fetchResponse = await fetch(ANTHROPIC_API_URL, {
+      method: 'POST',
+      headers: anthropicHeaders,
+      body: JSON.stringify(anthropicBody)
+    });
+  } else {
+    // Call OpenRouter API for other Rose models
+    const openRouterBody: any = {
+      model: actualModel,
+      messages: modelMessages,  // Use transformed messages
+      temperature,
+      max_tokens: maxTokens,
+      seed,
+      tools,
+      tool_choice: toolChoice,
+      stream: true
+    };
+
+    // Add response_format for structured outputs
+    if (responseFormat) {
+      openRouterBody.response_format = responseFormat;
+    }
+
+    // Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
+    if (reasoning) {
+      openRouterBody.reasoning = reasoning;
+      console.log(`🧠 Streaming with reasoning config:`, reasoning);
+    }
+
+    console.log(`[OpenRouter Stream] Request to ${actualModel}:`, JSON.stringify(truncateForLogging(openRouterBody), null, 2));
+
+    fetchResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${openRouterKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': supabaseUrl,
+        'X-Title': 'Rose Benchmark Suite'
+      },
+      body: JSON.stringify(openRouterBody)
+    });
+  }
+
+  if (!fetchResponse.ok) {
+    const provider = isCerebras ? 'Cerebras' : (isAnthropicModel(actualModel) || claudeAuth) ? 'Anthropic' : 'OpenRouter';
+    const errorText = await fetchResponse.text();
+    console.error(`${provider} streaming error:`, fetchResponse.status, errorText);
+    throw new Error(`${provider} API error: ${fetchResponse.status} - ${errorText.slice(0, 200)}`);
+  }
+
+  const reader = fetchResponse.body?.getReader();
+  if (!reader) {
+    throw new Error('No response body');
+  }
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        let response: globalThis.Response;
-        let nativeToolMode = false;
-
-        if (isCerebras) {
-          // Call Cerebras API directly for rose-hyper
-          const cerebrasKey = Deno.env.get('CEREBRAS_API_KEY');
-          console.log(`⚡ Streaming from Cerebras API with model: ${actualModel}`);
-          
-          // Build Cerebras streaming request - supports tools with gpt-oss-120b
-          const cerebrasStreamBody: any = {
-            model: actualModel,
-            messages: modelMessages,  // Use transformed messages
-            temperature,
-            max_tokens: maxTokens,
-            stream: true
-          };
-          
-          // Add tools for streaming (gpt-oss-120b supports this)
-          if (tools && tools.length > 0) {
-            cerebrasStreamBody.tools = tools;
-          }
-          if (toolChoice) {
-            cerebrasStreamBody.tool_choice = toolChoice;
-          }
-          
-          // Add response_format with schema transformation for Cerebras
-          if (responseFormat) {
-            if (responseFormat.type === 'json_schema' && responseFormat.json_schema?.schema) {
-              const transformedSchema = transformSchemaForCerebras(responseFormat.json_schema.schema);
-              cerebrasStreamBody.response_format = {
-                type: 'json_schema',
-                json_schema: {
-                  name: responseFormat.json_schema.name || 'response',
-                  strict: true,
-                  schema: transformedSchema
-                }
-              };
-            } else {
-              cerebrasStreamBody.response_format = responseFormat;
-            }
-          }
-          
-          response = await fetch(CEREBRAS_API_URL, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${cerebrasKey}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(cerebrasStreamBody)
-          });
-        } else if (isAnthropicModel(actualModel) || claudeAuth) {
-          // Call Anthropic API directly for Claude models (structured outputs require beta header)
-          // When claudeAuth is set, actualModel is e.g. "claude-opus-4-6-claude" or "claude-sonnet-4-6-claude" — strip "-claude" suffix for API
-          const anthropicModel = claudeAuth ? actualModel.replace('-claude', '') : getAnthropicModelName(actualModel);
-          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
-
-          const anthropicBody: any = {
-            model: anthropicModel,
-            messages: anthropicMessages,
-            max_tokens: maxTokens || 4096,
-            stream: true
-          };
-
-          if (system) {
-            anthropicBody.system = system;
-          }
-          if (temperature !== undefined) {
-            anthropicBody.temperature = temperature;
-          }
-
-          nativeToolMode = applyAnthropicToolConfig(anthropicBody, responseFormat, !!claudeAuth);
-
-          console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`);
-
-          // Use Claude OAuth token (user's subscription) or Rose's API key
-          const anthropicHeaders: Record<string, string> = {
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json',
-          };
-          if (claudeAuth) {
-            anthropicHeaders['Authorization'] = `Bearer ${claudeAuth.token}`;
-            anthropicHeaders['anthropic-beta'] = 'oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05';
-            anthropicHeaders['x-app'] = 'cli';
-            anthropicHeaders['User-Agent'] = 'claude-cli/2.1.45 (external, rose-planner)';
-          } else {
-            const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
-            if (!anthropicKey) {
-              throw new Error(`ANTHROPIC_API_KEY required for ${actualModel}`);
-            }
-            anthropicHeaders['x-api-key'] = anthropicKey;
-            anthropicHeaders['anthropic-beta'] = ANTHROPIC_BETA_HEADER;
-          }
-
-          console.log(`[Anthropic Stream] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
-
-          response = await fetch(ANTHROPIC_API_URL, {
-            method: 'POST',
-            headers: anthropicHeaders,
-            body: JSON.stringify(anthropicBody)
-          });
-        } else {
-          // Call OpenRouter API for other Rose models
-          const openRouterBody: any = {
-            model: actualModel,
-            messages: modelMessages,  // Use transformed messages
-            temperature,
-            max_tokens: maxTokens,
-            seed,
-            tools,
-            tool_choice: toolChoice,
-            stream: true
-          };
-          
-          // Add response_format for structured outputs
-          if (responseFormat) {
-            openRouterBody.response_format = responseFormat;
-          }
-          
-          // Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
-          if (reasoning) {
-            openRouterBody.reasoning = reasoning;
-            console.log(`🧠 Streaming with reasoning config:`, reasoning);
-          }
-
-          console.log(`[OpenRouter Stream] Request to ${actualModel}:`, JSON.stringify(truncateForLogging(openRouterBody), null, 2));
-
-          response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${openRouterKey}`,
-              'Content-Type': 'application/json',
-              'HTTP-Referer': supabaseUrl,
-              'X-Title': 'Rose Benchmark Suite'
-            },
-            body: JSON.stringify(openRouterBody)
-          });
-        }
-
-        if (!response.ok) {
-          const provider = isCerebras ? 'Cerebras' : isAnthropicModel(actualModel) ? 'Anthropic' : 'OpenRouter';
-          // Read error body for better debugging
-          const errorText = await response.text();
-          console.error(`${provider} streaming error:`, response.status, errorText);
-          throw new Error(`${provider} API error: ${response.status} - ${errorText.slice(0, 200)}`);
-        }
-
-        const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error('No response body');
-        }
-
         const decoder = new TextDecoder();
         let buffer = '';
 
@@ -3753,13 +3754,14 @@ serve(async (req) => {
       // CLAUDE MODE: Direct Anthropic call with Claude Code credentials + prompt caching
       // ============================================
       if (browserUseReq.mode === 'claude') {
-        // Every 3rd step, route to Yutori via the existing model_seed path (index 1 in pool)
-        const stepNumber = browserUseReq.action_history.length;
-        if (stepNumber > 0 && stepNumber % 3 === 0 && browserUseReq.browser_state.screenshot) {
-          console.log(`🔶 [${requestId}] Claude mode: routing step ${stepNumber} to Yutori via model_seed=1`);
-          browserUseReq.model_seed = 1; // yutori/n1 is index 1 in rose-1-browser-use pool
-          // Fall through to model_seed handler below
-        } else {
+        // TEMPORARILY DISABLED: Every 3rd step, route to Yutori via the existing model_seed path (index 1 in pool)
+        // const stepNumber = browserUseReq.action_history.length;
+        // if (stepNumber > 0 && stepNumber % 3 === 0 && browserUseReq.browser_state.screenshot) {
+        //   console.log(`🔶 [${requestId}] Claude mode: routing step ${stepNumber} to Yutori via model_seed=1`);
+        //   browserUseReq.model_seed = 1; // yutori/n1 is index 1 in rose-1-browser-use pool
+        //   // Fall through to model_seed handler below
+        // } else
+        {
         // For claude-mode, use user_id from request body if provided (the API key may map to a shared
         // worker user, but the real user who owns the agent/credentials is passed via user_id)
         const claudeUserId = browserUseReq.user_id || authInfo.userId;

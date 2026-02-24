@@ -52,6 +52,7 @@ TOOL_GUIDANCE = {
     "spawn_browser_agent": """Ephemeral session. 25-step limit. For short web trajectories (purchases, forms, JS-heavy sites).
 Do work OUTSIDE browser when possible. Give deepest starting URL.
 Do NOT use for information gathering - use web_search/web_fetch instead. Only use browser if those tools have failed.
+IMPORTANT: Browser cookies are ONLY synced for the start_url domain. The agent will only be logged in on that site.
 
 <bad-example>
 spawn_browser_agent("Login to site")
@@ -394,7 +395,8 @@ def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dic
     CONTEXT / CAPABILITIES
     ----------------------
     - The SIAS can research, reason, spawn sub-agents, ask users for input, and coordinate complex plans.
-    - It has unlimited creativity and persistence—never excuse failure as “AI limitations.”
+    - It has unlimited creativity and persistence—never excuse failure as "AI limitations."
+    - When the task involves screenshots, the orchestrator automatically captures and returns the final page screenshot on completion. Do NOT penalize for not explicitly returning a screenshot file.
         """
     ).strip()
     prompt += "\n\n\n" + context_section

@@ -543,7 +543,8 @@ interface FingerprintData {
  */
 export async function injectUserData(
   sessionId: string,
-  userId: string
+  userId: string,
+  startUrl: string
 ): Promise<{
   cookies: { injected: boolean; cookieCount: number };
   fingerprint: { injected: boolean };
@@ -555,10 +556,32 @@ export async function injectUserData(
   const startTime = Date.now();
   console.log(`🔐 [injectUserData] START for session ${sessionId}`);
 
+  // Build cookie domain filter from start_url
+  // Cookie domains use leading dots for subdomain matching (e.g. ".amazon.com" matches "www.amazon.com")
+  // We need to query for both ".domain.com" and "domain.com" variants
+  let url = startUrl;
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`;
+  }
+  const hostname = new URL(url).hostname;
+  // Extract registrable domain (e.g. "www.amazon.com" → "amazon.com")
+  const parts = hostname.split('.');
+  const registrableDomain = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
+  // Match: exact domain, with leading dot, and registrable domain variants
+  const domainVariants = [
+    hostname,                    // "www.amazon.com"
+    `.${hostname}`,              // ".www.amazon.com"
+    registrableDomain,           // "amazon.com"
+    `.${registrableDomain}`,     // ".amazon.com"
+  ];
+  const uniqueDomains = [...new Set(domainVariants)];
+  const cookieDomainFilter = { userId, domain: { in: uniqueDomains } };
+  console.log(`  [cookies] Filtering to domains for start_url "${startUrl}": ${uniqueDomains.join(', ')}`);
+
   // Fetch cookies, fingerprint, localStorage, IndexedDB, permissions, and cacheStorage in parallel
   console.log(`  [1/9] Fetching user data from DB...`);
   const [cookies, integration, localStorageOrigins, indexedDBOrigins, permissions, cacheStorageOrigins] = await Promise.all([
-    prisma.cookie.findMany({ where: { userId } }),
+    prisma.cookie.findMany({ where: cookieDomainFilter }),
     prisma.integration.findUnique({
       where: { userId_name: { userId, name: 'browser_fingerprint' } },
     }),
