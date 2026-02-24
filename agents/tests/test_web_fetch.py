@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
-from tools.web_fetch import WebFetchManager, get_manager, web_fetch, web_fetch_activity
+from tools.web_fetch import WebFetchManager, get_manager, web_fetch, web_fetch_activity, _extract_media_urls
 from tools.base import EventType, MessageStatus
 
 
@@ -25,7 +25,7 @@ def test_manager_singleton():
 
 
 async def test_web_fetch_success():
-    """Test successful web fetch execution with new execute_activity pattern."""
+    """Test successful web fetch execution with condensor_enabled=True."""
     manager = get_manager()
 
     # Mock execute_activity callable
@@ -35,19 +35,21 @@ async def test_web_fetch_success():
     mock_result = {
         "content": "**Python** (https://python.org)\nPython is a programming language.",
         "sources": ["https://python.org"],
+        "images": ["https://python.org/logo.png"],
+        "files": [],
+        "links": ["https://python.org/docs"],
         "objective": "What is Python?",
         "results": [
             {
                 "url": "https://python.org",
                 "title": "Python",
-                "excerpts": ["Python is a programming language."]
+                "excerpts": ["Python is a programming language."],
+                "full_content": "Python is a programming language. ![logo](https://python.org/logo.png) [docs](https://python.org/docs)"
             }
         ],
         "errors": []
     }
 
-    # execute_activity is only called once (for web_fetch_activity)
-    # handle_tool_event is mocked separately
     mock_execute_activity.return_value = mock_result
 
     tool_call = {
@@ -70,20 +72,20 @@ async def test_web_fetch_success():
             user_id=user_id,
         )
 
-        # Verify handle_tool_event was called 3 times (IN_PROGRESS, FINISHED, USAGE)
-        assert mock_handle.call_count == 3
+        # condensor_enabled=True means tool only posts IN_PROGRESS (workflow handles FINISHED)
+        assert mock_handle.call_count == 1
 
         # First call should be IN_PROGRESS
         first_call = mock_handle.call_args_list[0]
         assert first_call.kwargs['event'].status == MessageStatus.IN_PROGRESS
         assert "What is Python?" in first_call.kwargs['event'].message
 
-        # Second call should be FINISHED
-        second_call = mock_handle.call_args_list[1]
-        assert second_call.kwargs['event'].status == MessageStatus.FINISHED
-
-        # Verify result
-        assert "Python" in result["content"]
+        # Verify result structure (wrapped with usage)
+        assert "result" in result
+        assert "usage" in result
+        assert "Python" in result["result"]["content"]
+        assert result["result"]["sources"] == ["https://python.org"]
+        assert result["result"]["images"] == ["https://python.org/logo.png"]
 
     print("✅ test_web_fetch_success passed")
 
@@ -133,13 +135,14 @@ async def test_web_fetch_activity_success():
     """Test the actual activity with mocked httpx client."""
     from tools.web_fetch import web_fetch_activity
 
-    # Mock Parallel AI response
+    # Mock Parallel AI response (always returns full_content now)
     mock_response_data = {
         "results": [
             {
                 "url": "https://python.org",
                 "title": "Python",
-                "excerpts": ["Python is awesome!"]
+                "excerpts": ["Python is awesome!"],
+                "full_content": "Python is awesome! ![logo](https://python.org/static/logo.png) [Download](https://python.org/downloads/python-3.12.0.zip)"
             }
         ],
         "errors": []
@@ -170,9 +173,18 @@ async def test_web_fetch_activity_success():
                     full_content=False
                 )
 
+            # Content uses excerpts (not full_content) since full_content=False was passed
             assert "Python is awesome!" in result["content"]
             assert result["sources"] == ["https://python.org"]
             assert result["objective"] == "What is Python?"
+
+            # Verify media extraction from full_content
+            assert "https://python.org/static/logo.png" in result["images"]
+            assert "https://python.org/downloads/python-3.12.0.zip" in result["files"]
+
+            # Verify API was called with full_content=True (always)
+            call_args = mock_client.post.call_args
+            assert call_args.kwargs['json']['full_content'] is True
 
     print("✅ test_web_fetch_activity_success passed")
 
@@ -206,6 +218,89 @@ async def test_web_fetch_activity_error():
     print("✅ test_web_fetch_activity_error passed")
 
 
+def test_extract_media_urls():
+    """Test _extract_media_urls parses image URLs, file links, and navigation links."""
+
+    page_content = """
+# Welcome to My Site
+
+![Hero Image](https://example.com/images/hero.png)
+![Logo](https://example.com/logo.svg)
+
+Check out our [About page](https://example.com/about) and [Contact](https://example.com/contact).
+
+Download our [brochure](https://example.com/docs/brochure.pdf) or [data](https://example.com/data.csv).
+
+Background: https://example.com/bg.jpg
+
+Visit our [shop](https://example.com/shop).
+"""
+    result = _extract_media_urls(page_content)
+
+    # Images
+    assert "https://example.com/images/hero.png" in result["images"]
+    assert "https://example.com/logo.svg" in result["images"]
+    assert "https://example.com/bg.jpg" in result["images"]
+
+    # Images should NOT appear in links
+    assert "https://example.com/images/hero.png" not in result["links"]
+    assert "https://example.com/logo.svg" not in result["links"]
+
+    # Files
+    assert "https://example.com/docs/brochure.pdf" in result["files"]
+    assert "https://example.com/data.csv" in result["files"]
+
+    # Files should NOT appear in links
+    assert "https://example.com/docs/brochure.pdf" not in result["links"]
+    assert "https://example.com/data.csv" not in result["links"]
+
+    # Links (only non-image, non-file markdown links)
+    assert "https://example.com/about" in result["links"]
+    assert "https://example.com/contact" in result["links"]
+    assert "https://example.com/shop" in result["links"]
+
+    print("✅ test_extract_media_urls passed")
+
+
+def test_extract_media_urls_case_insensitive():
+    """Test _extract_media_urls matches uppercase extensions."""
+    content = """
+![Photo](https://example.com/photo.PNG)
+https://example.com/banner.JPG
+[Report](https://example.com/report.PDF)
+"""
+    result = _extract_media_urls(content)
+
+    assert "https://example.com/photo.PNG" in result["images"]
+    assert "https://example.com/banner.JPG" in result["images"]
+    assert "https://example.com/report.PDF" in result["files"]
+    # PDF file link should not appear in links
+    assert "https://example.com/report.PDF" not in result["links"]
+
+    print("✅ test_extract_media_urls_case_insensitive passed")
+
+
+def test_extract_media_urls_empty():
+    """Test _extract_media_urls with no media."""
+    result = _extract_media_urls("Just plain text, no links or images.")
+    assert result["images"] == []
+    assert result["files"] == []
+    assert result["links"] == []
+    print("✅ test_extract_media_urls_empty passed")
+
+
+def test_extract_media_urls_dedup():
+    """Test _extract_media_urls deduplicates URLs."""
+    content = """
+![img](https://example.com/logo.png)
+![img2](https://example.com/logo.png)
+https://example.com/logo.png
+"""
+    result = _extract_media_urls(content)
+    assert result["images"].count("https://example.com/logo.png") == 1
+    print("✅ test_extract_media_urls_dedup passed")
+
+
 async def run_all_tests():
     """Run all tests."""
     print("\n" + "="*60)
@@ -213,8 +308,12 @@ async def run_all_tests():
     print("="*60 + "\n")
 
     try:
-        # Sync test
+        # Sync tests
         test_manager_singleton()
+        test_extract_media_urls()
+        test_extract_media_urls_case_insensitive()
+        test_extract_media_urls_empty()
+        test_extract_media_urls_dedup()
 
         # Async tests
         await test_web_fetch_success()

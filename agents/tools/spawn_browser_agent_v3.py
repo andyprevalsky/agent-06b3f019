@@ -2635,6 +2635,17 @@ async def spawn_browser_agent_activity_v3(
             browser_state = await dom_service.get_browser_state(include_screenshot=True)
             current_url = browser_state.get("url", "")
 
+            # 1b. Composite cursor from previous action onto screenshot
+            # This lets vision models see where the last click landed and course-correct
+            prev_entries = action_history.get_entries()
+            if prev_entries and browser_state.get("screenshot"):
+                last_coords = prev_entries[-1].get("coordinates")
+                if last_coords:
+                    from browser_tools.cursor_overlay import composite_cursor_on_screenshot
+                    browser_state["screenshot"] = composite_cursor_on_screenshot(
+                        browser_state["screenshot"], last_coords["x"], last_coords["y"]
+                    )
+
             # Track URL changes
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)

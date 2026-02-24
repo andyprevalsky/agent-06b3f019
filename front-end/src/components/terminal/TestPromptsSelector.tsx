@@ -130,6 +130,11 @@ For any services that require a API Key or Credential, mock the service for now 
     prompt: 'Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.',
   },
   {
+    title: 'Test Event Planning',
+    description: 'Tests coordination of event planning with budget constraints',
+    prompt: 'I want to play volleyball with some friends this weekend in san francisco.\nCan you figure out who would be down and coordinate the space & procurment of equipment?\nEnsure its less then 30$ total',
+  },
+  {
     title: 'Test Website Mapping',
     description: 'Tests Claude Code agents rebuilding a website with sub-agents',
     prompt: `recreate https://dallasmmaboxing.com w a modern stack using claude code agents and sub agents

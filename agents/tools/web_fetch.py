@@ -10,6 +10,7 @@ import httpx
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 from helpers.handle_tool_event import handle_tool_event
 
+import re
 import time
 from config import load_config
 
@@ -221,6 +222,41 @@ async def web_fetch(
 # TEMPORAL ACTIVITY
 # ========================================
 
+IMAGE_EXTENSIONS = r'\.(?:png|jpg|jpeg|gif|svg|webp|ico|bmp|tiff|avif)'
+FILE_EXTENSIONS = r'\.(?:pdf|doc|docx|xls|xlsx|csv|zip|rar|ppt|pptx|txt|mp3|mp4|mov|avi)'
+_RE_FLAGS = re.IGNORECASE
+
+
+def _extract_media_urls(text: str, base_url: str = "") -> Dict[str, List[str]]:
+    """Extract image URLs and file/document links from page content."""
+    # Markdown images: ![alt](url)
+    md_images = re.findall(r'!\[.*?\]\((https?://[^)]+)\)', text, _RE_FLAGS)
+    # Bare image URLs
+    bare_images = re.findall(rf'(https?://\S+{IMAGE_EXTENSIONS})(?:\s|$|[)\]])', text, _RE_FLAGS)
+    images = list(dict.fromkeys(md_images + bare_images))  # dedupe, preserve order
+    image_set = set(images)
+
+    # File/document links
+    files = re.findall(rf'(https?://\S+{FILE_EXTENSIONS})(?:\s|$|[)\]])', text, _RE_FLAGS)
+    files = list(dict.fromkeys(files))
+    file_set = set(files)
+
+    # Non-image markdown links: exclude ![...](url) by requiring no preceding !
+    # (?<!!)\[ is a negative lookbehind for !
+    all_links = re.findall(r'(?<!!)\[([^\]]*)\]\((https?://[^)]+)\)', text, _RE_FLAGS)
+    # Filter out URLs already captured as images or files
+    links = list(dict.fromkeys(
+        url for _, url in all_links
+        if url not in image_set and url not in file_set
+    ))
+
+    return {
+        "images": images,
+        "files": files,
+        "links": links,
+    }
+
+
 def _format_extract_results(results: List[Dict[str, Any]], full_content: bool) -> str:
     """Format Parallel AI extract results into a readable answer."""
     if not results:
@@ -284,12 +320,13 @@ async def web_fetch_activity(
             "Content-Type": "application/json"
         }
 
-        # Parallel AI API requires urls as an array
+        # Always request full_content so we can extract images/links from the page.
+        # Use excerpts for the formatted content the LLM reads; full_content for media parsing.
         payload = {
             "urls": [url],
             "objective": objective,
             "excerpts": excerpts,
-            "full_content": full_content
+            "full_content": True,  # Always fetch full content for media extraction
         }
 
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -308,15 +345,30 @@ async def web_fetch_activity(
         if errors:
             logger.warning("Web fetch had errors", errors=errors)
 
-        # Format results into content
+        # Format results into content (uses excerpts unless user requested full_content)
         content = _format_extract_results(results, full_content)
 
         # Extract successful sources
         sources = [r.get("url") for r in results if r.get("url")]
 
+        # Extract image URLs and file links from full page content
+        media: Dict[str, List[str]] = {"images": [], "files": [], "links": []}
+        for r in results:
+            page_text = r.get("full_content", "")
+            if page_text:
+                page_media = _extract_media_urls(page_text, url)
+                media["images"].extend(page_media["images"])
+                media["files"].extend(page_media["files"])
+                media["links"].extend(page_media["links"])
+        # Dedupe across results
+        media = {k: list(dict.fromkeys(v)) for k, v in media.items()}
+
         result = {
             "content": content,
             "sources": sources,
+            "images": media["images"],
+            "files": media["files"],
+            "links": media["links"],
             "objective": objective,
             "results": results,
             "errors": errors,
@@ -328,6 +380,9 @@ async def web_fetch_activity(
             objective=objective[:100],
             content_length=len(content),
             results_count=len(results),
+            images_count=len(media["images"]),
+            links_count=len(media["links"]),
+            files_count=len(media["files"]),
             errors_count=len(errors)
         )
 

@@ -159,6 +159,18 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         requires_browser_agent=True,
         expected_tools=["spawn_browser_agent"],
     ),
+    "event-planning": TestPrompt(
+        name="event-planning",
+        title="Test Event Planning",
+        description="Tests coordination of event planning with budget constraints",
+        prompt=(
+            "I want to play volleyball with some friends this weekend in san francisco.\n"
+            "Can you figure out who would be down and coordinate the space & procurment of equipment?\n"
+            "Ensure its less then 30$ total"
+        ),
+        timeout=300,
+        expected_tools=["web_search"],
+    ),
 }
 
 

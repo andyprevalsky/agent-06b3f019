@@ -1299,10 +1299,23 @@ class AgentWorkflow:
 
         total_cost_cents = tool_cost_cents + condensor_cost_cents
 
-        # Format message using standard tool format (only condensed content in result)
+        # Preserve sources/images/links from original result (not subject to condensation)
+        sources = result.get("sources", [])
+        images = result.get("images", [])
+        links = result.get("links", [])
+
+        # Format message using standard tool format (pass sources through for display)
+        condensed_result = {"content": condensed_message}
+        if sources:
+            condensed_result["sources"] = sources
+        if images:
+            condensed_result["images"] = images
+        if links:
+            condensed_result["links"] = links
+
         formatted_message = format_tool_message(
             params=tool_call,
-            result={"content": condensed_message},
+            result=condensed_result,
             time_elapsed=elapsed_time,
             cost_cents=total_cost_cents
         )
@@ -1321,7 +1334,17 @@ class AgentWorkflow:
 
         # Return condensed result for context
         # "message" key is what run_agent.py uses to build context text
-        return {"message": condensed_message, "condensed": True, "original": result}
+        # Append sources/images/links so they appear in the LLM's context
+        context_parts = [condensed_message]
+        if sources:
+            context_parts.append("\n**Sources:** " + ", ".join(sources))
+        if images:
+            context_parts.append("\n**Images:** " + ", ".join(images))
+        if links:
+            context_parts.append("\n**Links:** " + ", ".join(links))
+        context_message = "\n".join(context_parts)
+
+        return {"message": context_message, "condensed": True, "original": result}
 
     async def _track_tokens_and_cost(self, result: Dict) -> None:
         """Track context size and token_count from run_agent result.
@@ -1540,9 +1563,11 @@ class AgentWorkflow:
 
         This enables real-time cost tracking and limit checking, not just at phase boundaries.
         """
-        # Update workflow token state
+        # Update workflow token state (keep in sync with run_agent local vars)
         self.tokens_in += tokens_in_delta
         self.tokens_out += tokens_out_delta
+        self.token_count += tokens_in_delta + tokens_out_delta
+        self.context_size = tokens_in_delta  # Current context = prompt tokens of last LLM call
 
         # Track actual_model for credit billing
         if actual_model:

@@ -273,7 +273,21 @@ def format_result(result: Dict[str, Any]) -> str:
             lines.append(f"\n**Sources:**")
             for src in sources:
                 lines.append(f"- {src}")
-    
+
+    if "images" in result:
+        images = result.get("images", [])
+        if images:
+            lines.append(f"\n**Images ({len(images)}):**")
+            for img in images:
+                lines.append(f"- {img}")
+
+    if "links" in result:
+        links = result.get("links", [])
+        if links:
+            lines.append(f"\n**Links ({len(links)}):**")
+            for link in links:
+                lines.append(f"- {link}")
+
     if "findall_id" in result:
         lines.append(f"\nFind All ID: {result['findall_id']}")
     
