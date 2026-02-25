@@ -30,11 +30,14 @@ const ElectronAppInner = () => {
   // Check onboarding status from backend when auth changes
   useEffect(() => {
     const checkOnboarding = async () => {
+      console.log('[ElectronApp] checkOnboarding called', { authLoading, isFullySignedIn, isAnonymous });
+
       // Wait for auth to finish loading before deciding
       if (authLoading) return;
 
       // Only check if user is signed in
       if (!isFullySignedIn) {
+        console.log('[ElectronApp] Not fully signed in, showing onboarding');
         setOnboardingComplete(false);
         setCheckingOnboarding(false);
         return;
@@ -43,11 +46,13 @@ const ElectronAppInner = () => {
       try {
         const session = getSession();
         if (!session?.access_token) {
+          console.log('[ElectronApp] No session token, showing onboarding');
           setOnboardingComplete(false);
           setCheckingOnboarding(false);
           return;
         }
 
+        console.log('[ElectronApp] Fetching onboarding status from backend...');
         const response = await fetch(`${backendUrl}/api/user-settings`, {
           headers: {
             Authorization: `Bearer ${session.access_token}`,
@@ -58,6 +63,7 @@ const ElectronAppInner = () => {
           const data = await response.json();
           // onboardingCompletedAt is null if not completed, a date string if completed
           const complete = !!data.onboardingCompletedAt;
+          console.log('[ElectronApp] Onboarding status from backend:', { onboardingCompletedAt: data.onboardingCompletedAt, complete });
           setOnboardingComplete(complete);
 
           // If already completed, sync local electron store and enable shortcuts
@@ -70,10 +76,11 @@ const ElectronAppInner = () => {
             }
           }
         } else {
+          console.error('[ElectronApp] Failed to fetch user-settings:', response.status);
           setOnboardingComplete(false);
         }
       } catch (err) {
-        console.error('Failed to check onboarding status:', err);
+        console.error('[ElectronApp] Failed to check onboarding status:', err);
         setOnboardingComplete(false);
       } finally {
         setCheckingOnboarding(false);
@@ -83,30 +90,38 @@ const ElectronAppInner = () => {
   }, [authLoading, isFullySignedIn]);
 
   const handleOnboardingComplete = async () => {
+    console.log('[ElectronApp] handleOnboardingComplete called');
     try {
       const session = getSession();
+      console.log('[ElectronApp] Session for onboarding complete:', { hasSession: !!session, hasToken: !!session?.access_token });
       if (session?.access_token) {
         // Call backend to mark onboarding complete and send welcome SMS
-        await fetch(`${backendUrl}/api/auth/complete-onboarding`, {
+        const response = await fetch(`${backendUrl}/api/auth/complete-onboarding`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${session.access_token}`,
             'Content-Type': 'application/json',
           },
         });
+        const data = await response.json();
+        console.log('[ElectronApp] Backend complete-onboarding response:', { status: response.status, data });
       }
     } catch (err) {
-      console.error('Failed to complete onboarding on backend:', err);
+      console.error('[ElectronApp] Failed to complete onboarding on backend:', err);
     }
 
     // Sync local electron store and enable global shortcuts now that onboarding is done
+    console.log('[ElectronApp] Syncing local electron store...');
     if (window.api?.onboarding?.setComplete) {
       await window.api.onboarding.setComplete(true);
+      console.log('[ElectronApp] Electron store onboarding set to complete');
     }
     if (window.api?.shortcut?.enable) {
       await window.api.shortcut.enable();
+      console.log('[ElectronApp] Shortcuts enabled');
     }
     setOnboardingComplete(true);
+    console.log('[ElectronApp] Onboarding complete, rendering Terminal');
   };
 
   // Show loading while checking auth/onboarding state

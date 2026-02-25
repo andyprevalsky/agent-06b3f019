@@ -388,12 +388,12 @@ async function callSupervisorLlm(
       contentLength: accumulatedContent.length,
     });
 
-    // Fallback: treat the entire content as an attempt_completion
+    // Fallback: send a user-friendly error (never send raw JSON/garbage to the user)
     parsed = {
       reasoning: accumulatedReasoning || 'Failed to parse structured response',
       tool_calls: [{
         tool: 'attempt_completion',
-        arguments: { message: accumulatedContent || "Sorry, something went wrong. Please try again." },
+        arguments: { message: "Sorry, something went wrong. Please try again." },
       }],
     };
   }

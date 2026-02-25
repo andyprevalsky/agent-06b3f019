@@ -16,7 +16,7 @@ export function getPersonalizedVcardUrl(userId: string): string {
 }
 
 export function getAgentUrl(agentId: string): string {
-  return `${ROSE_LABS_URL}?agent-id=${agentId}`;
+  return `${ROSE_LABS_URL}/?agent-id=${agentId}`;
 }
 
 export const SMS_TEMPLATES = {

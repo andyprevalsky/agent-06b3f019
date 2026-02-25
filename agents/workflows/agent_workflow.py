@@ -1895,7 +1895,7 @@ class AgentWorkflow:
 
         for msg in context:
             role = msg.get("role")
-            metadata = msg.get("metadata", {})
+            metadata = msg.get("metadata") or {}
 
             # Extract last assistant reasoning
             if role == "ASSISTANT":

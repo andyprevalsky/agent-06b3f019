@@ -90,8 +90,10 @@ function validateSurgeSignature(
  * }
  */
 function parseSurgePayload(body: any): { fromPhone: string; messageBody: string } | null {
-  const messageBody = (body?.body as string || '').trim();
-  const fromPhone = body?.conversation?.contact?.phone_number as string;
+  // Surge wraps the message under a `data` envelope
+  const data = body?.data ?? body;
+  const messageBody = (data?.body as string || '').trim();
+  const fromPhone = data?.conversation?.contact?.phone_number as string;
 
   if (!fromPhone || !messageBody) {
     return null;
