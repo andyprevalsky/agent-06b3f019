@@ -5,6 +5,7 @@ Activities for:
 - Enqueueing/sending SMS questions with queue awareness
 - Sending direct SMS (for completion, welcome - no queue)
 - Handling agent unblock (cleanup queue state)
+- Sending lifecycle SMS notifications (agent started, write lock, cost limit)
 """
 
 from typing import Dict, Optional
@@ -207,3 +208,83 @@ async def handle_agent_unblocked_activity(user_id: str, agent_id: str) -> Dict:
             error=str(e),
         )
         return {"nextSent": False, "error": str(e)}
+
+
+@activity.defn
+async def notify_sms_event_activity(
+    user_id: str, event_type: str, agent_id: str, payload: Dict
+) -> Dict:
+    """
+    Send a lifecycle SMS notification via the backend /api/send-sms/notify endpoint.
+
+    Event types: agent_started, planner_message, write_lock, completion, cost_limit
+
+    Args:
+        user_id: User ID
+        event_type: One of the supported event types
+        agent_id: Agent ID
+        payload: Event-specific data (e.g. goal, question, summary)
+
+    Returns:
+        Dict with success field
+    """
+    config = load_config()
+
+    logger.info(
+        "Sending SMS lifecycle notification",
+        user_id=user_id,
+        event_type=event_type,
+        agent_id=agent_id,
+        payload_keys=list(payload.keys()) if payload else [],
+    )
+
+    try:
+        activity.heartbeat(f"Sending SMS notification: {event_type}")
+
+        request_body = {
+            "user_id": user_id,
+            "event_type": event_type,
+            "agent_id": agent_id,
+            "payload": payload,
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/send-sms/notify",
+                json=request_body,
+                headers={
+                    "X-API-Key": config.backend.api_key,
+                    "Content-Type": "application/json",
+                },
+                timeout=30.0,
+            )
+
+            logger.info(
+                "SMS notify response",
+                user_id=user_id,
+                event_type=event_type,
+                agent_id=agent_id,
+                status_code=response.status_code,
+                response_body=response.text[:200] if response.text else "",
+            )
+
+            response.raise_for_status()
+            result = response.json()
+
+            logger.info(
+                "SMS notify result",
+                user_id=user_id,
+                event_type=event_type,
+                agent_id=agent_id,
+                success=result.get("success"),
+            )
+            return result
+    except Exception as e:
+        logger.error(
+            "Failed to send SMS notification",
+            user_id=user_id,
+            event_type=event_type,
+            agent_id=agent_id,
+            error=str(e),
+        )
+        return {"success": False, "error": str(e)}

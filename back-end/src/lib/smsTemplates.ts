@@ -20,6 +20,7 @@ export function getAgentUrl(agentId: string): string {
 }
 
 export const SMS_TEMPLATES = {
+  // Legacy templates (kept for backward compat)
   welcome: (firstName: string) =>
     `Hi ${firstName}!\nWelcome to Rose Labs :)\n\nYou can start a new task by texting this number.\nJust prefix the message with "new" and then type in your task.\nExample -> new: buy me socks on amazon\n\nI'll text you back with any clarifications needed and a status update when the task is completed.\n\nGodspeed!\n(Save my contact by clicking below)`,
 
@@ -39,4 +40,26 @@ export const SMS_TEMPLATES = {
 
   emptyGoal: () =>
     `Please provide a goal after "new". Example: "new Book a dinner reservation for 2 at 7pm"`,
+
+  // SMS Supervisor templates (with [prefix] format)
+  agentStarted: (prefix: string, goal: string, url: string) =>
+    `[${prefix}] Started: "${goal}"\nTrack: ${url}`,
+
+  plannerQuestion: (prefix: string, question: string) =>
+    `[${prefix}] Rose asks: ${question}`,
+
+  plannerFyi: (prefix: string, message: string) =>
+    `[${prefix}] FYI: ${message}`,
+
+  writeLock: (prefix: string, question: string, shortcode: string) =>
+    `[${prefix}] Approval needed: ${question}\n\nReply "Approve ${shortcode}" to continue.`,
+
+  agentCompleted: (prefix: string, summary: string, url: string) =>
+    `[${prefix}] Done: ${summary}\n\nFull report: ${url}`,
+
+  costLimit: (prefix: string, costCents: number, limitCents: number) =>
+    `[${prefix}] Budget limit hit ($${(costCents / 100).toFixed(2)}/$${(limitCents / 100).toFixed(2)}). Increase budget by replying "juice ${prefix} 5.00"`,
+
+  onboardingWelcome: (name: string) =>
+    `Hi ${name}! Welcome to Rose.\n\nText this number anytime you want something done and our superintelligence will ensure the task gets resolved optimally and quickly.\n\nI'll text you updates and ask for approval when needed.`,
 };

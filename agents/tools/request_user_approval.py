@@ -342,7 +342,7 @@ async def request_user_approval_direct(
             request_id=request_id,
             workflow_id=workflow_id
         )
-        
+
         metadata_payload = dict(metadata or {})
         metadata_payload["attentionRequestId"] = request_id
         event_metadata = {
@@ -350,7 +350,26 @@ async def request_user_approval_direct(
             "attentionMessage": question,
             "requestUserApproval": metadata_payload,
         }
-        
+
+        # Send SMS write_lock notification (root + SMS-source agents only)
+        if (getattr(workflow_instance, 'parent_workflow_id', None) is None
+                and getattr(workflow_instance, 'agent_source', 'WEB') == "SMS"):
+            try:
+                from helpers.sms_activities import notify_sms_event_activity
+                await workflow.execute_activity(
+                    notify_sms_event_activity,
+                    args=[user_id, "write_lock", agent_id, {
+                        "question": question,
+                        "attention_request_id": request_id,
+                        "workflow_id": workflow_id,
+                    }],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                logger.info("Sent write_lock SMS notification", request_id=request_id, agent_id=agent_id)
+            except Exception as sms_err:
+                logger.warning(f"Failed to send write_lock SMS notification: {sms_err}")
+
     except Exception as e:
         # Post error message
         error_event = ToolEvent(

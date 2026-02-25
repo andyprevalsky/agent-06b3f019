@@ -729,3 +729,28 @@ enum EmailProvider {
   GMAIL
   YAHOO
 }
+
+model SmsSession {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  messages  Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model SmsShortcode {
+  id                 String   @id @default(uuid())
+  code               String   @unique
+  userId             String
+  attentionRequestId String
+  agentId            String
+  workflowId         String
+  createdAt          DateTime @default(now())
+  expiresAt          DateTime
+
+  @@index([code])
+  @@index([userId])
+  @@index([expiresAt])
+}

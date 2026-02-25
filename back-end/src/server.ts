@@ -80,9 +80,8 @@ const PORT = process.env.PORT || 3001;
 // (Stripe requires raw body for signature verification)
 app.use('/webhooks', webhooksRouter);
 
-// SMS Webhook from Twilio (needs urlencoded body parser)
-// Must be before express.json() to use its own body parser
-app.use('/api/sms', express.urlencoded({ extended: true }), smsWebhookRouter);
+// SMS Webhook from Surge (JSON body)
+app.use('/api/sms', express.json(), smsWebhookRouter);
 
 // Middleware
 app.use(express.json({ limit: '100mb' })); // Increased to handle large encrypted payloads

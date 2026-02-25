@@ -83,6 +83,7 @@ from helpers.sms_activities import (
     enqueue_sms_question_activity,
     send_direct_sms_activity,
     handle_agent_unblocked_activity,
+    notify_sms_event_activity,
 )
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
@@ -253,6 +254,7 @@ async def main():
             enqueue_sms_question_activity,
             send_direct_sms_activity,
             handle_agent_unblocked_activity,
+            notify_sms_event_activity,
             # DAG executor activities
             populate_tool_params_activity,
             execute_reasoning_activity,

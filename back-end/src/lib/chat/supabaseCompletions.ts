@@ -42,6 +42,7 @@ export interface CompletionOptions {
       schema: Record<string, any>;
     };
   };
+  claude_token?: string;
 }
 
 /**

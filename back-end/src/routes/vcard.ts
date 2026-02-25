@@ -34,7 +34,7 @@ router.get('/rose.vcf', (req, res) => {
   vCard.lastName = '';
 
   // Contact info
-  vCard.cellPhone = '+14154498445';
+  vCard.cellPhone = '+14154498072';
   vCard.email = 'rose@roselabs.ai';
 
   // Organization
@@ -86,7 +86,7 @@ router.get('/:userId.vcf', async (req, res) => {
     vCard.lastName = '';
 
     // Contact info (always Rose Labs)
-    vCard.cellPhone = '+14154498445';
+    vCard.cellPhone = '+14154498072';
     vCard.email = 'rose@roselabs.ai';
 
     // Organization
@@ -115,7 +115,7 @@ router.get('/:userId.vcf', async (req, res) => {
     const vCard = vCardsJS();
     vCard.firstName = 'Rose';
     vCard.lastName = '';
-    vCard.cellPhone = '+14154498445';
+    vCard.cellPhone = '+14154498072';
     vCard.email = 'rose@roselabs.ai';
     vCard.organization = 'Rose Labs';
     // No job title

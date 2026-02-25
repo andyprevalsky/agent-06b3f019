@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import {
   sendSms,
@@ -7,6 +8,13 @@ import {
   getUserPhone,
 } from '../lib/smsQueue';
 import { SMS_TEMPLATES } from '../lib/smsTemplates';
+import {
+  notifyAgentStarted,
+  notifyPlannerMessage,
+  notifyWriteLock,
+  notifyCompletion,
+  notifyCostLimit,
+} from '../lib/smsSupervisor/outboundEvents';
 
 const router = Router();
 
@@ -198,6 +206,107 @@ router.post('/unblock', authenticate, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error('[SMS] Error in unblock endpoint:', error);
     res.status(500).json({ error: 'Failed to handle unblock' });
+  }
+});
+
+/**
+ * Lifecycle SMS notification endpoint
+ * POST /api/send-sms/notify
+ * Auth: API Key (internal - called by agent worker)
+ *
+ * Body:
+ *   - user_id: string
+ *   - event_type: string
+ *   - agent_id: string
+ *   - payload: object (event-specific data)
+ */
+const notifySchema = z.object({
+  user_id: z.string(),
+  event_type: z.enum(['agent_started', 'planner_message', 'write_lock', 'completion', 'cost_limit']),
+  agent_id: z.string(),
+  payload: z.record(z.any()).optional(),
+});
+
+router.post('/notify', authenticate, async (req: AuthRequest, res) => {
+  const startTime = Date.now();
+
+  try {
+    const data = notifySchema.parse(req.body);
+
+    console.log('[SMS Notify] Received', {
+      userId: data.user_id,
+      eventType: data.event_type,
+      agentId: data.agent_id,
+      payload: JSON.stringify(data.payload || {}).substring(0, 200),
+    });
+
+    const payload = data.payload || {};
+
+    switch (data.event_type) {
+      case 'agent_started':
+        await notifyAgentStarted(data.user_id, {
+          id: data.agent_id,
+          goal: payload.goal || 'Unknown goal',
+        });
+        break;
+
+      case 'planner_message':
+        await notifyPlannerMessage(
+          data.user_id,
+          { id: data.agent_id },
+          payload.message || '',
+          payload.is_question || false
+        );
+        break;
+
+      case 'write_lock':
+        await notifyWriteLock(
+          data.user_id,
+          { id: data.agent_id },
+          payload.question || '',
+          payload.attention_request_id || '',
+          payload.workflow_id || ''
+        );
+        break;
+
+      case 'completion':
+        await notifyCompletion(
+          data.user_id,
+          { id: data.agent_id },
+          payload.summary || ''
+        );
+        break;
+
+      case 'cost_limit':
+        await notifyCostLimit(data.user_id, {
+          id: data.agent_id,
+          treeCostCents: payload.tree_cost_cents || 0,
+          priceLimitCents: payload.price_limit_cents || 0,
+        });
+        break;
+    }
+
+    console.log('[SMS Notify] Processed', {
+      eventType: data.event_type,
+      agentId: data.agent_id,
+      durationMs: Date.now() - startTime,
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      console.error('[SMS Notify] Validation error', {
+        errors: error.errors,
+        body: JSON.stringify(req.body).substring(0, 200),
+      });
+      return res.status(400).json({ error: 'Invalid request data', details: error.errors });
+    }
+    console.error('[SMS Notify] Error', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      durationMs: Date.now() - startTime,
+    });
+    res.status(500).json({ error: 'Failed to send notification' });
   }
 });
 

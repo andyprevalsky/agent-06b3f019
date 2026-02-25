@@ -66,7 +66,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.set_plan import set_plan
     from tools.attempt_completion import attempt_completion
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
-    from helpers.sms_activities import get_agent_source, send_direct_sms_activity
+    from helpers.sms_activities import get_agent_source, send_direct_sms_activity, notify_sms_event_activity
     from tools.request_user_signup import request_user_signup
     from tools.call_phone_number import call_phone_number, get_manager as get_call_phone_manager
     from tools.people_search import people_search
@@ -207,6 +207,9 @@ class AgentWorkflow:
         # User customization (fetched at workflow start for dynamic name in approvals/SMS)
         self.system_name: str = "Rose"  # Default to "Rose", fetched from user settings
         self.custom_system_prompt: Optional[str] = None  # Custom personality prompt to inject
+
+        # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
+        self.agent_source: str = "WEB"
 
         # Shared memory state (for cross-agent memory sharing within a run)
         self.shared_memory_hash: Optional[str] = None  # Current hash for cache invalidation
@@ -492,6 +495,31 @@ class AgentWorkflow:
             )
         except Exception:
             pass
+
+        # Fetch and cache agent source (WEB, MAC_APP, SMS) for notification gating
+        try:
+            self.agent_source = await workflow.execute_activity(
+                get_agent_source,
+                args=[agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            workflow.logger.info(f"Agent source: {self.agent_source}")
+        except Exception as e:
+            workflow.logger.warning(f"Failed to fetch agent source, defaulting to WEB: {e}")
+
+        # Send SMS notification for agent_started (root + SMS-source only)
+        if not parent_workflow_id and self.agent_source == "SMS":
+            try:
+                await workflow.execute_activity(
+                    notify_sms_event_activity,
+                    args=[user_id, "agent_started", agent_id, {"goal": goal}],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                workflow.logger.info("Sent agent_started SMS notification")
+            except Exception as e:
+                workflow.logger.warning(f"Failed to send agent_started SMS notification: {e}")
 
         # Fetch user context once (for both phases)
         user_context_section = ""
@@ -1690,6 +1718,22 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.error(f"Failed to update status to COST_LIMIT_REACHED: {e}")
 
+            # Send SMS notification for cost_limit (root + SMS-source only)
+            if self.agent_source == "SMS":
+                try:
+                    await workflow.execute_activity(
+                        notify_sms_event_activity,
+                        args=[self.user_id, "cost_limit", self.agent_id, {
+                            "tree_cost_cents": int(self.subtree_cost_cents),
+                            "price_limit_cents": self.price_limit_cents,
+                        }],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    workflow.logger.info("Sent cost_limit SMS notification")
+                except Exception as e:
+                    workflow.logger.warning(f"Failed to send cost_limit SMS notification: {e}")
+
             # Cascade to children (pull-based checks cover spawn race conditions)
             for child_wf_id in self._get_pending_child_workflow_ids():
                 try:
@@ -2130,30 +2174,19 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
 
-            # Send completion SMS if SMS-initiated goal (root agents only)
-            if not self.parent_workflow_id and summary:
+            # Send completion SMS notification (root + SMS-source only)
+            if not self.parent_workflow_id and summary and self.agent_source == "SMS":
                 try:
-                    agent_source = await workflow.execute_activity(
-                        get_agent_source,
-                        args=[self.agent_id],
+                    await workflow.execute_activity(
+                        notify_sms_event_activity,
+                        args=[self.user_id, "completion", self.agent_id, {"summary": summary}],
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
-                    if agent_source == "SMS":
-                        # Truncate summary for SMS (200 char limit to leave room for URL)
-                        sms_summary = summary[:200] + "..." if len(summary) > 200 else summary
-                        agent_url = f"https://roselabs.ai?agent-id={self.agent_id}"
-                        completion_message = f"{self.system_name} completed your task: {sms_summary}\n\nView the full conversation: {agent_url}"
-                        await workflow.execute_activity(
-                            send_direct_sms_activity,
-                            args=[self.user_id, completion_message],
-                            start_to_close_timeout=timedelta(seconds=30),
-                            retry_policy=RetryPolicy(maximum_attempts=2),
-                        )
-                        workflow.logger.info("Sent completion SMS", agent_id=self.agent_id)
+                    workflow.logger.info("Sent completion SMS notification", agent_id=self.agent_id)
                 except Exception as sms_error:
                     # Log but don't fail completion if SMS fails
-                    workflow.logger.warning(f"Failed to send completion SMS: {sms_error}")
+                    workflow.logger.warning(f"Failed to send completion SMS notification: {sms_error}")
 
         except Exception as e:
             workflow.logger.error(f"Failed to mark complete: {e}")
