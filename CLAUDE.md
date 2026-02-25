@@ -131,6 +131,21 @@ Public API for agents and completions. Docs: https://docs.roselabs.ai (localhost
 - `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite
 - `research/supabase/functions/completions/test-browser-use-usage.mjs` - rose-1-browser-use test
 
+## Production Logs (Render)
+
+Fetch backend prod logs via Render API:
+```bash
+# Recent logs (last 50)
+curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+  "https://api.render.com/v1/logs?ownerId=$RENDER_OWNER_ID&resource=$RENDER_SERVICE_ID&limit=50&direction=backward" \
+  | python3 -c "import sys,json; [print(l['message']) for l in json.load(sys.stdin)['logs']]"
+```
+
+Env vars are in `back-end/.env`:
+- `RENDER_API_KEY` - Render API token
+- `RENDER_SERVICE_ID` - `srv-d3jga77diees73cgrvk0`
+- `RENDER_OWNER_ID` - `tea-csppgi56l47c73djvpig`
+
 ## Ralph Instructions
 
 - If the next step is to check a log file, make sure to call the tool. NEVER ask the user to check a log file for you.
