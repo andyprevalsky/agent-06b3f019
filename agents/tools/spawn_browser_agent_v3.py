@@ -2946,6 +2946,10 @@ async def spawn_browser_agent_activity_v3(
                             display_params = {k: v for k, v in params.items() if k not in ["screenshot", "dom_tree"]}
                             if display_params:
                                 line += f"\n  Params: {display_params}"
+                        # Include tool result data so verifier can see what was actually returned
+                        display_result = {k: v for k, v in result.items() if k not in ["success", "error", "screenshot", "dom_tree"]}
+                        if display_result:
+                            line += f"\n  Result: {display_result}"
                         action_details_lines.append(line)
                     
                     actions_text = "\n\n".join(action_details_lines)
