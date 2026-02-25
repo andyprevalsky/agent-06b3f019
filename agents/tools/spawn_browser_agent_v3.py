@@ -1923,6 +1923,85 @@ async def execute_action(
             logger.info(f"➕ Opened new tab {new_tab_id} with URL: {url}")
             return {"success": True, "message": "", "new_tab_id": new_tab_id, "url": url}
 
+        elif action_name == "screenshot":
+            # Full-page screenshot via CDP:
+            # 1. Get full document dimensions via Page.getLayoutMetrics
+            # 2. Capture with clip covering entire document + captureBeyondViewport
+            # 3. Save to Steel session filesystem so existing extract_session_files handles it
+            target_id = session.agent_focus_target_id
+            cdp_sess = await session.get_or_create_cdp_session(target_id, focus=False)
+            try:
+                # Get full document dimensions
+                layout = await cdp_sess.cdp_client.send_raw(
+                    "Page.getLayoutMetrics",
+                    {},
+                    session_id=cdp_sess.session_id,
+                )
+                content_size = layout.get("contentSize", layout.get("cssContentSize", {}))
+                doc_width = content_size.get("width", 1280)
+                doc_height = content_size.get("height", 800)
+
+                cdp_result = await cdp_sess.cdp_client.send_raw(
+                    "Page.captureScreenshot",
+                    {
+                        "format": "png",
+                        "fromSurface": True,
+                        "captureBeyondViewport": True,
+                        "clip": {
+                            "x": 0,
+                            "y": 0,
+                            "width": doc_width,
+                            "height": doc_height,
+                            "scale": 1,
+                        },
+                    },
+                    session_id=cdp_sess.session_id,
+                )
+                logger.info(f"📸 Full-page screenshot: {doc_width}x{doc_height}")
+            except Exception as e:
+                logger.warning(f"Full-page screenshot failed, falling back to viewport: {e}")
+                cdp_result = await cdp_sess.cdp_client.send_raw(
+                    "Page.captureScreenshot",
+                    {"format": "png", "fromSurface": True},
+                    session_id=cdp_sess.session_id,
+                )
+
+            screenshot_b64 = cdp_result.get("data", "")
+            screenshot_bytes = base64.b64decode(screenshot_b64)
+
+            # Save to Steel session filesystem via backend API
+            # This makes it visible to list_session_files (verifier) and
+            # extract_session_files (completion) — no separate upload needed
+            saved_path = None
+            if session_id and config:
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.post(
+                            f"{config.backend.api_url}/api/browser-session/{session_id}/files",
+                            headers={"x-api-key": config.backend.api_key or ""},
+                            files={"file": ("screenshot.png", screenshot_bytes, "image/png")}
+                        )
+                        if response.status_code in [200, 201]:
+                            saved_path = response.json().get("path", "/tmp/screenshot.png")
+                            logger.info(f"📸 Screenshot saved to Steel session: {saved_path} ({len(screenshot_bytes)} bytes)")
+                        else:
+                            logger.warning(f"Failed to save screenshot to Steel: HTTP {response.status_code}")
+                except Exception as upload_err:
+                    logger.warning(f"Screenshot save to Steel session failed: {upload_err}")
+
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="screenshot",
+                thinking=thinking,
+                params={},
+                result={"success": True, "file_path": saved_path or "screenshot.png"},
+            )
+
+            return {
+                "success": True,
+                "message": f"Full-page screenshot saved ({len(screenshot_bytes)} bytes)",
+            }
+
         else:
             return {"success": False, "error": f"Unknown action: {action_name}"}
             
@@ -1996,6 +2075,7 @@ AVAILABLE ACTIONS:
 - evaluate: Execute JavaScript
 - extract: Extract structured data from the page
 - upload_file: Upload a file to a file input element (requires filename from available_files)
+- screenshot: Take a full-page screenshot (returned to the orchestrating agent)
 - attempt_completion: Signal you believe the task is complete
 - send_message_to_user: Request user assistance
 
@@ -2006,8 +2086,15 @@ CRITICAL SAFETY RULES:
 
 {custom_instructions}
 
-SCREENSHOT RETURN:
-When the task involves taking a screenshot or capturing the page state, you do NOT need to use any special action to return the image. The orchestrator automatically captures and returns the final screenshot when your task completes. Simply navigate to the target page and call attempt_completion.
+SCREENSHOT TOOL:
+Use the screenshot action to capture a full-page screenshot. Only screenshots taken with this tool will be returned to the orchestrating agent that spawned you. The orchestrator does NOT see your per-step viewport screenshots — those are for your own use only. The orchestrator always receives a final screenshot of the last page when your task completes.
+
+IMPORTANT: One screenshot call captures the ENTIRE page (full-page, not just viewport). Do NOT call screenshot multiple times for the same page. After calling screenshot once, proceed to your next task or call attempt_completion.
+
+Use screenshot when:
+- The orchestrating agent needs visual proof of a page state
+- You need to capture something for the parent agent to inspect
+- The task explicitly asks for a screenshot to be returned
 
 Think step-by-step about what action to take next. Always prefer using element indices from the DOM tree for precise interactions."""
 
@@ -2850,6 +2937,9 @@ async def spawn_browser_agent_activity_v3(
 
                         line = f"Step {step}: {action} - {status}"
                         # NOTE: Intentionally excluding entry["thinking"] - prone to reward hacking
+                        # For screenshot actions, note that they capture the full page
+                        if action == "screenshot" and success:
+                            line += " (full-page capture — entire scrollable page, not just viewport)"
                         params = entry.get("params", {})
                         if params:
                             # Remove verbose data like screenshots
@@ -3163,6 +3253,9 @@ Based on this feedback, I need to continue working on the task and address the i
                 else:
                     title_progress = f"Uploading {filename}..."
                     title_done = f"Uploaded {filename}"
+            elif action_name == "screenshot":
+                title_progress = "Taking screenshot..."
+                title_done = "Screenshot captured"
 
             # Prepend model name to title_done for visibility (dev only)
             # if config.environment != "production":
@@ -3736,8 +3829,8 @@ async def spawn_browser_agent(
         await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_browser_agent")
         if isinstance(event, ToolEvent) and event.status:
             last_status = event.status
-        # Track usage from final event (included in data field)
-        if event.data and event.data.get("usage"):
+        # Track usage from final ToolEvent (AssistantEvent has no data field)
+        if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
             await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_browser_agent")
 
     return last_status

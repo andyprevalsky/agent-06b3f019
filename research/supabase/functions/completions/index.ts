@@ -502,6 +502,10 @@ const BROWSER_USE_TOOLS: Record<string, { description: string; params: Record<st
     params: {
       message: { type: 'string', description: 'Message content', required: true }
     }
+  },
+  screenshot: {
+    description: 'Take a full-page screenshot of the current page (captures entire page, not just viewport). The screenshot is saved and returned to the orchestrating agent. Only call once per page — one call captures everything.',
+    params: {}
   }
 };
 
@@ -1404,12 +1408,8 @@ function normalizeAnthropicCUAResponse(response: any): UnifiedAction {
       }
       break;
     case 'screenshot':
-      // CUA's native screenshot action - we capture automatically, so skip
-      return {
-        action: 'done',
-        thinking: textPart?.text || 'Screenshot requested (already capturing automatically)',
-        params: {}
-      };
+      action = 'screenshot';
+      break;
     default:
       throw new Error(`normalizeAnthropicCUAResponse: Unmapped CUA action "${cuaAction}" - add to switch statement`);
   }
