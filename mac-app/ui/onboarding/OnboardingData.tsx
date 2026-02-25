@@ -5,6 +5,7 @@ import AtlasPasswordModal from '../components/AtlasPasswordModal';
 import ApplePasswordsModal from '../components/ApplePasswordsModal';
 import WhatsAppQRModal from '../components/WhatsAppQRModal';
 import TelegramAuthModal from '../components/TelegramAuthModal';
+import AgentPayModal from '../components/AgentPayModal';
 import type { BrowserInfo, BrowserType } from '../../shared/types/ipc';
 
 // Browser icons
@@ -13,6 +14,7 @@ import chatgptIcon from '../assets/chatgpt-icon.webp';
 import braveIcon from '../assets/brave-icon.webp';
 import applePasswordsIcon from '../assets/apple-passwords-icon.png';
 import claudeIcon from '../assets/claude-color.svg';
+import geminiIcon from '../assets/gemini-icon.png';
 
 interface OnboardingDataProps {
   onComplete: () => void;
@@ -220,6 +222,13 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const [claudeCodeSyncLoading, setClaudeCodeSyncLoading] = useState(false);
   const [claudeCodeStatus, setClaudeCodeStatus] = useState<string | null>(null);
 
+  // Socials state
+  const [socialsExpanded, setSocialsExpanded] = useState(false);
+
+  // Agent Pay state
+  const [agentPayModalOpen, setAgentPayModalOpen] = useState(false);
+  const [agentPayConfigured, setAgentPayConfigured] = useState(false);
+
   // Accordion behavior - expand one section, collapse others
   const handleBrowsersExpand = () => {
     setBrowsersExpanded(!browsersExpanded);
@@ -227,6 +236,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       setPasswordsExpanded(false);
       setChatSyncExpanded(false);
       setComputeExpanded(false);
+      setSocialsExpanded(false);
     }
   };
 
@@ -236,6 +246,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       setBrowsersExpanded(false);
       setChatSyncExpanded(false);
       setComputeExpanded(false);
+      setSocialsExpanded(false);
     }
   };
 
@@ -245,6 +256,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       setBrowsersExpanded(false);
       setPasswordsExpanded(false);
       setComputeExpanded(false);
+      setSocialsExpanded(false);
     }
   };
 
@@ -254,6 +266,17 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       setBrowsersExpanded(false);
       setPasswordsExpanded(false);
       setChatSyncExpanded(false);
+      setSocialsExpanded(false);
+    }
+  };
+
+  const handleSocialsExpand = () => {
+    setSocialsExpanded(!socialsExpanded);
+    if (!socialsExpanded) {
+      setBrowsersExpanded(false);
+      setPasswordsExpanded(false);
+      setChatSyncExpanded(false);
+      setComputeExpanded(false);
     }
   };
 
@@ -350,6 +373,19 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           // Check for Claude Code credentials
           const claudeCodeIntegration = integrations.find((i: Integration) => i.name === 'claude_code' && i.status === 'CONNECTED');
           setClaudeCodeSynced(!!claudeCodeIntegration);
+        }
+
+        // Check if agent pay is already configured
+        const settingsResponse = await fetch(`${backendUrl}/api/user-settings`, {
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+          },
+        });
+        if (settingsResponse.ok) {
+          const settingsData = await settingsResponse.json();
+          if (settingsData.encryptedPaymentInformation) {
+            setAgentPayConfigured(true);
+          }
         }
       } catch (err) {
         console.error('Failed to fetch data:', err);
@@ -1289,16 +1325,152 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 )}
 
                 {/* ChatGPT Subscription - Coming Soon */}
+                <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                  <div className="flex items-center gap-3">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.997-2.9 6.056 6.056 0 0 0-.747-7.073zM13.26 22.43a4.476 4.476 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.795.795 0 0 0 .392-.681v-6.737l2.02 1.168a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494zM3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.771.771 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646zM2.34 7.896a4.485 4.485 0 0 1 2.366-1.973V11.6a.766.766 0 0 0 .388.676l5.815 3.355-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.872zm16.597 3.855l-5.833-3.387L15.119 7.2a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667zm2.01-3.023l-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zm-12.64 4.135l-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08L8.704 5.46a.795.795 0 0 0-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5z" />
+                    </svg>
+                    <span className="text-sm text-foreground">ChatGPT Subscription</span>
+                  </div>
+
+                  <span className="text-xs text-muted-foreground italic">Coming soon</span>
+                </div>
+
+                {/* Gemini Subscription - Coming Soon */}
                 <div className="px-4 py-2 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <img src={chatgptIcon} alt="ChatGPT" className="w-6 h-6 rounded" />
-                    <span className="text-sm text-foreground">ChatGPT Subscription</span>
+                    <img src={geminiIcon} alt="Gemini" className="w-6 h-6" />
+                    <span className="text-sm text-foreground">Gemini Subscription</span>
                   </div>
 
                   <span className="text-xs text-muted-foreground italic">Coming soon</span>
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Socials - Expandable */}
+          <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
+            {/* Main row */}
+            <div className="p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                    <defs>
+                      <linearGradient id="socialsGradientOnboarding" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stopColor="#8b5cf6" />
+                        <stop offset="100%" stopColor="#6366f1" />
+                      </linearGradient>
+                    </defs>
+                    <circle cx="5" cy="12" r="2.5" fill="url(#socialsGradientOnboarding)"/>
+                    <circle cx="19" cy="5" r="2.5" fill="url(#socialsGradientOnboarding)"/>
+                    <circle cx="19" cy="19" r="2.5" fill="url(#socialsGradientOnboarding)"/>
+                    <line x1="7.5" y1="11" x2="16.5" y2="6" stroke="url(#socialsGradientOnboarding)" strokeWidth="1.5"/>
+                    <line x1="7.5" y1="13" x2="16.5" y2="18" stroke="url(#socialsGradientOnboarding)" strokeWidth="1.5"/>
+                  </svg>
+                </div>
+                <div>
+                  <div className="font-medium text-sm text-foreground">Socials</div>
+                  <div className="text-xs text-muted-foreground">Connect social media accounts</div>
+                </div>
+              </div>
+
+              <button
+                onClick={handleSocialsExpand}
+                className="h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 bg-foreground text-background hover:bg-foreground/90"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Expanded social options */}
+            {socialsExpanded && (
+              <div className="border-t border-border">
+                {/* X */}
+                <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                  <div className="flex items-center gap-3">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24">
+                      <rect width="24" height="24" rx="5" fill="#000000" />
+                      <path fill="white" d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z" transform="scale(0.72) translate(4.7, 4.7)"/>
+                    </svg>
+                    <span className="text-sm text-foreground">X</span>
+                  </div>
+                  <span className="text-xs text-muted-foreground italic">Coming soon</span>
+                </div>
+
+                {/* LinkedIn */}
+                <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                  <div className="flex items-center gap-3">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24">
+                      <rect width="24" height="24" rx="5" fill="#0A66C2" />
+                      <path fill="white" d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z" transform="scale(0.85) translate(2.1, 2.1)"/>
+                    </svg>
+                    <span className="text-sm text-foreground">LinkedIn</span>
+                  </div>
+                  <span className="text-xs text-muted-foreground italic">Coming soon</span>
+                </div>
+
+                {/* Instagram */}
+                <div className="px-4 py-2 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24">
+                      <defs>
+                        <linearGradient id="igGradOnboarding" x1="0%" y1="100%" x2="100%" y2="0%">
+                          <stop offset="0%" stopColor="#FFDC80" />
+                          <stop offset="25%" stopColor="#F77737" />
+                          <stop offset="50%" stopColor="#E1306C" />
+                          <stop offset="75%" stopColor="#C13584" />
+                          <stop offset="100%" stopColor="#833AB4" />
+                        </linearGradient>
+                      </defs>
+                      <rect width="24" height="24" rx="5" fill="url(#igGradOnboarding)" />
+                      <rect x="6" y="6" width="12" height="12" rx="3.5" stroke="white" strokeWidth="1.5" fill="none" />
+                      <circle cx="12" cy="12" r="3" stroke="white" strokeWidth="1.5" fill="none" />
+                      <circle cx="16.5" cy="7.5" r="1" fill="white" />
+                    </svg>
+                    <span className="text-sm text-foreground">Instagram</span>
+                  </div>
+                  <span className="text-xs text-muted-foreground italic">Coming soon</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Agent Pay - Opens modal */}
+          <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
+            <div className="p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                    <rect x="1" y="4" width="22" height="16" rx="2.5" fill="#1a1a1a"/>
+                    <rect x="1" y="8.5" width="22" height="3" fill="#333"/>
+                    <rect x="3.5" y="14" width="6" height="2" rx="0.5" fill="#555"/>
+                    <rect x="11" y="14" width="3" height="2" rx="0.5" fill="#555"/>
+                    <circle cx="18.5" cy="15" r="2" fill="#444" />
+                    <circle cx="20" cy="15" r="2" fill="#555" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="font-medium text-sm text-foreground">Agent Pay</div>
+                  <div className="text-xs text-muted-foreground">Payment method for agent purchases</div>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setAgentPayModalOpen(true)}
+                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                  agentPayConfigured
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-foreground text-background hover:bg-foreground/90'
+                }`}
+              >
+                {agentPayConfigured ? (
+                  <Check className="w-4 h-4" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1365,6 +1537,16 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         onSuccess={() => {
           setTelegramConnected(true);
           setTelegramAuthModalOpen(false);
+        }}
+      />
+
+      {/* Agent Pay Modal */}
+      <AgentPayModal
+        isOpen={agentPayModalOpen}
+        onClose={() => setAgentPayModalOpen(false)}
+        onSuccess={() => {
+          setAgentPayConfigured(true);
+          setAgentPayModalOpen(false);
         }}
       />
     </div>

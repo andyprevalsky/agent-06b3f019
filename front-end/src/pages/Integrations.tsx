@@ -33,6 +33,7 @@
  * - passwordRequestInput: string --> password request text
  * - passwordRequestSending: boolean --> sending password request
  * - passwordRequestSent: boolean --> password request sent successfully
+ * - computeExpanded: boolean --> compute list expanded
  * - messagesSyncExpanded: boolean --> messages sync list expanded
  * - socialsExpanded: boolean --> socials list expanded
  * - iMessageSynced: boolean --> iMessage connected
@@ -60,6 +61,7 @@ import chatgptIcon from '@/assets/chatgpt-icon.webp';
 import braveIcon from '@/assets/brave-icon.webp';
 import applePasswordsIcon from '@/assets/apple-passwords-icon.png';
 import claudeIcon from '@/assets/claude-color.svg';
+import geminiIcon from '@/assets/gemini-icon.png';
 
 const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
@@ -201,7 +203,8 @@ export default function Integrations() {
   const [passwordRequestSending, setPasswordRequestSending] = useState(false);
   const [passwordRequestSent, setPasswordRequestSent] = useState(false);
 
-  // Claude Code state
+  // Compute state
+  const [computeExpanded, setComputeExpanded] = useState(false);
   const [claudeCodeSynced, setClaudeCodeSynced] = useState(false);
   const [claudeCodeSyncLoading, setClaudeCodeSyncLoading] = useState(false);
   const [claudeCodeStatus, setClaudeCodeStatus] = useState<string | null>(null);
@@ -209,6 +212,16 @@ export default function Integrations() {
   // Messages Sync state
   const [messagesSyncExpanded, setMessagesSyncExpanded] = useState(false);
   const [socialsExpanded, setSocialsExpanded] = useState(false);
+
+  // Accordion mutual exclusivity - only one section open at a time
+  type AccordionSection = 'browsers' | 'passwords' | 'messagesSync' | 'compute' | 'socials';
+  const toggleSection = (section: AccordionSection) => {
+    setBrowsersExpanded(prev => section === 'browsers' ? !prev : false);
+    setPasswordsExpanded(prev => section === 'passwords' ? !prev : false);
+    setMessagesSyncExpanded(prev => section === 'messagesSync' ? !prev : false);
+    setComputeExpanded(prev => section === 'compute' ? !prev : false);
+    setSocialsExpanded(prev => section === 'socials' ? !prev : false);
+  };
   const [iMessageSynced, setIMessageSynced] = useState(false);
   const [whatsAppConnected, setWhatsAppConnected] = useState(false);
   const [telegramConnected, setTelegramConnected] = useState(false);
@@ -655,7 +668,7 @@ export default function Integrations() {
                     </div>
 
                     <button
-                      onClick={() => setBrowsersExpanded(!browsersExpanded)}
+                      onClick={() => toggleSection('browsers')}
                       className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
                         connectedBrowsers.size > 0
                           ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
@@ -771,7 +784,7 @@ export default function Integrations() {
                   </div>
 
                   <button
-                    onClick={() => setPasswordsExpanded(!passwordsExpanded)}
+                    onClick={() => toggleSection('passwords')}
                     className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
                       chromePasswordsSynced || applePasswordsSynced || atlasPasswordsSynced
                         ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
@@ -972,7 +985,7 @@ export default function Integrations() {
                   </div>
 
                   <button
-                    onClick={() => setMessagesSyncExpanded(!messagesSyncExpanded)}
+                    onClick={() => toggleSection('messagesSync')}
                     className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
                       iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED')
                         ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
@@ -1139,69 +1152,121 @@ export default function Integrations() {
                 )}
               </div>
 
-              {/* Claude Code Credentials */}
-              {handlers.claudeCode?.isAvailable ? (
-                <div className="border border-border rounded-lg bg-card/60 overflow-hidden">
-                  <div className="flex items-center justify-between p-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
-                        <img src={claudeIcon} alt="Claude Code" className="w-5 h-5" />
-                      </div>
-                      <div className="flex flex-col">
-                        <h3 className="font-medium">Claude Code</h3>
-                        <span className="text-xs text-muted-foreground">
-                          Sync Claude Code credentials to reduce usage costs
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={handleClaudeCodeSync}
-                      disabled={claudeCodeSyncLoading}
-                      className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                        claudeCodeSynced
-                          ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                          : 'bg-primary text-primary-foreground hover:bg-primary/90'
-                      }`}
-                    >
-                      {claudeCodeSyncLoading ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : claudeCodeSynced ? (
-                        <Check className="w-4 h-4" />
-                      ) : (
-                        <RefreshCw className="w-4 h-4" />
-                      )}
-                    </button>
-                  </div>
-                  {claudeCodeSyncLoading && claudeCodeStatus && (
-                    <div className="px-4 py-2 flex items-center gap-2 border-t border-border/50">
-                      <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
-                      <span className="text-xs text-muted-foreground">{claudeCodeStatus}</span>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="flex items-center justify-between p-4 border border-border rounded-lg bg-card/60">
+              {/* Compute - Expandable Section */}
+              <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
+                {/* Main row */}
+                <div className="p-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
-                      <img src={claudeIcon} alt="Claude Code" className="w-5 h-5" />
+                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                        <defs>
+                          <linearGradient id="computeGradientIntegrations" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stopColor="#ef4444" />
+                            <stop offset="100%" stopColor="#f87171" />
+                          </linearGradient>
+                        </defs>
+                        <path d="M13 2L4.5 14h6l-1 8L19.5 10h-6l1-8z" fill="url(#computeGradientIntegrations)" stroke="url(#computeGradientIntegrations)" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
                     </div>
                     <div className="flex flex-col">
-                      <div className="flex items-center gap-2">
-                        <h3 className="font-medium">Claude Code</h3>
-                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                          Desktop Only
-                        </span>
+                      <h3 className="font-medium">Compute</h3>
+                      <span className="text-xs text-muted-foreground">Connect AI subscriptions</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => toggleSection('compute')}
+                    className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                      claudeCodeSynced
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                    }`}
+                  >
+                    {claudeCodeSynced ? (
+                      <Check className="w-4 h-4" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+                {claudeCodeSyncLoading && claudeCodeStatus && (
+                  <div className="px-4 py-2 flex items-center gap-2 border-t border-border/50">
+                    <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                    <span className="text-xs text-muted-foreground">{claudeCodeStatus}</span>
+                  </div>
+                )}
+
+                {/* Expanded compute options */}
+                {computeExpanded && (
+                  <div className="border-t border-border">
+                    {/* Claude Subscription */}
+                    {handlers.claudeCode?.isAvailable ? (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
+                          <span className="text-sm">Claude Subscription</span>
+                        </div>
+
+                        <button
+                          onClick={handleClaudeCodeSync}
+                          disabled={claudeCodeSyncLoading}
+                          className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                            claudeCodeSynced
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                              : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          {claudeCodeSyncLoading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : claudeCodeSynced ? (
+                            <Check className="w-3.5 h-3.5" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                        </button>
                       </div>
-                      <span className="text-xs text-muted-foreground">
-                        Sync Claude Code credentials to reduce usage costs
+                    ) : (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm">Claude Subscription</span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                              Desktop Only
+                            </span>
+                          </div>
+                        </div>
+                        <Button size="sm" variant="ghost" asChild className="h-8 px-2">
+                          <a href="/download" className="text-xs">Get App</a>
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* ChatGPT Subscription - Coming Soon */}
+                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                      <div className="flex items-center gap-3">
+                        <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.997-2.9 6.056 6.056 0 0 0-.747-7.073zM13.26 22.43a4.476 4.476 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.795.795 0 0 0 .392-.681v-6.737l2.02 1.168a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494zM3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.771.771 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646zM2.34 7.896a4.485 4.485 0 0 1 2.366-1.973V11.6a.766.766 0 0 0 .388.676l5.815 3.355-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.872zm16.597 3.855l-5.833-3.387L15.119 7.2a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667zm2.01-3.023l-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zm-12.64 4.135l-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08L8.704 5.46a.795.795 0 0 0-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5z" />
+                        </svg>
+                        <span className="text-sm">ChatGPT Subscription</span>
+                      </div>
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        Coming Soon
+                      </span>
+                    </div>
+
+                    {/* Gemini Subscription - Coming Soon */}
+                    <div className="px-4 py-2 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <img src={geminiIcon} alt="Gemini" className="w-6 h-6" />
+                        <span className="text-sm">Gemini Subscription</span>
+                      </div>
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        Coming Soon
                       </span>
                     </div>
                   </div>
-                  <Button size="sm" variant="outline" asChild>
-                    <a href="/download">Download for Mac</a>
-                  </Button>
-                </div>
-              )}
+                )}
+              </div>
 
               {/* Socials - Expandable Section */}
               <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
@@ -1230,7 +1295,7 @@ export default function Integrations() {
                   </div>
 
                   <button
-                    onClick={() => setSocialsExpanded(!socialsExpanded)}
+                    onClick={() => toggleSection('socials')}
                     className="h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 bg-primary text-primary-foreground hover:bg-primary/90"
                   >
                     <RefreshCw className="w-4 h-4" />
@@ -1240,14 +1305,14 @@ export default function Integrations() {
                 {/* Expanded social options */}
                 {socialsExpanded && (
                   <div className="border-t border-border">
-                    {/* Twitter/X */}
+                    {/* X */}
                     <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                       <div className="flex items-center gap-3">
                         <svg className="w-6 h-6" viewBox="0 0 24 24">
                           <rect width="24" height="24" rx="5" fill="#000000" />
                           <path fill="white" d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z" transform="scale(0.72) translate(4.7, 4.7)"/>
                         </svg>
-                        <span className="text-sm">Twitter/X</span>
+                        <span className="text-sm">X</span>
                       </div>
                       <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
                         Coming Soon
