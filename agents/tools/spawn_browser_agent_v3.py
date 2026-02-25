@@ -3672,11 +3672,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
 
             # Yield final result with usage for tracking
+            final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",
                 message=result.get("message", ""),
-                status=MessageStatus.FINISHED,
+                status=final_status,
                 data={"usage": tool_usage}
             )
 
@@ -3729,10 +3730,14 @@ async def spawn_browser_agent(
         tool_call_id: Unique ID for this tool call
     """
     manager = get_manager()
+    last_status = None
 
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_browser_agent")
+        if isinstance(event, ToolEvent) and event.status:
+            last_status = event.status
         # Track usage from final event (included in data field)
         if event.data and event.data.get("usage"):
             await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_browser_agent")
 
+    return last_status

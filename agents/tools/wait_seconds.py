@@ -123,14 +123,18 @@ def get_manager() -> WaitSecondsManager:
 # WORKFLOW HELPER
 # ========================================
 
-async def wait_seconds(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str) -> None:
+async def wait_seconds(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str):
     """
     Workflow helper for wait_seconds (new event-driven system).
-    
+
     This replaces the old wait_seconds function.
     Yields events instead of returning a value.
     """
     manager = get_manager()
+    last_status = None
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "wait_seconds")
+        if isinstance(event, ToolEvent) and event.status:
+            last_status = event.status
+    return last_status
 

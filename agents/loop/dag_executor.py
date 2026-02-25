@@ -408,7 +408,7 @@ async def _execute_single_task(
             result = await execute_tool(actual_tool, params, tool_call_id)
 
             # Check for error status
-            if result.get("status") == "error":
+            if result.get("status") == "error" or result.get("success") is False:
                 return False
 
             return True

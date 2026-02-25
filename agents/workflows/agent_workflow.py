@@ -1129,8 +1129,9 @@ class AgentWorkflow:
             else:
                 # Legacy signature: (workflow_instance, tool_call, tool_call_id)
                 # These yield ToolEvents and call workflow_instance._handle_tool_event
-                await executor(self, {"tool": tool_name, **tool_args}, tool_call_id)
-                return {"success": True, "message": f"{tool_name} completed"}
+                last_status = await executor(self, {"tool": tool_name, **tool_args}, tool_call_id)
+                failed = last_status == MessageStatus.ERROR
+                return {"success": not failed, "message": f"{tool_name} completed"}
 
         except asyncio.CancelledError:
             # User paused the agent - don't show as error

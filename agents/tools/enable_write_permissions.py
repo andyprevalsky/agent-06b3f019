@@ -136,7 +136,7 @@ def get_manager() -> EnableWritePermissionsManager:
 # WORKFLOW HELPER
 # ========================================
 
-async def enable_write_permissions(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str) -> None:
+async def enable_write_permissions(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str):
     """
     Workflow helper for enable_write_permissions.
 
@@ -144,6 +144,10 @@ async def enable_write_permissions(workflow_instance, tool_call: Dict[str, Any],
     Permission is granted only for the immediate next action.
     """
     manager = get_manager()
+    last_status = None
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "enable_write_permissions")
+        if isinstance(event, ToolEvent) and event.status:
+            last_status = event.status
+    return last_status
 

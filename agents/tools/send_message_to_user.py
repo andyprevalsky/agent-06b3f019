@@ -256,7 +256,7 @@ def get_manager() -> SendMessageToUserManager:
 # WORKFLOW HELPER
 # ========================================
 
-async def send_message_to_user(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str) -> None:
+async def send_message_to_user(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str):
     """
     Workflow helper for send_message_to_user (lightweight version).
 
@@ -266,5 +266,9 @@ async def send_message_to_user(workflow_instance, tool_call: Dict[str, Any], too
     For sub-agents (depth >= 1), auto-responds instead of blocking.
     """
     manager = get_manager()
+    last_status = None
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "send_message_to_user")
+        if isinstance(event, ToolEvent) and event.status:
+            last_status = event.status
+    return last_status

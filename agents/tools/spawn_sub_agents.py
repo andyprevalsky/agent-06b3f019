@@ -596,6 +596,10 @@ async def spawn_sub_agent(workflow_instance, tool_call: Dict, tool_call_id: str)
     event-driven tools.
     """
     manager = get_manager()
+    last_status = None
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_sub_agent")
+        if isinstance(event, ToolEvent) and event.status:
+            last_status = event.status
 
+    return last_status
