@@ -108,7 +108,11 @@ export interface IPC {
   claudeCode?: {
     hasCredentials: () => Promise<boolean>;
     syncCredentials: () => Promise<{ success: boolean; message?: string }>;
+    setMockNoClaudeCode: (mock: boolean) => Promise<{ success: boolean }>;
   };
+
+  // Claude Code setup status events
+  onClaudeSetupStatus?: (callback: (status: string) => void) => (() => void);
 
   // Atlas credentials
   atlas?: {
@@ -128,7 +132,7 @@ export interface IPC {
   };
 
   // WhatsApp events
-  onWhatsAppQRCode?: (callback: (qr: string) => void) => void;
+  onWhatsAppQRCode?: (callback: (qr: string) => void) => (() => void);
 
   // Telegram
   telegram?: {

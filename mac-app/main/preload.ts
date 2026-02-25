@@ -124,6 +124,15 @@ const api: IPC = {
       ipcRenderer.invoke('claude:hasCredentials') as Promise<boolean>,
     syncCredentials: () =>
       ipcRenderer.invoke('claude:syncCredentials') as Promise<{ success: boolean; message?: string }>,
+    setMockNoClaudeCode: (mock: boolean) =>
+      ipcRenderer.invoke('claude:setMockNoClaudeCode', mock) as Promise<{ success: boolean }>,
+  },
+
+  // Claude Code setup status events
+  onClaudeSetupStatus: (callback: (status: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status as string);
+    ipcRenderer.on('claude:setupStatus', handler);
+    return () => { ipcRenderer.removeListener('claude:setupStatus', handler); };
   },
 
   // Atlas credentials
@@ -154,7 +163,9 @@ const api: IPC = {
 
   // WhatsApp events
   onWhatsAppQRCode: (callback: (qr: string) => void) => {
-    ipcRenderer.on('whatsapp:qrCode', (_, qr) => callback(qr as string));
+    const handler = (_event: Electron.IpcRendererEvent, qr: unknown) => callback(qr as string);
+    ipcRenderer.on('whatsapp:qrCode', handler);
+    return () => { ipcRenderer.removeListener('whatsapp:qrCode', handler); };
   },
 
   // Telegram

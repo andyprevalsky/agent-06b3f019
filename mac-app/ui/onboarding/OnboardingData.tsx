@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Check, Loader2, ArrowRight, X, RefreshCw } from 'lucide-react';
 import { getSession } from '@/lib/supabase';
 import AtlasPasswordModal from '../components/AtlasPasswordModal';
@@ -213,10 +213,12 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const [whatsAppQRModalOpen, setWhatsAppQRModalOpen] = useState(false);
   const [whatsAppQRCode, setWhatsAppQRCode] = useState<string | null>(null);
   const [telegramAuthModalOpen, setTelegramAuthModalOpen] = useState(false);
+  const whatsAppQRCleanupRef = useRef<(() => void) | null>(null);
 
   // Claude Code state
   const [claudeCodeSynced, setClaudeCodeSynced] = useState(false);
   const [claudeCodeSyncLoading, setClaudeCodeSyncLoading] = useState(false);
+  const [claudeCodeStatus, setClaudeCodeStatus] = useState<string | null>(null);
 
   // Accordion behavior - expand one section, collapse others
   const handleBrowsersExpand = () => {
@@ -254,6 +256,21 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       setChatSyncExpanded(false);
     }
   };
+
+  // Listen for Claude Code setup status events
+  useEffect(() => {
+    if (!window.api.onClaudeSetupStatus) return;
+    const cleanup = window.api.onClaudeSetupStatus((status: string) => {
+      if (status) console.log('[ClaudeCodeSetup]', status);
+      setClaudeCodeStatus(status || null);
+    });
+    return cleanup;
+  }, []);
+
+  // Clean up WhatsApp QR listener on unmount
+  useEffect(() => {
+    return () => { whatsAppQRCleanupRef.current?.(); };
+  }, []);
 
   // Fetch installed browsers and existing integrations on mount
   useEffect(() => {
@@ -563,9 +580,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         }
       }
 
-      // Set up QR code listener
+      // Set up QR code listener (clean up previous one first)
       if (window.api.onWhatsAppQRCode) {
-        window.api.onWhatsAppQRCode((qr: string) => {
+        whatsAppQRCleanupRef.current?.();
+        whatsAppQRCleanupRef.current = window.api.onWhatsAppQRCode((qr: string) => {
           setWhatsAppQRCode(qr);
         });
       }
@@ -1236,30 +1254,38 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
               <div className="border-t border-border">
                 {/* Claude Subscription */}
                 {window.api.claudeCode && (
-                  <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-                    <div className="flex items-center gap-3">
-                      <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
-                      <span className="text-sm text-foreground">Claude Subscription</span>
-                    </div>
+                  <>
+                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                      <div className="flex items-center gap-3">
+                        <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
+                        <span className="text-sm text-foreground">Claude Subscription</span>
+                      </div>
 
-                    <button
-                      onClick={handleClaudeCodeSync}
-                      disabled={claudeCodeSyncLoading}
-                      className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                        claudeCodeSynced
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {claudeCodeSyncLoading ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : claudeCodeSynced ? (
-                        <Check className="w-3.5 h-3.5" />
-                      ) : (
-                        <RefreshCw className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                  </div>
+                      <button
+                        onClick={handleClaudeCodeSync}
+                        disabled={claudeCodeSyncLoading}
+                        className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                          claudeCodeSynced
+                            ? 'bg-green-100 text-green-700'
+                            : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {claudeCodeSyncLoading ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : claudeCodeSynced ? (
+                          <Check className="w-3.5 h-3.5" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+                    {claudeCodeSyncLoading && claudeCodeStatus && (
+                      <div className="px-4 py-1.5 flex items-center gap-2 border-b border-border/50">
+                        <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground">{claudeCodeStatus}</span>
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {/* ChatGPT Subscription - Coming Soon */}

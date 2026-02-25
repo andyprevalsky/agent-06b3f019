@@ -452,10 +452,11 @@ export function registerHandlers() {
     return hasCredentials;
   });
 
-  ipcMain.handle('claude:syncCredentials', async () => {
+  ipcMain.handle('claude:syncCredentials', async (event) => {
     logIpc('IN', 'claude:syncCredentials');
+    const window = BrowserWindow.fromWebContents(event.sender);
     try {
-      const result = await ClaudeCredentialSync.syncCredentials();
+      const result = await ClaudeCredentialSync.syncCredentials(window);
       logIpc('OUT', 'claude:syncCredentials', result);
       return result;
     } catch (error: any) {
@@ -463,6 +464,13 @@ export function registerHandlers() {
       logIpc('OUT', 'claude:syncCredentials', { success: false, message: error.message });
       return { success: false, message: error.message };
     }
+  });
+
+  ipcMain.handle('claude:setMockNoClaudeCode', (_event, mock: boolean) => {
+    logIpc('IN', 'claude:setMockNoClaudeCode', { mock });
+    ClaudeCredentialSync.setMockNoClaudeCode(mock);
+    logIpc('OUT', 'claude:setMockNoClaudeCode', { success: true });
+    return { success: true };
   });
 
   // WhatsApp handlers

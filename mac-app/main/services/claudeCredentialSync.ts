@@ -1,5 +1,8 @@
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import { execSync, spawn } from 'child_process';
+import { BrowserWindow } from 'electron';
 import { Crypto } from '../base/crypto';
 import { AuthService } from './auth';
 import { IntegrationCache } from './sync/IntegrationCache';
@@ -21,6 +24,194 @@ kwIDAQAB
 -----END PUBLIC KEY-----`;
 
 export class ClaudeCredentialSync {
+  private static _mockNoClaudeCode = false;
+
+  static setMockNoClaudeCode(mock: boolean) {
+    this._mockNoClaudeCode = mock;
+    logConsole('ClaudeCredentialSync', `Mock no Claude Code: ${mock}`);
+  }
+
+  /**
+   * Build env with augmented PATH for finding npm/claude in packaged Electron apps.
+   */
+  private static getAugmentedEnv(): NodeJS.ProcessEnv {
+    const home = process.env.HOME || '';
+    const extraPaths = [
+      '/usr/local/bin',
+      '/opt/homebrew/bin',
+      `${home}/.npm-global/bin`,
+    ];
+
+    // Include ALL NVM node version bin dirs (packaged Electron won't have NVM_DIR set)
+    try {
+      const nvmDir = process.env.NVM_DIR || `${home}/.nvm`;
+      const versionsDir = path.join(nvmDir, 'versions', 'node');
+      if (fs.existsSync(versionsDir)) {
+        const versions = fs.readdirSync(versionsDir);
+        for (const v of versions) {
+          const binDir = path.join(versionsDir, v, 'bin');
+          if (fs.existsSync(binDir)) {
+            extraPaths.push(binDir);
+          }
+        }
+      }
+    } catch {
+      // NVM not installed, skip
+    }
+
+    // Also try the user's default shell PATH as a last resort
+    try {
+      const shellPath = execSync('/bin/bash -ilc "echo $PATH"', { stdio: 'pipe', encoding: 'utf8', timeout: 3000 }).trim();
+      if (shellPath) {
+        extraPaths.push(...shellPath.split(':'));
+      }
+    } catch {
+      // Ignore
+    }
+
+    const PATH = [...extraPaths, process.env.PATH].filter(Boolean).join(':');
+    return { ...process.env, PATH };
+  }
+
+  /**
+   * Find the npm-installed claude binary path.
+   * Prefers npm global install over any bundled/app-local claude.
+   */
+  private static findNpmClaudePath(): string | null {
+    const env = this.getAugmentedEnv();
+    try {
+      // Get npm global bin directory
+      const npmBin = execSync('npm config get prefix', { stdio: 'pipe', encoding: 'utf8', env }).trim();
+      const claudePath = path.join(npmBin, 'bin', 'claude');
+      if (fs.existsSync(claudePath)) {
+        return claudePath;
+      }
+    } catch {
+      // npm not available
+    }
+    return null;
+  }
+
+  /**
+   * Check if Claude Code is installed via npm (not a bundled copy).
+   */
+  private static isClaudeInstalled(): boolean {
+    if (this._mockNoClaudeCode) return false;
+    return this.findNpmClaudePath() !== null;
+  }
+
+  /**
+   * Get the full path to the npm-installed `claude` binary.
+   */
+  private static getClaudePath(): string {
+    return this.findNpmClaudePath() || 'claude';
+  }
+
+  /**
+   * Install Claude Code CLI via npm.
+   */
+  private static installClaudeCLI(onStatus: (status: string) => void): Promise<void> {
+    return new Promise((resolve, reject) => {
+      onStatus('Installing Claude Code...');
+      logConsole('ClaudeCredentialSync', 'Installing Claude Code via npm');
+
+      const env = this.getAugmentedEnv();
+      let npmPath: string;
+      try {
+        npmPath = execSync('which npm', { stdio: 'pipe', encoding: 'utf8', env }).trim();
+      } catch {
+        reject(new Error('npm not found. Please install Node.js from https://nodejs.org and try again.'));
+        return;
+      }
+
+      const proc = spawn(npmPath, ['install', '-g', '@anthropic-ai/claude-code'], {
+        env,
+        stdio: 'pipe',
+      });
+
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.stdout.on('data', (d) => {
+        logConsole('ClaudeCredentialSync', `npm install stdout: ${d.toString().trim()}`);
+      });
+
+      const timer = setTimeout(() => {
+        proc.kill();
+        reject(new Error('Claude Code installation timed out after 2 minutes'));
+      }, 120_000);
+
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          logConsole('ClaudeCredentialSync', 'Claude Code installed successfully');
+          resolve();
+        } else {
+          reject(new Error(`npm install failed (exit ${code}): ${stderr.slice(0, 200)}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Run `claude auth login` to trigger OAuth flow in the browser.
+   */
+  private static runClaudeAuthLogin(onStatus: (status: string) => void): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const claudePath = this.getClaudePath();
+      const env = this.getAugmentedEnv();
+
+      // In mock mode, logout first to force a fresh OAuth flow
+      if (this._mockNoClaudeCode) {
+        try {
+          logConsole('ClaudeCredentialSync', 'MOCK: Running claude auth logout first');
+          execSync(`"${claudePath}" auth logout`, { stdio: 'pipe', env });
+        } catch {
+          // Ignore logout errors
+        }
+      }
+
+      onStatus('Opening browser for authentication...');
+      logConsole('ClaudeCredentialSync', `Running: ${claudePath} auth login`);
+
+      const proc = spawn(claudePath, ['auth', 'login'], {
+        env,
+        stdio: 'pipe',
+      });
+
+      let stderr = '';
+      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.stdout.on('data', (d) => {
+        const line = d.toString().trim();
+        if (line) logConsole('ClaudeCredentialSync', `auth login: ${line}`);
+      });
+
+      const timer = setTimeout(() => {
+        proc.kill();
+        reject(new Error('Authentication timed out after 5 minutes. Please try again.'));
+      }, 300_000);
+
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          logConsole('ClaudeCredentialSync', 'OAuth login completed successfully');
+          resolve();
+        } else {
+          reject(new Error(`claude auth login failed (exit ${code}): ${stderr.slice(0, 200)}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
   /**
    * Check if Claude Code credentials exist in the macOS Keychain.
    */
@@ -37,6 +228,7 @@ export class ClaudeCredentialSync {
    * Read Claude Code credentials from macOS Keychain.
    */
   private static readCredentials(): string | null {
+    if (this._mockNoClaudeCode) return null;
     try {
       const result = execSync(
         `security find-generic-password -s "${KEYCHAIN_SERVICE}" -w`,
@@ -122,21 +314,64 @@ export class ClaudeCredentialSync {
 
   /**
    * Read, encrypt, and upload Claude Code credentials.
-   * Reads from macOS Keychain, encrypts, and uploads to backend.
+   * If no credentials found in Keychain, installs Claude Code and triggers OAuth.
    */
-  static async syncCredentials(): Promise<{ success: boolean; message?: string }> {
+  static async syncCredentials(
+    window?: BrowserWindow | null
+  ): Promise<{ success: boolean; message?: string }> {
     const session = await AuthService.getSession();
     if (!session) {
       return { success: false, message: 'Not authenticated' };
     }
 
+    const sendStatus = (status: string) => {
+      logConsole('ClaudeCredentialSync', `Status: ${status}`);
+      window?.webContents.send('claude:setupStatus', status);
+    };
+
     // 1. Read credentials from macOS Keychain
-    const credentialsJson = this.readCredentials();
+    let credentialsJson = this.readCredentials();
+    logConsole('ClaudeCredentialSync', `Keychain credentials found: ${!!credentialsJson}`);
+
+    // 2. If no credentials, install Claude Code and run OAuth
     if (!credentialsJson) {
-      return { success: false, message: 'Claude Code credentials not found in Keychain. Make sure you are logged into Claude Code.' };
+      try {
+        // Check if claude CLI is installed, install if needed
+        const installed = this.isClaudeInstalled();
+        logConsole('ClaudeCredentialSync', `Claude Code installed (npm): ${installed}, path: ${this.findNpmClaudePath() || 'none'}`);
+        if (!installed) {
+          await this.installClaudeCLI(sendStatus);
+          if (!this.isClaudeInstalled()) {
+            sendStatus('');
+            return { success: false, message: 'Claude Code installation failed. Please install manually: npm install -g @anthropic-ai/claude-code' };
+          }
+          sendStatus('Claude Code installed');
+        }
+
+        // Run OAuth login
+        await this.runClaudeAuthLogin(sendStatus);
+
+        // Re-read credentials after OAuth
+        sendStatus('Reading credentials...');
+        // Disable mock for the re-read so we actually check the keychain
+        const savedMock = this._mockNoClaudeCode;
+        this._mockNoClaudeCode = false;
+        credentialsJson = this.readCredentials();
+        this._mockNoClaudeCode = savedMock;
+
+        if (!credentialsJson) {
+          sendStatus('');
+          return { success: false, message: 'Authentication completed but credentials not found in Keychain. Please try again.' };
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logConsoleError('ClaudeCredentialSync', 'Install/auth flow failed', error);
+        sendStatus('');
+        return { success: false, message };
+      }
     }
 
-    // Validate credential structure
+    // 3. Validate credential structure
     try {
       const parsed = JSON.parse(credentialsJson);
       if (!parsed.claudeAiOauth?.accessToken) {
@@ -146,15 +381,18 @@ export class ClaudeCredentialSync {
       return { success: false, message: 'Claude Code credentials are not valid JSON' };
     }
 
-    // 2. Encrypt and upload
+    // 4. Encrypt and upload
     try {
+      sendStatus('Uploading credentials...');
       await this.uploadCredentials(credentialsJson, session.access_token);
       IntegrationCache.invalidate();
+      sendStatus('');
       logConsole('ClaudeCredentialSync', 'Credentials synced successfully');
       return { success: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logConsoleError('ClaudeCredentialSync', 'Upload failed', error);
+      sendStatus('');
       return { success: false, message };
     }
   }
