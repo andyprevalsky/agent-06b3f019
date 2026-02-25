@@ -110,7 +110,7 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     console.log(`🌍 Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
 
     // Phase 2: Create session (needs agent proxy + context)
-    const session = await createSessionWithContext(contextId, agent_id, proxyGeo);
+    const session = await createSessionWithContext(contextId, agent_id, proxyGeo, start_url);
 
     // Phase 3: Inject user's cookies and fingerprint via CDP
     const injectionResult = await injectUserData(session.sessionId, user_id, start_url);
@@ -216,7 +216,9 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
     let injectionResult = { cookies: { injected: false, cookieCount: 0 }, fingerprint: { injected: false } };
     let fingerprintInjection = null;
     if (session?.context?.userId) {
-      injectionResult = await injectUserData(result.sessionId, session.context.userId);
+      if (result.savedUrl) {
+        injectionResult = await injectUserData(result.sessionId, session.context.userId, result.savedUrl);
+      }
       // Get fingerprint data for agent to apply via CDP
       fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
     }

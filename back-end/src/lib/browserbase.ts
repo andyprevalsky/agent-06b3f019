@@ -272,7 +272,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
     debugUrl, 
     sessionId: session.id,
     wsUrl,  // CDP WebSocket URL for browser-use
-    savedUrl: oldSession.currentUrl || undefined 
+    savedUrl: oldSession.currentUrl || oldSession.startUrl || undefined
   };
 }
 

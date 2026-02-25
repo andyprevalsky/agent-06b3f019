@@ -249,6 +249,7 @@ model BrowserSession {
   sessionId       String               @unique
   status          BrowserSessionStatus @default(ACTIVE)
   debugUrl        String?
+  startUrl        String?
   currentUrl      String?
   createdAt       DateTime             @default(now())
   closedAt        DateTime?

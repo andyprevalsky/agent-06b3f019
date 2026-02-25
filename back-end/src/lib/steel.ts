@@ -141,7 +141,8 @@ export async function getOrCreateContext(userId: string): Promise<string> {
 export async function createSessionWithContext(
   dbContextId: string,
   agentId: string,
-  geolocation: ProxyGeoLocation = DEFAULT_GEOLOCATION
+  geolocation: ProxyGeoLocation = DEFAULT_GEOLOCATION,
+  startUrl?: string
 ): Promise<{ sessionId: string; debugUrl: string; taskId: string; wsUrl: string }> {
   console.log(`Creating Steel browser session for context ${dbContextId}...`);
   console.log(`  Proxy geolocation: ${geolocation.city}, ${geolocation.state}, ${geolocation.country}`);
@@ -242,6 +243,7 @@ export async function createSessionWithContext(
           debugUrl,
           wsUrl,
           status: 'ACTIVE',
+          startUrl: startUrl || undefined,
         }
       });
 
@@ -443,7 +445,7 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
         debugUrl,
         sessionId: session.id,
         wsUrl,
-        savedUrl: oldSession.currentUrl || undefined
+        savedUrl: oldSession.currentUrl || oldSession.startUrl || undefined
       };
 
     } catch (error) {
