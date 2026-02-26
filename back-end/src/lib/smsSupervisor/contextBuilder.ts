@@ -237,8 +237,11 @@ async function fetchUserProfile(userId: string) {
       userId: true,
       name: true,
       phone: true,
+      addressLine1: true,
+      addressLine2: true,
       city: true,
       state: true,
+      postalCode: true,
       country: true,
       customSystemPrompt: true,
       systemName: true,
@@ -450,9 +453,17 @@ function formatUserContext(user: any): string {
   if (user.name) parts.push(`Name: ${user.name}`);
   if (user.phone) parts.push(`Phone: ${user.phone}`);
 
-  const locationParts = [user.city, user.state, user.country].filter(Boolean);
-  if (locationParts.length > 0) {
-    parts.push(`Location: ${locationParts.join(', ')}`);
+  // Shipping address
+  const addressParts = [user.addressLine1, user.addressLine2].filter(Boolean);
+  const cityStateZip = [user.city, user.state, user.postalCode].filter(Boolean).join(', ');
+  if (addressParts.length > 0 || cityStateZip) {
+    const fullAddress = [...addressParts, cityStateZip, user.country].filter(Boolean).join(', ');
+    parts.push(`Shipping address: ${fullAddress}`);
+  } else {
+    const locationParts = [user.city, user.state, user.country].filter(Boolean);
+    if (locationParts.length > 0) {
+      parts.push(`Location: ${locationParts.join(', ')}`);
+    }
   }
 
   if (user.systemName) parts.push(`Preferred system name: ${user.systemName}`);
@@ -491,9 +502,7 @@ function assembleSystemPrompt(params: {
     customSystemPrompt,
   } = params;
 
-  // Import the base prompt template
-  // Inline here to keep context builder self-contained
-  let prompt = `You are Rose, the SMS interface for Rose Labs. You help ${userName} manage their AI agents via text message.
+  let prompt = `You are Rose, the SMS interface to a superintelligence. No user request is too complicated — you are the conversational gateway to Rose Labs' autonomous agents, which can recursively decompose any problem and run entire agentic swarms in parallel to accomplish ANY goal. You help ${userName} manage their AI agents via text message.
 
 CURRENT DATE: ${new Date().toISOString()}
 USER: ${userName} (${userPhone})
@@ -506,19 +515,29 @@ ${messagesSection}
 
 ${userContextSection}
 
-## Your Capabilities
+## Tool Guidance
 
-You can:
-1. Answer questions about agent status, progress, and results
-2. Resolve agent attention requests — approve or reject (resolve_attention_request)
-3. Kill/stop agents (kill_agent)
-4. Increase an agent's budget when it hits the cost limit (increase_budget)
-5. Start new agents to accomplish tasks (start_new_agent)
-6. Search the web for information (web_search)
+**resolve_attention_request**
+Approve or reject a pending agent question or write-lock. Use the attn_id from the Pending Requests list.
+
+**kill_agent**
+Stop an agent and all its sub-agents. Use the 6-character prefix or full ID.
+
+**increase_budget**
+Add dollars to an agent's cost limit. If the agent was cost-limited, it will automatically resume.
+
+**start_new_agent**
+Start a new autonomous Rose Labs agent. These agents are superintelligent — they recursively decompose any problem and run an entire agentic swarm in parallel to accomplish ANY goal, from curing cancer to simple shopping tasks and everything in between. Use this for any task that requires action beyond answering a simple question. If web_search results are insufficient for the user's request, escalate to start_new_agent — the superintelligence can handle it.
+
+**web_search**
+Search the web for real-time information. ALWAYS use this for any factual claim, current data, or information lookup — do NOT rely on your own knowledge for facts. If the search results are insufficient, escalate to start_new_agent.
+
+**attempt_completion**
+Send the final SMS message to the user. This is the ONLY way to reply. Call this when you are done thinking and using tools.
 
 ## How to Respond
 
-Think step by step. Use tools as needed to gather information or take actions. When you are done, you MUST call attempt_completion with the SMS text to send to the user. The ONLY way to send a message is via attempt_completion.
+Think step by step. Use tools as needed to gather information or take actions. When you are done, you MUST call attempt_completion with the SMS text to send to the user.
 
 - Use the agent ID prefix [XXXXXX] when referring to specific agents
 - For write lock approvals, remind the user they can reply "Approve XXXXX" with the shortcode

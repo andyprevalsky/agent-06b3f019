@@ -86,8 +86,9 @@ export async function handleSmsSupervisorMessage(config: {
   userId: string;
   phoneNumber: string;
   inboundMessage: string;
+  abortSignal?: AbortSignal;
 }): Promise<SmsSupervisorResult> {
-  const { userId, phoneNumber, inboundMessage } = config;
+  const { userId, phoneNumber, inboundMessage, abortSignal } = config;
   const overallStart = Date.now();
 
   console.log('[SMS Supervisor] === START ===', {
@@ -228,7 +229,16 @@ export async function handleSmsSupervisorMessage(config: {
     }
   }
 
-  // 6. Send response SMS
+  // 6. Check if session was cleared while we were processing
+  if (abortSignal?.aborted) {
+    console.log('[SMS Supervisor] Aborted before sending SMS (session cleared)', {
+      userId,
+      responseLength: finalResponse.length,
+    });
+    return { responseText: '', toolsExecuted: allToolsExecuted };
+  }
+
+  // 7. Send response SMS
   if (finalResponse) {
     const smsStart = Date.now();
     const smsResult = await sendSms(phoneNumber, finalResponse);
@@ -249,7 +259,7 @@ export async function handleSmsSupervisorMessage(config: {
     await sendSms(phoneNumber, finalResponse);
   }
 
-  // 7. Save session — only the user's inbound message and assistant's final response
+  // 8. Save session — only the user's inbound message and assistant's final response
   session.messages.push({
     role: 'user',
     content: inboundMessage,

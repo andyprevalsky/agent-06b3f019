@@ -27,6 +27,38 @@ const router = Router();
 // Regex for shortcode approval: "approve XXXXX" or "yes XXXXX"
 const SHORTCODE_REGEX = /^(?:approve|yes)\s+([A-Z0-9]{5})$/i;
 
+// Per-user AbortControllers for in-flight supervisor runs.
+// /clear aborts all active runs for a user so they don't send SMS after session reset.
+const activeSupervisorRuns = new Map<string, Set<AbortController>>();
+
+function registerSupervisorRun(userId: string): AbortController {
+  const controller = new AbortController();
+  if (!activeSupervisorRuns.has(userId)) {
+    activeSupervisorRuns.set(userId, new Set());
+  }
+  activeSupervisorRuns.get(userId)!.add(controller);
+  return controller;
+}
+
+function unregisterSupervisorRun(userId: string, controller: AbortController): void {
+  const runs = activeSupervisorRuns.get(userId);
+  if (runs) {
+    runs.delete(controller);
+    if (runs.size === 0) activeSupervisorRuns.delete(userId);
+  }
+}
+
+function abortAllSupervisorRuns(userId: string): void {
+  const runs = activeSupervisorRuns.get(userId);
+  if (runs) {
+    for (const controller of runs) {
+      controller.abort();
+    }
+    runs.clear();
+    activeSupervisorRuns.delete(userId);
+  }
+}
+
 /**
  * Validate Surge webhook signature (HMAC-SHA256)
  *
@@ -239,11 +271,60 @@ router.post('/inbound', async (req: Request, res: Response) => {
     if (messageBody.toLowerCase() === '/clear') {
       console.log('[SMS Webhook] /clear command received', { userId: user.userId });
 
+      // Abort any in-flight supervisor runs so they don't send SMS after clear
+      abortAllSupervisorRuns(user.userId);
+
+      // Clear SMS session history
       await prisma.smsSession.upsert({
         where: { userId: user.userId },
         update: { messages: JSON.stringify([]) },
         create: { userId: user.userId, messages: JSON.stringify([]) },
       });
+
+      // Find and terminate all active SMS-source agents for this user
+      const activeAgents = await prisma.agent.findMany({
+        where: {
+          userId: user.userId,
+          source: 'SMS',
+          deletedAt: null,
+          parentAgentId: null, // Only root agents (children get cleaned up recursively)
+        },
+        select: { id: true, temporalWorkflowId: true },
+      });
+
+      if (activeAgents.length > 0) {
+        console.log('[SMS Webhook] Terminating active SMS agents on /clear', {
+          userId: user.userId,
+          agentCount: activeAgents.length,
+          agentIds: activeAgents.map(a => a.id),
+        });
+
+        const client = await getTemporalClient();
+
+        for (const agent of activeAgents) {
+          // Terminate Temporal workflow
+          if (agent.temporalWorkflowId) {
+            try {
+              const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+              await handle.terminate('Session cleared by user via /clear');
+            } catch (error) {
+              console.warn(`[SMS Webhook] Failed to terminate workflow for agent ${agent.id}:`, error instanceof Error ? error.message : String(error));
+            }
+          }
+
+          // Soft-delete the agent and all its children
+          await prisma.agent.updateMany({
+            where: {
+              OR: [
+                { id: agent.id },
+                { parentAgentId: agent.id },
+              ],
+              deletedAt: null,
+            },
+            data: { deletedAt: new Date() },
+          });
+        }
+      }
 
       await sendSms(fromPhone, 'Session cleared.');
       return res.json({ ok: true });
@@ -259,10 +340,13 @@ router.post('/inbound', async (req: Request, res: Response) => {
 
     // Run async — don't block the webhook response
     // The supervisor sends its response via Surge API
+    const abortController = registerSupervisorRun(user.userId);
+
     handleSmsSupervisorMessage({
       userId: user.userId,
       phoneNumber: fromPhone,
       inboundMessage: messageBody,
+      abortSignal: abortController.signal,
     })
       .then((result) => {
         console.log('[SMS Webhook] Supervisor completed', {
@@ -273,6 +357,15 @@ router.post('/inbound', async (req: Request, res: Response) => {
         });
       })
       .catch((error) => {
+        // Don't send error SMS if we were aborted (e.g. by /clear)
+        if (abortController.signal.aborted) {
+          console.log('[SMS Webhook] Supervisor aborted (session cleared)', {
+            userId: user.userId,
+            durationMs: Date.now() - requestStart,
+          });
+          return;
+        }
+
         console.error('[SMS Webhook] Supervisor failed', {
           userId: user.userId,
           error: error instanceof Error ? error.message : String(error),
@@ -287,6 +380,9 @@ router.post('/inbound', async (req: Request, res: Response) => {
               error: smsError instanceof Error ? smsError.message : String(smsError),
             });
           });
+      })
+      .finally(() => {
+        unregisterSupervisorRun(user.userId, abortController);
       });
 
     // Return 200 immediately (supervisor sends response async via Surge)

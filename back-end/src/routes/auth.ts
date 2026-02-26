@@ -665,7 +665,7 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
     if (user.phone) {
       const firstName = user.name?.split(' ')[0] || 'there';
       const personalizedVcardUrl = getPersonalizedVcardUrl(userId);
-      sendSms(user.phone, SMS_TEMPLATES.welcome(firstName))
+      sendSms(user.phone, SMS_TEMPLATES.onboardingWelcome(firstName))
         .then(() => sendMms(user.phone!, '', personalizedVcardUrl))
         .catch((error) => {
           console.error(`⚠️ Failed to send welcome messages to user ${userId}:`, error);

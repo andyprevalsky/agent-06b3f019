@@ -23,7 +23,7 @@ const FORCE_SKIP_AUTH = false;
 
 // Inner component that has access to auth context
 const ElectronAppInner = () => {
-  const { isFullySignedIn, isAnonymous, loading: authLoading } = useAuth();
+  const { isFullySignedIn, isAnonymous, loading: authLoading, refreshAuthState } = useAuth();
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [checkingOnboarding, setCheckingOnboarding] = useState(true);
 
@@ -120,6 +120,9 @@ const ElectronAppInner = () => {
       await window.api.shortcut.enable();
       console.log('[ElectronApp] Shortcuts enabled');
     }
+    // Refresh auth state so isFullySignedIn picks up the session from onboarding
+    await refreshAuthState('onboarding-complete');
+
     setOnboardingComplete(true);
     console.log('[ElectronApp] Onboarding complete, rendering Terminal');
   };

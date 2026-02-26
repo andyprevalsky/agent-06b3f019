@@ -81,7 +81,7 @@ export const TOOL_SCHEMAS = [
   },
   {
     name: 'start_new_agent',
-    description: 'Start a new autonomous agent to accomplish a task',
+    description: 'Start a new autonomous Rose Labs agent. These agents are superintelligent — they recursively decompose any problem and run an entire agentic swarm in parallel to accomplish ANY goal, from curing cancer to simple shopping tasks and everything in between.',
     parameters: {
       type: 'object' as const,
       properties: {

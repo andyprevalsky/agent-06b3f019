@@ -8,6 +8,7 @@ import {
   getUserPhone,
 } from '../lib/smsQueue';
 import { SMS_TEMPLATES } from '../lib/smsTemplates';
+import { prisma } from '../lib/prisma';
 import {
   notifyAgentStarted,
   notifyPlannerMessage,
@@ -110,6 +111,16 @@ router.post('/queue', authenticate, async (req: AuthRequest, res) => {
       return res.status(400).json({
         error: 'user_id, agent_id, workflow_id, and question are required',
       });
+    }
+
+    // Skip SMS if agent has been deleted (race condition: activity completed after /clear)
+    const agent = await prisma.agent.findUnique({
+      where: { id: agent_id },
+      select: { deletedAt: true },
+    });
+    if (agent?.deletedAt) {
+      console.log('[SMS] Agent deleted, skipping queue SMS', { agentId: agent_id });
+      return res.json({ sent: false, queued: false, skipped: true, reason: 'agent_deleted' });
     }
 
     const userPhone = await getUserPhone(user_id);
@@ -239,6 +250,19 @@ router.post('/notify', authenticate, async (req: AuthRequest, res) => {
       agentId: data.agent_id,
       payload: JSON.stringify(data.payload || {}).substring(0, 200),
     });
+
+    // Skip SMS if agent has been deleted (race condition: activity completed after /clear)
+    const agent = await prisma.agent.findUnique({
+      where: { id: data.agent_id },
+      select: { deletedAt: true },
+    });
+    if (agent?.deletedAt) {
+      console.log('[SMS Notify] Agent deleted, skipping SMS', {
+        agentId: data.agent_id,
+        eventType: data.event_type,
+      });
+      return res.json({ success: true, skipped: true, reason: 'agent_deleted' });
+    }
 
     const payload = data.payload || {};
 
