@@ -53,7 +53,7 @@ class ClaudeCodeParentResponse(BaseModel):
 SILENCE_TIMEOUT_S = 1.0
 
 # Maximum runtime before timeout
-MAX_RUNTIME_S = 600  # 10 minutes
+MAX_RUNTIME_S = 1800  # 30 minutes (matches E2B SANDBOX_TIMEOUT_MS)
 
 
 def _safe_time() -> float:
@@ -1150,7 +1150,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             activity_handle = workflow.start_activity(
                 spawn_claude_code_activity,
                 args=[user_id, agent_id, goal, tool_call_id, output_schema, attachments if attachments else None, model, github_repo_url],
-                start_to_close_timeout=timedelta(minutes=15),
+                start_to_close_timeout=timedelta(minutes=35),  # 30 min sandbox + 5 min headroom for verifier/close
                 heartbeat_timeout=timedelta(seconds=60),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                 retry_policy=RetryPolicy(maximum_attempts=2),

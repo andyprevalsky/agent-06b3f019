@@ -18,6 +18,7 @@ import { getTemporalClient } from '../temporal';
 import { startAgentWorkflow } from '../temporal';
 import { executeWebSearch } from '../chat/chatTools';
 import { getAgentUrl } from '../smsTemplates';
+import { cleanupAgentSessions } from '../agentCleanup';
 
 // ============================================
 // Tool Schemas (for LLM structured output)
@@ -570,6 +571,9 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
   for (const child of agent.children) {
     await deleteAgentRecursive(child.id);
   }
+
+  // Clean up E2B sandboxes and Steel browser sessions before terminating workflow
+  await cleanupAgentSessions(agentId);
 
   // Terminate Temporal workflow
   if (agent.temporalWorkflowId) {

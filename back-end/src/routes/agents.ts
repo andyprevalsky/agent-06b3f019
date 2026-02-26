@@ -13,6 +13,7 @@ import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSch
 import { handleChatMessage, broadcastAgentModeStarted, broadcastAgentUpdate } from '../lib/chat';
 import { createMessage } from '../lib/messages';
 import { getClientIP, getGeoFromIP, DEFAULT_GEOLOCATION } from '../lib/geoip';
+import { cleanupAgentSessions } from '../lib/agentCleanup';
 import { createGithubRepo } from '../lib/github';
 import {
   processUploadedFile,
@@ -1088,6 +1089,9 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
   for (const child of agent.children) {
     await deleteAgentRecursive(child.id);
   }
+
+  // Clean up E2B sandboxes and Steel browser sessions before terminating workflow
+  await cleanupAgentSessions(agentId);
 
   // Terminate Temporal workflow if it exists
   if (agent.temporalWorkflowId) {
