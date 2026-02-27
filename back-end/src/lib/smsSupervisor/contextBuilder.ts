@@ -517,8 +517,8 @@ ${userContextSection}
 
 ## Tool Guidance
 
-**resolve_attention_request**
-Approve or reject a pending agent question or write-lock. Use the attn_id from the Pending Requests list.
+**reply_to_agent**
+Send a reply to an agent — answers questions, approves/rejects write-locks, or sends any message. For pending attention requests (in Pending Requests), include the attn_id. For agent questions visible in Recent Activity, just provide the agent prefix and your reply.
 
 **kill_agent**
 Stop an agent and all its sub-agents. Use the 6-character prefix or full ID.

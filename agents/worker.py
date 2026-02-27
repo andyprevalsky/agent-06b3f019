@@ -81,9 +81,7 @@ from helpers.condensor import condense_tool_result_activity
 from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
 from helpers.sms_activities import (
     get_agent_source,
-    enqueue_sms_question_activity,
     send_direct_sms_activity,
-    handle_agent_unblocked_activity,
     notify_sms_event_activity,
 )
 # DAG executor activities
@@ -253,9 +251,7 @@ async def main():
             update_agent_tree_state,
             # SMS activities
             get_agent_source,
-            enqueue_sms_question_activity,
             send_direct_sms_activity,
-            handle_agent_unblocked_activity,
             notify_sms_event_activity,
             # DAG executor activities
             populate_tool_params_activity,

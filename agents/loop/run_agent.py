@@ -111,6 +111,10 @@ async def run_agent(
 
     # Claude OAuth token for direct Anthropic calls via Rose endpoint
     claude_token: Optional[str] = None,
+
+    # Dynamic token getter - called before each LLM call to get latest token
+    # (workflow invalidates cached token on fallback, so getter returns None after that)
+    get_claude_token: Optional[Callable[[], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -318,6 +322,9 @@ async def run_agent(
         else:
             messages = await build_llm_messages(context, current_system_prompt)
         
+        # Resolve Claude token dynamically (getter returns latest; may be None after fallback)
+        current_claude_token = get_claude_token() if get_claude_token else claude_token
+
         # 7. Call LLM with structured streaming
         try:
             if is_inside_temporal_activity:
@@ -361,7 +368,7 @@ async def run_agent(
                     on_chunk=on_chunk,
                     reasoning_max_tokens=reasoning_max_tokens,
                     agent_id=agent_id,
-                    claude_token=claude_token,
+                    claude_token=current_claude_token,
                 )
                 
                 # Convert Pydantic tool_calls to dicts (same as call_llm_activity does)
@@ -405,7 +412,7 @@ async def run_agent(
                 # Workflow context - call LLM via activity (streams to Supabase Realtime inside)
                 llm_result = await workflow.execute_activity(
                     call_llm_activity,
-                    args=[messages, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id, claude_token],
+                    args=[messages, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id, current_claude_token],
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=30),

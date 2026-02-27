@@ -3,11 +3,8 @@ import { z } from 'zod';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import {
   sendSms,
-  enqueueOrSendSms,
-  handleAgentUnblocked,
   getUserPhone,
 } from '../lib/smsQueue';
-import { SMS_TEMPLATES } from '../lib/smsTemplates';
 import { prisma } from '../lib/prisma';
 import {
   notifyAgentStarted,
@@ -93,59 +90,6 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
 });
 
 /**
- * Queue-aware SMS for agent questions
- * POST /api/send-sms/queue
- * Auth: API Key (internal - called by agent worker)
- *
- * Body:
- *   - user_id: string
- *   - agent_id: string
- *   - workflow_id: string
- *   - question: string
- */
-router.post('/queue', authenticate, async (req: AuthRequest, res) => {
-  try {
-    const { user_id, agent_id, workflow_id, question } = req.body;
-
-    if (!user_id || !agent_id || !workflow_id || !question) {
-      return res.status(400).json({
-        error: 'user_id, agent_id, workflow_id, and question are required',
-      });
-    }
-
-    // Skip SMS if agent has been deleted (race condition: activity completed after /clear)
-    const agent = await prisma.agent.findUnique({
-      where: { id: agent_id },
-      select: { deletedAt: true },
-    });
-    if (agent?.deletedAt) {
-      console.log('[SMS] Agent deleted, skipping queue SMS', { agentId: agent_id });
-      return res.json({ sent: false, queued: false, skipped: true, reason: 'agent_deleted' });
-    }
-
-    const userPhone = await getUserPhone(user_id);
-    if (!userPhone) {
-      return res.status(400).json({ error: 'User has no phone number' });
-    }
-
-    const message = SMS_TEMPLATES.question(question);
-    const result = await enqueueOrSendSms(user_id, agent_id, workflow_id, message, userPhone);
-
-    console.log('[SMS] Queue endpoint result', {
-      userId: user_id,
-      agentId: agent_id,
-      sent: result.sent,
-      queued: result.queued,
-    });
-
-    res.json(result);
-  } catch (error) {
-    console.error('[SMS] Error in queue endpoint:', error);
-    res.status(500).json({ error: 'Failed to queue SMS' });
-  }
-});
-
-/**
  * Direct SMS send (for welcome, completion - no queue)
  * POST /api/send-sms/direct
  * Auth: API Key (internal - called by agent worker)
@@ -178,45 +122,6 @@ router.post('/direct', authenticate, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error('[SMS] Error in direct endpoint:', error);
     res.status(500).json({ error: 'Failed to send SMS' });
-  }
-});
-
-/**
- * Handle agent unblocked (removes from queue, triggers next)
- * POST /api/send-sms/unblock
- * Auth: API Key (internal - called by agent worker)
- *
- * Body:
- *   - user_id: string
- *   - agent_id: string
- */
-router.post('/unblock', authenticate, async (req: AuthRequest, res) => {
-  try {
-    const { user_id, agent_id } = req.body;
-
-    if (!user_id || !agent_id) {
-      return res.status(400).json({ error: 'user_id and agent_id are required' });
-    }
-
-    const userPhone = await getUserPhone(user_id);
-    if (!userPhone) {
-      // No phone number - nothing in queue to clean up
-      return res.json({ nextSent: false });
-    }
-
-    const result = await handleAgentUnblocked(user_id, agent_id, userPhone);
-
-    console.log('[SMS] Unblock endpoint result', {
-      userId: user_id,
-      agentId: agent_id,
-      nextSent: result.nextSent,
-      nextAgentId: result.nextAgentId,
-    });
-
-    res.json(result);
-  } catch (error) {
-    console.error('[SMS] Error in unblock endpoint:', error);
-    res.status(500).json({ error: 'Failed to handle unblock' });
   }
 });
 

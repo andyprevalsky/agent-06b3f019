@@ -496,31 +496,6 @@ model GoalHistory {
   @@index([originalAgentId])
 }
 
-model SmsQueue {
-  id           String   @id @default(uuid())
-  userId       String   @unique
-  agentId      String
-  workflowId   String
-  questionText String
-  messageSid   String?
-  sentAt       DateTime @default(now())
-  createdAt    DateTime @default(now())
-
-  @@index([userId])
-  @@index([agentId])
-}
-
-model SmsQueuePending {
-  id           String   @id @default(uuid())
-  userId       String
-  agentId      String
-  workflowId   String
-  questionText String
-  createdAt    DateTime @default(now())
-
-  @@index([userId, createdAt])
-  @@index([agentId])
-}
 
 model ImessageQueue {
   id          String   @id @default(uuid())

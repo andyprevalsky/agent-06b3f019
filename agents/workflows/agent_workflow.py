@@ -670,6 +670,7 @@ class AgentWorkflow:
                 response_schema=response_schema,
                 get_response_schema=self._make_response_schema_getter(),
                 claude_token=self.claude_max_token,
+                get_claude_token=lambda: self.claude_max_token,
             )
 
             await self._track_tokens_and_cost(plan_result)
@@ -761,6 +762,7 @@ class AgentWorkflow:
             response_schema=response_schema,
             get_response_schema=self._make_response_schema_getter(),
             claude_token=self.claude_max_token,
+            get_claude_token=lambda: self.claude_max_token,
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
 
@@ -1596,6 +1598,17 @@ class AgentWorkflow:
         # Track actual_model for credit billing
         if actual_model:
             self.actual_model = actual_model
+
+            # Detect Claude token fallback: we had a token but Rose used racing instead
+            if (self.claude_max_token
+                    and actual_model != "unknown"
+                    and not actual_model.endswith("-claude")):
+                workflow.logger.warning(
+                    f"⚠️ Claude token fallback detected: actual_model={actual_model}, "
+                    f"invalidating cached token"
+                )
+                self.claude_max_token = None
+                self.claude_max_token_fetched_at = None
 
         # Use actual_model pricing if available (e.g., "-claude" suffix = $0)
         input_rate = self.input_cents_per_1k

@@ -489,7 +489,7 @@ async function testToolSchemasHaveRequiredFields() {
 async function testToolSchemasNames() {
   const { TOOL_SCHEMAS } = await import('../lib/smsSupervisor/supervisorTools');
   const expectedNames = [
-    'resolve_attention_request',
+    'reply_to_agent',
     'kill_agent',
     'increase_budget',
     'start_new_agent',
@@ -515,22 +515,26 @@ async function testToolSchemasNames() {
   }
 }
 
-async function testToolSchemasResolveRequiresFields() {
+async function testToolSchemasReplyToAgentRequiresFields() {
   const { TOOL_SCHEMAS } = await import('../lib/smsSupervisor/supervisorTools');
-  const resolveSchema = TOOL_SCHEMAS.find((s: any) => s.name === 'resolve_attention_request');
-  assert(!!resolveSchema, 'resolve_attention_request schema should exist');
+  const replySchema = TOOL_SCHEMAS.find((s: any) => s.name === 'reply_to_agent');
+  assert(!!replySchema, 'reply_to_agent schema should exist');
   assert(
-    resolveSchema!.parameters.required.includes('attention_request_id'),
-    'resolve_attention_request should require attention_request_id'
+    replySchema!.parameters.required.includes('agent_id_or_prefix'),
+    'reply_to_agent should require agent_id_or_prefix'
   );
   assert(
-    resolveSchema!.parameters.required.includes('approved'),
-    'resolve_attention_request should require approved'
+    replySchema!.parameters.required.includes('message'),
+    'reply_to_agent should require message'
   );
-  // response should NOT be required (it's optional)
+  // attention_request_id and reject should NOT be required (optional)
   assert(
-    !resolveSchema!.parameters.required.includes('response'),
-    'resolve_attention_request response should be optional'
+    !replySchema!.parameters.required.includes('attention_request_id'),
+    'reply_to_agent attention_request_id should be optional'
+  );
+  assert(
+    !replySchema!.parameters.required.includes('reject'),
+    'reply_to_agent reject should be optional'
   );
 }
 
@@ -824,7 +828,7 @@ async function runAllTests() {
     { name: 'Module: tool schemas count', fn: testToolSchemasCount },
     { name: 'Module: tool schemas have required fields', fn: testToolSchemasHaveRequiredFields },
     { name: 'Module: tool schema names', fn: testToolSchemasNames },
-    { name: 'Module: resolve requires attention_id + approved', fn: testToolSchemasResolveRequiresFields },
+    { name: 'Module: reply_to_agent requires agent_id + message', fn: testToolSchemasReplyToAgentRequiresFields },
     { name: 'Module: attempt_completion requires message', fn: testToolSchemasAttemptCompletion },
     { name: 'Module: kill_agent requires prefix', fn: testToolSchemasKillAgentRequiresPrefix },
     { name: 'Module: increase_budget requires amount', fn: testToolSchemasIncreaseBudgetRequiresAmount },

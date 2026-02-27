@@ -5,9 +5,10 @@ Cases:
 1. Clarifications / approvals → block until the user replies (is_question=True)
 2. Heads-up / plan visibility → send message and keep working (is_question=False)
 
-SMS Fallback:
-- SMS-initiated goals: send SMS immediately for questions
-- Web/Mac-initiated: wait 15 min, then send SMS if no response
+When is_question=True:
+- SMS-initiated goals: sends SMS immediately
+- Web/Mac-initiated: waits 15 min, then sends SMS if no response
+- Blocks until the user responds (via web chat or SMS supervisor reply_to_agent)
 """
 
 from typing import Dict, Any, Optional, AsyncGenerator
@@ -18,12 +19,11 @@ import structlog
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 
-# Import SMS activities (will be executed via workflow.execute_activity)
+# Import activities (will be executed via workflow.execute_activity)
 with workflow.unsafe.imports_passed_through():
     from helpers.sms_activities import (
         get_agent_source,
-        enqueue_sms_question_activity,
-        handle_agent_unblocked_activity,
+        notify_sms_event_activity,
     )
 
 logger = structlog.get_logger()
@@ -33,7 +33,7 @@ SMS_FALLBACK_TIMEOUT_MINUTES = 15
 
 
 class SendMessageToUserManager(ToolManager):
-    """Manager for lightweight user notifications/clarifications (no DB writes)."""
+    """Manager for lightweight user notifications/clarifications."""
 
     tool_name = "send_message_to_user"
     read_only = True  # Available in plan phase
@@ -137,25 +137,28 @@ class SendMessageToUserManager(ToolManager):
 
         sms_sent = False
 
-        # 4. Handle SMS fallback based on source
+        # 4. Handle SMS notification based on source
         if agent_source == "SMS":
             # SMS-initiated: send SMS immediately
             logger.info(
                 "SMS-initiated goal, sending SMS question immediately",
                 agent_id=workflow_instance.agent_id,
             )
-            await workflow.execute_activity(
-                enqueue_sms_question_activity,
-                args=[
-                    workflow_instance.user_id,
-                    workflow_instance.agent_id,
-                    workflow.info().workflow_id,
-                    message,
-                ],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-            sms_sent = True
+            try:
+                await workflow.execute_activity(
+                    notify_sms_event_activity,
+                    args=[
+                        workflow_instance.user_id,
+                        "planner_message",
+                        workflow_instance.agent_id,
+                        {"message": message, "is_question": True},
+                    ],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                sms_sent = True
+            except Exception as e:
+                logger.error(f"Failed to send SMS question: {e}")
         else:
             # Web/Mac-initiated: wait 15 min, then send SMS if no response
             logger.info(
@@ -179,20 +182,23 @@ class SendMessageToUserManager(ToolManager):
                     "No response within timeout, sending SMS",
                     agent_id=workflow_instance.agent_id,
                 )
-                await workflow.execute_activity(
-                    enqueue_sms_question_activity,
-                    args=[
-                        workflow_instance.user_id,
-                        workflow_instance.agent_id,
-                        workflow.info().workflow_id,
-                        message,
-                    ],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-                sms_sent = True
+                try:
+                    await workflow.execute_activity(
+                        notify_sms_event_activity,
+                        args=[
+                            workflow_instance.user_id,
+                            "planner_message",
+                            workflow_instance.agent_id,
+                            {"message": message, "is_question": True},
+                        ],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    sms_sent = True
+                except Exception as e:
+                    logger.error(f"Failed to send SMS fallback: {e}")
 
-        # 5. If we haven't received a response yet (SMS path or after timeout), wait indefinitely
+        # 5. If we haven't received a response yet, wait indefinitely
         if not workflow_instance._has_new_messages:
             try:
                 await workflow.wait_condition(
@@ -218,16 +224,7 @@ class SendMessageToUserManager(ToolManager):
             sms_was_sent=sms_sent,
         )
 
-        # 6. Clean up SMS queue state (remove from active/pending)
-        if sms_sent:
-            await workflow.execute_activity(
-                handle_agent_unblocked_activity,
-                args=[workflow_instance.user_id, workflow_instance.agent_id],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-
-        # 7. Success status - mark as finished (frontend will swallow this)
+        # 6. Success status - mark as finished (frontend will swallow this)
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="User response received",
@@ -258,10 +255,7 @@ def get_manager() -> SendMessageToUserManager:
 
 async def send_message_to_user(workflow_instance, tool_call: Dict[str, Any], tool_call_id: str):
     """
-    Workflow helper for send_message_to_user (lightweight version).
-
-    This is a simple visibility/clarification bridge: it never writes to DB or
-    trigger notifications, it only mirrors text into the chat transcript.
+    Workflow helper for send_message_to_user.
 
     For sub-agents (depth >= 1), auto-responds instead of blocking.
     """

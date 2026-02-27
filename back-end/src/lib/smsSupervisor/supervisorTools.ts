@@ -2,7 +2,7 @@
  * SMS Supervisor Tools
  *
  * 6 tools available to the SMS supervisor LLM:
- * 1. resolve_attention_request — Approve or reject a pending agent request
+ * 1. reply_to_agent — Send a reply to an agent (answers questions, approves/rejects write-locks)
  * 2. kill_agent — Terminate an agent and all sub-agents
  * 3. increase_budget — Increase an agent's cost limit
  * 4. start_new_agent — Create and start a new agent
@@ -19,6 +19,7 @@ import { startAgentWorkflow } from '../temporal';
 import { executeWebSearch } from '../chat/chatTools';
 import { getAgentUrl } from '../smsTemplates';
 import { cleanupAgentSessions } from '../agentCleanup';
+import { createMessage } from '../messages';
 
 // ============================================
 // Tool Schemas (for LLM structured output)
@@ -26,25 +27,29 @@ import { cleanupAgentSessions } from '../agentCleanup';
 
 export const TOOL_SCHEMAS = [
   {
-    name: 'resolve_attention_request',
-    description: 'Resolve a pending agent attention request — approve (with optional response) or reject',
+    name: 'reply_to_agent',
+    description: 'Send a reply to an agent — answers questions, approves/rejects write-locks, or sends any message.',
     parameters: {
       type: 'object' as const,
       properties: {
+        agent_id_or_prefix: {
+          type: 'string' as const,
+          description: 'Agent ID or 6-char prefix (e.g. "a3f2b1")',
+        },
+        message: {
+          type: 'string' as const,
+          description: 'The reply text to send to the agent',
+        },
         attention_request_id: {
           type: 'string' as const,
-          description: 'The attention request ID (attn_id from the Pending Requests list)',
+          description: 'If resolving a pending attention request, provide the attn_id from the Pending Requests list',
         },
-        approved: {
+        reject: {
           type: 'boolean' as const,
-          description: 'true to approve/respond, false to reject',
-        },
-        response: {
-          type: 'string' as const,
-          description: "Optional response text. For questions, provide the answer. For approvals, defaults to 'Approved' if omitted.",
+          description: 'Set to true to reject an attention request. Default: false (approve)',
         },
       },
-      required: ['attention_request_id', 'approved'],
+      required: ['agent_id_or_prefix', 'message'],
     },
   },
   {
@@ -210,8 +215,8 @@ export async function executeToolCall(
     let result: ToolResult;
 
     switch (tool) {
-      case 'resolve_attention_request':
-        result = await executeResolveAttention(args, userId);
+      case 'reply_to_agent':
+        result = await executeReplyToAgent(args, userId);
         break;
       case 'kill_agent':
         result = await executeKillAgent(args, userId);
@@ -270,72 +275,96 @@ export async function executeToolCall(
 // Individual Tool Implementations
 // ============================================
 
-async function executeResolveAttention(
+async function executeReplyToAgent(
   args: Record<string, any>,
   userId: string
 ): Promise<ToolResult> {
-  const { attention_request_id, approved, response: responseText } = args;
+  const { agent_id_or_prefix, message, attention_request_id, reject } = args;
 
-  console.log('[SMS Tools:resolve] Resolving attention request', {
-    requestId: attention_request_id,
+  const agent = await resolveAgentPrefix(agent_id_or_prefix, userId);
+  if (!agent) {
+    return { tool: 'reply_to_agent', success: false, result: '', error: `No agent found matching "${agent_id_or_prefix}"` };
+  }
+
+  console.log('[SMS Tools:reply] Replying to agent', {
+    agentId: agent.id,
     userId,
-    approved,
-    responsePreview: responseText?.substring(0, 100),
+    messagePreview: message?.substring(0, 100),
+    hasAttentionRequest: !!attention_request_id,
+    reject: !!reject,
   });
 
-  const request = await prisma.agentAttentionRequest.findUnique({
-    where: { id: attention_request_id },
-  });
-
-  if (!request) {
-    return { tool: 'resolve_attention_request', success: false, result: '', error: 'Attention request not found' };
-  }
-
-  if (request.userId !== userId) {
-    return { tool: 'resolve_attention_request', success: false, result: '', error: 'Not authorized' };
-  }
-
-  if (request.userResponse !== null) {
-    return { tool: 'resolve_attention_request', success: false, result: '', error: 'Already answered' };
-  }
-
-  let userResponse: string;
-  if (approved) {
-    userResponse = responseText || 'Approved';
-  } else {
-    userResponse = '__REJECTED__';
-  }
-
-  // Update the request with response
-  await prisma.agentAttentionRequest.update({
-    where: { id: attention_request_id },
-    data: { userResponse },
-  });
-
-  // Signal the workflow
+  // 1. Post USER message to agent's conversation
   try {
-    const client = await getTemporalClient();
-    const handle = client.workflow.getHandle(request.workflowId);
-    await handle.signal('receive_user_response', userResponse);
+    await createMessage({
+      agentId: agent.id,
+      text: message,
+      role: 'USER',
+      metadata: { source: 'sms_supervisor' },
+    });
 
-    console.log('[SMS Tools:resolve] Signaled workflow', {
-      workflowId: request.workflowId,
-      agentId: request.agentId,
-      approved,
+    console.log('[SMS Tools:reply] Posted USER message', {
+      agentId: agent.id,
     });
   } catch (error) {
-    console.error('[SMS Tools:resolve] Failed to signal workflow', {
-      workflowId: request.workflowId,
+    console.error('[SMS Tools:reply] Failed to post message', {
+      agentId: agent.id,
       error: error instanceof Error ? error.message : String(error),
     });
-    // Don't fail — DB is updated, workflow will poll
+    return { tool: 'reply_to_agent', success: false, result: '', error: 'Failed to post message to agent' };
   }
 
-  const action = approved ? 'Responded to' : 'Rejected';
+  // 2. Signal the workflow to unblock any waiting tool
+  if (agent.temporalWorkflowId) {
+    try {
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      const signalValue = (attention_request_id && reject) ? '__REJECTED__' : message;
+      await handle.signal('receive_user_response', signalValue);
+
+      console.log('[SMS Tools:reply] Signaled workflow', {
+        workflowId: agent.temporalWorkflowId,
+        agentId: agent.id,
+        reject: !!reject,
+      });
+    } catch (error) {
+      console.error('[SMS Tools:reply] Failed to signal workflow', {
+        workflowId: agent.temporalWorkflowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Don't fail — message is in DB, workflow will poll
+    }
+  }
+
+  // 3. If resolving an attention request, mark it in DB
+  if (attention_request_id) {
+    try {
+      const userResponse = reject ? '__REJECTED__' : (message || 'Approved');
+      await prisma.agentAttentionRequest.update({
+        where: { id: attention_request_id },
+        data: { userResponse },
+      });
+
+      console.log('[SMS Tools:reply] Resolved attention request', {
+        requestId: attention_request_id,
+        reject: !!reject,
+      });
+    } catch (error) {
+      console.warn('[SMS Tools:reply] Failed to resolve attention request', {
+        requestId: attention_request_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Don't fail — message is posted, agent will see it
+    }
+  }
+
+  const action = attention_request_id
+    ? (reject ? 'Rejected request and replied to' : 'Approved request and replied to')
+    : 'Replied to';
   return {
-    tool: 'resolve_attention_request',
+    tool: 'reply_to_agent',
     success: true,
-    result: `${action} request for agent [${request.agentId.substring(0, 6)}]`,
+    result: `${action} agent [${agent.id.substring(0, 6)}]`,
   };
 }
 
