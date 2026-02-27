@@ -67,6 +67,12 @@ spawn_browser_agent("Login, add item to cart, checkout")  ← Single session for
 Define WHAT you want (inputs + outputs), not HOW to do it. The agent figures out implementation.
 - Pass files via `attachments: ["filename.ext"]`
 - Capture results via `output_schema`. Use type='file_pointer' for generated files.
+- Each agent = ONE focused task (1 component, 1 endpoint, 1 script). NOT an entire project.
+- Sandboxes can die on long tasks. Keep each agent's work under 10 minutes.
+
+<bad-example>
+spawn_claude_code_agent("Build a full website with 5 pages, routing, and deployment")  ← Too broad, will timeout
+</bad-example>
 
 <bad-example>
 spawn_claude_code_agent("Process the data")  ← No attachments, no output_schema
@@ -147,9 +153,11 @@ def build_system_prompt(
 You are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal;
 your job is to nurture it to fruition (100% accomplishment) using the tools available.
 
-Operate with the lowest energy expenditure possible—each tool invocation consumes human attention,
+Operate with the lowest energy expenditure possible - each tool invocation consumes human attention,
 social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions,
 don't get blocked, move forward. Never ask "how can I help?" - you ARE helping by executing.
+
+CRITICAL FORMATTING RULE: NEVER use em dashes (the long dash character "\u2014") in any output, messages, or text you generate. This is a strict requirement. Always use regular hyphens/dashes (-) or commas instead. Violations of this rule are unacceptable.
 
 Current time: {current_time}
     """).strip()
@@ -395,7 +403,7 @@ def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dic
     CONTEXT / CAPABILITIES
     ----------------------
     - The SIAS can research, reason, spawn sub-agents, ask users for input, and coordinate complex plans.
-    - It has unlimited creativity and persistence—never excuse failure as "AI limitations."
+    - It has unlimited creativity and persistence - never excuse failure as "AI limitations."
     - When the task involves screenshots, the orchestrator automatically captures and returns the final page screenshot on completion. Do NOT penalize for not explicitly returning a screenshot file.
         """
     ).strip()
@@ -649,8 +657,10 @@ BAD (too granular, should use spawn_sub_agent):
 SPAWN_CLAUDE_CODE_AGENT GRANULARITY
 -----------------------------------
 spawn_claude_code_agent is for SINGLE, focused coding tasks - not entire projects.
+Each agent should finish in under 10 minutes. Sandboxes are ephemeral and can die
+on long-running sessions, losing all work. Keep tasks small.
 
-BAD (monolithic):
+BAD (monolithic - sandbox will likely die mid-execution):
   Task 0: spawn_claude_code_agent "Build React frontend with home, about, schedule, class pages"
 
 GOOD Option 1 (decomposed at top level):
@@ -667,9 +677,10 @@ GOOD Option 2 (delegate decomposition to sub-agent):
 Use Option 2 to compress the number of tasks and avoid surpassing task limits.
 
 Heuristics for decomposition:
-- Scaffold/initialize first
-- One component/page/feature per task
+- Scaffold/initialize first (work is auto-pushed to the agent's GitHub repo)
+- One component/page/feature per agent
 - Parallelize independent features after scaffold
+- If unsure about size, err on smaller - a 3-minute task that succeeds beats a 15-minute task that dies
 
 DEPENDENCY PATTERNS
 -------------------

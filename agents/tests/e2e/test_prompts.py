@@ -171,6 +171,17 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         timeout=300,
         expected_tools=["web_search"],
     ),
+    "message-person": TestPrompt(
+        name="message-person",
+        title="Test Message Person",
+        description="Tests unified message_person tool with email and iMessage channels",
+        prompt=(
+            "Send an email and a imessage to myself, 972-977-7432, for testing purposes, "
+            "don't ask any questions. The message should try to get me to launch this product."
+        ),
+        timeout=300,
+        expected_tools=["message_person"],
+    ),
 }
 
 

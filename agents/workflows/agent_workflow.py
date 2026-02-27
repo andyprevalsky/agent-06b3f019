@@ -53,7 +53,6 @@ with workflow.unsafe.imports_passed_through():
     from tools.web_fetch import web_fetch
     from tools.spawn_sub_agents import spawn_sub_agent
     from helpers.error_utils import extract_error_message
-    from tools.send_sms_as_user import send_sms_as_user, get_manager as get_send_sms_as_user_manager
     from tools.spawn_browser_agent_v3 import spawn_browser_agent  # V3: browser-use + Rose API
     from tools.spawn_claude_code_agent import spawn_claude_code_agent  # Claude Code in E2B sandbox
     from tools.search_user_network import search_user_network_for_people
@@ -61,8 +60,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.enrich import enrich
     from tools.monitor import monitor
     from tools.check_monitor_events import check_monitor_events
-    from tools.read_message_history import read_message_history_with_person
-    from tools.message_person import message_person, get_manager as get_message_person_manager
+    from tools.message_person import message_person
     from tools.set_plan import set_plan
     from tools.attempt_completion import attempt_completion
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
@@ -93,13 +91,11 @@ TOOL_EXECUTORS = {
     "web_search": web_search,
     "web_fetch": web_fetch,
     "spawn_sub_agent": spawn_sub_agent,
-    "send_sms_as_user": send_sms_as_user,
     "search_user_network_for_people": search_user_network_for_people,
     "find_all": find_all,
     "enrich": enrich,
     "monitor": monitor,
     "check_monitor_events": check_monitor_events,
-    "read_message_history_with_person": read_message_history_with_person,
     "message_person": message_person,
     "set_plan": set_plan,
     "attempt_completion": attempt_completion,
@@ -111,10 +107,9 @@ TOOL_EXECUTORS = {
 }
 
 # Tools requiring user approval before execution
+# NOTE: message_person handles approval internally (after message generation, not before)
 APPROVAL_REQUIRED_TOOLS = {
-    "message_person": get_message_person_manager,
     "call_phone_number": get_call_phone_manager,
-    "send_sms_as_user": get_send_sms_as_user_manager,
 }
 
 
@@ -1084,8 +1079,8 @@ class AgentWorkflow:
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
             # These return results and call handle_tool_event internally
             NEW_SIGNATURE_TOOLS = {
-                "web_search", "web_fetch", "send_email", "send_sms", "send_sms_as_user",
-                "search_user_network_for_people", "read_message_history_with_person",
+                "web_search", "web_fetch", "send_email", "send_sms",
+                "search_user_network_for_people",
                 "monitor", "check_monitor_events",
                 "deep_research", "attempt_completion",
                 "search_x402_bazaar", "pay_for_x402_bazaar_service",

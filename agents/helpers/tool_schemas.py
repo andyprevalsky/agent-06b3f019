@@ -35,7 +35,7 @@ EXECUTE_PHASE_TOOLS = [
     # "people_search",     # removed from execute to stay within 8 anyOf limit
     "send_message_to_user_execute_phase",
     "call_phone_number",
-    "send_sms_as_user",
+    "message_person",
     "attempt_completion",
 ]
 
@@ -49,7 +49,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "web_fetch",
     "people_search",
     "call_phone_number",
-    "send_sms_as_user",
+    "message_person",
     "send_message_to_user_execute_phase",
     "reasoning",  # Pure thinking/analysis step (no tool call)
 ]
@@ -64,7 +64,7 @@ class PlanToolName(str, Enum):
     web_fetch = "web_fetch"
     people_search = "people_search"
     call_phone_number = "call_phone_number"
-    send_sms_as_user = "send_sms_as_user"
+    message_person = "message_person"
     send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
     reasoning = "reasoning"
 
@@ -276,31 +276,35 @@ class SendEmailTool(BaseModel):
     cc: Optional[str] = Field(None, description="Optional CC recipient email address")
 
 
-class ReadMessageHistoryTool(BaseModel):
-    """Read message history with a person. Use this to retrieve past conversations before sending a new message. You MUST call this tool before using message_person to send any message."""
-
-    tool: Literal["read_message_history_with_person"]
-    phone: Optional[str] = Field(None, description="Phone number in E.164 format (e.g., +19729777432)")
-    email: Optional[str] = Field(None, description="Email address of the person")
-    first_name: Optional[str] = Field(None, description="First name of the person (use with last_name)")
-    last_name: Optional[str] = Field(None, description="Last name of the person (use with first_name)")
-
-
 class MessagePersonTool(BaseModel):
-    """Send a message to a person via SMS or email. IMPORTANT: You MUST first call read_message_history_with_person for the SAME person before using this tool. If you haven't read their message history, this tool will fail."""
+    """Send a message to a person via iMessage or email. This is the ONLY tool for sending messages
+    to people. It automatically reads message history, researches the person, generates an appropriate
+    message based on your intent, and requests user approval before sending.
+
+    Provide a person identifier (full name, phone, or email) and describe the intent of the message.
+    Do NOT write the message yourself - the tool generates it based on context and intent."""
 
     tool: Literal["message_person"]
-    channel: Literal["sms", "email"] = Field(description="Communication channel: 'sms' for text message, 'email' for email")
-    phone: Optional[str] = Field(None, description="Phone number in E.164 format (required for SMS channel)")
-    email: Optional[str] = Field(None, description="Email address (required for email channel)")
-    first_name: Optional[str] = Field(None, description="First name of the person (optional, for context matching)")
-    last_name: Optional[str] = Field(None, description="Last name of the person (optional, for context matching)")
-    message: str = Field(description="The message content to send")
-    subject: Optional[str] = Field(None, description="Email subject line (required for email channel)")
+    person_id: str = Field(
+        description="Identifier for the person: full name (e.g., 'John Smith'), "
+        "phone number (E.164 format, e.g., '+19729777432'), or email address. "
+        "Full name must resolve unambiguously to one person."
+    )
+    channel: Literal["imessage", "email"] = Field(
+        description="Communication channel: 'imessage' for iMessage/SMS via user's Mac, 'email' for email via user's Gmail"
+    )
+    intent: str = Field(
+        description="Detailed description of the intent/purpose of the message. "
+        "Be as descriptive as possible about what the message should accomplish. "
+        "Examples: 'Get them interested in angel investing in Rose Labs - mention our "
+        "recent traction and ask if they would be open to a call', "
+        "'Check in and make sure they feel supported after their recent job change', "
+        "'Notify them about the new API features we launched this week'"
+    )
 
 
 class SpawnBrowserAgentTool(BaseModel):
-    """Spawn an autonomous browser agent to complete short, simple web tasks. Best for: purchases, checkouts, form submissions, downloading files, and reading content from JS-heavy sites. The browser agent should be used for short simple trajectories, not complex reasoning loops—it has a 25-step limit. Provide a complete, high-level goal - the browser agent will autonomously execute all necessary steps. Login state and saved payment methods persist across sessions. Minimize the work done by this tool and keep the trajectory as short as possible. Do not call this tool multiple times in parallel."""
+    """Spawn an autonomous browser agent to complete short, simple web tasks. Best for: purchases, checkouts, form submissions, downloading files, and reading content from JS-heavy sites. The browser agent should be used for short simple trajectories, not complex reasoning loops - it has a 25-step limit. Provide a complete, high-level goal - the browser agent will autonomously execute all necessary steps. Login state and saved payment methods persist across sessions. Minimize the work done by this tool and keep the trajectory as short as possible. Do not call this tool multiple times in parallel."""
 
     tool: Literal["spawn_browser_agent"]
     start_url: str = Field(
@@ -325,13 +329,20 @@ class SpawnClaudeCodeAgentTool(BaseModel):
     - Git (clone repos, create branches, commit)
     - Package managers (npm, pip, etc.)
 
-    TASK SCOPING: If a task can be broken into 2+ subtasks with no context dependency between them,
-    you MUST split them into separate Claude Code agents. Tasks timeout after 10 minutes, so anything
-    too complex that isn't broken down will fail. Each agent should have ONE focused deliverable.
+    TASK SCOPING: Each agent should complete ONE focused deliverable in under 10 minutes.
+    Think "create one component" or "add one feature" - NOT "build an entire app".
 
-    Provide a complete, high-level coding goal. Note: Sandboxes are ephemeral -
-    files don't persist after the session ends. Use git to push changes to preserve work,
-    or use file_pointer in output_schema to return generated files.
+    Size heuristics (pick the SMALLEST unit that makes sense):
+    - 1 page/component/endpoint per agent
+    - 1 data pipeline or analysis per agent
+    - 1 config/scaffold step per agent (others depend on this)
+
+    If a task can be broken into 2+ subtasks with no context dependency, you MUST split them
+    into separate agents. Monolithic tasks WILL fail due to sandbox timeouts.
+
+    A GitHub repo is automatically created and linked for every agent. All Claude Code
+    work is pushed to this repo. Use file_pointer in output_schema to return files
+    to the parent agent's context.
     """
 
     tool: Literal["spawn_claude_code_agent"]
@@ -797,7 +808,6 @@ TOOL_MODELS = {
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "enable_write_permissions": EnableWritePermissionsTool,
-    "send_sms_as_user": SendSmsAsUserTool,
     "spawn_browser_agent": SpawnBrowserAgentTool,
     "spawn_claude_code_agent": SpawnClaudeCodeAgentTool,
     "spawn_sub_agent": SpawnSubAgentTool,
@@ -806,7 +816,6 @@ TOOL_MODELS = {
     "enrich": EnrichTool,
     "monitor": MonitorTool,
     "check_monitor_events": CheckMonitorEventsTool,
-    "read_message_history_with_person": ReadMessageHistoryTool,
     "message_person": MessagePersonTool,
     # Plan phase tools
     "set_plan": SetPlanTool,
@@ -914,7 +923,6 @@ __all__ = [
     "SendSmsTool",
     "SendSmsAsUserTool",
     "SendEmailTool",
-    "ReadMessageHistoryTool",
     "MessagePersonTool",
     "SpawnBrowserAgentTool",
     "SpawnClaudeCodeAgentTool",

@@ -1,347 +1,369 @@
-"""Message person tool - unified SMS/email sending with read-first enforcement."""
+"""Unified message_person tool - resolve person, read history, enrich, generate, approve, send."""
 
+import re
 from typing import Dict, Any, Optional, AsyncGenerator
-from temporalio import workflow
+from temporalio import workflow, activity
 from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
 import time
+import json
+import httpx
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
-
-# Import activities from existing tools (safe - no side effects at import time)
-from tools.send_sms import send_sms_activity
-from tools.send_email import send_email_activity
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
+from tools.request_user_approval import request_user_approval_direct, UserRejectedError
 
 logger = structlog.get_logger()
 
 
 def _safe_time() -> float:
-    """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
     try:
         return time.time()
     except Exception:
         return 0.0
 
 
-def _normalize_phone(phone: Optional[str]) -> Optional[str]:
-    """Normalize phone number for comparison (remove spaces, dashes, etc.)."""
-    if not phone:
-        return None
-    # Keep only digits and leading +
-    normalized = ''.join(c for c in phone if c.isdigit() or c == '+')
-    return normalized if normalized else None
+def _classify_person_id(person_id: str) -> dict:
+    """Classify person_id as phone, email, or name.
 
-
-def _normalize_email(email: Optional[str]) -> Optional[str]:
-    """Normalize email for comparison (lowercase, strip whitespace)."""
-    if not email:
-        return None
-    return email.lower().strip()
-
-
-def _check_read_history_in_context(
-    context: list,
-    phone: Optional[str] = None,
-    email: Optional[str] = None,
-    first_name: Optional[str] = None,
-    last_name: Optional[str] = None
-) -> tuple[bool, Optional[Dict]]:
+    Returns dict with exactly one key set:
+      {"phone": "+19725551234"} or {"email": "a@b.com"} or {"first_name": "John", "last_name": "Smith"}
     """
-    Check if read_message_history_with_person was called for the same person.
-    
-    Returns:
-        Tuple of (found: bool, person_info: Optional[Dict])
-    """
-    normalized_phone = _normalize_phone(phone)
-    normalized_email = _normalize_email(email)
-    normalized_first = first_name.lower().strip() if first_name else None
-    normalized_last = last_name.lower().strip() if last_name else None
-    
-    for msg in context:
-        metadata = msg.get("metadata", {})
-        if not metadata:
-            continue
-        
-        # Look for read_message_history_person metadata
-        read_info = metadata.get("read_message_history_person")
-        if not read_info:
-            continue
-        
-        # Check if this read matches the person we're trying to message
-        read_phone = _normalize_phone(read_info.get("phone") or read_info.get("person_phone"))
-        read_email = _normalize_email(read_info.get("email") or read_info.get("person_email"))
-        read_first = read_info.get("first_name", "").lower().strip() if read_info.get("first_name") else None
-        read_last = read_info.get("last_name", "").lower().strip() if read_info.get("last_name") else None
-        
-        # Match by phone
-        if normalized_phone and read_phone and normalized_phone == read_phone:
-            return True, read_info
-        
-        # Match by email
-        if normalized_email and read_email and normalized_email == read_email:
-            return True, read_info
-        
-        # Match by full name
-        if normalized_first and normalized_last and read_first and read_last:
-            if normalized_first == read_first and normalized_last == read_last:
-                return True, read_info
-    
-    return False, None
+    pid = person_id.strip()
+
+    # Phone: digits with optional +, spaces, dashes, parens - at least 7 digits
+    if re.match(r'^[\+\d\s\-()]+$', pid) and sum(c.isdigit() for c in pid) >= 7:
+        # Normalise to E.164
+        digits = re.sub(r'[^\d]', '', pid)
+        if len(digits) == 10:
+            digits = '1' + digits
+        return {"phone": f"+{digits}"}
+
+    # Email: contains @
+    if '@' in pid and '.' in pid.split('@')[-1]:
+        return {"email": pid.lower().strip()}
+
+    # Name: must be at least first + last
+    parts = pid.strip().split()
+    if len(parts) >= 2:
+        return {"first_name": parts[0], "last_name": " ".join(parts[1:])}
+
+    # Fallback: treat as name with empty last
+    return {"first_name": pid, "last_name": ""}
+
+
+def _format_messages_for_context(messages: list, limit: int = 100) -> str:
+    """Format message records into readable text for LLM context."""
+    if not messages:
+        return "No previous messages."
+
+    lines = []
+    for msg in messages[:limit]:
+        channel = msg.get("channel", "?")
+        from_addr = msg.get("from", "?")
+        to_addr = msg.get("to", "?")
+        ts = msg.get("timestamp", "")
+        content = msg.get("message", "")
+        lines.append(f"[{channel}] {ts} | {from_addr} → {to_addr}: {content}")
+    return "\n".join(lines)
+
+
+def _format_person_display(person: dict) -> str:
+    """Build a display name from person dict."""
+    first = person.get("firstName", "")
+    last = person.get("lastName", "")
+    name = f"{first} {last}".strip()
+    return name or person.get("email") or person.get("phoneNumber") or "Unknown"
 
 
 class MessagePersonManager(ToolManager):
-    """Manager for sending messages to a person via SMS or email."""
+    """Unified tool: resolve person → read history → enrich → generate message → approve → send."""
 
     tool_name = "message_person"
-    requires_approval = True
-
-    def get_approval_question(self, tool_call: Dict[str, Any]) -> str:
-        """Build approval question showing recipient and message preview."""
-        channel = tool_call.get("channel", "message").upper()
-        phone = tool_call.get("phone")
-        email = tool_call.get("email")
-        message = tool_call.get("message", "")
-        subject = tool_call.get("subject")
-        system_name = tool_call.get("system_name", "Rose")
-
-        # Determine recipient
-        recipient = phone or email or "unknown recipient"
-
-        # Truncate message for preview
-        message_preview = message if len(message) <= 200 else message[:197] + "..."
-
-        if channel == "EMAIL" and subject:
-            return f"""{system_name} wants to send an **email**
-
-**To:** {recipient}
-**Subject:** {subject}
-
-**Message:**
-{message_preview}
-
-Reply to approve, or say "no" to cancel."""
-        else:
-            return f"""{system_name} wants to send a **{channel}**
-
-**To:** {recipient}
-
-**Message:**
-{message_preview}
-
-Reply to approve, or say "no" to cancel."""
+    requires_approval = False  # Approval handled internally after message generation
 
     async def execute_tool(
         self,
         workflow_instance,
         tool_call: Dict[str, Any],
-        tool_call_id: str
+        tool_call_id: str,
     ) -> AsyncGenerator[ToolEvent, None]:
-        """
-        Execute message send and yield events.
-        
-        Pre-check: Verifies that read_message_history_with_person was called
-        for the same person in the workflow context.
-
-        Yields:
-            - Pre-execution status with message preview
-            - Post-execution status with success/error
-        """
+        person_id_raw = tool_call.get("person_id", "")
         channel = tool_call.get("channel", "").lower()
-        phone = tool_call.get("phone")
-        email = tool_call.get("email")
-        first_name = tool_call.get("first_name")
-        last_name = tool_call.get("last_name")
-        message = tool_call.get("message", "")
-        subject = tool_call.get("subject")
-
-        # Get user_id from workflow instance
+        intent = tool_call.get("intent", "")
         user_id = workflow_instance.user_id
+        agent_id = workflow_instance.agent_id
+        model = workflow_instance.model
 
-        # Track start time for elapsed time calculation
-        start_time = _safe_time()
-
-        # Build person identifier for display
-        if first_name and last_name:
-            person_identifier = f"{first_name} {last_name}"
-        elif email:
-            person_identifier = email
-        elif phone:
-            person_identifier = phone
-        else:
-            person_identifier = "Unknown"
-
-        # Validate channel
-        if channel not in ["sms", "email"]:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Invalid channel",
-                message=f"Channel must be 'sms' or 'email', got: '{channel}'",
-                status=MessageStatus.ERROR
-            )
+        # ── Validate inputs ──────────────────────────────────────────────
+        if not person_id_raw:
+            yield ToolEvent(type=EventType.POST_MESSAGE, title="Missing person_id",
+                            message="person_id is required.", status=MessageStatus.ERROR)
             return
 
-        # Validate required fields based on channel
-        if channel == "sms" and not phone:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Missing phone number",
-                message="Phone number is required for SMS channel. Please provide a phone number in E.164 format (e.g., +19729777432).",
-                status=MessageStatus.ERROR
-            )
+        if channel not in ("imessage", "email"):
+            yield ToolEvent(type=EventType.POST_MESSAGE, title="Invalid channel",
+                            message=f"Channel must be 'imessage' or 'email', got: '{channel}'",
+                            status=MessageStatus.ERROR)
             return
 
-        if channel == "email":
-            if not email:
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="❌ Missing email address",
-                    message="Email address is required for email channel.",
-                    status=MessageStatus.ERROR
-                )
-                return
-            if not subject:
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="❌ Missing email subject",
-                    message="Subject is required for email channel.",
-                    status=MessageStatus.ERROR
-                )
-                return
-
-        if not message:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Missing message",
-                message="Message content is required.",
-                status=MessageStatus.ERROR
-            )
+        if not intent:
+            yield ToolEvent(type=EventType.POST_MESSAGE, title="Missing intent",
+                            message="intent is required - describe what the message should accomplish.",
+                            status=MessageStatus.ERROR)
             return
 
-        # CHECK: Verify that read_message_history_with_person was called for this person
-        context = workflow_instance.context
-        history_read, read_info = _check_read_history_in_context(
-            context, phone, email, first_name, last_name
-        )
+        # ── Step 1: Resolve person & read messages ───────────────────────
+        id_fields = _classify_person_id(person_id_raw)
+        person_display = person_id_raw  # fallback until we resolve
 
-        if not history_read:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="❌ Must read message history first",
-                message=(
-                    f"**Error:** You must call `read_message_history_with_person` for **{person_identifier}** "
-                    f"before sending a message to them.\n\n"
-                    f"This ensures you have context about your previous conversations. "
-                    f"Please call `read_message_history_with_person` with the same identifier "
-                    f"(phone: {phone}, email: {email}, name: {first_name} {last_name}) first, "
-                    f"then retry this message."
-                ),
-                status=MessageStatus.ERROR
-            )
-            return
+        yield ToolEvent(type=EventType.POST_MESSAGE,
+                        title=f"Reading Messages with {person_display}",
+                        message=f"Looking up **{person_display}** and reading conversation history...",
+                        status=MessageStatus.IN_PROGRESS)
 
-        # Truncate long messages for display
-        display_message = message if len(message) <= 100 else message[:97] + "..."
-
-        # 1. Pre-execution status
-        if channel == "sms":
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="📱 Sending SMS",
-                message=f"**To:** {phone}\n**Message:** {display_message}",
-                status=MessageStatus.IN_PROGRESS
-            )
-        else:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="📧 Sending Email",
-                message=f"**To:** {email}\n**Subject:** {subject}\n**Message:** {display_message}",
-                status=MessageStatus.IN_PROGRESS
-            )
-
-        # 2. Execute send activity based on channel
         try:
-            if channel == "sms":
-                result = await workflow.execute_activity(
-                    send_sms_activity,
-                    args=[phone, message],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3,
-                        backoff_coefficient=2.0,
-                        initial_interval=timedelta(seconds=1),
-                        maximum_interval=timedelta(seconds=10)
-                    )
-                )
-            else:  # email
-                result = await workflow.execute_activity(
-                    send_email_activity,
-                    args=[user_id, email, subject, message, None],  # No CC
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3,
-                        backoff_coefficient=2.0,
-                        initial_interval=timedelta(seconds=1),
-                        maximum_interval=timedelta(seconds=10)
-                    )
-                )
-
-            # 3. Calculate elapsed time and cost
-            elapsed_time = _safe_time() - start_time
-            cost_cents = 2 if channel == "sms" else 0  # SMS: ~$0.02, Email: free
-
-            # Build standardized usage for workflow cost tracking
-            tool_usage = {
-                "llm": [],
-                "service": [{"cost_cents": cost_cents, "provider": f"MessageBird {channel.upper()}"}] if cost_cents > 0 else [],
-            }
-
-            # Format success message
-            formatted_message = format_tool_message(
-                params=tool_call,
-                result=result,
-                time_elapsed=elapsed_time,
-                cost_cents=cost_cents
+            history_result = await workflow.execute_activity(
+                read_message_history_activity,
+                args=[user_id,
+                      id_fields.get("phone"),
+                      id_fields.get("email"),
+                      id_fields.get("first_name"),
+                      id_fields.get("last_name"),
+                      100],  # message_limit
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3, backoff_coefficient=2.0,
+                                         initial_interval=timedelta(seconds=1),
+                                         maximum_interval=timedelta(seconds=10)),
             )
-
-            # Post-execution success with usage data for tracking
-            if channel == "sms":
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="✅ SMS sent successfully",
-                    message=formatted_message,
-                    status=MessageStatus.FINISHED,
-                    data={"usage": tool_usage}
-                )
-            else:
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="✅ Email sent successfully",
-                    message=formatted_message,
-                    status=MessageStatus.FINISHED,
-                    data={"usage": tool_usage}
-                )
-
         except Exception as e:
-            # Calculate elapsed time even on error
-            elapsed_time = _safe_time() - start_time
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"Failed to look up {person_display}",
+                            message=f"Error reading message history: {e}",
+                            status=MessageStatus.ERROR)
+            return
 
-            # Format error message using standardized format
-            error_message = format_error_message(
-                params=tool_call,
-                error=e,
-                time_elapsed=elapsed_time,
-                cost_cents=0
-            )
+        # Handle multiple matches
+        if history_result.get("multiple_matches"):
+            matches = history_result.get("matches", [])
+            id_type = "name" if id_fields.get("first_name") else "email" if id_fields.get("email") else "phone"
+            lines = [f"Multiple people found with the {id_type}: **{person_id_raw}**\n"]
+            for i, m in enumerate(matches, 1):
+                name = f"{m.get('firstName', '')} {m.get('lastName', '')}".strip()
+                email_str = m.get("email") or "no email"
+                phone_str = m.get("phoneNumber") or "no phone"
+                msg_count = m.get("messageCount", 0)
+                lines.append(f"{i}. **{name}** - {email_str}, {phone_str}, {msg_count} messages")
+            lines.append("\nPlease specify using their phone number or email address.")
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"Ambiguous: multiple matches for {person_id_raw}",
+                            message="\n".join(lines),
+                            status=MessageStatus.ERROR)
+            return
 
-            # Error status
-            channel_name = "SMS" if channel == "sms" else "Email"
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"❌ {channel_name} send failed",
-                message=error_message,
-                status=MessageStatus.ERROR
+        # Handle no person found
+        person = history_result.get("person")
+        if not person:
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"No person found: {person_display}",
+                            message=history_result.get("message", f"No person found matching: {person_display}"),
+                            status=MessageStatus.ERROR)
+            return
+
+        # We have a resolved person
+        person_display = _format_person_display(person)
+        messages = history_result.get("messages", [])
+        person_phone = person.get("phoneNumber")
+        person_email = person.get("email")
+
+        # ── Channel validation ───────────────────────────────────────────
+        if channel == "imessage" and not person_phone:
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"Cannot send iMessage to {person_display}",
+                            message=f"No phone number found for {person_display}. Try the email channel instead.",
+                            status=MessageStatus.ERROR)
+            return
+
+        if channel == "email" and not person_email:
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"Cannot send email to {person_display}",
+                            message=f"No email address found for {person_display}. Try the imessage channel instead.",
+                            status=MessageStatus.ERROR)
+            return
+
+        # ── Step 2: Exa enrichment (only if we have a name) ─────────────
+        exa_context = ""
+        has_name = person.get("firstName") and person.get("lastName")
+        if has_name:
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"Gathering Information about {person_display}",
+                            message=f"Researching **{person_display}** online...",
+                            status=MessageStatus.IN_PROGRESS)
+            try:
+                exa_query = f"{person.get('firstName')} {person.get('lastName')}"
+                if person.get("company"):
+                    exa_query += f" {person.get('company')}"
+                exa_result = await workflow.execute_activity(
+                    people_search_activity,
+                    args=[exa_query, 3],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=2, backoff_coefficient=2.0,
+                                             initial_interval=timedelta(seconds=1),
+                                             maximum_interval=timedelta(seconds=10)),
+                )
+                exa_context = exa_result.get("answer", "")
+            except Exception as e:
+                logger.warning("Exa enrichment failed, continuing without it", error=str(e))
+                exa_context = ""
+
+        # ── Step 3: Generate message via LLM ─────────────────────────────
+        yield ToolEvent(type=EventType.POST_MESSAGE,
+                        title=f"Generating Message for {person_display}",
+                        message=f"Crafting a message for **{person_display}** based on your intent...",
+                        status=MessageStatus.IN_PROGRESS)
+
+        # Build conversation context from workflow
+        conversation_context = _build_conversation_summary(workflow_instance.context)
+        messages_context = _format_messages_for_context(messages, limit=100)
+
+        try:
+            gen_result = await workflow.execute_activity(
+                generate_message_activity,
+                args=[
+                    model,
+                    workflow_instance.system_name,
+                    conversation_context,
+                    person_display,
+                    messages_context,
+                    exa_context,
+                    intent,
+                    channel,
+                    person_email,
+                ],
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=2, backoff_coefficient=2.0,
+                                         initial_interval=timedelta(seconds=2),
+                                         maximum_interval=timedelta(seconds=15)),
             )
+        except Exception as e:
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"Message generation failed for {person_display}",
+                            message=f"Error generating message: {e}",
+                            status=MessageStatus.ERROR)
+            return
+
+        generated_message = gen_result.get("message", "")
+        generated_subject = gen_result.get("subject")
+
+        if not generated_message:
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title="Empty message generated",
+                            message="The LLM returned an empty message. Please try again with a clearer intent.",
+                            status=MessageStatus.ERROR)
+            return
+
+        # ── Step 4: User approval ────────────────────────────────────────
+        recipient = person_phone if channel == "imessage" else person_email
+        channel_label = "iMessage" if channel == "imessage" else "Email"
+
+        approval_text = f"""{workflow_instance.system_name} wants to send {'an' if channel == 'email' else 'a'} **{channel_label}**
+
+**To:** {person_display} ({recipient})"""
+
+        if channel == "email" and generated_subject:
+            approval_text += f"\n**Subject:** {generated_subject}"
+
+        approval_text += f"""
+
+**Intent:** {intent}
+
+**Message:**
+{generated_message}
+
+Reply to approve, or say "no" to cancel."""
+
+        try:
+            await request_user_approval_direct(
+                workflow_instance,
+                question=approval_text,
+                metadata={"toolApproval": True},
+            )
+        except UserRejectedError:
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"Message to {person_display} cancelled",
+                            message="User declined to send the message.",
+                            status=MessageStatus.ERROR)
+            return
+
+        # ── Step 5: Send ─────────────────────────────────────────────────
+        yield ToolEvent(type=EventType.POST_MESSAGE,
+                        title=f"Sending {channel_label} to {person_display}",
+                        message=f"Delivering message to **{person_display}**...",
+                        status=MessageStatus.IN_PROGRESS)
+
+        try:
+            if channel == "imessage":
+                send_result = await workflow.execute_activity(
+                    queue_imessage_activity,
+                    args=[user_id, agent_id, person_phone, generated_message],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3, backoff_coefficient=2.0,
+                                             initial_interval=timedelta(seconds=1),
+                                             maximum_interval=timedelta(seconds=10)),
+                )
+                if not send_result.get("success"):
+                    error_msg = send_result.get("error", "Unknown error")
+                    if "imessage" in error_msg.lower() or "mac" in error_msg.lower():
+                        error_msg = "iMessage integration is not setup for the current user (Mac app not connected)"
+                    yield ToolEvent(type=EventType.POST_MESSAGE,
+                                    title=f"Failed to send iMessage to {person_display}",
+                                    message=error_msg,
+                                    status=MessageStatus.ERROR)
+                    return
+            else:  # email
+                send_result = await workflow.execute_activity(
+                    send_email_activity,
+                    args=[user_id, person_email, generated_subject or "(no subject)", generated_message, None],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3, backoff_coefficient=2.0,
+                                             initial_interval=timedelta(seconds=1),
+                                             maximum_interval=timedelta(seconds=10)),
+                )
+        except Exception as e:
+            error_str = str(e)
+            if channel == "email" and ("gmail" in error_str.lower() or "not connected" in error_str.lower()):
+                error_str = "Email integration is not setup for the current user"
+            elif channel == "imessage" and ("imessage" in error_str.lower() or "mac" in error_str.lower()):
+                error_str = "iMessage integration is not setup for the current user (Mac app not connected)"
+            yield ToolEvent(type=EventType.POST_MESSAGE,
+                            title=f"Failed to send {channel_label} to {person_display}",
+                            message=error_str,
+                            status=MessageStatus.ERROR)
+            return
+
+        # ── Done ─────────────────────────────────────────────────────────
+        preview = generated_message if len(generated_message) <= 200 else generated_message[:197] + "..."
+        yield ToolEvent(type=EventType.POST_MESSAGE,
+                        title=f"{channel_label} sent to {person_display}",
+                        message=f"**To:** {person_display} ({recipient})\n\n**Message:**\n{preview}",
+                        status=MessageStatus.FINISHED)
+
+
+def _build_conversation_summary(context: list) -> str:
+    """Build a full conversation context string from workflow context messages."""
+    if not context:
+        return "No conversation history."
+    lines = []
+    for msg in context:
+        role = msg.get("role", "UNKNOWN")
+        text = msg.get("text", "")
+        if not text:
+            continue
+        # Truncate very long individual messages
+        if len(text) > 2000:
+            text = text[:2000] + "...(truncated)"
+        lines.append(f"[{role}]: {text}")
+    return "\n".join(lines) if lines else "No conversation history."
 
 
 # ========================================
@@ -352,7 +374,6 @@ _manager: Optional[MessagePersonManager] = None
 
 
 def get_manager() -> MessagePersonManager:
-    """Get or create message person manager singleton."""
     global _manager
     if _manager is None:
         _manager = MessagePersonManager()
@@ -360,22 +381,15 @@ def get_manager() -> MessagePersonManager:
 
 
 # ========================================
-# WORKFLOW HELPER
+# WORKFLOW HELPER (legacy signature)
 # ========================================
 
 async def message_person(
     workflow_instance,
     tool_call: Dict[str, Any],
-    tool_call_id: str
+    tool_call_id: str,
 ):
-    """
-    Workflow helper for message_person (event-driven system).
-
-    Args:
-        workflow_instance: The workflow instance
-        tool_call: Tool call dict with 'channel', 'phone'/'email', 'message', optional 'subject'
-        tool_call_id: Unique ID for this tool call
-    """
+    """Legacy-signature workflow helper. Receives workflow_instance directly."""
     manager = get_manager()
     last_status = None
 
@@ -383,13 +397,104 @@ async def message_person(
         await workflow_instance._handle_tool_event(event, tool_call_id, "message_person")
         if isinstance(event, ToolEvent) and event.status:
             last_status = event.status
-        # Track usage from final event (included in data field)
-        if event.data and event.data.get("usage"):
-            await workflow_instance._track_usage(event.data["usage"], tool_name="message_person")
 
     return last_status
 
 
+# ========================================
+# TEMPORAL ACTIVITIES (imported at workflow level via unsafe.imports_passed_through)
+# ========================================
+
+# Re-export activities we use (they live in their own files)
+from tools.read_message_history import read_message_history_activity  # noqa: E402
+from tools.people_search import people_search_activity  # noqa: E402
+from tools.send_sms_as_user import queue_imessage_activity  # noqa: E402
+from tools.send_email import send_email_activity  # noqa: E402
 
 
+@activity.defn
+async def generate_message_activity(
+    model: str,
+    system_name: str,
+    conversation_context: str,
+    person_name: str,
+    messages_context: str,
+    exa_context: str,
+    intent: str,
+    channel: str,
+    person_email: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate a message for a person using the inherited LLM model.
 
+    Returns: {"message": str, "subject": Optional[str]}
+    """
+    from helpers.llm import call_llm
+
+    activity.heartbeat(f"Generating message for {person_name}")
+
+    channel_instructions = ""
+    if channel == "imessage":
+        channel_instructions = (
+            "You are writing an iMessage/text message. Keep it casual, conversational, "
+            "and relatively brief (1-3 short paragraphs max). Use a warm, natural texting tone. "
+            "Do NOT include a subject line."
+        )
+    else:
+        channel_instructions = (
+            "You are writing an email. Be professional but personable. "
+            "Include a clear, concise subject line. Structure the email with a greeting, body, and sign-off. "
+            f"Sign the email as {system_name}."
+        )
+
+    system_prompt = f"""You are {system_name}'s messaging assistant. Your job is to craft the perfect message
+to send to {person_name} based on the intent and context provided.
+
+{channel_instructions}
+
+IMPORTANT RULES:
+- Write ONLY the message content (and subject if email). No meta-commentary.
+- Match the tone of previous conversations if available.
+- Be authentic and genuine - this message is sent from {system_name}'s account.
+- CRITICAL: NEVER use em dashes ("\u2014") anywhere in the message. This is a strict, non-negotiable rule. Always use regular hyphens (-) or commas instead.
+- Reference specific shared context when relevant (previous conversations, mutual interests).
+- Do NOT be overly formal or robotic.
+- Do NOT include placeholder text like [your name] or [company].
+"""
+
+    user_prompt = f"""## Intent
+{intent}
+
+## Previous Messages with {person_name}
+{messages_context}
+
+## Research about {person_name}
+{exa_context if exa_context else "No additional research available."}
+
+## Recent Conversation Context
+{conversation_context[:8000]}
+
+---
+
+Now write the message. {"Include a subject line on the first line prefixed with 'Subject: ' followed by the message body." if channel == "email" else "Write only the message text."}"""
+
+    result = await call_llm(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        model=model,
+        temperature=0.7,
+        max_tokens=1024,
+    )
+
+    content = result.get("content", "").strip()
+
+    # Parse subject from email response
+    subject = None
+    message_body = content
+    if channel == "email" and content.startswith("Subject:"):
+        lines = content.split("\n", 1)
+        subject = lines[0].replace("Subject:", "").strip()
+        message_body = lines[1].strip() if len(lines) > 1 else ""
+
+    return {"message": message_body, "subject": subject}

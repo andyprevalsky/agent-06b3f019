@@ -338,28 +338,68 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
       });
     }
     
-    // Find person matching any of the criteria
-    // Limit to 50 most recent messages to avoid performance issues
-    const person = await prisma.person.findFirst({
+    // Build person identifier string for messages
+    const personIdentifier = hasName
+      ? `${firstName} ${lastName}`
+      : hasEmail
+        ? email as string
+        : phone as string;
+
+    // Find ALL matching people first (for disambiguation)
+    const matchingPeople = await prisma.person.findMany({
       where: {
         userId,
         OR: whereConditions,
       },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        phoneNumber: true,
+        email: true,
+        _count: { select: { messageRecords: true } },
+      },
+    });
+
+    if (matchingPeople.length === 0) {
+      return res.json({
+        person: null,
+        messages: [],
+        message: `No person found matching: ${personIdentifier}`,
+      });
+    }
+
+    if (matchingPeople.length > 1) {
+      // Multiple matches - return disambiguation info
+      const idType = hasName ? 'name' : hasEmail ? 'email' : 'phone';
+      return res.json({
+        person: null,
+        messages: [],
+        multiple_matches: true,
+        message: `Multiple people found with the ${idType}: ${personIdentifier}`,
+        matches: matchingPeople.map(p => ({
+          id: p.id,
+          firstName: p.firstName,
+          lastName: p.lastName,
+          phoneNumber: p.phoneNumber,
+          email: p.email,
+          messageCount: p._count.messageRecords,
+        })),
+      });
+    }
+
+    // Single match - load with messages
+    const messageLimit = parseInt(req.body.message_limit) || 50;
+    const person = await prisma.person.findFirst({
+      where: { id: matchingPeople[0].id },
       include: {
         messageRecords: {
           orderBy: { timestamp: 'desc' },
-          take: 50,
+          take: messageLimit,
         },
       },
     });
-    
-    // Build person identifier string for messages
-    const personIdentifier = hasName 
-      ? `${firstName} ${lastName}` 
-      : hasEmail 
-        ? email as string 
-        : phone as string;
-    
+
     if (!person) {
       return res.json({
         person: null,
@@ -367,7 +407,7 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
         message: `No person found matching: ${personIdentifier}`,
       });
     }
-    
+
     // Filter person object to non-null fields (exclude messageRecords relation)
     const { messageRecords, ...personRow } = person;
     const personData = Object.fromEntries(
@@ -381,7 +421,7 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
         message: `No messages present for ${person.firstName} ${person.lastName}`,
       });
     }
-    
+
     // Format message records with channel info
     const formattedMessages = person.messageRecords.map(record => ({
       channel: record.channel,
@@ -390,7 +430,7 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
       timestamp: record.timestamp.toISOString(),
       message: record.message,
     }));
-    
+
     return res.json({
       person: personData,
       messages: formattedMessages,

@@ -329,7 +329,8 @@ async def read_message_history_activity(
     phone: Optional[str] = None,
     email: Optional[str] = None,
     first_name: Optional[str] = None,
-    last_name: Optional[str] = None
+    last_name: Optional[str] = None,
+    message_limit: int = 50,
 ) -> Dict[str, Any]:
     """
     Activity: Read message history via backend API.
@@ -340,6 +341,7 @@ async def read_message_history_activity(
         email: Email address
         first_name: First name
         last_name: Last name
+        message_limit: Maximum number of messages to return (default 50)
 
     Returns:
         Dict with:
@@ -347,6 +349,8 @@ async def read_message_history_activity(
             - messages: Array of message records
             - message: Descriptive message if no person/messages found
             - count: Number of messages
+            - multiple_matches: True if multiple people match (disambiguation needed)
+            - matches: Array of matching people when multiple_matches is True
 
     Raises:
         Exception: If API request fails
@@ -357,7 +361,7 @@ async def read_message_history_activity(
         config = load_config()
 
         # Build request body
-        body = {"user_id": user_id}
+        body = {"user_id": user_id, "message_limit": message_limit}
         if phone:
             body["phone"] = phone
         if email:

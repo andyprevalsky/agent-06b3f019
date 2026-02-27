@@ -76,10 +76,13 @@ class ClaudeCodeWsClient:
             if self._session is None:
                 self._session = aiohttp.ClientSession()
 
-            self._ws = await self._session.ws_connect(
-                self.ws_url,
-                heartbeat=30.0,
-                receive_timeout=60.0,
+            self._ws = await asyncio.wait_for(
+                self._session.ws_connect(
+                    self.ws_url,
+                    heartbeat=30.0,
+                    receive_timeout=60.0,
+                ),
+                timeout=30.0,  # Don't hang if sandbox is dead
             )
             self._running = True
             self._reconnect_count = 0  # Reset on successful connect
@@ -235,10 +238,19 @@ class ClaudeCodeWsClient:
         """
         Attempt reconnection with exponential backoff.
 
+        Total deadline of 60s prevents hanging when the sandbox is dead
+        (each connect() has a 30s timeout, so we get ~2 real attempts).
+
         Returns:
-            True if reconnected successfully, False if max retries exceeded.
+            True if reconnected successfully, False if max retries exceeded or deadline hit.
         """
+        deadline = asyncio.get_event_loop().time() + 60.0  # 60s total deadline
+
         while self._reconnect_count < self.max_reconnects:
+            if asyncio.get_event_loop().time() >= deadline:
+                logger.error("[ClaudeCodeWs] Reconnect deadline exceeded (60s)")
+                return False
+
             self._reconnect_count += 1
             delay = self.reconnect_delay * (2 ** (self._reconnect_count - 1))
 

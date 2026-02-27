@@ -47,8 +47,7 @@ const SYSTEM_TOOLS = [
   { name: "monitor", description: "Monitor the web for changes on a schedule" },
   { name: "check_monitor_events", description: "Check for events from monitors" },
   { name: "search_user_network_for_people", description: "Search user's network for people" },
-  { name: "read_message_history_with_person", description: "Read message history with a person" },
-  { name: "message_person", description: "Send messages via SMS or email" },
+  { name: "message_person", description: "Send messages via iMessage or email with AI-generated content" },
   { name: "send_message_to_user", description: "Message the user from PLAN phase (optionally blocking for a reply)" },
   { name: "wait_seconds", description: "Pause execution for a specified duration" },
 ];
