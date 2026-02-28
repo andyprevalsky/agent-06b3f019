@@ -1122,6 +1122,18 @@ class AgentWorkflow:
                         result=result,
                     )
 
+                # Post downloaded files as ASSISTANT messages (like browser/code agents do)
+                # This makes FilePointers visible in the frontend and agent context
+                downloaded_files = (result.get("original", {}) or {}).get("downloaded_files", []) if isinstance(result, dict) else []
+                if not downloaded_files and isinstance(result, dict):
+                    downloaded_files = result.get("downloaded_files", [])
+                for fp in downloaded_files:
+                    await self._handle_tool_event(
+                        AssistantEvent(message="", file_pointer=fp),
+                        tool_call_id,
+                        tool_name,
+                    )
+
                 return {"success": True, "message": f"{tool_name} completed", "result": result}
             else:
                 # Legacy signature: (workflow_instance, tool_call, tool_call_id)
@@ -1325,10 +1337,11 @@ class AgentWorkflow:
 
         total_cost_cents = tool_cost_cents + condensor_cost_cents
 
-        # Preserve sources/images/links from original result (not subject to condensation)
+        # Preserve sources/images/links/downloaded_files from original result (not subject to condensation)
         sources = result.get("sources", [])
         images = result.get("images", [])
         links = result.get("links", [])
+        downloaded_files = result.get("downloaded_files", [])
 
         # Format message using standard tool format (pass sources through for display)
         condensed_result = {"content": condensed_message}
@@ -1338,6 +1351,8 @@ class AgentWorkflow:
             condensed_result["images"] = images
         if links:
             condensed_result["links"] = links
+        if downloaded_files:
+            condensed_result["downloaded_files"] = downloaded_files
 
         formatted_message = format_tool_message(
             params=tool_call,
@@ -1368,6 +1383,9 @@ class AgentWorkflow:
             context_parts.append("\n**Images:** " + ", ".join(images))
         if links:
             context_parts.append("\n**Links:** " + ", ".join(links))
+        if downloaded_files:
+            file_list = ", ".join(f["original_filename"] for f in downloaded_files)
+            context_parts.append(f"\n**Downloaded Files:** {file_list}")
         context_message = "\n".join(context_parts)
 
         return {"message": context_message, "condensed": True, "original": result}

@@ -183,6 +183,10 @@ class WebFetchTool(BaseModel):
     objective: str = Field(description="What content to focus on extracting from the page")
     excerpts: bool = Field(default=True, description="Return focused excerpts aligned to objective")
     full_content: bool = Field(default=False, description="Return complete page content instead of excerpts")
+    download_files: Optional[List[str]] = Field(
+        default=None,
+        description="File extensions to auto-download from the page (e.g. ['pdf', 'csv', 'xlsx']). Discovered URLs matching these extensions are downloaded and returned as file pointers."
+    )
 
 
 class PeopleSearchTool(BaseModel):

@@ -95,6 +95,8 @@ Use for: parallel work, evaluating hypotheses, decomposing complex goals.""",
 
     "web_search": """Search the web for real-time information. Use for current events, recent data, fact-checking.""",
 
+    "web_fetch": """Fetch and extract content from a URL with JavaScript rendering support. Use when you need to read page content, find specific information, or analyze web pages. Set download_files to a list of extensions (e.g. ["pdf", "csv"]) to automatically download files of those types found on the page.""",
+
     "set_plan": """Signal readiness for plan generation. A dedicated planner LLM will analyze the conversation and generate an execution plan.""",
 
     "wait_seconds": """Pause execution for a specified number of seconds (1-3600).""",

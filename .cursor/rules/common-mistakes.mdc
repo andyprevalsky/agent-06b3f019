@@ -7,7 +7,7 @@ description: >
   3. Wrong phone format: Use +19729777432 not "+19729777432" in JSON
   4. Trying to use backend WebSocket: It's been removed, use Supabase Realtime
   5. Forgetting RLS is enabled: All frontend queries are filtered by user ID
-  6. Using wrong database connection: Use Session Pooler (port 5432) not Direct (IPv6 incompatible)
+  6. Using wrong database connection: Use Transaction Pooler (port 6543) with ?pgbouncer=true for runtime, Session Pooler (port 5432) for migrations only. Never use Direct connection (IPv6 incompatible with Render)
   7. Not normalizing base URLs: Always strip trailing slashes to prevent double-slash bugs
   8. Not using prisma db push to sync database state.
   9. Not using prisma cli when trying access the database.

@@ -6,9 +6,12 @@ from temporalio.common import RetryPolicy
 from datetime import timedelta
 import structlog
 import httpx
+from urllib.parse import urlparse, urljoin
+import os
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
 from helpers.handle_tool_event import handle_tool_event
+from helpers.attachments import upload_to_storage
 
 import re
 import time
@@ -61,6 +64,7 @@ class WebFetchManager(ToolManager):
         objective = tool_call.get("objective", "")
         excerpts = tool_call.get("excerpts", True)
         full_content = tool_call.get("full_content", False)
+        download_files = tool_call.get("download_files", None)
 
         # Track start time for elapsed time calculation
         start_time = _safe_time()
@@ -85,11 +89,11 @@ class WebFetchManager(ToolManager):
 
         # 2. Execute web fetch activity
         try:
-            logger.info("Calling web_fetch_activity", url=url, objective_len=len(objective))
+            logger.info("Calling web_fetch_activity", url=url, objective_len=len(objective), download_files=download_files)
             result = await execute_activity(
                 web_fetch_activity,
-                args=[url, objective, excerpts, full_content],
-                start_to_close_timeout=timedelta(seconds=120),  # Longer timeout for JS rendering
+                args=[url, objective, excerpts, full_content, download_files, user_id],
+                start_to_close_timeout=timedelta(seconds=180),  # Longer timeout when downloading files
                 retry_policy=RetryPolicy(
                     maximum_attempts=3,
                     backoff_coefficient=2.0,
@@ -257,6 +261,183 @@ def _extract_media_urls(text: str, base_url: str = "") -> Dict[str, List[str]]:
     }
 
 
+MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024  # 50MB per file
+
+MIME_TYPES = {
+    "pdf": "application/pdf",
+    "csv": "text/csv",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "ppt": "application/vnd.ms-powerpoint",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "svg": "image/svg+xml",
+    "webp": "image/webp",
+    "zip": "application/zip",
+    "rar": "application/x-rar-compressed",
+    "json": "application/json",
+    "txt": "text/plain",
+    "mp3": "audio/mpeg",
+    "mp4": "video/mp4",
+    "mov": "video/quicktime",
+    "avi": "video/x-msvideo",
+}
+
+
+def _get_filename_from_url(url: str) -> str:
+    """Extract filename from URL path.
+
+    Handles CDN URLs with transform suffixes, e.g.:
+    .../photo.jpg/:/cr=t:0%25/rs=w:600 → photo.jpg
+    """
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    # Split path into segments and find the last one with a file extension
+    segments = [s for s in path.split("/") if s]
+    for seg in reversed(segments):
+        if "." in seg and not seg.startswith("."):
+            # Check if this segment looks like a filename (has a common extension)
+            ext = seg.rsplit(".", 1)[-1].lower()
+            if ext in MIME_TYPES:
+                return seg
+    # Fallback to last segment
+    filename = os.path.basename(path)
+    return filename if filename else "download"
+
+
+def _matches_extensions(url: str, extensions: List[str]) -> bool:
+    """Check if a URL's file extension matches any in the requested list.
+
+    Handles CDN URLs where the extension isn't at the end of the path, e.g.:
+    .../photo.jpg/:/cr=t:0%25,l:0%25/rs=w:600,h:451 (GoDaddy image transforms)
+    """
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    for ext in extensions:
+        ext_clean = ext.lower().lstrip(".")
+        # Check both exact end match and .ext/ (extension followed by path separator)
+        if path.endswith(f".{ext_clean}") or f".{ext_clean}/" in path:
+            return True
+    return False
+
+
+def _extract_asset_urls_from_html(html: str, base_url: str) -> List[str]:
+    """Extract asset URLs from raw HTML src/href attributes.
+
+    Captures URLs from <img src>, <a href>, <source src>, <video src>, <audio src>,
+    <link href>, etc. that point to downloadable files. Resolves relative and
+    protocol-relative URLs against the base URL.
+    """
+    # Match src="..." and href="..." attributes (single or double quotes)
+    attr_urls = re.findall(r'(?:src|href)\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE)
+
+    resolved = []
+    for raw_url in attr_urls:
+        raw_url = raw_url.strip()
+        if not raw_url or raw_url.startswith(("data:", "javascript:", "mailto:", "#")):
+            continue
+        # Resolve relative/protocol-relative URLs
+        full_url = urljoin(base_url, raw_url)
+        resolved.append(full_url)
+
+    return list(dict.fromkeys(resolved))  # dedupe, preserve order
+
+
+async def _fetch_raw_html(url: str) -> Optional[str]:
+    """Fetch raw HTML from a URL for asset extraction."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.text
+    except Exception as e:
+        logger.warning("[web_fetch] Failed to fetch raw HTML for asset extraction", url=url, error=str(e))
+        return None
+
+
+async def _download_and_upload_files(
+    urls: List[str],
+    extensions: List[str],
+    user_id: str,
+) -> List[Dict[str, Any]]:
+    """Download files matching requested extensions and upload to Supabase storage.
+
+    Args:
+        urls: Candidate URLs discovered on the page (files + images)
+        extensions: Requested file extensions to download (e.g. ["pdf", "csv"])
+        user_id: User ID for storage path
+
+    Returns:
+        List of FilePointer dicts for successfully downloaded files
+    """
+    # Filter URLs by requested extensions
+    matching_urls = [u for u in urls if _matches_extensions(u, extensions)]
+
+    if not matching_urls:
+        logger.info("No URLs matched requested extensions", extensions=extensions, candidate_count=len(urls))
+        return []
+
+    # Dedupe by base filename — CDN URLs often have the same image at different sizes
+    # e.g. blob-f7a5f2e.png/:/rs=w:57 and blob-f7a5f2e.png/:/rs=w:180 are the same image
+    seen_filenames = set()
+    deduped_urls = []
+    for u in matching_urls:
+        fname = _get_filename_from_url(u)
+        if fname not in seen_filenames:
+            seen_filenames.add(fname)
+            deduped_urls.append(u)
+    matching_urls = deduped_urls
+
+    logger.info(
+        "Downloading files from web_fetch",
+        matching_count=len(matching_urls),
+        extensions=extensions,
+    )
+
+    file_pointers = []
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        for url in matching_urls:
+            try:
+                activity.heartbeat(f"Downloading {_get_filename_from_url(url)}...")
+                response = await client.get(url)
+                response.raise_for_status()
+
+                content = response.content
+                if len(content) > MAX_DOWNLOAD_SIZE:
+                    logger.warning("File too large, skipping", url=url, size=len(content))
+                    continue
+
+                filename = _get_filename_from_url(url)
+                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                mime_type = MIME_TYPES.get(ext, "application/octet-stream")
+
+                file_pointer = await upload_to_storage(
+                    user_id=user_id,
+                    file_content=content,
+                    filename=filename,
+                    mime_type=mime_type,
+                )
+                file_pointers.append(file_pointer)
+
+                logger.info(
+                    "[web_fetch] Downloaded and uploaded file",
+                    url=url,
+                    filename=filename,
+                    size_bytes=len(content),
+                )
+
+            except Exception as e:
+                logger.warning("[web_fetch] Failed to download file", url=url, error=str(e))
+                continue
+
+    return file_pointers
+
+
 def _format_extract_results(results: List[Dict[str, Any]], full_content: bool) -> str:
     """Format Parallel AI extract results into a readable answer."""
     if not results:
@@ -286,7 +467,9 @@ async def web_fetch_activity(
     url: str,
     objective: str,
     excerpts: bool = True,
-    full_content: bool = False
+    full_content: bool = False,
+    download_files: Optional[List[str]] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity: Fetch and extract content from a URL with JavaScript rendering support.
@@ -300,6 +483,8 @@ async def web_fetch_activity(
         objective: What content to focus on extracting
         excerpts: Return focused excerpts (default: True)
         full_content: Return complete page content (default: False)
+        download_files: File extensions to auto-download (e.g. ["pdf", "csv"])
+        user_id: User ID for storage uploads
 
     Returns:
         Dict with:
@@ -307,6 +492,7 @@ async def web_fetch_activity(
             - sources: List of source URLs
             - objective: Original objective
             - results: Raw results from API
+            - downloaded_files: List of FilePointer dicts (if download_files was set)
     """
     try:
         activity.heartbeat(f"Fetching {url}: {objective[:50]}...")
@@ -363,6 +549,35 @@ async def web_fetch_activity(
         # Dedupe across results
         media = {k: list(dict.fromkeys(v)) for k, v in media.items()}
 
+        # Download files if requested
+        downloaded_files = []
+        if download_files and user_id:
+            candidate_urls = media["files"] + media["images"]
+
+            # Also fetch raw HTML to extract src/href asset URLs that Parallel AI's
+            # markdown conversion may have dropped (e.g. <img src="//cdn.example.com/photo.jpg">)
+            activity.heartbeat("Fetching raw HTML for asset extraction...")
+            raw_html = await _fetch_raw_html(url)
+            if raw_html:
+                html_asset_urls = _extract_asset_urls_from_html(raw_html, url)
+                # Merge HTML assets into candidates, deduping against what we already have
+                existing = set(candidate_urls)
+                for asset_url in html_asset_urls:
+                    if asset_url not in existing:
+                        candidate_urls.append(asset_url)
+                        existing.add(asset_url)
+                logger.info(
+                    "[web_fetch] Extracted asset URLs from raw HTML",
+                    html_asset_count=len(html_asset_urls),
+                    total_candidates=len(candidate_urls),
+                )
+
+            downloaded_files = await _download_and_upload_files(
+                urls=candidate_urls,
+                extensions=download_files,
+                user_id=user_id,
+            )
+
         result = {
             "content": content,
             "sources": sources,
@@ -372,6 +587,7 @@ async def web_fetch_activity(
             "objective": objective,
             "results": results,
             "errors": errors,
+            "downloaded_files": downloaded_files,
         }
 
         logger.info(
@@ -383,6 +599,7 @@ async def web_fetch_activity(
             images_count=len(media["images"]),
             links_count=len(media["links"]),
             files_count=len(media["files"]),
+            downloaded_count=len(downloaded_files),
             errors_count=len(errors)
         )
 

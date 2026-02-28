@@ -8,7 +8,7 @@ description: >
   
   Database:
   - Type: Supabase PostgreSQL
-  - Connection: Session Pooler (IPv4 compatible)
+  - Connection: Transaction Pooler port 6543 (IPv4 compatible, pgbouncer=true)
   - RLS: ENABLED on all tables
   - ORM: Prisma
   - ⚠️ CRITICAL: When adding Supabase Realtime websockets to ANY new table, you MUST add Row Level Security (RLS) policies
@@ -82,7 +82,7 @@ description: >
   Prisma Studio (GUI): View/edit database directly: cd back-end && npm run prisma:studio (Opens at http://localhost:5555)
   
   Environment Variables:
-  DATABASE_URL=postgresql://postgres.kzlurqihzaolhzsbkctf:PASSWORD@aws-1-us-east-2.pooler.supabase.com:5432/postgres
+  DATABASE_URL=postgresql://postgres.kzlurqihzaolhzsbkctf:PASSWORD@aws-1-us-east-2.pooler.supabase.com:6543/postgres?pgbouncer=true
   SUPABASE_URL=https://kzlurqihzaolhzsbkctf.supabase.co
   OPENAI_API_KEY=sk-proj-...
   ALLOWED_ORIGINS=http://localhost:8080,https://hinavi.ai
