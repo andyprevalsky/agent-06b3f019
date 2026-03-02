@@ -572,7 +572,7 @@
     border: 3px solid var(--border-color);
     flex-shrink: 0;
     object-fit: cover;
-    object-position: center top;
+    object-position: 40% 15%;
   }
 
   .s5-name-block {
@@ -810,7 +810,147 @@
   <div class="slide-number">02</div>
 </section>
 
-<!-- ==================== SLIDE 3: COMPETITIVE LANDSCAPE ==================== -->
+<!-- ==================== SLIDE 3: SOLUTION ==================== -->
+<section class="slide">
+  <div class="slide-content">
+    <div style="display: flex; align-items: center; gap: 20px;">
+      <div class="slide-title">Solution</div>
+      <div class="s4-badge">
+        <div class="s4-badge-dot"></div>
+        Live at roselabs.ai
+      </div>
+    </div>
+    <div style="font-size: 18px; color: var(--text-secondary); line-height: 1.6; margin-top: 16px;">Rose Labs has built the harness that unlocks complex user tasks by building:</div>
+
+    <div class="s4-items">
+      <div class="s4-item">
+        <div class="s4-bullet">01</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">Live Product</div>
+          <div class="s4-item-body">Real users completing real tasks on roselabs.ai. Autonomous agents running in production daily.</div>
+        </div>
+      </div>
+      <div class="s4-item">
+        <div class="s4-bullet">02</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">Computer-to-Cloud Sync</div>
+          <div class="s4-item-body">Requisite infrastructure for scaling agent parallelism. Seamless state sync between local and cloud execution environments.</div>
+        </div>
+      </div>
+      <div class="s4-item">
+        <div class="s4-bullet">03</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">SOTA Browser Agent</div>
+          <div class="s4-item-body">Custom prompt-braiding algorithm for escaping single-model-provider minima. Browser agents that actually converge to the correct answer over time.</div>
+        </div>
+      </div>
+      <div class="s4-item">
+        <div class="s4-bullet">04</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">Live Integrations</div>
+          <div class="s4-item-body">SMS, phone calling, and Claude Code. Real-world tool integrations fine-tuned and ready to use out of the box.</div>
+        </div>
+      </div>
+      <div class="s4-item">
+        <div class="s4-bullet">05</div>
+        <div class="s4-item-content">
+          <div class="s4-item-title">SOTA Task Decomposer</div>
+          <div class="s4-item-body">Rose-Decompose outperforms every frontier model at breaking complex goals into parallelizable sub-tasks. 45x higher success rate than Opus 4.6 on deep recursive plans.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">03</div>
+</section>
+
+<!-- ==================== SLIDE 4: ROSE-DECOMPOSE ==================== -->
+<section class="slide">
+  <div class="slide-content" style="display: flex; flex-direction: column; justify-content: center;">
+    <div class="slide-title" style="margin-bottom: 8px;">Rose-Decompose</div>
+    <div class="slide-subtitle" style="margin-bottom: 32px;">Rose-Decompose: a fine-tuned model that recursively breaks complex goals into parallelizable sub-tasks.</div>
+
+    <div style="display: flex; gap: 32px;">
+      <!-- Left: Key insight + methodology -->
+      <div style="flex: 1;">
+        <div style="font-size: 14px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 20px;">
+          Long-horizon tasks fail because agent networks exhaust context, explode in cost, and drift from the goal. Rose-Decompose solves this by ensuring every decomposition satisfies three criteria:
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+          <div style="display: flex; gap: 10px; align-items: flex-start;">
+            <div style="font-size: 13px; font-weight: 700; background: var(--rose-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; flex-shrink: 0; width: 28px;">ME</div>
+            <div style="font-size: 13px; color: var(--text-secondary);">Mutually Exclusive: no duplicated work across sub-tasks</div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: flex-start;">
+            <div style="font-size: 13px; font-weight: 700; background: var(--rose-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; flex-shrink: 0; width: 28px;">CE</div>
+            <div style="font-size: 13px; color: var(--text-secondary);">Collectively Exhaustive: completing all sub-tasks completes the parent task</div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: flex-start;">
+            <div style="font-size: 13px; font-weight: 700; background: var(--rose-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; flex-shrink: 0; width: 28px;">CX</div>
+            <div style="font-size: 13px; color: var(--text-secondary);">Complexity Reducing: each sub-task is strictly less complex than the parent</div>
+          </div>
+        </div>
+        <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 20px;">And minimizes expected time to completion and expected cost.</div>
+        <div style="font-size: 12px; color: var(--text-muted); line-height: 1.5;">
+          Trained on 500 real user tasks collected via roselabs.ai. Expected Cost and Expected Time are bootstrapped via a proxy metric derived from a custom trained Bradley-Terry reward model, then optimized with GEPA for generalization across unseen tasks.
+          <br><span style="background: var(--rose-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight: 600;">roselabs.ai/research/task-decomposer</span>
+        </div>
+      </div>
+
+      <!-- Right: Results table -->
+      <div style="flex: 1;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+          <thead>
+            <tr style="border-bottom: 2px solid var(--border-color);">
+              <th style="text-align: left; padding: 8px 12px; color: var(--text-muted); font-weight: 600;">Model</th>
+              <th style="text-align: center; padding: 8px 12px; color: var(--text-muted); font-weight: 600;">ELO</th>
+              <th style="text-align: center; padding: 8px 12px; color: var(--text-muted); font-weight: 600;">All-3 Pass</th>
+              <th style="text-align: center; padding: 8px 12px; color: var(--text-muted); font-weight: 600;">Tree Pass (d=3)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom: 1px solid var(--border-color); background: rgba(254,117,3,0.05);">
+              <td style="padding: 10px 12px; font-weight: 700; color: var(--text-primary);">Rose-Decompose</td>
+              <td style="text-align: center; padding: 10px 12px; font-weight: 700; color: var(--text-primary);">1251</td>
+              <td style="text-align: center; padding: 10px 12px; font-weight: 700; color: var(--text-primary);">85.6%</td>
+              <td style="text-align: center; padding: 10px 12px; font-weight: 700; color: var(--text-primary);">13.25%</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border-color);">
+              <td style="padding: 10px 12px; color: var(--text-secondary);">Opus 4.6</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">1000</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">63.8%</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">0.29%</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border-color);">
+              <td style="padding: 10px 12px; color: var(--text-secondary);">Gemini 3 Pro</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">530</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">68.7%</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">0.76%</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border-color);">
+              <td style="padding: 10px 12px; color: var(--text-secondary);">GPT 5.2</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">864</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">64.9%</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">0.36%</td>
+            </tr>
+            <tr>
+              <td style="padding: 10px 12px; color: var(--text-secondary);">Kimi 2.5</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">716</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">57.5%</td>
+              <td style="text-align: center; padding: 10px 12px; color: var(--text-secondary);">0.08%</td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="margin-top: 16px; font-size: 11px; color: var(--text-muted); line-height: 1.5;">
+          <strong>ELO</strong>: derived from pairwise comparisons of decompositions, measuring expected time and expected cost via a custom Bradley-Terry reward model.
+          <br><strong>Tree Pass (depth=3)</strong>: probability that every node in a full recursive decomposition tree passes all three criteria. Rose-Decompose achieves a 45x higher rate than Opus 4.6.
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">04</div>
+</section>
+
+<!-- ==================== SLIDE 5: COMPETITIVE LANDSCAPE ==================== -->
 <section class="slide">
   <div class="slide-content">
     <div class="slide-title">The Competitive Landscape</div>
@@ -916,63 +1056,10 @@
       </div>
     </div>
   </div>
-  <div class="slide-number">03</div>
+  <div class="slide-number">05</div>
 </section>
 
-<!-- ==================== SLIDE 4: PROGRESS ==================== -->
-<section class="slide">
-  <div class="slide-content">
-    <div style="display: flex; align-items: center; gap: 20px;">
-      <div class="slide-title">Built in &lt; 90 Days</div>
-      <div class="s4-badge">
-        <div class="s4-badge-dot"></div>
-        Live at roselabs.ai
-      </div>
-    </div>
-    <div class="slide-subtitle">Real users. Real tasks. Shipping fast.</div>
-
-    <div class="s4-items">
-      <div class="s4-item">
-        <div class="s4-bullet">01</div>
-        <div class="s4-item-content">
-          <div class="s4-item-title">Live Product</div>
-          <div class="s4-item-body">Real users completing real tasks on roselabs.ai. Autonomous agents running in production daily.</div>
-        </div>
-      </div>
-      <div class="s4-item">
-        <div class="s4-bullet">02</div>
-        <div class="s4-item-content">
-          <div class="s4-item-title">Computer-to-Cloud Sync</div>
-          <div class="s4-item-body">Requisite infrastructure for scaling agent parallelism. Seamless state sync between local and cloud execution environments.</div>
-        </div>
-      </div>
-      <div class="s4-item">
-        <div class="s4-bullet">03</div>
-        <div class="s4-item-content">
-          <div class="s4-item-title">SOTA Task Decomposer</div>
-          <div class="s4-item-body">Rose-Decompose outperforms every frontier model at breaking complex goals into parallelizable sub-tasks. 45x higher success rate than Opus 4.6 on deep recursive plans. <a class="s3-link" href="https://www.roselabs.ai/research/task-decomposer">Read the research</a></div>
-        </div>
-      </div>
-      <div class="s4-item">
-        <div class="s4-bullet">04</div>
-        <div class="s4-item-content">
-          <div class="s4-item-title">SOTA Browser Agent</div>
-          <div class="s4-item-body">Custom prompt-braiding algorithm for escaping single-model-provider minima. Browser agents that actually converge to the correct answer over time.</div>
-        </div>
-      </div>
-      <div class="s4-item">
-        <div class="s4-bullet">05</div>
-        <div class="s4-item-content">
-          <div class="s4-item-title">Live Integrations</div>
-          <div class="s4-item-body">SMS, phone calling, and Claude Code. Real-world tool integrations tuned to work together out of the box.</div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="slide-number">04</div>
-</section>
-
-<!-- ==================== SLIDE 5: HOW WE WIN ==================== -->
+<!-- ==================== SLIDE 6: HOW WE WIN ==================== -->
 <section class="slide">
   <div class="slide-content">
     <div class="slide-title">How We Win</div>
@@ -992,7 +1079,6 @@
           <div class="s3-item-title">Focus research narrowly on task decomposition</div>
           <div class="s3-item-body">
             Task decomposition is the bottleneck to scaling agent networks. Rose-Decompose achieves a 45x higher success rate than Opus 4.6 on deep recursive plans.
-            <br><a class="s3-link" href="https://www.roselabs.ai/research/task-decomposer">Read the research</a>
           </div>
         </div>
       </div>
@@ -1016,10 +1102,10 @@
       </div>
     </div>
   </div>
-  <div class="slide-number">05</div>
+  <div class="slide-number">06</div>
 </section>
 
-<!-- ==================== SLIDE 6: TEAM ==================== -->
+<!-- ==================== SLIDE 7: TEAM ==================== -->
 <section class="slide">
   <div class="slide-content">
     <div class="slide-title">The Founder</div>
@@ -1028,7 +1114,7 @@
       <!-- Andy -->
       <div class="s5-person">
         <div class="s5-photo-row">
-          <img class="s5-photo" src="andy.jpeg" alt="Andy Prevalsky" />
+          <img class="s5-photo" src="andy-new.png" alt="Andy Prevalsky" />
           <div class="s5-name-block">
             <div class="s5-name">Andy Prevalsky</div>
             <div class="s5-role">CEO</div>
@@ -1057,15 +1143,15 @@
 
     </div>
   </div>
-  <div class="slide-number">06</div>
+  <div class="slide-number">07</div>
 </section>
 
-<!-- ==================== SLIDE 7: THE RAISE ==================== -->
+<!-- ==================== SLIDE 8: THE RAISE ==================== -->
 <section class="slide">
   <div class="slide-content s6-layout">
     <div>
-      <div class="s6-amount"><span class="rose-text">$1.5M</span></div>
-      <div class="s6-valuation">Pre-Seed @ $10M Valuation</div>
+      <div class="s6-amount">$1.5M</div>
+      <div class="s6-valuation">Pre-Seed</div>
     </div>
     <div class="s6-divider"></div>
     <div class="s6-uses">
@@ -1085,10 +1171,10 @@
       </div>
     </div>
   </div>
-  <div class="slide-number">07</div>
+  <div class="slide-number">08</div>
 </section>
 
-<!-- ==================== SLIDE 8: CLOSING ==================== -->
+<!-- ==================== SLIDE 9: CLOSING ==================== -->
 <section class="slide">
   <div class="slide-content s7-layout">
     <div class="s7-left">
@@ -1109,7 +1195,7 @@
       </div>
     </div>
   </div>
-  <div class="slide-number">08</div>
+  <div class="slide-number">09</div>
 </section>
 
 </body>
