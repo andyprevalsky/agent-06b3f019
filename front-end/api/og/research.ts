@@ -1,4 +1,4 @@
-import { getBlogMeta } from './_blogMeta';
+import { getBlogMeta } from './_blogMeta.js';
 
 export const config = { runtime: 'edge' };
 
