@@ -303,16 +303,15 @@ def _format_user_context(
         profile_parts.append(f"Phone: {user_settings['phone']}")
         profile_parts.append(f"When sending SMS messages to the user, use: {user_settings['phone']}")
     
-    location_parts = []
-    if user_settings.get('city'):
-        location_parts.append(user_settings['city'])
-    if user_settings.get('state'):
-        location_parts.append(user_settings['state'])
-    if user_settings.get('country'):
-        location_parts.append(user_settings['country'])
-    
-    if location_parts:
-        profile_parts.append(f"Location: {', '.join(location_parts)}")
+    addr_lines = [
+        user_settings.get('addressLine1', ''),
+        user_settings.get('addressLine2', ''),
+        ', '.join(filter(None, [user_settings.get('city', ''), user_settings.get('state', ''), user_settings.get('postalCode', '')])),
+        user_settings.get('country', '')
+    ]
+    delivery_address = "\n".join(line for line in addr_lines if line.strip())
+    if delivery_address:
+        profile_parts.append(f"Delivery Address:\n{delivery_address}")
     
     if profile_parts:
         sections.append("USER PROFILE\n" + "\n".join(profile_parts))

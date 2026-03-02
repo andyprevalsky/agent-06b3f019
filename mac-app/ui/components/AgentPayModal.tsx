@@ -633,10 +633,10 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                 </>
               )}
 
-              {/* Shipping Address */}
+              {/* Delivery Address */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-foreground">Shipping Address</h3>
+                  <h3 className="text-sm font-semibold text-foreground">Delivery Address</h3>
                   {showCardForm && (
                     <label className="flex items-center gap-2 cursor-pointer">
                       <input

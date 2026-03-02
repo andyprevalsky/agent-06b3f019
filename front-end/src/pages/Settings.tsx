@@ -760,7 +760,7 @@ export default function Settings() {
                 </div>
 
                 <div className="space-y-4">
-                  <h3 className="text-lg font-semibold">Shipping Address</h3>
+                  <h3 className="text-lg font-semibold">Delivery Address</h3>
 
                   <div className="space-y-2">
                     <Label htmlFor="addressLine1">Address Line 1</Label>

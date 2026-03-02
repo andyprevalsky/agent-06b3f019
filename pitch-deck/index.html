@@ -420,7 +420,7 @@
   .s3-items {
     display: flex;
     flex-direction: column;
-    gap: 28px;
+    gap: 40px;
     margin-top: 36px;
     flex: 1;
   }
@@ -774,10 +774,6 @@
       </div>
     </div>
     <div class="s1-right">
-      <div class="s1-headline">
-        <div class="rose-accent"></div>
-        <div class="s1-headline-text">Building Personal Agentic<br>Superintelligence.</div>
-      </div>
       <div class="s1-info">
         <div class="s1-name">Andy Prevalsky</div>
         <div class="s1-detail-rose">Founder</div>
@@ -791,65 +787,24 @@
   <div class="slide-number">01</div>
 </section>
 
-<!-- ==================== SLIDE 2: FRAMING ==================== -->
+<!-- ==================== SLIDE 2: PROBLEM ==================== -->
 <section class="slide">
-  <div class="slide-content" style="padding: 0;">
-    <div style="display: grid; grid-template-columns: 1fr 1fr; height: 100%;">
+  <div class="slide-content" style="display: flex; flex-direction: column; justify-content: center;">
+    <div class="slide-title" style="font-size: 42px; margin-bottom: 40px;">Problem</div>
 
-      <!-- Left: The Problem -->
-      <div style="padding: 64px 48px; display: flex; flex-direction: column; justify-content: center;">
-        <div class="slide-title" style="font-size: 34px; margin-bottom: 16px;">Current AI Systems Have Hit a Fundamental Scaling Limit</div>
-        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 24px;">
-          <div class="rose-accent"></div>
-          <div style="font-size: 15px; color: var(--text-secondary); line-height: 1.5;">Monolithic and unable to parallelize intelligence.</div>
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 14px;">
-          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
-            <span>Monolithic models function as single, indivisible units of compute.</span>
-          </div>
-          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
-            <span>Pre & post training returns are starting to diminish.</span>
-          </div>
-          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
-            <span>Superintelligence is not a model that can one-shot the perfect answer in a vacuum without real-world feedback. Superintelligence is a system that can explore its environment with mathematical precision.</span>
-          </div>
-          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
-            <span>This is a fundamental architectural constraint, not just a compute problem.</span>
-          </div>
-        </div>
+    <div style="font-size: 20px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 48px; max-width: 900px;">
+      Users want their ai assistant to solve complex, real-world problems but no existing harness:
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 24px; margin-bottom: 56px;">
+      <div style="display: flex; gap: 16px; align-items: flex-start;">
+        <div style="font-size: 28px; font-weight: 800; background: var(--rose-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1; flex-shrink: 0; width: 36px;">1</div>
+        <div style="font-size: 18px; color: var(--text-secondary); line-height: 1.5;">Integrates with the necessary tools + context pipelines</div>
       </div>
-
-      <!-- Right: The Solution -->
-      <div style="padding: 64px 48px; background: var(--bg-surface); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; justify-content: center;">
-        <div class="slide-title" style="font-size: 34px; margin-bottom: 16px;">Mass Agent Networks Are the Evolutionary Leap to Multicellular AI</div>
-        <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 24px;">
-          <div class="rose-accent"></div>
-          <div style="font-size: 15px; color: var(--text-secondary); line-height: 1.5;">Minimizes costs while maximizing parallelizeability.</div>
-        </div>
-        <div style="display: flex; flex-direction: column; gap: 14px; margin-top: 8px;">
-          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
-            <span>Divide complex tasks into small, tractable components</span>
-          </div>
-          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
-            <span>Run thousands of reasoning paths in parallel</span>
-          </div>
-          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
-            <span>Cross-verify work to eliminate errors and drift</span>
-          </div>
-          <div style="display: flex; gap: 10px; font-size: 14px; color: var(--text-secondary); line-height: 1.5;">
-            <span style="color: var(--text-muted); flex-shrink: 0;">&#8226;</span>
-            <span>Self-organize into higher-order structures</span>
-          </div>
-        </div>
+      <div style="display: flex; gap: 16px; align-items: flex-start;">
+        <div style="font-size: 28px; font-weight: 800; background: var(--rose-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1; flex-shrink: 0; width: 36px;">2</div>
+        <div style="font-size: 18px; color: var(--text-secondary); line-height: 1.5;">Is built to scale the number of agents necessary to accomplish these tasks in a generalizable and cost-efficient way</div>
       </div>
-
     </div>
   </div>
   <div class="slide-number">02</div>
@@ -859,6 +814,7 @@
 <section class="slide">
   <div class="slide-content">
     <div class="slide-title">The Competitive Landscape</div>
+    <div class="slide-subtitle" style="margin-top: 4px; font-size: 16px; font-weight: 600; color: var(--text-secondary); letter-spacing: 0.01em;">Assistant Intelligence = Parallelization &times; Context Integration</div>
     <div class="s2-body">
       <div class="s2-chart-area" style="flex: 1;">
         <div class="s2-chart">
@@ -869,38 +825,48 @@
           <div class="s2-arrow-x"></div>
 
           <!-- Axis Labels -->
-          <div class="s2-axis-label s2-label-y-top">Multi-Agent Scalability</div>
-          <div class="s2-axis-label s2-label-x-right">Consumer Readiness</div>
+          <div class="s2-axis-label s2-label-y-top">Parallelization</div>
+          <div class="s2-axis-label s2-label-x-right">Context Integration</div>
 
-          <!-- Cursor: highest multi-agent, lowest consumer -->
-          <div class="s2-point" style="left: 10%; top: 12%;">
+          <!-- Kimi-2.5: high parallelization, low context integration -->
+          <div class="s2-point" style="left: 15%; top: 15%;">
+            <div class="s2-point-label">Kimi-2.5</div>
+            <div class="s2-dot"></div>
+          </div>
+
+          <!-- Cursor: high parallelization, low context integration -->
+          <div class="s2-point" style="left: 22%; top: 22%;">
             <div class="s2-point-label">Cursor</div>
             <div class="s2-dot"></div>
           </div>
 
-          <!-- Claude Code: high multi-agent, low consumer -->
-          <div class="s2-point" style="left: 22%; top: 24%;">
+          <!-- Claude Code: low parallelization, strong context integration -->
+          <div class="s2-point" style="left: 66%; top: 75%;">
             <div class="s2-point-label">Claude Code</div>
             <div class="s2-dot"></div>
           </div>
 
-          <!-- OAI / OpenClaw: high consumer, mid multi-agent -->
-          <div class="s2-point" style="left: 65%; top: 45%;">
-            <div class="s2-point-label">OAI / OpenClaw</div>
+          <!-- ChatGPT: weak on both, slightly more context integration -->
+          <div class="s2-point" style="left: 40%; top: 85%;">
+            <div class="s2-point-label">ChatGPT</div>
             <div class="s2-dot"></div>
           </div>
 
-          <!-- DoAnything: high consumer, low multi-agent -->
-          <div class="s2-point" style="left: 80%; top: 75%;">
-            <div class="s2-point-label">DoAnything</div>
+          <!-- OpenClaw: deeper context integration than Claude Code, weak parallelization -->
+          <div class="s2-point" style="left: 80%; top: 77%;">
+            <div class="s2-point-label">OpenClaw</div>
             <div class="s2-dot"></div>
           </div>
 
-          <!-- Rose Labs: high multi-agent + high consumer (top right) -->
+          <!-- Rose Labs: high parallelization + high context integration (top right) -->
           <div class="s2-point" style="left: 78%; top: 8%;">
             <div class="s2-point-label-rose">Rose Labs</div>
             <div class="s2-dot-rose"></div>
           </div>
+
+          <!-- Dotted line: Cloud Agent Architectures threshold -->
+          <div style="position: absolute; top: 70%; left: 5%; width: 90%; height: 2px; z-index: 1; background: repeating-linear-gradient(90deg, #FF6B6B 0px, #FF8E53 8px, transparent 8px, transparent 14px);"></div>
+          <div style="position: absolute; top: 66.5%; right: 6%; font-size: 11px; background: linear-gradient(135deg, #FF6B6B, #FF8E53); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-transform: uppercase; letter-spacing: 1px; z-index: 2;">Cloud Agent Architectures</div>
         </div>
       </div>
 
@@ -908,36 +874,43 @@
         <div class="s2-legend-item">
           <div class="s2-legend-dot"></div>
           <div>
+            <div class="s2-legend-name">Kimi-2.5</div>
+            <div class="s2-legend-desc">Best swarm orchestration in market. Zero access to user credentials, browsing history, or personal data. Agents operate blind.</div>
+          </div>
+        </div>
+        <div class="s2-legend-item">
+          <div class="s2-legend-dot"></div>
+          <div>
             <div class="s2-legend-name">Cursor</div>
-            <div class="s2-legend-desc">Strongest mass agent network, but farthest from general consumer use. Code-only.</div>
+            <div class="s2-legend-desc">Strong multi-agent coordination via background agents. Code-only. No browser, phone, SMS, or consumer tool integrations.</div>
           </div>
         </div>
         <div class="s2-legend-item">
           <div class="s2-legend-dot"></div>
           <div>
             <div class="s2-legend-name">Claude Code</div>
-            <div class="s2-legend-desc">Developer focused & starting to produce agent networks that can coordinate to solve long-horizon problems.</div>
+            <div class="s2-legend-desc">Deep local context via MCP and agent teams. Bound to the user's machine. Can't scale agents to the cloud or parallelize beyond local compute.</div>
           </div>
         </div>
         <div class="s2-legend-item">
           <div class="s2-legend-dot"></div>
           <div>
-            <div class="s2-legend-name">OAI / OpenClaw</div>
-            <div class="s2-legend-desc">Strong consumer mindshare, but still have to work through privacy concerns, tool integrations, and agent network scaling.</div>
+            <div class="s2-legend-name">ChatGPT</div>
+            <div class="s2-legend-desc">Largest consumer base. Single-threaded execution, shallow integrations, no ability to act on behalf of users across services.</div>
           </div>
         </div>
         <div class="s2-legend-item">
           <div class="s2-legend-dot"></div>
           <div>
-            <div class="s2-legend-name">DoAnything</div>
-            <div class="s2-legend-desc">Consumer-friendly, but lack context syncs and technical depth.</div>
+            <div class="s2-legend-name">OpenClaw</div>
+            <div class="s2-legend-desc">Computer-use focused with growing context access. Still single-agent and bound to the user's machine, same local compute ceiling as Claude Code.</div>
           </div>
         </div>
         <div class="s2-legend-item">
           <div class="s2-legend-dot s2-legend-dot-rose"></div>
           <div>
             <div class="s2-legend-name" style="background: var(--rose-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Rose Labs</div>
-            <div class="s2-legend-desc">Stable mass agent network execution, SOTA task decomposition, out of the box tool integrations, a product anyone can set up in &lt;&nbsp;5&nbsp;minutes.</div>
+            <div class="s2-legend-desc">100s of parallel agents with credential sync, browser use, phone, SMS. Real-world task execution at scale.</div>
           </div>
         </div>
       </div>
@@ -946,55 +919,7 @@
   <div class="slide-number">03</div>
 </section>
 
-<!-- ==================== SLIDE 4: HOW WE WIN ==================== -->
-<section class="slide">
-  <div class="slide-content">
-    <div class="slide-title">How We Win</div>
-    <div class="s3-items">
-      <div class="s3-item">
-        <div class="s3-num" style="color: #16a34a;">&#10003;</div>
-        <div class="s3-item-content">
-          <div class="s3-item-title">Ship the first consumer-ready mass agent network</div>
-          <div class="s3-item-body">
-            Rose Labs has built a stable harness that can spawn 100s of agents for any given problem, handle failures gracefully, terminate execution when the goal is actually accomplished, and do this in a non-cost-prohibitive way. Out-of-the-box tool integrations for real-world tasks.
-            <br><a class="s3-link" href="https://roselabs.ai">roselabs.ai</a>
-          </div>
-        </div>
-      </div>
-      <div class="s3-item">
-        <div class="s3-num">02</div>
-        <div class="s3-item-content">
-          <div class="s3-item-title">Create the industry standard benchmark for real-world, long-horizon tasks</div>
-          <div class="s3-item-body">
-            There is currently no widely accepted benchmark that accurately measures an LLM's or agent harness's ability to complete long-horizon tasks. The closest thing the industry has is <a class="s3-link" href="https://metr.org">METR</a>, but METR focuses exclusively on coding tasks, is already saturated, and has numerous mistakes in its data collection that make the data unreliable. Rose will create and host the benchmark that evaluates how well models perform in real-world across long-horizon tasks across the vast scope of industry & personal settings.
-          </div>
-        </div>
-      </div>
-      <div class="s3-item">
-        <div class="s3-num">03</div>
-        <div class="s3-item-content">
-          <div class="s3-item-title">Focus research narrowly on task decomposition</div>
-          <div class="s3-item-body">
-            The remaining bottleneck to superintelligence is task decomposition. Rose-Decompose outperforms every frontier model at breaking complex goals into parallelizable sub-tasks. 45x higher success rate than Opus 4.6 on deep recursive plans.
-            <br><a class="s3-link" href="https://www.roselabs.ai/research/task-decomposer">Read the research</a>
-          </div>
-        </div>
-      </div>
-      <div class="s3-item">
-        <div class="s3-num">04</div>
-        <div class="s3-item-content">
-          <div class="s3-item-title">Build the protocol for agent-to-agent communication</div>
-          <div class="s3-item-body">
-            Super-intelligence requires context to be shared between users in order to accurately accomplish a large chunk of user goals. Rose Labs will be the first team to solve the two main challenges here: context-management and privacy preservation.
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="slide-number">04</div>
-</section>
-
-<!-- ==================== SLIDE 5: PROGRESS ==================== -->
+<!-- ==================== SLIDE 4: PROGRESS ==================== -->
 <section class="slide">
   <div class="slide-content">
     <div style="display: flex; align-items: center; gap: 20px;">
@@ -1039,7 +964,54 @@
         <div class="s4-bullet">05</div>
         <div class="s4-item-content">
           <div class="s4-item-title">Live Integrations</div>
-          <div class="s4-item-body">SMS, phone calling, and Claude Code. Real-world tool integrations fine-tuned and ready to use out of the box.</div>
+          <div class="s4-item-body">SMS, phone calling, and Claude Code. Real-world tool integrations tuned to work together out of the box.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-number">04</div>
+</section>
+
+<!-- ==================== SLIDE 5: HOW WE WIN ==================== -->
+<section class="slide">
+  <div class="slide-content">
+    <div class="slide-title">How We Win</div>
+    <div class="s3-items">
+      <div class="s3-item">
+        <div class="s3-num" style="color: #16a34a;">&#10003;</div>
+        <div class="s3-item-content">
+          <div class="s3-item-title">Ship the first consumer-ready mass agent network</div>
+          <div class="s3-item-body">
+            Live at <a class="s3-link" href="https://roselabs.ai">roselabs.ai</a>. 100s of parallel agents with deep integrations into user context, shipping daily.
+          </div>
+        </div>
+      </div>
+      <div class="s3-item">
+        <div class="s3-num">02</div>
+        <div class="s3-item-content">
+          <div class="s3-item-title">Focus research narrowly on task decomposition</div>
+          <div class="s3-item-body">
+            Task decomposition is the bottleneck to scaling agent networks. Rose-Decompose achieves a 45x higher success rate than Opus 4.6 on deep recursive plans.
+            <br><a class="s3-link" href="https://www.roselabs.ai/research/task-decomposer">Read the research</a>
+          </div>
+        </div>
+      </div>
+      <div class="s3-item">
+        <div class="s3-num">03</div>
+        <div class="s3-item-content">
+          <div class="s3-item-title">Create the industry benchmark for long-horizon tasks</div>
+          <div class="s3-item-body">
+            METR and existing evals measure isolated tool use. No standard exists for measuring real-world, long-horizon agent performance across parallel workflows. Rose will build and host this benchmark.
+          </div>
+        </div>
+      </div>
+      <div class="s3-item">
+        <div class="s3-num">04</div>
+        <div class="s3-item-content">
+          <div class="s3-item-title">Build the agent-to-agent communication protocol</div>
+          <div class="s3-item-body">
+            Today every agent operates in isolation with no shared memory. The next leap in context integration is agents that can pass knowledge between each other securely, creating agent network effects.
+          </div>
         </div>
       </div>
     </div>
@@ -1092,7 +1064,7 @@
 <section class="slide">
   <div class="slide-content s6-layout">
     <div>
-      <div class="s6-amount"><span class="rose-text">$2M</span></div>
+      <div class="s6-amount"><span class="rose-text">$1.5M</span></div>
       <div class="s6-valuation">Pre-Seed @ $10M Valuation</div>
     </div>
     <div class="s6-divider"></div>
@@ -1102,7 +1074,7 @@
           <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
         </div>
         <div class="s6-use-label">Compute</div>
-        <div class="s6-use-desc">GPU infrastructure for Mass Agent Network research & inference</div>
+        <div class="s6-use-desc">GPU infrastructure for Task Decomposition research & inference</div>
       </div>
       <div class="s6-use">
         <div class="s6-use-icon">

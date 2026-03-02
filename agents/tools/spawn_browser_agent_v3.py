@@ -2345,7 +2345,7 @@ async def spawn_browser_agent_activity_v3(
                     user_profile.get("country", "United States")
                 ]
                 shipping_address = "\n".join(line for line in addr_lines if line)
-                _shipping_section = f"\n\nUSER SHIPPING ADDRESS:\n{shipping_address}\n\nIMPORTANT: During checkout, verify shipping address matches."
+                _shipping_section = f"\n\nUSER DELIVERY ADDRESS:\n{shipping_address}\n\nIMPORTANT: During checkout, verify delivery address matches."
 
             _autopay_section = ""
             _card_refs: Dict[str, str] = {}
