@@ -755,14 +755,17 @@ async def call_llm_structured_streaming(
                                 logger.info(f"📊 Usage received: prompt={stream_usage.get('prompt_tokens', 0)} completion={stream_usage.get('completion_tokens', 0)}")
 
                             # Extract delta content
-                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                            
+                            choices = chunk_data.get("choices", [])
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
+
                             # Extract reasoning from delta.reasoning (GPT-5.2, Gemini, DeepSeek use this)
                             # NOTE: For structured streaming, reasoning is logged but NOT added to accumulated_content
                             # because accumulated_content must be valid JSON for parsing at the end
                             reasoning_delta = delta.get("reasoning") or ""
                             content = delta.get("content") or ""
-                            fin = chunk_data.get("choices", [{}])[0].get("finish_reason") or ""
+                            fin = choices[0].get("finish_reason") or ""
                             
                             # DEBUG: Log every 50 chunks with state info
                             if chunk_count % 50 == 0 or fin:
@@ -1596,6 +1599,7 @@ async def _call_llm_verifier(
     model: str,
     config: Any,
     response_schema: Optional[Dict[str, Any]] = None,
+    claude_token: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Simple LLM call for verifier - no streaming UI, no tool detection.
@@ -1605,6 +1609,7 @@ async def _call_llm_verifier(
         model: Model to use
         config: Application config
         response_schema: Optional response schema to include output extraction
+        claude_token: Optional Claude OAuth token for direct Anthropic calls
 
     Returns:
         Tuple of (parsed JSON dict with reasoning, score, and optionally output), usage dict)
@@ -1617,6 +1622,9 @@ async def _call_llm_verifier(
         "stream": True,
         "response_format": _build_verifier_json_schema(response_schema)
     }
+
+    if claude_token:
+        request_body["claude_token"] = claude_token
     
     accumulated_reasoning = ""
     accumulated_json = ""
@@ -1658,14 +1666,17 @@ async def _call_llm_verifier(
                     if chunk_data.get("pool_name"):
                         pool_name = chunk_data["pool_name"]
                     
-                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                    
+                    choices = chunk_data.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+
                     # Accumulate both reasoning and content
                     if delta.get("reasoning"):
                         accumulated_reasoning += delta["reasoning"]
                     if delta.get("content"):
                         accumulated_json += delta["content"]
-                        
+
                 except json.JSONDecodeError:
                     continue
     
@@ -1842,7 +1853,8 @@ async def check_progress(
     verifier_system_prompt: str,
     model: str = "anthropic/claude-sonnet-4.5",
     phase: str = "EXECUTE",  # Kept for backward compat but no longer used
-    response_schema: Optional[Dict[str, Any]] = None
+    response_schema: Optional[Dict[str, Any]] = None,
+    claude_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal.
@@ -1853,6 +1865,7 @@ async def check_progress(
         model: LLM model to use
         phase: Deprecated - no longer used (prompt is pre-built by caller)
         response_schema: Response schema for structured output extraction
+        claude_token: Optional Claude OAuth token for direct Anthropic calls
 
     Returns:
         Dict with 'score' (float 0.0-1.0), 'reasoning' (str), and optionally 'structured_response'
@@ -1905,7 +1918,7 @@ async def check_progress(
         
         # Use dedicated verifier LLM call (simple, no streaming UI)
         # Pass response_schema so the verifier includes output extraction in same call
-        result, usage = await _call_llm_verifier(messages, model, config, response_schema)
+        result, usage = await _call_llm_verifier(messages, model, config, response_schema, claude_token=claude_token)
 
         score = result["score"]
         reasoning = result["reasoning"]

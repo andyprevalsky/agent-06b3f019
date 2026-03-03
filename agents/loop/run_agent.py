@@ -764,6 +764,9 @@ async def run_agent(
                     )
 
                 # Use response_schema passed from caller (already fetched with agent config)
+                # Resolve Claude token for verifier (same as main LLM call)
+                verifier_claude_token = get_claude_token() if get_claude_token else claude_token
+
                 verifier_result = await _run_verifier(
                     execute_activity=execute_activity,
                     context=context,
@@ -774,6 +777,7 @@ async def run_agent(
                     post_message=post_message,
                     response_schema=response_schema,
                     get_response_schema=get_response_schema,
+                    claude_token=verifier_claude_token,
                 )
 
                 # Track verifier tokens
@@ -819,6 +823,7 @@ async def run_agent(
     if verifier_prompt_generator and not skip_verification:
         try:
             logger.info("Running final verifier to capture failure context...")
+            final_verifier_claude_token = get_claude_token() if get_claude_token else claude_token
             final_verifier_result = await _run_verifier(
                 execute_activity=execute_activity,
                 context=context,
@@ -829,6 +834,7 @@ async def run_agent(
                 post_message=post_message,
                 response_schema=response_schema,
                 get_response_schema=get_response_schema,
+                claude_token=final_verifier_claude_token,
             )
 
             # Track final verifier tokens
@@ -901,6 +907,7 @@ async def _run_verifier(
     post_message: Optional[Callable],
     response_schema: Optional[Dict] = None,
     get_response_schema: Optional[Callable[[], Awaitable[Optional[Dict]]]] = None,
+    claude_token: Optional[str] = None,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = str(uuid.uuid4())
@@ -930,7 +937,7 @@ async def _run_verifier(
 
     result = await execute_activity(
         check_progress,
-        args=[context, verifier_prompt, model, "EXECUTE", current_response_schema],
+        args=[context, verifier_prompt, model, "EXECUTE", current_response_schema, claude_token],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )

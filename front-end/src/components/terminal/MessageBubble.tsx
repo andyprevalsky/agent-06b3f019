@@ -900,13 +900,30 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   const subAgentBubble = useMemo(() => {
     if (!isSubAgentTool || !message.metadata) return null;
 
-    const toolStatus = message.metadata.toolStatus === 'ERROR'
-      ? 'FINISHED'
-      : (message.metadata.toolStatus || 'FINISHED');
+    const rawToolStatus = message.metadata.toolStatus || 'FINISHED';
 
     // Check if this is a summary message with tree data (has subAgentIds and busId)
     const subAgentIds = message.metadata.subAgentIds as string[] | undefined;
     const busId = message.metadata.busId as string | undefined;
+
+    // Pre-spawn error: spawn failed before a sub-agent was created (e.g. DAG param population failed)
+    // Render as a failed sub-agent node in tree-node style
+    if (rawToolStatus === 'ERROR' && !subAgentIds && !message.metadata.subAgentId) {
+      const errorTitle = (message.metadata.title as string) || 'Sub-agent';
+      const errorMsg = message.text || 'Failed to spawn sub-agent';
+      return (
+        <div className="flex gap-3 animate-in fade-in duration-300">
+          <div className="flex items-center gap-1 font-mono text-sm text-red-500">
+            <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">└─</span>
+            <span className="w-4 text-center select-none">✗</span>
+            <span className="truncate">{errorTitle}: {errorMsg}</span>
+          </div>
+        </div>
+      );
+    }
+
+    // Post-spawn errors with subAgentIds: SubAgentTree handles failure via bus channel
+    const toolStatus = rawToolStatus === 'ERROR' ? 'FINISHED' : rawToolStatus;
 
     if (subAgentIds && subAgentIds.length > 0 && busId) {
       // Render tree view for summary messages

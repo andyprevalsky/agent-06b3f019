@@ -55,10 +55,10 @@ const MODEL_POOLS: Record<string, string[]> = {
     'moonshotai/kimi-k2-0905',
     'openai/gpt-5.2',
     'google/gemini-2.5-flash',
-    'anthropic/claude-haiku-4.5'
+    // 'anthropic/claude-haiku-4.5'  // Disabled: Anthropic API credits depleted
   ],
   'rose-1-ultra': [
-    'anthropic/claude-opus-4.6',
+    // 'anthropic/claude-opus-4.6',  // Disabled: Anthropic API credits depleted
     'openai/gpt-5.2',
     'google/gemini-3-pro-preview',
     'moonshotai/kimi-k2.5'
@@ -68,7 +68,7 @@ const MODEL_POOLS: Record<string, string[]> = {
     'browser-use',                   // Index 0 - bu-1-0 (their hosted LLM)
     'yutori/n1',                     // Index 1 - Vision-only, coordinate output
     'openai/gpt-5.2',               // Index 2 - DOM-only (via OpenRouter)
-    'anthropic/claude-opus-4.6',    // Index 3 - DOM-only (direct Anthropic API)
+    // 'anthropic/claude-opus-4.6',    // Index 3 - DOM-only (direct Anthropic API) — Disabled: Anthropic API credits depleted
   ]
 };
 
@@ -3490,6 +3490,10 @@ async function handleStreaming(
                   emitDelta(parsed.delta?.text || parsed.delta?.partial_json || '');
                 } else {
                   // OpenRouter/Cerebras - pass through with metadata
+                  // Skip chunks with empty/missing choices (OpenRouter debug/echo chunks)
+                  if (!parsed.choices?.length) {
+                    continue;
+                  }
                   parsed.requested_model = requestedModel;
                   parsed.actual_model = actualModel;
                   parsed.pool_name = poolName;
@@ -4822,6 +4826,10 @@ serve(async (req) => {
                     }
 
                     // Non-Anthropic models (OpenRouter/Cerebras) - pass through with metadata
+                    // Skip chunks with empty/missing choices (OpenRouter debug/echo chunks)
+                    if (!parsed.choices?.length) {
+                      return;
+                    }
                     parsed.requested_model = model;
                     parsed.actual_model = winningModel;
                     parsed.pool_name = poolName;
