@@ -1,5 +1,6 @@
 import { Browserbase } from '@browserbasehq/sdk';
 import { prisma } from './prisma';
+import { logJson } from './log';
 
 // Validate required environment variables
 if (!process.env.BROWSERBASE_API_KEY) {
@@ -102,7 +103,7 @@ export async function createSessionWithContext(
   
   // Get the authenticated live view URLs (debugger, fullscreen, websocket)
   const liveUrls = await bb.sessions.debug(session.id);
-  console.log('📺 Live URLs:', JSON.stringify(liveUrls, null, 2));
+  console.log('📺 Live URLs:', logJson(liveUrls));
   
   // Use debuggerFullscreenUrl for embedding (no Steel chrome, just the browser)
   const debugUrl = liveUrls.debuggerFullscreenUrl || liveUrls.debuggerUrl;

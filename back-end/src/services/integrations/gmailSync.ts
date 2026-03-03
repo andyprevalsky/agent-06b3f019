@@ -1,4 +1,5 @@
 import { prisma } from '../../lib/prisma';
+import { logTruncate } from '../../lib/log';
 import { IntegrationStatus, EmailProvider, MessageChannel } from '@prisma/client';
 import {
   fetchGmailEmails,
@@ -52,7 +53,7 @@ async function refreshGoogleAccessToken(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`[GmailSync] Token refresh failed: ${response.status} - ${errorText}`);
+      console.error(`[GmailSync] Token refresh failed: ${response.status} - ${logTruncate(errorText)}`);
       return null;
     }
 

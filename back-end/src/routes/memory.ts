@@ -1,14 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
-import NodeCache from 'node-cache';
+import { LRUCache } from 'lru-cache';
 import { prisma } from '../lib/prisma';
 import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
 
 const router = Router();
-
-// In-memory cache for shared memory (1 hour TTL)
-const memoryCache = new NodeCache({ stdTTL: 3600 });
 
 // Memory entry schema
 interface MemoryEntry {
@@ -26,6 +23,10 @@ interface CachedMemory {
   content: MemoryEntry[];
   hash: string;
 }
+
+// LRU cache for shared memory (1 hour TTL, max 500 entries)
+// Evicts least-recently-used entries when full instead of rejecting new ones
+const memoryCache = new LRUCache<string, CachedMemory>({ max: 500, ttl: 3600 * 1000 });
 
 // Token limit (30k tokens ≈ 120k chars at 4 chars/token)
 const MAX_TOKEN_COUNT = 30000;
@@ -63,7 +64,7 @@ router.get('/:busId', hybridAuth, async (req: HybridAuthRequest, res) => {
     const clientHash = req.query.hash as string | undefined;
 
     // Check cache first
-    const cached = memoryCache.get<CachedMemory>(busId);
+    const cached = memoryCache.get(busId);
 
     if (cached) {
       // If client has current hash, return 304

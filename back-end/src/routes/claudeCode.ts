@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
+import { logJson } from '../lib/log';
 import { AuthRequest, authenticate } from '../middleware/auth';
 import {
   createClaudeCodeSession,
@@ -302,7 +303,7 @@ router.get('/:sandboxId/health', authenticate, async (req: AuthRequest, res) => 
           const logsResult = await sandbox.commands.run('tail -50 /tmp/ws-server.log 2>/dev/null || echo "no_ws_log"', { timeoutMs: 5000 });
           diagnostics.ws_log = logsResult.stdout.trim();
 
-          console.log(`[ClaudeCode] Sandbox ${sandboxId} diagnostics:`, JSON.stringify(diagnostics, null, 2));
+          console.log(`[ClaudeCode] Sandbox ${sandboxId} diagnostics:`, logJson(diagnostics));
         } catch (diagErr) {
           console.error(`[ClaudeCode] Failed to extract diagnostics:`, diagErr);
         }

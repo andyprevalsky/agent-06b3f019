@@ -1,5 +1,6 @@
 import { MessageChannel } from '@prisma/client';
 import fetch from 'node-fetch';
+import { logTruncate } from '../../lib/log';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
 export interface ParsedEmail {
@@ -87,7 +88,7 @@ export async function getGmailProfile(accessToken: string): Promise<GmailProfile
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`[Gmail] Failed to get profile: ${response.status} - ${errorText}`);
+    console.error(`[Gmail] Failed to get profile: ${response.status} - ${logTruncate(errorText)}`);
     throw new Error(`Gmail API error: ${response.status}`);
   }
 
@@ -127,7 +128,7 @@ export async function fetchGmailHistory(
         console.log('[Gmail] History expired, full sync required');
         return { addedMessageIds: [], newHistoryId: '' };
       }
-      console.error(`[Gmail] Failed to fetch history: ${response.status} - ${errorText}`);
+      console.error(`[Gmail] Failed to fetch history: ${response.status} - ${logTruncate(errorText)}`);
       throw new Error(`Gmail API error: ${response.status}`);
     }
 
@@ -218,7 +219,7 @@ export async function fetchGmailMessagesSince(
 
     if (!listResponse.ok) {
       const errorText = await listResponse.text();
-      console.error(`[Gmail] Failed to list messages: ${listResponse.status} - ${errorText}`);
+      console.error(`[Gmail] Failed to list messages: ${listResponse.status} - ${logTruncate(errorText)}`);
       throw new Error(`Gmail API error: ${listResponse.status}`);
     }
 
@@ -276,7 +277,7 @@ async function fetchMessagesBatch(
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`[Gmail] Batch request failed: ${response.status} - ${errorText}`);
+    console.error(`[Gmail] Batch request failed: ${response.status} - ${logTruncate(errorText)}`);
     throw new Error(`Gmail batch API error: ${response.status}`);
   }
 
@@ -342,7 +343,7 @@ export async function fetchGmailEmails(accessToken: string): Promise<ParsedEmail
 
     if (!listResponse.ok) {
       const errorText = await listResponse.text();
-      console.error(`[Gmail] Failed to list messages: ${listResponse.status} - ${errorText}`);
+      console.error(`[Gmail] Failed to list messages: ${listResponse.status} - ${logTruncate(errorText)}`);
       throw new Error(`Gmail API error: ${listResponse.status}`);
     }
 

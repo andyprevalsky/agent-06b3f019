@@ -5,6 +5,7 @@
  */
 
 import { prisma } from './prisma';
+import { logTruncate } from './log';
 
 interface SurgeMessageResponse {
   id: string;
@@ -45,7 +46,7 @@ export async function sendSms(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[SMS] Surge API error:', response.status, errorText);
+      console.error('[SMS] Surge API error:', response.status, logTruncate(errorText));
       return { success: false, error: `Surge API error: ${response.status}` };
     }
 
@@ -97,7 +98,7 @@ export async function sendMms(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[MMS] Surge API error:', response.status, errorText);
+      console.error('[MMS] Surge API error:', response.status, logTruncate(errorText));
       return { success: false, error: `Surge API error: ${response.status}` };
     }
 

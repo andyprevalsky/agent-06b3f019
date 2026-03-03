@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import { logJson, logTruncate } from '../lib/log';
 
 const router = Router();
 
@@ -185,7 +186,7 @@ router.post('/call', authenticate, async (req: AuthRequest, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Vapi API error:', response.status, errorText);
+      console.error('Vapi API error:', response.status, logTruncate(errorText));
       return res.status(response.status).json({
         error: `Vapi API error (${response.status})`,
         details: errorText,
@@ -244,7 +245,7 @@ router.get('/call/:id', authenticate, async (req: AuthRequest, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Vapi API error:', response.status, errorText);
+      console.error('Vapi API error:', response.status, logTruncate(errorText));
       return res.status(response.status).json({
         error: `Vapi API error (${response.status})`,
         details: errorText,
@@ -253,14 +254,12 @@ router.get('/call/:id', authenticate, async (req: AuthRequest, res) => {
 
     const result = await response.json() as Record<string, unknown>;
 
-    // Log full response for debugging
     console.log('Vapi call poll response', {
       callId: id,
       status: result.status,
       duration: result.duration,
       endedReason: result.endedReason,
-      // Log full result for debugging during development
-      fullResponse: JSON.stringify(result),
+      fullResponse: logJson(result),
     });
 
     res.json(result);

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
+import { logJson } from '../lib/log';
 import { AuthRequest, authenticate } from '../middleware/auth';
 import { hybridAuth, HybridAuthRequest } from '../middleware/hybridAuth';
 
@@ -25,7 +26,7 @@ const respondSchema = z.object({
 // POST /api/attention-requests - Create an attention request (called by agent)
 router.post('/', async (req, res) => {
   try {
-    console.log('📥 Received attention request:', JSON.stringify(req.body, null, 2));
+    console.log('📥 Received attention request:', logJson(req.body));
     const data = createAttentionRequestSchema.parse(req.body);
     
     const request = await prisma.agentAttentionRequest.create({
@@ -48,8 +49,8 @@ router.post('/', async (req, res) => {
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      console.error('❌ Validation error:', JSON.stringify(error.errors, null, 2));
-      console.error('Request body was:', JSON.stringify(req.body, null, 2));
+      console.error('❌ Validation error:', logJson(error.errors));
+      console.error('Request body was:', logJson(req.body));
       return res.status(400).json({ error: 'Invalid request data', details: error.errors });
     }
     console.error('Failed to create attention request:', error);

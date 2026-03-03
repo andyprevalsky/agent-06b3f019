@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { logTruncate } from '../lib/log';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import {
   sendSms,
@@ -62,7 +63,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Surge API error:', response.status, errorText);
+      console.error('Surge API error:', response.status, logTruncate(errorText));
       return res.status(response.status).json({
         error: `Surge API error (${response.status})`,
         details: errorText,

@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { logTruncate } from '../lib/log';
 import { AuthRequest } from '../middleware/auth';
 import { ROSE_MODEL_POOLS, normalizeRoseAlias, isCerebrasPool } from '../lib/roseModels';
 // import { MMLUProHarness } from '../benchmarks/harnesses/mmlu-pro';
@@ -82,10 +83,10 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
 
       if (!cerebrasResponse.ok) {
         const errorText = await cerebrasResponse.text();
-        console.error('Cerebras API error:', cerebrasResponse.status, errorText);
-        return res.status(cerebrasResponse.status).json({ 
+        console.error('Cerebras API error:', cerebrasResponse.status, logTruncate(errorText));
+        return res.status(cerebrasResponse.status).json({
           error: 'Cerebras API error',
-          details: errorText 
+          details: logTruncate(errorText)
         });
       }
 
@@ -116,10 +117,10 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
 
       if (!openrouterResponse.ok) {
         const errorText = await openrouterResponse.text();
-        console.error('OpenRouter API error:', openrouterResponse.status, errorText);
-        return res.status(openrouterResponse.status).json({ 
+        console.error('OpenRouter API error:', openrouterResponse.status, logTruncate(errorText));
+        return res.status(openrouterResponse.status).json({
           error: 'OpenRouter API error',
-          details: errorText 
+          details: logTruncate(errorText)
         });
       }
 

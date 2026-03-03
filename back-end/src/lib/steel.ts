@@ -1,5 +1,6 @@
 import Steel from 'steel-sdk';
 import { prisma } from './prisma';
+import { logJson } from './log';
 import { ProxyGeoLocation, DEFAULT_GEOLOCATION } from './geoip';
 
 // Validate required environment variables
@@ -199,7 +200,7 @@ export async function createSessionWithContext(
         },
       });
 
-      console.log('📺 Steel Session:', JSON.stringify(session, null, 2));
+      console.log('📺 Steel Session:', logJson(session));
 
       // Steel provides debugUrl for unauthenticated live viewing (anyone with URL can view)
       // sessionViewerUrl requires Steel dashboard login - don't use that

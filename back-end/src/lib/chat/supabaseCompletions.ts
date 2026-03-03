@@ -10,6 +10,8 @@
  */
 
 // Use local Supabase functions in development, production URL otherwise
+import { logJson } from '../log';
+
 const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
   ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
   : 'http://localhost:54321/functions/v1';
@@ -95,7 +97,7 @@ export async function createStreamingCompletion(
     stream_options: { include_usage: true },
   };
 
-  console.log('[SupabaseCompletions] Request to Rose:', JSON.stringify(requestBody, null, 2));
+  console.log('[SupabaseCompletions] Request to Rose:', logJson(requestBody));
 
   const response = await fetch(url, {
     method: 'POST',
