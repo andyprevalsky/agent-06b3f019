@@ -13,6 +13,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 import asyncio
+import json as _json
 import structlog
 
 # Import pass-through for workflow context:
@@ -140,6 +141,7 @@ class AgentWorkflow:
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
         self._has_new_messages: bool = False
         self._last_signal_response: Optional[str] = None  # Stores response from receive_user_response signal
+        self._signal_responses: dict = {}  # Per-request responses keyed by attention request ID
         self._has_credits: bool = True  # Cached credit status
         self._last_credit_check: int = 0  # Iteration count at last check
         self.write_lock_enabled: bool = True  # Write lock for browser agent actions
@@ -259,6 +261,18 @@ class AgentWorkflow:
     async def receive_user_response(self, response: str):
         """Receive user response - sets flag and stores response for approval checks."""
         workflow.logger.info(f"💬 Received user response (length={len(response)})")
+        # Try to parse as JSON with request_id (from attention request endpoints)
+        try:
+            data = _json.loads(response)
+            if isinstance(data, dict) and "request_id" in data:
+                req_id = data["request_id"]
+                actual_response = data.get("response", "")
+                self._signal_responses[req_id] = actual_response
+                workflow.logger.info(f"💬 Stored response for request {req_id}")
+                return
+        except (ValueError, TypeError, KeyError):
+            pass
+        # Legacy: plain string (from chat messages, SMS, etc.)
         self._last_signal_response = response
         self._has_new_messages = True
     

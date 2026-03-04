@@ -319,7 +319,9 @@ async function executeReplyToAgent(
     try {
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      const signalValue = (attention_request_id && reject) ? '__REJECTED__' : message;
+      const signalValue = attention_request_id
+        ? JSON.stringify({ request_id: attention_request_id, response: reject ? '__REJECTED__' : message })
+        : message;
       await handle.signal('receive_user_response', signalValue);
 
       console.log('[SMS Tools:reply] Signaled workflow', {

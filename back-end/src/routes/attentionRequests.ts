@@ -177,12 +177,12 @@ router.post('/:id/respond', authenticate, async (req: AuthRequest, res) => {
       },
     });
     
-    // Send signal to workflow to resume
+    // Send signal to workflow to resume (with request_id so each tool gets its own response)
     try {
       const { getTemporalClient } = await import('../lib/temporal');
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(request.workflowId);
-      await handle.signal('receive_user_response', data.response);
+      await handle.signal('receive_user_response', JSON.stringify({ request_id: id, response: data.response }));
     } catch (error) {
       console.error(`Failed to send signal to workflow ${request.workflowId}:`, error);
       // Don't fail the request - DB is updated, workflow will eventually check
@@ -267,12 +267,12 @@ router.post('/:id/reject', authenticate, async (req: AuthRequest, res) => {
       },
     });
 
-    // Send signal to workflow to resume (with rejection)
+    // Send signal to workflow to resume (with rejection + request_id)
     try {
       const { getTemporalClient } = await import('../lib/temporal');
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(request.workflowId);
-      await handle.signal('receive_user_response', '__REJECTED__');
+      await handle.signal('receive_user_response', JSON.stringify({ request_id: id, response: '__REJECTED__' }));
     } catch (error) {
       console.error(`Failed to send rejection signal to workflow ${request.workflowId}:`, error);
       // Don't fail the request - DB is updated, workflow will eventually check

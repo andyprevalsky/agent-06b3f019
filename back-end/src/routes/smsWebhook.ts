@@ -234,7 +234,7 @@ router.post('/inbound', async (req: Request, res: Response) => {
         try {
           const client = await getTemporalClient();
           const handle = client.workflow.getHandle(shortcodeResult.workflowId);
-          await handle.signal('receive_user_response', 'Approved via SMS shortcode');
+          await handle.signal('receive_user_response', JSON.stringify({ request_id: shortcodeResult.attentionRequestId, response: 'Approved via SMS shortcode' }));
 
           console.log('[SMS Webhook] Signaled workflow with shortcode approval', {
             workflowId: shortcodeResult.workflowId,

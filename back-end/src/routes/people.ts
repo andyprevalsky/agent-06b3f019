@@ -304,13 +304,13 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
     // Validate that at least one identifier is provided
     const hasPhone = phone && typeof phone === 'string' && phone.trim().length > 0;
     const hasEmail = email && typeof email === 'string' && email.trim().length > 0;
-    const hasName = firstName && lastName && 
-      typeof firstName === 'string' && typeof lastName === 'string' &&
-      firstName.trim().length > 0 && lastName.trim().length > 0;
-    
+    const hasFirstName = firstName && typeof firstName === 'string' && firstName.trim().length > 0;
+    const hasLastName = lastName && typeof lastName === 'string' && lastName.trim().length > 0;
+    const hasName = hasFirstName; // firstName alone is enough (single-name contacts like "Aya")
+
     if (!hasPhone && !hasEmail && !hasName) {
       return res.status(400).json({
-        error: 'At least one identifier is required: phone, email, or firstName+lastName',
+        error: 'At least one identifier is required: phone, email, or firstName',
       });
     }
     
@@ -332,15 +332,18 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
       whereConditions.push({ email: { equals: email as string, mode: 'insensitive' } });
     }
     if (hasName) {
-      whereConditions.push({
+      const nameCondition: any = {
         firstName: { equals: firstName as string, mode: 'insensitive' },
-        lastName: { equals: lastName as string, mode: 'insensitive' },
-      });
+      };
+      if (hasLastName) {
+        nameCondition.lastName = { equals: lastName as string, mode: 'insensitive' };
+      }
+      whereConditions.push(nameCondition);
     }
-    
+
     // Build person identifier string for messages
     const personIdentifier = hasName
-      ? `${firstName} ${lastName}`
+      ? hasLastName ? `${firstName} ${lastName}` : firstName as string
       : hasEmail
         ? email as string
         : phone as string;

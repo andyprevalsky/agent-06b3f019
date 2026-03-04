@@ -391,19 +391,12 @@ async def request_user_approval_direct(
     )
     await workflow_instance._handle_tool_event(pre_event, tool_call_id, "request_user_approval")
     
-    # Wait indefinitely for user response (approval is blocking)
-    # Use _has_new_messages flag which is set by the receive_user_response signal
+    # Wait indefinitely for this specific request's response
     await workflow.wait_condition(
-        lambda: workflow_instance._has_new_messages
+        lambda: request_id in workflow_instance._signal_responses
     )
 
-    # Reset the flag so subsequent waits work correctly
-    workflow_instance._has_new_messages = False
-
-    # Check signal response first (set directly by receive_user_response signal)
-    # This handles rejection signals from the backend which don't create DB messages
-    signal_response = workflow_instance._last_signal_response
-    workflow_instance._last_signal_response = None  # Reset after reading
+    signal_response = workflow_instance._signal_responses.pop(request_id)
 
     if signal_response and signal_response.strip() == "__REJECTED__":
         logger.info("User rejected approval request (via signal)", request_id=request_id)

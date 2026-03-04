@@ -10,7 +10,7 @@ import time
 import json
 import httpx
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, extract_root_error
 from tools.request_user_approval import request_user_approval_direct, UserRejectedError
 
 logger = structlog.get_logger()
@@ -137,9 +137,11 @@ class MessagePersonManager(ToolManager):
                                          maximum_interval=timedelta(seconds=10)),
             )
         except Exception as e:
+            # Unwrap Temporal's ActivityError → ApplicationError to get the real message
+            error_msg = extract_root_error(e)
             yield ToolEvent(type=EventType.POST_MESSAGE,
                             title=f"Failed to look up {person_display}",
-                            message=f"Error reading message history: {e}",
+                            message=f"Error reading message history: {error_msg}",
                             status=MessageStatus.ERROR)
             return
 

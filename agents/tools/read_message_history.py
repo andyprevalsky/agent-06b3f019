@@ -8,7 +8,7 @@ import structlog
 import httpx
 import time
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message, format_error_message, extract_root_error
 from helpers.handle_tool_event import handle_tool_event
 
 # Config import is safe - no side effects at import time (load_dotenv is lazy)
@@ -267,7 +267,7 @@ class ReadMessageHistoryManager(ToolManager):
                 user_id=user_id,
             )
             
-            return {"error": str(e), "messages": [], "person": None}
+            return {"error": extract_root_error(e), "messages": [], "person": None}
 
 
 # ========================================
