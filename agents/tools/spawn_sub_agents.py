@@ -343,15 +343,21 @@ class SpawnSubAgentManager(ToolManager):
                         file_pointer=fp,
                     )
 
+            # Save summary before cleanup (child_result is popped below)
+            child_summary = child_result.get("summary", "") or f"Completed: {child_info.get('goal', '')}"
+
             # Clean up stored result
             workflow_instance.child_results.pop(child_agent_id, None)
 
             # 8. Post final FINISHED message (replaces IN_PROGRESS via toolCallId dedup)
             # Include structured_response so parent verifier can extract full FilePointers
+            # Include summary in message so build_llm_messages dedup preserves it
+            # (this is the latest FINISHED message per toolCallId, so it wins over
+            # the earlier child_completed summary posted by the signal handler)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Spawning sub-agent",
-                message="",
+                message=child_summary,
                 status=MessageStatus.FINISHED,
                 metadata={
                     "subAgentIds": [child_agent_id],

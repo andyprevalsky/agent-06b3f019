@@ -12,7 +12,7 @@ USAGE:
 - On failure: error already in context, returns needs_llm for recovery
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Any, Callable, Awaitable
@@ -24,6 +24,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from tools.base import ToolEvent, EventType, MessageStatus
+from loop.context_utils import poll_and_update_context
 
 logger = structlog.get_logger()
 
@@ -217,6 +218,7 @@ async def execute_dag(
     post_message: Callable[[str, str, Optional[Dict]], Awaitable[None]],
     execute_tool: Callable[[str, Dict, str], Awaitable[Dict]],
     handle_tool_event_fn: Callable[[ToolEvent, str, str], Awaitable[None]],
+    poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,
 ) -> Dict[str, Any]:
     """
     Execute DAG with maximum parallelism.
@@ -250,7 +252,26 @@ async def execute_dag(
 
     workflow.logger.info(f"[DAG] Starting execution with {len(dag.tasks)} tasks, join={dag.join}")
 
+    first_iteration = True
+    # Seed last_checked from existing context to avoid fetching entire message history
+    last_checked = datetime.fromtimestamp(0, tz=timezone.utc)
+    for msg in context:
+        ts_str = msg.get("timestamp", "")
+        if ts_str:
+            try:
+                msg_ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                if msg_ts > last_checked:
+                    last_checked = msg_ts
+            except Exception:
+                pass
+
     while not dag.is_complete() and not dag.has_failed():
+        # Poll DB for new messages before starting next batch
+        # (skip first iteration — nothing has completed yet)
+        if poll_messages and not first_iteration:
+            last_checked = await poll_and_update_context(poll_messages, context, last_checked)
+        first_iteration = False
+
         # Start newly ready tasks
         ready = dag.get_ready_tasks()
         for task in ready:

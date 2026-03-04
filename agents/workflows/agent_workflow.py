@@ -719,6 +719,7 @@ class AgentWorkflow:
                 post_message=self._post_message,
                 execute_tool=self._execute_tool,
                 handle_tool_event_fn=self._handle_tool_event,
+                poll_messages=self._poll_messages,
             )
 
             # DAG completed or failed - both hand off to run_agent

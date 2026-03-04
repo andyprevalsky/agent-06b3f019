@@ -28,6 +28,7 @@ from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import compress_context
 from helpers.update_status import update_agent_status
 from tools.base import ToolEvent, EventType, MessageStatus
+from loop.context_utils import poll_and_update_context
 from tools.knowledge_base import query_blueprints_activity, query_blueprints
 from loop.activity_helper import call_temporal_activity_from_activity
 
@@ -151,12 +152,9 @@ async def run_agent(
                 except:
                     pass
     
-    # DEBUG: Log initial context state
-    logger.info(
-        "🔍 DEBUG: Initial context",
+    logger.debug(
+        "Initial context",
         context_len=len(context),
-        none_count=sum(1 for m in context if m is None) if context else 0,
-        has_none=any(m is None for m in context) if context else False,
         last_checked=last_checked.isoformat(),
     )
     
@@ -217,37 +215,7 @@ async def run_agent(
         
         # 2. Poll for new messages (pass our own last_checked, not workflow's)
         if poll_messages:
-            new_msgs = await poll_messages(last_checked)
-            # DEBUG: Log what poll_messages returned
-            logger.info(
-                "🔍 DEBUG: poll_messages returned",
-                count=len(new_msgs) if new_msgs else 0,
-                types=[type(m).__name__ for m in (new_msgs or [])],
-                has_none=any(m is None for m in (new_msgs or [])),
-                last_checked=last_checked.isoformat(),
-            )
-            if new_msgs and any(m is None for m in new_msgs):
-                logger.error(
-                    "❌ poll_messages RETURNED NONE VALUES",
-                    none_indices=[i for i, m in enumerate(new_msgs) if m is None],
-                )
-            if new_msgs:
-                for msg in new_msgs:
-                    # Avoid duplicates
-                    if msg not in context:
-                        context.append(msg)
-                # Sort by timestamp
-                context.sort(key=lambda x: x.get("timestamp", ""))
-                # Update our last_checked to latest message timestamp
-                for msg in context:
-                    ts_str = msg.get("timestamp", "")
-                    if ts_str:
-                        try:
-                            msg_ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
-                            if msg_ts > last_checked:
-                                last_checked = msg_ts
-                        except:
-                            pass
+            last_checked = await poll_and_update_context(poll_messages, context, last_checked)
         
         # 3. Query blueprints after first iteration (only in PLAN phase, not EXECUTE)
         if not blueprint_queried and iteration == 1 and not skip_blueprint_query:
@@ -654,11 +622,10 @@ async def run_agent(
                         "metadata": {"toolName": tool_name}
                     }
                 context.append(new_msg)
-                logger.info(
-                    f"🔍 DEBUG: Added tool result to context",
+                logger.debug(
+                    "Added tool result to context",
                     tool_name=tool_name,
                     context_len=len(context),
-                    none_count=sum(1 for m in context if m is None),
                 )
 
         # Handle attempt_completion separately (should be alone due to llm.py filtering)
@@ -748,20 +715,6 @@ async def run_agent(
                     }
 
                 # Run verifier
-                # DEBUG: Log context state before verifier
-                logger.info(
-                    "🔍 DEBUG: Context before verifier",
-                    context_len=len(context),
-                    none_count=sum(1 for m in context if m is None),
-                    context_types=[type(m).__name__ for m in context],
-                    context_roles=[m.get('role') if isinstance(m, dict) else f"NOT_DICT:{type(m)}" for m in context],
-                )
-                if any(m is None for m in context):
-                    logger.error(
-                        "❌ FOUND NONE IN CONTEXT",
-                        none_indices=[i for i, m in enumerate(context) if m is None],
-                        context_snapshot=str(context)[:2000],
-                    )
 
                 # Use response_schema passed from caller (already fetched with agent config)
                 # Resolve Claude token for verifier (same as main LLM call)
