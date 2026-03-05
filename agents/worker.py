@@ -51,7 +51,7 @@ from tools.monitor import monitor_activity
 from tools.check_monitor_events import check_monitor_events_activity
 from tools.search_user_network import search_user_network_activity
 from tools.read_message_history import read_message_history_activity
-from tools.message_person import generate_message_activity
+from tools.message_person import generate_message_activity, fetch_recent_messages_activity
 from tools.x402_bazaar import search_x402_bazaar_activity, pay_for_x402_service_activity
 from tools.call_phone_number import call_phone_number_activity
 # Helper activities (workflow orchestration, not exposed to LLM)
@@ -75,6 +75,7 @@ from helpers import (
     fetch_model_pricing,
 )
 from helpers.llm import call_planner_llm_activity, set_response_schema_activity, fetch_claude_max_token_activity
+from helpers.attachments import resolve_attachments_activity
 from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
 from helpers.condensor import condense_tool_result_activity
@@ -215,6 +216,7 @@ async def main():
             search_user_network_activity,
             read_message_history_activity,
             generate_message_activity,
+            fetch_recent_messages_activity,
             # x402 Bazaar activities
             search_x402_bazaar_activity,
             pay_for_x402_service_activity,
@@ -239,6 +241,7 @@ async def main():
             fetch_agent_tools,
             query_blueprints_activity,
             save_blueprint_activity,
+            resolve_attachments_activity,
             mark_finished,
             fetch_agent_config,
             fetch_model_pricing,

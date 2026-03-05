@@ -169,9 +169,10 @@ class SpawnSubAgentManager(ToolManager):
 
             # 2. Execute spawn activity (wrap single sub_agent in list for activity)
             parent_model = getattr(workflow_instance, 'model', 'rose-labs/rose-1-lite')
+            parent_source = getattr(workflow_instance, 'agent_source', 'WEB')
             result = await workflow.execute_activity(
                 spawn_sub_agent_activity,
-                args=[user_id, [sub_agent], parent_agent_id, parent_workflow_id, depth, parent_is_paused, parent_model, bus_id],
+                args=[user_id, [sub_agent], parent_agent_id, parent_workflow_id, depth, parent_is_paused, parent_model, bus_id, parent_source],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -403,7 +404,8 @@ async def spawn_sub_agent_activity(
     depth: int,
     parent_is_paused: bool,
     parent_model: str = "rose-labs/rose-1-lite",
-    bus_id: str = None
+    bus_id: str = None,
+    parent_source: str = "WEB"
 ) -> Dict[str, Any]:
     """
     Activity: Spawn multiple sub-agents to work on parallel subtasks.
@@ -420,6 +422,7 @@ async def spawn_sub_agent_activity(
         parent_is_paused: Whether parent is currently paused (children inherit this state)
         parent_model: Model from parent agent (inherited by all sub-agents)
         bus_id: Shared bus channel ID for sub-agent tree updates
+        parent_source: Agent source from parent (WEB or MAC_APP), inherited by sub-agents
 
     Returns:
         Dict with summary: {"spawned": int, "completed": int, "failed": int, "agents": [...]}
@@ -501,6 +504,7 @@ async def spawn_sub_agent_activity(
                     "response_schema": agent.get("output_schema"),
                     "bus_id": bus_id,  # Shared bus channel for tree updates
                     "max_iterations": 25,
+                    "source": parent_source,  # Inherit source from parent
                 }
 
                 # Add resolved attachments if any

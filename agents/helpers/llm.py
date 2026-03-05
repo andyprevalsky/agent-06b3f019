@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import random
 import re
 import uuid
 import time  # Import at module level for Temporal workflow sandbox compatibility
@@ -29,9 +30,16 @@ from helpers.attachments import (
     FilePointer,
     build_attachment_metadata_text,
     get_file_from_pointer,
+    get_cached_file,
 )
 
 logger = structlog.get_logger()
+
+# Shared in-process state for passing large data between workflow and activities
+# without going through Temporal's 2MB payload serialization limit.
+# Safe because workflows and activities run in the same worker process (single Fly.io machine).
+# Keyed by agent_id to avoid cross-agent interference.
+_pending_llm_context: Dict[str, Any] = {}  # agent_id -> (context, system_prompt, pre_resolved_ids)
 
 
 def _safe_heartbeat(message: str) -> None:
@@ -337,7 +345,11 @@ def convert_context_to_messages(
     return messages
 
 
-async def build_llm_messages(context: List[Dict], system_prompt: str) -> List[Dict]:
+async def build_llm_messages(
+    context: List[Dict],
+    system_prompt: str,
+    pre_resolved_ids: Optional[set] = None,
+) -> List[Dict]:
     """Build messages list for LLM from context, with attachment support.
 
     This is the primary function for building LLM messages across the codebase.
@@ -460,80 +472,99 @@ To pass files to spawn_browser_agent, spawn_claude_code_agent, or spawn_sub_agen
         if file_pointer and isinstance(file_pointer, dict):
             attachments_data = [file_pointer] + list(attachments_data)
 
-        if role == "USER":
-            if attachments_data:
-                # Build multimodal message with attachments
-                content = []
-                metadata_texts = []
+        # Resolve file attachments (all roles — USER, ASSISTANT, TOOL, SYSTEM)
+        content = []  # multimodal content blocks (images, PDFs)
+        metadata_texts = []  # text-based content (inline text files, metadata fallbacks)
 
-                for att_data in attachments_data:
-                    fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
-                    if not fp:
-                        continue
+        for att_data in attachments_data:
+            fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
+            if not fp:
+                continue
 
-                    # Large files or binary files -> metadata only
-                    if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
-                        metadata_texts.append(build_attachment_metadata_text(fp))
-                        continue
+            # Large files or binary files -> metadata only
+            if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
+                metadata_texts.append(build_attachment_metadata_text(fp))
+                continue
 
-                    # Skip downloads in workflow context (httpx uses threading.local which Temporal sandbox blocks)
-                    # Downloads only work inside activity context
-                    if not activity.in_activity():
-                        logger.debug(f"Skipping attachment download in workflow context: {fp.original_filename}")
-                        metadata_texts.append(build_attachment_metadata_text(fp))
-                        continue
-
-                    # Download file from storage (uses module-level cache)
-                    try:
-                        file_content, file_metadata = await get_file_from_pointer(fp)
-                        base64_data = base64.b64encode(file_content).decode("utf-8")
-
-                        if fp.is_image():
-                            # Image: inject as image_url content block
-                            content.append({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{fp.mime_type};base64,{base64_data}"
-                                }
-                            })
-                        elif fp.is_pdf():
-                            # PDF: inject as file content block (for capable models)
-                            content.append({
-                                "type": "file",
-                                "file": {
-                                    "filename": fp.original_filename,
-                                    "file_data": f"data:{fp.mime_type};base64,{base64_data}"
-                                }
-                            })
-                        elif fp.is_text():
-                            # Text: inject as text content
-                            try:
-                                text_content = file_content.decode("utf-8")
-                                metadata_texts.append(f"[File: {fp.original_filename}]\n```\n{text_content}\n```")
-                            except UnicodeDecodeError:
-                                metadata_texts.append(build_attachment_metadata_text(fp))
-                    except Exception as e:
-                        logger.warning(f"Failed to download/process attachment {fp.original_filename}: {e}")
-                        metadata_texts.append(build_attachment_metadata_text(fp))
-
-                # Build final content
-                full_text = text
-                if metadata_texts:
-                    full_text = text + "\n\n" + "\n\n".join(metadata_texts)
-
-                if content:
-                    # Has multimodal content - use content array format
-                    content.insert(0, {"type": "text", "text": full_text})
-                    messages.append({"role": "user", "content": content})
-                else:
-                    # No multimodal content - just text
-                    messages.append({"role": "user", "content": full_text})
+            # Resolve file content: cache first, then live download, then metadata fallback
+            file_content = None
+            cached = get_cached_file(fp.id) if (pre_resolved_ids and fp.id in pre_resolved_ids) else None
+            if cached:
+                file_content = cached[0]
+            elif activity.in_activity():
+                # Live download (activity context — e.g., reasoning, param_populator)
+                try:
+                    file_content, _ = await get_file_from_pointer(fp)
+                except Exception as e:
+                    logger.warning(f"Failed to download attachment {fp.original_filename}: {e}")
             else:
-                messages.append({"role": "user", "content": text})
+                logger.debug(f"Skipping attachment (not cached, not in activity): {fp.original_filename}")
+
+            if file_content is None:
+                metadata_texts.append(build_attachment_metadata_text(fp))
+                continue
+
+            try:
+                base64_data = base64.b64encode(file_content).decode("utf-8")
+
+                if fp.is_image():
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{fp.mime_type};base64,{base64_data}"
+                        }
+                    })
+                elif fp.is_pdf():
+                    content.append({
+                        "type": "file",
+                        "file": {
+                            "filename": fp.original_filename,
+                            "file_data": f"data:{fp.mime_type};base64,{base64_data}"
+                        }
+                    })
+                elif fp.is_text():
+                    try:
+                        text_content = file_content.decode("utf-8")
+                        metadata_texts.append(f"[File: {fp.original_filename}]\n```\n{text_content}\n```")
+                    except UnicodeDecodeError:
+                        metadata_texts.append(build_attachment_metadata_text(fp))
+            except Exception as e:
+                logger.warning(f"Failed to process attachment {fp.original_filename}: {e}")
+                metadata_texts.append(build_attachment_metadata_text(fp))
+
+        # Determine LLM role and base text
+        if role == "USER":
+            llm_role = "user"
+            full_text = text
         elif role == "ASSISTANT":
-            messages.append({"role": "assistant", "content": text})
+            llm_role = "assistant"
+            full_text = text
         elif role in ("TOOL", "SYSTEM"):
-            messages.append({"role": "user", "content": f"[{role}]: {text}"})
+            llm_role = "user"
+            full_text = f"[{role}]: {text}"
+        else:
+            llm_role = "user"
+            full_text = text
+
+        if metadata_texts:
+            full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+
+        if content and llm_role == "assistant":
+            # LLM APIs reject multimodal blocks in assistant messages.
+            # Convert image/PDF blocks to metadata text so content isn't silently lost.
+            for block in content:
+                if block.get("type") == "image_url":
+                    full_text += "\n\n[Attached image]"
+                elif block.get("type") == "file":
+                    fname = block.get("file", {}).get("filename", "file")
+                    full_text += f"\n\n[Attached file: {fname}]"
+            messages.append({"role": llm_role, "content": full_text})
+        elif content:
+            # Has multimodal content - use content array format
+            content.insert(0, {"type": "text", "text": full_text})
+            messages.append({"role": llm_role, "content": content})
+        else:
+            messages.append({"role": llm_role, "content": full_text})
 
     return messages
 
@@ -1632,55 +1663,64 @@ async def _call_llm_verifier(
     pool_name = "unknown"
     chunk_count = 0
     
-    async with httpx.AsyncClient(timeout=60.0) as http_client:
-        async with http_client.stream(
-            'POST',
-            config.rose.api_url,
-            json=request_body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {config.rose.supabase_anon_key}",
-                "x-api-key": config.rose.api_key,
-            }
-        ) as stream_response:
-            stream_response.raise_for_status()
-            
-            async for line in stream_response.aiter_lines():
-                chunk_count += 1
-                
-                if chunk_count % 10 == 0:
-                    _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
-                
-                if not line or not line.startswith('data: '):
-                    continue
-                
-                data_str = line[6:]
-                if data_str == '[DONE]':
-                    break
-                
-                try:
-                    chunk_data = json.loads(data_str)
-                    
-                    if chunk_data.get("actual_model"):
-                        actual_model = chunk_data["actual_model"]
-                    if chunk_data.get("pool_name"):
-                        pool_name = chunk_data["pool_name"]
-                    
-                    choices = chunk_data.get("choices", [])
-                    if not choices:
+    stream_interrupted = False
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as http_client:
+            async with http_client.stream(
+                'POST',
+                config.rose.api_url,
+                json=request_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
+                    "x-api-key": config.rose.api_key,
+                }
+            ) as stream_response:
+                stream_response.raise_for_status()
+
+                async for line in stream_response.aiter_lines():
+                    chunk_count += 1
+
+                    if chunk_count % 10 == 0:
+                        _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
+
+                    if not line or not line.startswith('data: '):
                         continue
-                    delta = choices[0].get("delta", {})
 
-                    # Accumulate both reasoning and content
-                    if delta.get("reasoning"):
-                        accumulated_reasoning += delta["reasoning"]
-                    if delta.get("content"):
-                        accumulated_json += delta["content"]
+                    data_str = line[6:]
+                    if data_str == '[DONE]':
+                        break
 
-                except json.JSONDecodeError:
-                    continue
-    
-    logger.info(f"🏁 Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}")
+                    try:
+                        chunk_data = json.loads(data_str)
+
+                        if chunk_data.get("actual_model"):
+                            actual_model = chunk_data["actual_model"]
+                        if chunk_data.get("pool_name"):
+                            pool_name = chunk_data["pool_name"]
+
+                        choices = chunk_data.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+
+                        # Accumulate both reasoning and content
+                        if delta.get("reasoning"):
+                            accumulated_reasoning += delta["reasoning"]
+                        if delta.get("content"):
+                            accumulated_json += delta["content"]
+
+                    except json.JSONDecodeError:
+                        continue
+    except (httpx.RemoteProtocolError, httpx.ReadError) as e:
+        # Connection dropped mid-stream - try to use whatever we accumulated
+        stream_interrupted = True
+        logger.warning(
+            f"Verifier stream interrupted after {chunk_count} chunks, "
+            f"accumulated json={len(accumulated_json)} chars, reasoning={len(accumulated_reasoning)} chars: {e}"
+        )
+
+    logger.info(f"🏁 Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}")
     
     # Parse JSON - handle thinking models that put JSON in reasoning
     json_content = accumulated_json
@@ -1918,7 +1958,29 @@ async def check_progress(
         
         # Use dedicated verifier LLM call (simple, no streaming UI)
         # Pass response_schema so the verifier includes output extraction in same call
-        result, usage = await _call_llm_verifier(messages, model, config, response_schema, claude_token=claude_token)
+        # Retry with exponential backoff + jitter on transient failures (e.g. malformed JSON from streaming)
+        max_retries = 5
+        base_delay = 0.2  # 0.2s -> 0.4s -> 0.8s -> 1.6s -> 3.2s
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                result, usage = await _call_llm_verifier(messages, model, config, response_schema, claude_token=claude_token)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    jitter = random.uniform(0, delay * 0.5)
+                    logger.warning(
+                        "Verifier call failed, retrying",
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        delay=round(delay + jitter, 3),
+                        error=str(e)[:200],
+                    )
+                    await asyncio.sleep(delay + jitter)
+                else:
+                    raise last_error
 
         score = result["score"]
         reasoning = result["reasoning"]
@@ -1958,7 +2020,7 @@ async def check_progress(
 
 @activity.defn
 async def call_llm_activity(
-    messages: List[Dict[str, Any]],
+    messages_or_agent_id: Any,
     model: str,
     tool_names: List[str],
     reasoning_max_tokens: int = 256,
@@ -1969,19 +2031,22 @@ async def call_llm_activity(
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
-    
+
     Used by run_agent when called from workflow context (not inside activity).
     Provides proper Temporal activity retries, heartbeating, and streaming to Supabase Realtime.
-    
+
     Args:
-        messages: Pre-built messages list (system prompt + context)
+        messages_or_agent_id: Either pre-built messages list OR an agent_id string.
+            When agent_id string: reads context from _pending_llm_context shared state,
+            builds messages inside the activity (so file downloads work and base64
+            content never crosses the Temporal 2MB payload boundary).
         model: Model to use
         tool_names: List of tool names for dynamic AgentAction model
         reasoning_max_tokens: Max reasoning tokens (0 disables)
         agent_id: Agent ID for streaming (optional)
         stream_id: Stream session ID for ordering (optional)
         task_id: Sub-agent task ID for routing to browser panel (optional)
-        
+
     Returns:
         Dict with:
         - response: Assistant response text
@@ -1990,6 +2055,20 @@ async def call_llm_activity(
     """
     try:
         _safe_heartbeat("Calling LLM for structured output")
+
+        # Resolve messages: either pre-built or build from shared context
+        _context_key = None
+        if isinstance(messages_or_agent_id, str):
+            # Agent ID passed — build messages from shared state (avoids 2MB payload limit)
+            _context_key = messages_or_agent_id
+            pending = _pending_llm_context.get(_context_key)
+            if pending is None:
+                raise ValueError(f"No pending LLM context for agent {_context_key}")
+            context, system_prompt, pre_resolved_ids = pending
+            messages = await build_llm_messages(context, system_prompt, pre_resolved_ids=pre_resolved_ids)
+        else:
+            # Legacy: pre-built messages list passed directly
+            messages = messages_or_agent_id
         
         # Create dynamic action model
         AgentActionModel = create_agent_action_model(tool_names)
@@ -2089,7 +2168,11 @@ async def call_llm_activity(
             tool_calls=len(tool_calls_dict),
             tokens=usage.get("total_tokens", 0)
         )
-        
+
+        # Clean up shared state on success
+        if _context_key:
+            _pending_llm_context.pop(_context_key, None)
+
         return {
             "response": result.response if result.response else "",
             "tool_calls": tool_calls_dict,
@@ -2098,6 +2181,9 @@ async def call_llm_activity(
         }
         
     except Exception as e:
+        # Do NOT clean up _pending_llm_context here — Temporal may retry the activity,
+        # and the retry needs the shared state to still be present.
+        # Cleanup happens on success (above) or when the workflow finishes/cancels.
         logger.error("LLM activity failed", error=extract_error_message(e))
         raise
 

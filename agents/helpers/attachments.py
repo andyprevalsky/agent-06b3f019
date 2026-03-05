@@ -8,9 +8,11 @@ import base64
 import httpx
 import logging
 import uuid
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+
+from temporalio import activity
 
 from config import load_config
 
@@ -162,6 +164,11 @@ def clear_file_cache() -> None:
     global _file_cache
     _file_cache.clear()
     logger.debug("File cache cleared")
+
+
+def get_cached_file(file_id: str) -> Optional[Tuple[bytes, Dict[str, Any]]]:
+    """Get file from module-level cache (no I/O). Returns None if not cached."""
+    return _file_cache.get(file_id)
 
 
 async def get_file_from_pointer(
@@ -338,3 +345,63 @@ When the user attaches files:
 - Text files: You can read the full content
 - Other files (docx, xlsx, zip, etc): You receive metadata only, but browser_agent and code_agent can download and use the full file. Direct them to work with these files as needed.
 """
+
+
+def extract_file_pointer_dicts(context: List[Dict]) -> List[Dict]:
+    """Extract unique, eligible file pointer dicts from context.
+
+    Call this in workflow context (cheap, no I/O) to get a small payload
+    that can be passed to resolve_attachments_activity without exceeding
+    Temporal's 2MB payload limit.
+    """
+    seen: Set[str] = set()
+    result: List[Dict] = []
+
+    for msg in context:
+        file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+        metadata = msg.get("metadata", {}) or {}
+        attachments_data = metadata.get("attachments", []) if isinstance(metadata, dict) else []
+
+        if file_pointer and isinstance(file_pointer, dict):
+            attachments_data = [file_pointer] + list(attachments_data)
+
+        for att_data in attachments_data:
+            if not isinstance(att_data, dict):
+                continue
+            fp = FilePointer.from_dict(att_data)
+            if not fp.id or fp.id in seen:
+                continue
+            seen.add(fp.id)
+
+            if not fp.is_small_enough_for_llm() or not fp.can_be_read_by_llm():
+                continue
+
+            result.append(att_data)
+
+    return result
+
+
+@activity.defn
+async def resolve_attachments_activity(file_pointers: List[Dict]) -> List[str]:
+    """
+    Pre-download eligible file attachments into module-level cache.
+
+    Runs inside a Temporal activity so httpx is available.
+    Accepts a list of FilePointer dicts (extracted in workflow via extract_file_pointer_dicts).
+    Returns list of resolved file IDs (tiny payload). The actual file bytes
+    live in _file_cache which is shared with workflow context via sandbox passthrough.
+    """
+    resolved_ids: List[str] = []
+
+    for att_data in file_pointers:
+        fp = FilePointer.from_dict(att_data)
+
+        try:
+            await get_file_from_pointer(fp)  # populates _file_cache
+            resolved_ids.append(fp.id)
+            activity.heartbeat(f"Resolved {fp.original_filename}")
+        except Exception as e:
+            logger.warning(f"Failed to pre-download {fp.original_filename}: {e}")
+
+    logger.info(f"[Attachments] Pre-resolved {len(resolved_ids)} files for LLM context")
+    return resolved_ids

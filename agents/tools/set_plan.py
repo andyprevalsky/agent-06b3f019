@@ -117,10 +117,8 @@ def _get_planner_tools_description() -> str:
             lines.append(f"- {name}: {PLANNING_TOOL_DESCRIPTIONS[name]}")
         elif name in TOOL_MODELS:
             model = TOOL_MODELS[name]
-            doc = model.__doc__ or ""
-            # Get first sentence of docstring
-            first_sentence = doc.split('.')[0] if doc else 'No description'
-            lines.append(f"- {name}: {first_sentence}")
+            doc = (model.__doc__ or "").strip()
+            lines.append(f"- {name}: {doc if doc else 'No description'}")
     return "\n".join(lines) if lines else "Standard execution tools available."
 
 

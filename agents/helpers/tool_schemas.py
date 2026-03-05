@@ -297,6 +297,11 @@ class MessagePersonTool(BaseModel):
     channel: Literal["imessage", "email"] = Field(
         description="Communication channel: 'imessage' for iMessage/SMS via user's Mac, 'email' for email via user's Gmail"
     )
+    from_email: Optional[str] = Field(
+        default=None,
+        description="The email address to send from (required when channel is 'email'). "
+        "Must match one of the user's connected email accounts."
+    )
     intent: str = Field(
         description="Detailed description of the intent/purpose of the message. "
         "Be as descriptive as possible about what the message should accomplish. "

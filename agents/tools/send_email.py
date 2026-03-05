@@ -215,7 +215,8 @@ async def send_email_activity(
     to: str,
     subject: str,
     body: str,
-    cc: Optional[str] = None
+    cc: Optional[str] = None,
+    from_email: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Activity: Send email via backend API (backend handles Gmail OAuth).
@@ -226,6 +227,7 @@ async def send_email_activity(
         subject: Email subject
         body: Email body content
         cc: Optional CC recipient
+        from_email: Optional sender email to select which connected account to send from
 
     Returns:
         Dict with:
@@ -249,6 +251,8 @@ async def send_email_activity(
             }
             if cc:
                 payload["cc"] = cc
+            if from_email:
+                payload["from_email"] = from_email
 
             response = await client.post(
                 f"{config.backend.api_url}/api/integrations/email/send",

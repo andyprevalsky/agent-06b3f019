@@ -266,11 +266,34 @@ def _format_user_context(
     authenticated_sites: List[str],
     user_settings: dict,
     recent_messages: List[dict],
-    frequent_contacts: List[dict]
+    frequent_contacts: List[dict],
+    integrations: Optional[List[dict]] = None,
 ) -> str:
     """Format the user context string for the system prompt."""
     sections = []
-    
+
+    # Section: Connected Integrations (Gmail, etc.)
+    if integrations:
+        connected = [i for i in integrations if i.get('status') == 'CONNECTED']
+        if connected:
+            integration_lines = []
+            for integ in connected:
+                name = integ.get('name', '')
+                # Extract connected email addresses from emailCredentials
+                creds = integ.get('emailCredentials', [])
+                emails = [c.get('email') for c in creds if c.get('email')]
+                if emails:
+                    integration_lines.append(f"- {name}: {', '.join(emails)}")
+                else:
+                    integration_lines.append(f"- {name}")
+            if integration_lines:
+                sections.append(
+                    "CONNECTED INTEGRATIONS\n"
+                    "These integrations are connected and available. Use the message_person tool\n"
+                    "to send emails (no SMTP credentials needed - Gmail is already connected):\n"
+                    + "\n".join(integration_lines)
+                )
+
     # Section: Authenticated Browser Sessions
     if authenticated_sites:
         sites_str = ", ".join(authenticated_sites[:50])  # Limit to 50 sites
@@ -449,7 +472,8 @@ async def fetch_user_context(user_id: str) -> str:
             authenticated_sites=authenticated_sites,
             user_settings=user_settings,
             recent_messages=recent_messages,
-            frequent_contacts=frequent_contacts
+            frequent_contacts=frequent_contacts,
+            integrations=integrations,
         )
         
         # Update cache

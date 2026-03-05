@@ -617,6 +617,14 @@ async def spawn_claude_code_activity(
                     # Claude Code stopped talking - get filtered output
                     filtered_output = terminal.get_display()
 
+                    # Clear pending_output BEFORE async calls to avoid race condition:
+                    # If on_output fires during the LLM call or stdin send below,
+                    # pending_output will be set back to True by the callback,
+                    # ensuring we detect the next silence. Previously this was set
+                    # AFTER the awaits, which could overwrite output that arrived
+                    # during the call, causing the loop to spin forever.
+                    pending_output = False
+
                     if filtered_output:
                         logger.info(
                             "[ClaudeCode] Silence detected, calling parent LLM",
@@ -678,8 +686,6 @@ async def spawn_claude_code_activity(
                                 status=MessageStatus.FINISHED,
                                 action_type="agent_response",
                             )
-
-                    pending_output = False  # Processed this batch
 
                 # Periodic status updates (every 30s)
                 if _safe_time() - last_status_update >= 30:

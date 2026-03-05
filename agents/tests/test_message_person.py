@@ -285,6 +285,8 @@ async def test_full_imessage_flow(mock_workflow, mock_approval):
                 "person": {"firstName": "Alice", "lastName": "Jones", "phoneNumber": "+19725551234", "email": "alice@test.com"},
                 "messages": [{"channel": "SMS", "from": "+19725551234", "to": "+1000", "timestamp": "2024-01-01", "message": "Hey!"}],
             }
+        elif "fetch_recent_messages" in name:
+            return {"messages": [{"channel": "SMS", "from": "+1000", "to": "+9999", "timestamp": "2024-01-01", "message": "General msg"}], "count": 1}
         elif "people_search" in name:
             return {"answer": "Alice Jones is a software engineer at Acme Corp."}
         elif "generate_message" in name:
@@ -333,6 +335,8 @@ async def test_full_email_flow(mock_workflow, mock_approval):
                 "person": {"firstName": "Bob", "lastName": "Lee", "phoneNumber": "+19725551234", "email": "bob@test.com"},
                 "messages": [],
             }
+        elif "fetch_recent_messages" in name:
+            return {"messages": [], "count": 0}
         elif "people_search" in name:
             return {"answer": "Bob Lee is a VC at Capital Fund."}
         elif "generate_message" in name:

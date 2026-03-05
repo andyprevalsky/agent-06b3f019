@@ -90,6 +90,7 @@ class MessagePersonManager(ToolManager):
     ) -> AsyncGenerator[ToolEvent, None]:
         person_id_raw = tool_call.get("person_id", "")
         channel = tool_call.get("channel", "").lower()
+        from_email = tool_call.get("from_email", "")
         intent = tool_call.get("intent", "")
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
@@ -104,6 +105,13 @@ class MessagePersonManager(ToolManager):
         if channel not in ("imessage", "email"):
             yield ToolEvent(type=EventType.POST_MESSAGE, title="Invalid channel",
                             message=f"Channel must be 'imessage' or 'email', got: '{channel}'",
+                            status=MessageStatus.ERROR)
+            return
+
+        if channel == "email" and not from_email:
+            yield ToolEvent(type=EventType.POST_MESSAGE, title="Missing from_email",
+                            message="from_email is required when channel is 'email'. "
+                            "Specify which connected email address to send from.",
                             status=MessageStatus.ERROR)
             return
 
@@ -193,6 +201,23 @@ class MessagePersonManager(ToolManager):
                             status=MessageStatus.ERROR)
             return
 
+        # ── Step 1b: Fetch general recent messages for voice/style ────────
+        general_messages_context = ""
+        try:
+            general_result = await workflow.execute_activity(
+                fetch_recent_messages_activity,
+                args=[user_id, 100, 30],  # limit=100, days=30
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2, backoff_coefficient=2.0,
+                                         initial_interval=timedelta(seconds=1),
+                                         maximum_interval=timedelta(seconds=10)),
+            )
+            general_messages = general_result.get("messages", [])
+            general_messages_context = _format_messages_for_context(general_messages, limit=100)
+        except Exception as e:
+            logger.warning("Failed to fetch general recent messages, continuing without", error=str(e))
+            general_messages_context = ""
+
         # ── Step 2: Exa enrichment (only if we have a name) ─────────────
         exa_context = ""
         has_name = person.get("firstName") and person.get("lastName")
@@ -241,6 +266,7 @@ class MessagePersonManager(ToolManager):
                     intent,
                     channel,
                     person_email,
+                    general_messages_context,
                 ],
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=2, backoff_coefficient=2.0,
@@ -325,7 +351,7 @@ Reply to approve, or say "no" to cancel."""
             else:  # email
                 send_result = await workflow.execute_activity(
                     send_email_activity,
-                    args=[user_id, person_email, generated_subject or "(no subject)", generated_message, None],
+                    args=[user_id, person_email, generated_subject or "(no subject)", generated_message, None, from_email],
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=3, backoff_coefficient=2.0,
                                              initial_interval=timedelta(seconds=1),
@@ -415,6 +441,42 @@ from tools.send_email import send_email_activity  # noqa: E402
 
 
 @activity.defn
+async def fetch_recent_messages_activity(
+    user_id: str,
+    limit: int = 100,
+    days: int = 30,
+) -> Dict[str, Any]:
+    """Fetch recent messages across all contacts for a user to understand their writing style.
+
+    Returns: {"messages": [...], "count": int}
+    """
+    from config import load_config
+
+    activity.heartbeat("Fetching recent messages for voice analysis")
+    config = load_config()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/people/messages/recent",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            params={"limit": limit, "days": days},
+        )
+
+        if response.status_code != 200:
+            try:
+                result = response.json()
+                error_msg = result.get("error", f"Backend error ({response.status_code})")
+            except Exception:
+                error_msg = f"Backend error ({response.status_code}): {response.text[:200]}"
+            raise Exception(error_msg)
+
+        return response.json()
+
+
+@activity.defn
 async def generate_message_activity(
     model: str,
     system_name: str,
@@ -425,6 +487,7 @@ async def generate_message_activity(
     intent: str,
     channel: str,
     person_email: Optional[str] = None,
+    general_messages_context: str = "",
 ) -> Dict[str, Any]:
     """Generate a message for a person using the inherited LLM model.
 
@@ -433,6 +496,8 @@ async def generate_message_activity(
     from helpers.llm import call_llm
 
     activity.heartbeat(f"Generating message for {person_name}")
+
+    channel_label = "iMessage" if channel == "imessage" else "Email"
 
     channel_instructions = ""
     if channel == "imessage":
@@ -448,26 +513,42 @@ async def generate_message_activity(
             f"Sign the email as {system_name}."
         )
 
-    system_prompt = f"""You are {system_name}'s messaging assistant. Your job is to craft the perfect message
-to send to {person_name} based on the intent and context provided.
+    system_prompt = f"""You are ghostwriting a message for {system_name}. The message must sound like it was written
+by {system_name} themselves - you are writing IN THEIR VOICE, not as an assistant.
+
+**Channel:** {channel_label}
 
 {channel_instructions}
 
-IMPORTANT RULES:
+VOICE & STYLE RULES:
+- Study {system_name}'s previous messages carefully. Mimic their exact writing style: sentence length, vocabulary,
+  punctuation habits, capitalization patterns, use of abbreviations, emoji usage (or lack thereof).
+- Pay special attention to how {system_name} writes on THIS specific channel ({channel_label}). People write
+  differently across channels - texts are usually more casual than emails. Match the channel-specific style.
+- Study how {system_name} specifically communicates with {person_name}. The tone, formality, and style may differ
+  from how they write to other people. Match the relationship dynamic.
+- If previous messages exist, the generated message should be indistinguishable from {system_name}'s real messages.
+
+CONTENT RULES:
 - Write ONLY the message content (and subject if email). No meta-commentary.
-- Match the tone of previous conversations if available.
 - Be authentic and genuine - this message is sent from {system_name}'s account.
 - CRITICAL: NEVER use em dashes ("\u2014") anywhere in the message. This is a strict, non-negotiable rule. Always use regular hyphens (-) or commas instead.
 - Reference specific shared context when relevant (previous conversations, mutual interests).
-- Do NOT be overly formal or robotic.
 - Do NOT include placeholder text like [your name] or [company].
 """
 
-    user_prompt = f"""## Intent
+    user_prompt = f"""## Channel
+{channel_label}
+
+## Intent
 {intent}
 
 ## Previous Messages with {person_name}
 {messages_context}
+
+## {system_name}'s Recent Messages (all contacts)
+Use these to understand {system_name}'s general writing voice, tone, and habits across conversations.
+{general_messages_context if general_messages_context else "No recent messages available."}
 
 ## Research about {person_name}
 {exa_context if exa_context else "No additional research available."}
@@ -477,7 +558,7 @@ IMPORTANT RULES:
 
 ---
 
-Now write the message. {"Include a subject line on the first line prefixed with 'Subject: ' followed by the message body." if channel == "email" else "Write only the message text."}"""
+Now write the message as {system_name}. {"Include a subject line on the first line prefixed with 'Subject: ' followed by the message body." if channel == "email" else "Write only the message text."}"""
 
     result = await call_llm(
         messages=[

@@ -404,12 +404,14 @@ export async function runGmailSyncJob(): Promise<void> {
 
   const cutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
 
-  // Find Gmail integrations that are due for sync
+  // Find Gmail integrations that are due for sync.
+  // Include CONNECTED, SYNCING, and SYNC_FAILED statuses — if an integration
+  // hasn't synced in over an hour, it should be retried regardless of status.
   const dueIntegrations = await prisma.integration.findMany({
     where: {
       name: 'gmail',
       isActive: true,
-      status: IntegrationStatus.CONNECTED,
+      status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNCING, IntegrationStatus.SYNC_FAILED] },
       OR: [
         { lastSyncAt: null },
         { lastSyncAt: { lt: cutoff } },

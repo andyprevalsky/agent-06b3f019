@@ -322,6 +322,11 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
       prisma.integration.findMany({
         where: { userId },
         orderBy: { updatedAt: 'desc' },
+        include: {
+          emailCredentials: {
+            select: { email: true },
+          },
+        },
       }),
       prisma.cookie.findMany({
         where: { userId },
@@ -2563,7 +2568,7 @@ function buildRawEmail(params: {
  */
 router.post('/email/send', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { to, subject, body, cc, user_id } = req.body;
+    const { to, subject, body, cc, user_id, from_email } = req.body;
     // For internal calls (API key), accept user_id from body
     // For user calls (JWT), extract from token
     const userId = req.isInternal ? user_id : req.user!.id;
@@ -2585,27 +2590,28 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
       return res.status(400).json({ error: 'Missing required field: body' });
     }
 
-    // Check if user has Gmail credentials - find the first one with a valid access token
-    // TODO: In the future, could accept an optional email parameter to select a specific account
+    // Check if user has Gmail credentials
     const credential = await prisma.emailIntegrationCredential.findFirst({
       where: {
         userId,
         provider: EmailProvider.GMAIL,
         accessToken: { not: null },
+        ...(from_email ? { email: from_email } : {}),
       },
       include: {
         integration: true,
       },
       orderBy: {
-        updatedAt: 'desc', // Use most recently updated credential
+        updatedAt: 'desc',
       },
     });
 
     if (!credential || !credential.accessToken) {
       return res.status(400).json({
         error: 'Gmail not connected',
-        message:
-          'Connect your Gmail in order to allow Rose to send emails on your behalf. To connect your Gmail click on the hamburger icon > Integrations > Connect Gmail',
+        message: from_email
+          ? `No connected Gmail account found for '${from_email}'. Make sure this email is connected in Integrations.`
+          : 'Connect your Gmail in order to allow Rose to send emails on your behalf. To connect your Gmail click on the hamburger icon > Integrations > Connect Gmail',
       });
     }
 

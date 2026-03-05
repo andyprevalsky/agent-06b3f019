@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Query surviving data for pitch deck chart - aggregated by ISO week
+ * Query people/network data breakdown
  */
 
 import 'dotenv/config';
@@ -9,68 +9,90 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-  // 1. User signups
-  const users = await prisma.user.findMany({
-    select: { createdAt: true },
-    orderBy: { createdAt: 'asc' },
-  });
-
-  console.log(`=== USER SIGNUPS BY WEEK (${users.length} total) ===`);
-  const signupWeeks = bucketByWeek(users.map(u => u.createdAt));
-  for (const [week, count] of signupWeeks) {
-    console.log(`  ${week}: ${count}`);
+  const userIdPrefix = process.argv[2];
+  if (!userIdPrefix) {
+    console.error('Usage: npx tsx back-end/scripts/query-db.ts <user-id-prefix>');
+    process.exit(1);
   }
 
-  // 2. Rose API calls
-  const apiLogs = await prisma.roseApiKeyLog.findMany({
-    select: { createdAt: true },
-    orderBy: { createdAt: 'asc' },
+  const people = await prisma.person.findMany({
+    where: { userId: { startsWith: userIdPrefix } },
+    select: {
+      firstName: true,
+      lastName: true,
+      email: true,
+      phoneNumber: true,
+      emailAddresses: true,
+      communicationFrequency: true,
+      messagesExchanged: true,
+      createdAt: true,
+    },
+    orderBy: { messagesExchanged: 'desc' },
   });
 
-  console.log(`\n=== ROSE API CALLS BY WEEK (${apiLogs.length} total) ===`);
-  const apiWeeks = bucketByWeek(apiLogs.map(l => l.createdAt));
-  for (const [week, count] of apiWeeks) {
-    console.log(`  ${week}: ${count}`);
+  console.log(`Total contacts: ${people.length}`);
+
+  // Breakdown by contact info type
+  const hasPhone = people.filter(p => p.phoneNumber).length;
+  const hasEmail = people.filter(p => p.email).length;
+  const hasEmailAddresses = people.filter(p => {
+    const addrs = p.emailAddresses as any;
+    return addrs && Array.isArray(addrs) && addrs.length > 0;
+  }).length;
+  const hasPhoneOnly = people.filter(p => p.phoneNumber && !p.email).length;
+  const hasEmailOnly = people.filter(p => !p.phoneNumber && p.email).length;
+  const hasBoth = people.filter(p => p.phoneNumber && p.email).length;
+  const hasNeither = people.filter(p => !p.phoneNumber && !p.email).length;
+
+  console.log(`\n=== CONTACT INFO BREAKDOWN ===`);
+  console.log(`  Has phone: ${hasPhone}`);
+  console.log(`  Has email: ${hasEmail}`);
+  console.log(`  Has emailAddresses (JSON): ${hasEmailAddresses}`);
+  console.log(`  Phone only (likely iMessage): ${hasPhoneOnly}`);
+  console.log(`  Email only (likely Gmail): ${hasEmailOnly}`);
+  console.log(`  Both: ${hasBoth}`);
+  console.log(`  Neither: ${hasNeither}`);
+
+  // Frequency breakdown
+  const freqMap = new Map<string, number>();
+  for (const p of people) {
+    const f = p.communicationFrequency || 'none';
+    freqMap.set(f, (freqMap.get(f) || 0) + 1);
+  }
+  console.log(`\n=== COMMUNICATION FREQUENCY ===`);
+  for (const [f, count] of [...freqMap.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${f}: ${count}`);
   }
 
-  // 3. Agents spawned (GoalHistory + current)
-  const archived = await prisma.goalHistory.findMany({
-    select: { agentCreatedAt: true },
-    orderBy: { agentCreatedAt: 'asc' },
+  // Message count distribution
+  const msgBuckets = { '0': 0, '1-10': 0, '11-50': 0, '51-100': 0, '100+': 0 };
+  for (const p of people) {
+    const m = p.messagesExchanged;
+    if (m === 0) msgBuckets['0']++;
+    else if (m <= 10) msgBuckets['1-10']++;
+    else if (m <= 50) msgBuckets['11-50']++;
+    else if (m <= 100) msgBuckets['51-100']++;
+    else msgBuckets['100+']++;
+  }
+  console.log(`\n=== MESSAGE COUNT DISTRIBUTION ===`);
+  for (const [bucket, count] of Object.entries(msgBuckets)) {
+    console.log(`  ${bucket} messages: ${count} contacts`);
+  }
+
+  // Top 15 by messages exchanged
+  console.log(`\n=== TOP 15 BY MESSAGES ===`);
+  for (const p of people.slice(0, 15)) {
+    const name = `${p.firstName} ${p.lastName}`.trim();
+    const contact = p.phoneNumber || p.email || 'no contact';
+    console.log(`  ${name}: ${p.messagesExchanged} msgs | ${contact} | ${p.communicationFrequency}`);
+  }
+
+  // Check MessageRecord count
+  const msgRecordCount = await prisma.messageRecord.count({
+    where: { person: { userId: { startsWith: userIdPrefix } } },
   });
-  const current = await prisma.agent.findMany({
-    select: { createdAt: true },
-    orderBy: { createdAt: 'asc' },
-  });
-
-  const allAgentDates = [
-    ...archived.map(a => a.agentCreatedAt),
-    ...current.map(a => a.createdAt),
-  ].sort((a, b) => a.getTime() - b.getTime());
-
-  console.log(`\n=== AGENTS SPAWNED BY WEEK (${allAgentDates.length} total) ===`);
-  const agentWeeks = bucketByWeek(allAgentDates);
-  for (const [week, count] of agentWeeks) {
-    console.log(`  ${week}: ${count}`);
-  }
-}
-
-function bucketByWeek(dates: Date[]): [string, number][] {
-  const map = new Map<string, number>();
-  for (const d of dates) {
-    const key = getMonday(d);
-    map.set(key, (map.get(key) || 0) + 1);
-  }
-  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-}
-
-function getMonday(date: Date): string {
-  const d = new Date(date);
-  // Use UTC to avoid timezone issues
-  const day = d.getUTCDay();
-  const diff = day === 0 ? -6 : 1 - day; // Monday = 1
-  d.setUTCDate(d.getUTCDate() + diff);
-  return d.toISOString().slice(0, 10);
+  console.log(`\n=== MESSAGE RECORDS ===`);
+  console.log(`Total MessageRecords: ${msgRecordCount}`);
 }
 
 main()

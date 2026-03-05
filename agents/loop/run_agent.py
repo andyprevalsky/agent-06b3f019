@@ -22,11 +22,12 @@ import uuid
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from pydantic import BaseModel
-from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity, build_llm_messages
+from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity, build_llm_messages, _pending_llm_context
 from helpers.tool_schemas import create_agent_action_model
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import compress_context
 from helpers.update_status import update_agent_status
+from helpers.attachments import resolve_attachments_activity, extract_file_pointer_dicts
 from tools.base import ToolEvent, EventType, MessageStatus
 from loop.context_utils import poll_and_update_context
 from tools.knowledge_base import query_blueprints_activity, query_blueprints
@@ -287,6 +288,24 @@ async def run_agent(
         # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
         if build_messages:
             messages = build_messages(context, current_system_prompt)
+        elif not is_inside_temporal_activity:
+            # Workflow context: pre-download files, then defer message building to call_llm_activity
+            # so that base64 content never crosses Temporal's 2MB payload boundary.
+            # The resolve activity populates _file_cache (shared in-process memory).
+            # call_llm_activity reads from _pending_llm_context + _file_cache.
+            pre_resolved_ids = None
+            file_pointer_dicts = extract_file_pointer_dicts(context)
+            if file_pointer_dicts:
+                resolved_list = await execute_activity(
+                    resolve_attachments_activity,
+                    args=[file_pointer_dicts],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                pre_resolved_ids = set(resolved_list) if resolved_list else None
+            # Store context in shared memory — call_llm_activity will build messages inside
+            _pending_llm_context[agent_id] = (context, current_system_prompt, pre_resolved_ids)
+            messages = None  # Signals to use shared state path below
         else:
             messages = await build_llm_messages(context, current_system_prompt)
         
@@ -378,9 +397,12 @@ async def run_agent(
                     pass
             else:
                 # Workflow context - call LLM via activity (streams to Supabase Realtime inside)
+                # Pass agent_id as first arg so the activity builds messages from _pending_llm_context
+                # (shared in-process memory). This avoids serializing large messages with base64 file
+                # content through Temporal's 2MB payload limit.
                 llm_result = await workflow.execute_activity(
                     call_llm_activity,
-                    args=[messages, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id, current_claude_token],
+                    args=[agent_id, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id, current_claude_token],
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=30),
@@ -456,6 +478,7 @@ async def run_agent(
 
         except asyncio.CancelledError:
             logger.info("LLM call cancelled (paused)")
+            _pending_llm_context.pop(agent_id, None)
             return {
                 "status": "paused",
                 "context": context,
@@ -765,6 +788,9 @@ async def run_agent(
                     "metadata": {"verifierMessage": True}
                 })
     
+    # Clean up shared state before exiting loop
+    _pending_llm_context.pop(agent_id, None)
+
     # Max iterations reached - run final verifier to capture current state
     logger.warning(f"Max iterations reached: {max_iterations}")
 

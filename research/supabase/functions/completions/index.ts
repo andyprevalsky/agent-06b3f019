@@ -3150,7 +3150,17 @@ async function handleStreaming(
   isCerebras: boolean,
   poolName: string,     // Added: for debugging
   poolSize: number,     // Added: for debugging
-  claudeAuth?: { token: string }  // Optional: user's Claude OAuth token (uses Bearer auth + Claude Code headers)
+  claudeAuth?: { token: string },  // Optional: user's Claude OAuth token (uses Bearer auth + Claude Code headers)
+  stallConfig?: {
+    timeoutMs: number,  // Max ms between content deltas before triggering fallback
+    onFallback: () => Promise<{
+      reader: ReadableStreamDefaultReader<Uint8Array>,
+      firstData: string,
+      actualModel: string,
+      poolName: string,
+      poolSize: number,
+    }>
+  }
 ) {
   // Get model-specific messages (transforms screenshots for vision models)
   const modelMessages = getMessagesForModel(messages, actualModel);
@@ -3314,6 +3324,15 @@ async function handleStreaming(
         const decoder = new TextDecoder();
         let buffer = '';
 
+        // Stall detection: reassignable reader/model so we can swap to racing on stall
+        let currentReader = reader;
+        let currentModel = actualModel;
+        let currentPoolName = poolName;
+        let currentPoolSize = poolSize;
+        let currentStallConfig = stallConfig;
+        let hasReceivedContent = false;
+        let lastContentTime = Date.now();
+
         // Anthropic usage tracking - capture from message_start and message_delta
         let anthropicInputTokens = 0;
         let anthropicOutputTokens = 0;
@@ -3333,9 +3352,9 @@ async function handleStreaming(
           const chunk: RoseCompletionChunk = {
             choices: [{ index: 0, delta: { content } }],
             requested_model: requestedModel,
-            actual_model: actualModel,
-            pool_name: poolName,
-            pool_size: poolSize
+            actual_model: currentModel,
+            pool_name: currentPoolName,
+            pool_size: currentPoolSize
           };
           const payload = `data: ${JSON.stringify(chunk)}\n\n`;
           logOutgoingSseChunk('direct-delta', payload);
@@ -3343,11 +3362,55 @@ async function handleStreaming(
         };
 
         while (true) {
-          const { done, value } = await reader.read();
+          // Stall detection: timeout reader.read() based on time since last content
+          let done: boolean;
+          let value: Uint8Array | undefined;
+          try {
+            if (currentStallConfig) {
+              const elapsed = Date.now() - lastContentTime;
+              const remaining = Math.max(currentStallConfig.timeoutMs - elapsed, 0);
+              const result = await withTimeout(currentReader.read(), remaining, 'content deadline');
+              done = result.done;
+              value = result.value;
+            } else {
+              const result = await currentReader.read();
+              done = result.done;
+              value = result.value;
+            }
+          } catch (timeoutError) {
+            if (!hasReceivedContent && currentStallConfig?.onFallback) {
+              // Never got content - seamlessly switch to racing
+              console.warn('[Stall] No content from Claude in 20s, switching to racing');
+              currentReader.cancel();
+              try {
+                const fallback = await currentStallConfig.onFallback();
+                currentReader = fallback.reader;
+                currentModel = fallback.actualModel;
+                currentPoolName = fallback.poolName;
+                currentPoolSize = fallback.poolSize;
+                if (fallback.firstData) buffer += fallback.firstData;
+                currentStallConfig = undefined;  // disable timeout for racing reader
+                lastContentTime = Date.now();
+                continue;
+              } catch (fallbackError) {
+                console.error('[Stall] Fallback racing also failed, closing stream:', fallbackError);
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: 'All model providers failed', type: 'server_error' } })}\n\n`));
+                controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                controller.close();
+                break;
+              }
+            }
+            // Had content but stalled - close gracefully
+            console.warn('[Stall] Claude stalled mid-content after 20s, closing');
+            currentReader.cancel();
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+            break;
+          }
 
           if (done) {
             // In native tool mode, close the JSON envelope
-            if (nativeToolMode && isAnthropicModel(actualModel)) {
+            if (nativeToolMode && isAnthropicModel(currentModel)) {
               if (ntState === 'initial') {
                 emitDelta('{"response": "", "tool_calls": []}');
               } else if (ntState === 'in_response') {
@@ -3359,7 +3422,7 @@ async function handleStreaming(
             }
 
             // For Anthropic models, emit final usage chunk before [DONE]
-            if (isAnthropicModel(actualModel) && (anthropicInputTokens > 0 || anthropicOutputTokens > 0)) {
+            if (isAnthropicModel(currentModel) && (anthropicInputTokens > 0 || anthropicOutputTokens > 0)) {
               const usageChunk: RoseCompletionChunk = {
                 choices: [{
                   index: 0,
@@ -3372,9 +3435,9 @@ async function handleStreaming(
                   total_tokens: anthropicInputTokens + anthropicOutputTokens
                 },
                 requested_model: requestedModel,
-                actual_model: actualModel,
-                pool_name: poolName,
-                pool_size: poolSize
+                actual_model: currentModel,
+                pool_name: currentPoolName,
+                pool_size: currentPoolSize
               };
               const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
               logOutgoingSseChunk('direct-usage', payload);
@@ -3403,7 +3466,7 @@ async function handleStreaming(
                 const parsed = JSON.parse(data);
 
                 // Transform Anthropic streaming events to OpenAI format
-                if (isAnthropicModel(actualModel)) {
+                if (isAnthropicModel(currentModel)) {
                   // Capture input tokens from message_start
                   if (parsed.type === 'message_start' && parsed.message?.usage?.input_tokens) {
                     anthropicInputTokens = parsed.message.usage.input_tokens;
@@ -3450,6 +3513,8 @@ async function handleStreaming(
                     }
 
                     if (parsed.type === 'content_block_delta') {
+                      lastContentTime = Date.now();
+                      hasReceivedContent = true;
                       if (ntCurrentBlock === 'text' && parsed.delta?.text) {
                         emitDelta(escapeForJsonString(parsed.delta.text));
                       } else if (ntCurrentBlock === 'tool_use' && parsed.delta?.partial_json) {
@@ -3487,6 +3552,8 @@ async function handleStreaming(
 
                   // Transform to OpenAI format
                   // Handle both delta.text (normal) and delta.partial_json (JSON schema output)
+                  lastContentTime = Date.now();
+                  hasReceivedContent = true;
                   emitDelta(parsed.delta?.text || parsed.delta?.partial_json || '');
                 } else {
                   // OpenRouter/Cerebras - pass through with metadata
@@ -3494,10 +3561,12 @@ async function handleStreaming(
                   if (!parsed.choices?.length) {
                     continue;
                   }
+                  lastContentTime = Date.now();
+                  hasReceivedContent = true;
                   parsed.requested_model = requestedModel;
-                  parsed.actual_model = actualModel;
-                  parsed.pool_name = poolName;
-                  parsed.pool_size = poolSize;
+                  parsed.actual_model = currentModel;
+                  parsed.pool_name = currentPoolName;
+                  parsed.pool_size = currentPoolSize;
                   const payload = `data: ${JSON.stringify(parsed)}\n\n`;
                   logOutgoingSseChunk('direct-passthrough', payload);
                   controller.enqueue(encoder.encode(payload));
@@ -4285,6 +4354,8 @@ serve(async (req) => {
       const claudeApiModel = isLitePool ? 'claude-sonnet-4-6' : 'claude-opus-4-6';
       const claudePassthroughModel = isLitePool ? 'anthropic/claude-sonnet-4.6' : 'anthropic/claude-opus-4.6';
       console.log(`🔑 [${requestId}] Claude token present, attempting direct Anthropic call with ${claudeApiModel} (skipping racing)`);
+      // Resolve pool for stall fallback (racing needs the model pool)
+      const fallbackPool = MODEL_POOLS[poolName] || MODEL_POOLS['rose-1-lite'];
       try {
         if (stream) {
           return await handleStreaming(
@@ -4303,7 +4374,24 @@ serve(async (req) => {
             false,  // isCerebras
             'claude-token',
             1,
-            { token: claude_token }  // claudeAuth
+            { token: claude_token },  // claudeAuth
+            {
+              timeoutMs: 20000,
+              onFallback: async () => {
+                console.log(`🔄 [${requestId}] Stall fallback: starting model racing`);
+                const openRouterKey = Deno.env.get('OPENROUTER_API_KEY')!;
+                const { latencies } = await getCachedLatencies(supabase, poolName, fallbackPool);
+                const racingTrio = selectRacingTrio(fallbackPool, latencies);
+                const timings: Record<string, number> = {};
+                const { model: winningModel, reader, firstData } = await raceModels(
+                  racingTrio, messages, temperature, maxTokens, seed,
+                  tools, tool_choice, response_format, cappedReasoning,
+                  openRouterKey, supabaseUrl, supabase, poolName, timings
+                );
+                console.log(`🔄 [${requestId}] Stall fallback: racing winner is ${winningModel}`);
+                return { reader, firstData, actualModel: winningModel, poolName, poolSize: fallbackPool.length };
+              }
+            }
           );
         } else {
           // Non-streaming claude token path
@@ -4435,7 +4523,8 @@ serve(async (req) => {
           });
         }
       } catch (error) {
-        console.warn(`⚠️ [${requestId}] Claude token call failed, falling back to racing: ${error}`);
+        const isStall = String(error).includes('timed out');
+        console.warn(`⚠️ [${requestId}] Claude token call failed${isStall ? ' (stall detected)' : ''}, falling back to racing: ${error}`);
         // Fall through to normal racing path
       }
     }
