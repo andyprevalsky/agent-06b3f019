@@ -203,13 +203,12 @@ async def _fetch_recent_messages(client: httpx.AsyncClient, config, user_id: str
         return []
 
 
-async def _fetch_frequent_contacts(client: httpx.AsyncClient, config, user_id: str) -> List[dict]:
-    """Fetch frequent contacts from backend."""
+async def _fetch_top_contacts(client: httpx.AsyncClient, config, user_id: str, limit: int = 2000) -> List[dict]:
+    """Fetch top contacts sorted by message count (tiebreak: most recent message)."""
     try:
-        # Get people with communicationFrequency set
         response = await client.get(
             f"{config.backend.api_url}/api/people",
-            params={"limit": 100},  # Get more people, filter client-side
+            params={"limit": limit},
             headers={
                 "X-API-Key": config.backend.api_key or "",
                 "X-User-Id": user_id,
@@ -218,17 +217,9 @@ async def _fetch_frequent_contacts(client: httpx.AsyncClient, config, user_id: s
         )
         response.raise_for_status()
         data = response.json()
-        people = data.get('people', [])
-        
-        # Filter to people with daily/weekly/monthly communication frequency
-        frequent = [
-            p for p in people
-            if p.get('communicationFrequency') in ['daily', 'weekly', 'monthly']
-        ]
-        
-        return frequent
+        return data.get('people', [])
     except Exception as e:
-        logger.warning("Failed to fetch frequent contacts", user_id=user_id, error=str(e))
+        logger.warning("Failed to fetch top contacts", user_id=user_id, error=str(e))
         return []
 
 
@@ -348,53 +339,51 @@ def _format_user_context(
                 "\n\n".join(message_lines)
             )
     
-    # Section: Frequent Contacts
+    # Section: Network (top contacts by message volume)
     if frequent_contacts:
         contact_lines = []
-        for contact in frequent_contacts[:30]:  # Limit to 30 contacts
-            parts = []
-            
-            # Name
+        for contact in frequent_contacts:
+            # Name or phone as identifier
             first = contact.get('firstName', '')
             last = contact.get('lastName', '')
             name = f"{first} {last}".strip()
-            if not name:
+            phone = contact.get('phoneNumber')
+
+            if not name and not phone:
                 continue
-            
-            # Relation (in parentheses if present)
-            relation = contact.get('relation')
-            if relation:
-                parts.append(f"{name} ({relation})")
-            else:
-                parts.append(name)
-            
-            # Communication frequency
+
+            # Always-included fields
+            parts = [name] if name else []
+
+            if phone:
+                parts.append(phone)
+
             freq = contact.get('communicationFrequency')
             if freq:
                 parts.append(freq)
-            
-            # Profession/Company
-            profession = contact.get('profession')
+
+            msgs = contact.get('messagesExchanged')
+            if msgs:
+                parts.append(f"{msgs} msgs")
+
+            # Conditionally-included fields (only when populated)
+            relation = contact.get('relation')
+            if relation:
+                parts.append(relation)
+
             company = contact.get('company')
-            if profession and company:
-                parts.append(f"{profession} @ {company}")
-            elif profession:
-                parts.append(profession)
-            elif company:
-                parts.append(f"@ {company}")
-            
-            # Contact info (phone or email)
-            phone = contact.get('phoneNumber')
+            if company:
+                parts.append(company)
+
             email = contact.get('email')
-            if phone:
-                parts.append(phone)
-            elif email:
+            if email and not phone:
+                # Only include email if no phone (avoid redundant contact info)
                 parts.append(email)
-            
-            contact_lines.append("- " + " | ".join(parts))
-        
+
+            contact_lines.append(" | ".join(parts))
+
         if contact_lines:
-            sections.append("FREQUENT CONTACTS\n" + "\n".join(contact_lines))
+            sections.append("YOUR NETWORK\n" + "\n".join(contact_lines))
     
     # Combine all sections
     if not sections:
@@ -446,7 +435,7 @@ async def fetch_user_context(user_id: str) -> str:
             integrations_task = _fetch_integrations_and_auth_domains(client, config, user_id)
             user_settings_task = _fetch_user_settings(client, config, user_id)
             messages_task = _fetch_recent_messages(client, config, user_id, limit=200)
-            contacts_task = _fetch_frequent_contacts(client, config, user_id)
+            contacts_task = _fetch_top_contacts(client, config, user_id)
 
             (integrations, authenticated_sites), user_settings, recent_messages, frequent_contacts = await asyncio.gather(
                 integrations_task,

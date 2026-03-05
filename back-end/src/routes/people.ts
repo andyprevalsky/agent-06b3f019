@@ -234,30 +234,35 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
     }
     
     const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 50;
+    const limit = Math.min(parseInt(req.query.limit as string) || 2000, 2000);
     const skip = (page - 1) * limit;
-    
+
     // Get total count for pagination
     const total = await prisma.person.count({
       where: { userId },
     });
-    
-    // Get people with message counts using raw query for performance
-    // We use a subquery to count MessageRecords for each person
+
+    // Get people sorted by messagesExchanged DESC, tiebreak by most recent message
     const peopleWithCounts = await prisma.$queryRaw<Array<any>>`
-      SELECT 
-        p.*
+      SELECT
+        p.*,
+        MAX(mr."timestamp") as "lastMessageAt"
       FROM "Person" p
+      LEFT JOIN "MessageRecord" mr ON mr."personId" = p."id"
       WHERE p."userId" = ${userId}
-      ORDER BY p."messagesExchanged" DESC
+      GROUP BY p."id"
+      ORDER BY p."messagesExchanged" DESC, "lastMessageAt" DESC NULLS LAST
       LIMIT ${limit}
       OFFSET ${skip}
     `;
-    
+
     const totalPages = Math.ceil(total / limit);
-    
+
+    // Strip lastMessageAt — only used for ordering, not part of the response shape
+    const people = peopleWithCounts.map(({ lastMessageAt, ...rest }) => rest);
+
     return res.json({
-      people: peopleWithCounts,
+      people,
       pagination: {
         page,
         limit,
