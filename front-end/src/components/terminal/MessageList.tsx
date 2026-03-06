@@ -738,29 +738,6 @@ export function MessageList({
 
           {/* Completed - FeedbackBanner is now rendered below CompletionSummaryCard in MessageBubble */}
 
-          {/* Preview Mode banner for web-spawned agents */}
-          {agent?.source === 'WEB' && (
-            <div className="flex gap-3">
-              <div
-                className="flex items-center gap-2 py-1.5 px-3 rounded-full border border-border"
-                style={{
-                  backdropFilter: 'blur(12px)',
-                  WebkitBackdropFilter: 'blur(12px)',
-                  backgroundColor: 'rgba(255, 255, 255, 0.1)',
-                }}
-              >
-                <span className="text-muted-foreground text-sm">
-                  Agents spawned via web are in Preview Mode and have restricted functionality. To enable all tools
-                </span>
-                <a
-                  href="/download"
-                  className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-foreground text-background hover:opacity-90 transition-opacity"
-                >
-                  Download for Mac
-                </a>
-              </div>
-            </div>
-          )}
         </>
       )}
       
@@ -844,6 +821,30 @@ export function MessageList({
         </div>
       )}
       
+      {/* Preview Mode banner for web-spawned agents - always below all other items */}
+      {showStatusBanners && subAgentId === undefined && agent?.source === 'WEB' && (
+        <div className="flex gap-3">
+          <div
+            className="flex items-center gap-2 py-1.5 px-3 rounded-full border border-border"
+            style={{
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+              backgroundColor: 'rgba(255, 255, 255, 0.1)',
+            }}
+          >
+            <span className="text-muted-foreground text-sm">
+              Agents spawned via web are in Preview Mode and have restricted functionality. To enable all tools
+            </span>
+            <a
+              href="/download"
+              className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-foreground text-background hover:opacity-90 transition-opacity"
+            >
+              Download for Mac
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* Scroll anchor for auto-scroll */}
       <div ref={scrollEndRef} />
     </div>

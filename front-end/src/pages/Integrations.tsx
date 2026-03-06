@@ -554,15 +554,38 @@ export default function Integrations() {
     }
   };
 
+  // Handle OAuth redirect return - check for query params on mount
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oauthResult = params.get('oauth_result');
+    if (oauthResult) {
+      // Clean URL without reloading
+      const cleanUrl = window.location.pathname;
+      window.history.replaceState({}, '', cleanUrl);
+
+      if (oauthResult === 'success') {
+        setSuccess(params.get('message') || 'Email connected successfully.');
+      } else {
+        setError(params.get('message') || 'Failed to connect email.');
+      }
+      // Refetch integrations to pick up the new connection
+      fetchIntegrations();
+    }
+  }, [fetchIntegrations]);
+
   const handleEmailConnect = async (provider: 'gmail') => {
     setConnectingProvider(provider);
     setError(null);
+
+    const isElectron = !!(window as any).api;
 
     try {
       const headers = getAuthHeaders();
       const response = await fetch(`${API_BASE_WITH_PATH}/integrations/email/${provider}/start`, {
         method: 'POST',
         headers,
+        // Only send returnUrl for web (not Electron — mac-app polls instead)
+        body: isElectron ? undefined : JSON.stringify({ returnUrl: window.location.origin + window.location.pathname }),
       });
 
       const payload = await response.json().catch(() => null);
@@ -570,23 +593,32 @@ export default function Integrations() {
         throw new Error(payload?.error || 'Failed to start email connection');
       }
 
-      const popup = window.open(payload.authUrl, 'email-oauth', 'width=520,height=720');
-      if (!popup) {
-        throw new Error('Pop-up was blocked. Please allow pop-ups for this site and try again.');
-      }
-      popup.focus();
+      if (isElectron) {
+        // Electron: open in system browser, poll for status
+        await (window as any).api.openExternal(payload.authUrl);
 
-      // Poll for popup close and refetch integrations
-      const pollInterval = setInterval(() => {
-        if (popup.closed) {
-          clearInterval(pollInterval);
+        const pollForConnection = setInterval(async () => {
+          try {
+            const res = await fetch(`${API_BASE_WITH_PATH}/integrations`, { headers });
+            if (!res.ok) return;
+            const data = await res.json();
+            const gmail = (data.integrations || []).find((i: any) => i.name === provider && (i.status === 'CONNECTED' || i.status === 'SYNCING'));
+            if (gmail) {
+              clearInterval(pollForConnection);
+              setConnectingProvider(null);
+              fetchIntegrations();
+            }
+          } catch { /* retry */ }
+        }, 2000);
+
+        setTimeout(() => {
+          clearInterval(pollForConnection);
           setConnectingProvider(null);
-          // Give the backend a moment to finish processing, then refetch
-          setTimeout(() => {
-            fetchIntegrations();
-          }, 500);
-        }
-      }, 500);
+        }, 120000);
+      } else {
+        // Web: redirect in same window, callback redirects back with query params
+        window.location.href = payload.authUrl;
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
       setConnectingProvider(null);
@@ -1072,11 +1104,13 @@ export default function Integrations() {
                         </svg>
                         <div className="flex flex-col">
                           <span className="text-sm">Gmail</span>
-                          {connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED' && i.config?.connectedEmail) && (
-                            <span className="text-xs text-muted-foreground truncate max-w-[140px]">
-                              {connectedIntegrations.find(i => i.name === 'gmail' && i.status === 'CONNECTED')?.config?.connectedEmail}
-                            </span>
-                          )}
+                          {(() => {
+                            const gmail = connectedIntegrations.find(i => i.name === 'gmail' && i.status === 'CONNECTED');
+                            const emails = gmail?.config?.connectedEmails || (gmail?.config?.connectedEmail ? [gmail.config.connectedEmail] : []);
+                            return emails.map((email: string) => (
+                              <span key={email} className="text-xs text-muted-foreground">{email}</span>
+                            ));
+                          })()}
                         </div>
                       </div>
 

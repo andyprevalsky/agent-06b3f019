@@ -77,6 +77,8 @@ Check these when errors occur:
 
 10. **Pauses are user-initiated, not fixes** - When debugging, NEVER assume a pause caused a bug/crash. The user sends a pause AFTER noticing something wrong. Pauses are the symptom reporter, not the cause.
 
+11. **Short timeouts, check logs** - Never set bash timeouts longer than 5 minutes; use short timeouts and check task output periodically to ensure long-running tasks complete smoothly.
+
 ## Temporal/Agent Patterns
 
 - Workflows must be **deterministic** - no random, no wall-clock time, use `workflow.now()`

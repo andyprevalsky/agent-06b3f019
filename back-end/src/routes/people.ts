@@ -212,49 +212,109 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
 
 /**
  * GET /api/people
- * 
- * Get all people in user's network with pagination and message counts
- * 
+ *
+ * Get all people in user's network with pagination, sorting, and search
+ *
  * Query params:
  * - page: Page number (default: 1)
  * - limit: Items per page (default: 50)
- * 
- * Returns: Paginated list sorted by messagesExchanged (descending)
+ * - sort: Column to sort by (default: messagesExchanged)
+ * - sortDirection: 'asc' or 'desc' (default: desc)
+ * - search: Text search across name, email, phone, company, title
+ *
+ * Returns: Paginated list with server-side sorting and filtering
  */
 router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     // For internal calls (API key auth), get user_id from X-User-Id header
     // For user calls (JWT auth), get from req.user
-    const userId = req.isInternal 
-      ? (req.headers['x-user-id'] as string) 
+    const userId = req.isInternal
+      ? (req.headers['x-user-id'] as string)
       : req.user?.id;
-    
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    
+
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 2000, 2000);
     const skip = (page - 1) * limit;
+    const search = (req.query.search as string || '').trim();
 
-    // Get total count for pagination
-    const total = await prisma.person.count({
-      where: { userId },
-    });
+    // Validate sort column against allowed list to prevent SQL injection
+    const allowedSortColumns: Record<string, string> = {
+      firstName: '"firstName"',
+      lastName: '"lastName"',
+      email: '"email"',
+      phoneNumber: '"phoneNumber"',
+      messagesExchanged: '"messagesExchanged"',
+      company: '"company"',
+      title: '"title"',
+      communicationFrequency: '"communicationFrequency"',
+    };
+    const sortParam = req.query.sort as string;
+    const sortColumn = allowedSortColumns[sortParam] || '"messagesExchanged"';
+    const sortDirection = req.query.sortDirection === 'asc' ? 'ASC' : 'DESC';
 
-    // Get people sorted by messagesExchanged DESC, tiebreak by most recent message
-    const peopleWithCounts = await prisma.$queryRaw<Array<any>>`
-      SELECT
+    // Build parameterized WHERE clause
+    const params: any[] = [userId];
+    let whereClause = `p."userId" = $1`;
+    if (search) {
+      const searchPattern = `%${search}%`;
+      params.push(searchPattern);
+      const searchParam = `$${params.length}`;
+      whereClause += ` AND (
+        p."firstName" ILIKE ${searchParam}
+        OR p."lastName" ILIKE ${searchParam}
+        OR p."email" ILIKE ${searchParam}
+        OR p."phoneNumber" ILIKE ${searchParam}
+        OR p."company" ILIKE ${searchParam}
+        OR p."title" ILIKE ${searchParam}
+        OR p."communicationFrequency" ILIKE ${searchParam}
+        OR (p."firstName" || ' ' || p."lastName") ILIKE ${searchParam}
+      )`;
+    }
+
+    // Custom sort order for communicationFrequency
+    let orderClause: string;
+    if (sortParam === 'communicationFrequency') {
+      const freqOrder = `CASE p."communicationFrequency"
+        WHEN 'daily' THEN 0
+        WHEN 'weekly' THEN 1
+        WHEN 'monthly' THEN 2
+        WHEN 'yearly' THEN 3
+        WHEN 'rarely' THEN 4
+        ELSE 99
+      END`;
+      orderClause = `${freqOrder} ${sortDirection}, "lastMessageAt" DESC NULLS LAST`;
+    } else {
+      orderClause = `${sortColumn} ${sortDirection} NULLS LAST, "lastMessageAt" DESC NULLS LAST`;
+    }
+
+    // Get total count (with search filter applied)
+    const countResult = await prisma.$queryRawUnsafe<[{ count: bigint }]>(
+      `SELECT COUNT(*) as count FROM "Person" p WHERE ${whereClause}`,
+      ...params
+    );
+    const total = Number(countResult[0].count);
+
+    // Get people with sorting and search
+    params.push(limit, skip);
+    const limitParam = `$${params.length - 1}`;
+    const offsetParam = `$${params.length}`;
+    const peopleWithCounts = await prisma.$queryRawUnsafe<Array<any>>(
+      `SELECT
         p.*,
         MAX(mr."timestamp") as "lastMessageAt"
       FROM "Person" p
       LEFT JOIN "MessageRecord" mr ON mr."personId" = p."id"
-      WHERE p."userId" = ${userId}
+      WHERE ${whereClause}
       GROUP BY p."id"
-      ORDER BY p."messagesExchanged" DESC, "lastMessageAt" DESC NULLS LAST
-      LIMIT ${limit}
-      OFFSET ${skip}
-    `;
+      ORDER BY ${orderClause}
+      LIMIT ${limitParam}
+      OFFSET ${offsetParam}`,
+      ...params
+    );
 
     const totalPages = Math.ceil(total / limit);
 

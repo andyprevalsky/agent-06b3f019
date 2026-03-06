@@ -1590,7 +1590,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
 
         {/* Main Content - Centered */}
         <main className="flex-1 flex justify-center h-screen overflow-hidden" style={{ height: '100dvh' }}>
-          <div className="flex flex-col relative max-w-5xl w-full px-2 md:px-6 h-full overflow-hidden">
+          <div className={cn("flex flex-col relative w-full px-2 md:px-6 h-full overflow-hidden", currentView === 'network' ? 'max-w-none' : 'max-w-5xl')}>
           {/* Research + Download - right-aligned with content column, same row as header, web only, hidden on mobile */}
           {clientSource === 'WEB' && (
             <div className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50">
@@ -1684,11 +1684,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
               </div>
             </ScrollArea>
           ) : currentView === 'network' ? (
-            <ScrollArea className="flex-1 h-full">
-              <div className="pt-24 pb-8">
-                <NetworkView />
-              </div>
-            </ScrollArea>
+            <NetworkView />
           ) : (
             <>
             <ScrollArea 

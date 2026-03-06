@@ -13,6 +13,8 @@ export interface ParsedEmail {
   messageId: string | null;
   bodyText: string | null;
   bodyHtml: string | null;
+  isSent: boolean;
+  labels: string[];
 }
 
 interface GmailMessageListResponse {
@@ -76,7 +78,30 @@ interface EmailContact {
   }>;
 }
 
+/** Lightweight email metadata (no body content) for contact detection */
+interface EmailMetadata {
+  id: string;
+  from: string;
+  to: string[];
+  cc: string[];
+  isSent: boolean;
+}
+
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function fetchWithRetry(url: string, accessToken: string, init?: RequestInit): Promise<Response> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await fetch(url, { ...init, headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers } });
+    if (response.status === 429 || (response.status === 403 && (await response.clone().text()).includes('rateLimitExceeded'))) {
+      const wait = Math.pow(2, attempt) * 5;
+      console.log(`[Gmail] Rate limited (${response.status}), waiting ${wait}s (attempt ${attempt + 1}/3)...`);
+      await sleep(wait * 1000);
+      continue;
+    }
+    return response;
+  }
+  return fetch(url, { ...init, headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers } });
+}
 
 /**
  * Get Gmail profile including current historyId
@@ -213,9 +238,7 @@ export async function fetchGmailMessagesSince(
       listUrl.searchParams.set('pageToken', pageToken);
     }
 
-    const listResponse = await fetch(listUrl.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const listResponse = await fetchWithRetry(listUrl.toString(), accessToken);
 
     if (!listResponse.ok) {
       const errorText = await listResponse.text();
@@ -266,12 +289,9 @@ async function fetchMessagesBatch(
   );
   const body = parts.join('') + `--${boundary}--`;
 
-  const response = await fetch('https://www.googleapis.com/batch/gmail/v1', {
+  const response = await fetchWithRetry('https://www.googleapis.com/batch/gmail/v1', accessToken, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': `multipart/mixed; boundary=${boundary}`,
-    },
+    headers: { 'Content-Type': `multipart/mixed; boundary=${boundary}` },
     body,
   });
 
@@ -290,56 +310,164 @@ async function fetchMessagesBatch(
     return messageIds.map(() => null);
   }
 
-  const results: (ParsedEmail | null)[] = [];
-  const responseParts = responseText.split(`--${responseBoundary}`);
+  const resultMap = new Map<string, ParsedEmail>();
+  const rateLimitedIds: string[] = [];
+  const cleanBoundary = responseBoundary.replace(/^"(.*)"$/, '$1');
+  const responseParts = responseText.split(`--${cleanBoundary}`);
 
   for (const part of responseParts) {
     if (!part.trim() || part.trim() === '--') continue;
 
-    // Find the JSON body in each part (after the HTTP status line and headers)
+    // Check for rate limiting within sub-response
+    const statusMatch = part.match(/HTTP\/\d\.\d (\d+)/);
+    const status = statusMatch ? parseInt(statusMatch[1]) : 0;
+
+    // Extract message ID from Content-ID header
+    const contentIdMatch = part.match(/Content-ID:\s*<response-([^>]+)>/i);
+    const msgId = contentIdMatch?.[1];
+
+    if (status === 429 && msgId) {
+      rateLimitedIds.push(msgId);
+      continue;
+    }
+
     const jsonMatch = part.match(/\{[\s\S]*\}/);
     if (!jsonMatch) continue;
 
     try {
       const msgData = JSON.parse(jsonMatch[0]) as GmailMessageResponse;
       if (msgData.id && msgData.payload) {
-        results.push(parseGmailMessage(msgData));
-      } else if (msgData.id) {
-        // Might be an error response
-        results.push(null);
+        const parsed = parseGmailMessage(msgData);
+        if (parsed) resultMap.set(msgData.id, parsed);
       }
     } catch {
-      // Skip malformed responses
-      results.push(null);
+      // parse error, skip
     }
   }
 
-  return results;
+  // Retry rate-limited messages: only retry if a small number failed (not mass rate limiting)
+  if (rateLimitedIds.length > 0 && rateLimitedIds.length <= messageIds.length * 0.5) {
+    await sleep(2000);
+    for (const id of rateLimitedIds) {
+      try {
+        const singleRes = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (singleRes.ok) {
+          const msgData = (await singleRes.json()) as GmailMessageResponse;
+          if (msgData.id && msgData.payload) {
+            const parsed = parseGmailMessage(msgData);
+            if (parsed) resultMap.set(msgData.id, parsed);
+          }
+        }
+      } catch {
+        // skip individual failures
+      }
+    }
+  }
+
+  // Return results in original order
+  return messageIds.map(id => resultMap.get(id) || null);
 }
 
 /**
- * Fetch ALL emails from Gmail API, paginating through all pages
+ * From metadata, determine which message IDs involve contacts the user has sent to.
+ * Returns the set of needed message IDs for full content fetch.
  */
-export async function fetchGmailEmails(accessToken: string): Promise<ParsedEmail[]> {
-  const emails: ParsedEmail[] = [];
+function identifyNeededMessageIds(
+  metadata: EmailMetadata[],
+  userEmail: string
+): Set<string> {
+  // Build userEmailSet with import detection
+  const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
+  for (const e of metadata) {
+    if (e.isSent) userEmailSet.add(e.from);
+  }
+
+  // Detect imported accounts (same dominance logic as transformEmailsToContacts)
+  let foundNew = true;
+  while (foundNew) {
+    foundNew = false;
+    const fromCounts = new Map<string, number>();
+    const toCounts = new Map<string, number>();
+    for (const e of metadata) {
+      const allRecipients = [...e.to, ...e.cc];
+      if (userEmailSet.has(e.from) || allRecipients.some(r => userEmailSet.has(r))) continue;
+      fromCounts.set(e.from, (fromCounts.get(e.from) || 0) + 1);
+      for (const r of allRecipients) toCounts.set(r, (toCounts.get(r) || 0) + 1);
+    }
+    const candidates = [...fromCounts.entries()]
+      .filter(([addr]) => (toCounts.get(addr) || 0) >= 5)
+      .sort((a, b) => b[1] - a[1]);
+    if (candidates.length > 0) {
+      const [topAddr, topCount] = candidates[0];
+      const secondCount = candidates.length > 1 ? candidates[1][1] : 0;
+      if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
+        userEmailSet.add(topAddr);
+        foundNew = true;
+        console.log(`[Gmail] Detected imported account: ${topAddr} (from=${topCount}, next=${secondCount})`);
+      }
+    }
+  }
+
+  // Count sentCount per contact
+  const contactSentCount = new Map<string, number>();
+  for (const e of metadata) {
+    const isFromMe = e.isSent || userEmailSet.has(e.from);
+    if (isFromMe) {
+      for (const r of [...e.to, ...e.cc]) {
+        if (!userEmailSet.has(r)) {
+          contactSentCount.set(r, (contactSentCount.get(r) || 0) + 1);
+        }
+      }
+    }
+  }
+
+  // Contacts with sentCount > 0
+  const validContacts = new Set(
+    [...contactSentCount.entries()].filter(([, c]) => c > 0).map(([e]) => e)
+  );
+
+  console.log(`[Gmail] Contact filter: ${validContacts.size} contacts with sentCount > 0, userEmailSet=${JSON.stringify([...userEmailSet])}`);
+
+  // Collect message IDs that involve valid contacts
+  const neededIds = new Set<string>();
+  for (const e of metadata) {
+    const isFromMe = e.isSent || userEmailSet.has(e.from);
+    const contactEmails = isFromMe
+      ? [...e.to, ...e.cc].filter(addr => !userEmailSet.has(addr))
+      : [e.from];
+    if (contactEmails.some(ce => validContacts.has(ce))) {
+      neededIds.add(e.id);
+    }
+  }
+
+  return neededIds;
+}
+
+/**
+ * Fetch ALL emails from Gmail API using two-phase approach:
+ * Phase 1: Fetch metadata (headers + labels) for all messages — fast, small responses
+ * Phase 2: Fetch full content only for messages involving contacts user has sent to
+ */
+export async function fetchGmailEmails(accessToken: string, userEmail: string): Promise<ParsedEmail[]> {
   let pageToken: string | undefined;
   let pageCount = 0;
 
-  console.log('[Gmail] Starting to fetch all emails...');
+  console.log(`[Gmail] Starting to fetch all emails...`);
 
-  // First, get list of all message IDs
+  // List all message IDs
   const allMessageIds: string[] = [];
 
   do {
     const listUrl = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
-    listUrl.searchParams.set('maxResults', '500'); // Max allowed per request
+    listUrl.searchParams.set('maxResults', '500');
     if (pageToken) {
       listUrl.searchParams.set('pageToken', pageToken);
     }
 
-    const listResponse = await fetch(listUrl.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const listResponse = await fetchWithRetry(listUrl.toString(), accessToken);
 
     if (!listResponse.ok) {
       const errorText = await listResponse.text();
@@ -356,37 +484,137 @@ export async function fetchGmailEmails(accessToken: string): Promise<ParsedEmail
     pageToken = listData.nextPageToken;
     pageCount++;
 
-    console.log(`[Gmail] Fetched page ${pageCount}, got ${listData.messages?.length || 0} message IDs (total: ${allMessageIds.length})`);
+    if (pageCount % 10 === 0) {
+      console.log(`[Gmail] Listed ${allMessageIds.length} message IDs (page ${pageCount})...`);
+    }
   } while (pageToken);
 
-  console.log(`[Gmail] Found ${allMessageIds.length} total messages, fetching details via batch API...`);
+  console.log(`[Gmail] Total ${allMessageIds.length} message IDs listed`);
 
-  // Fetch message details using Gmail Batch API (up to 100 per batch request)
-  const BATCH_SIZE = 100;
-  for (let i = 0; i < allMessageIds.length; i += BATCH_SIZE) {
-    const batch = allMessageIds.slice(i, i + BATCH_SIZE);
+  // Phase 1: Fetch metadata for all messages using concurrent individual requests
+  console.log(`[Gmail] Phase 1: Fetching metadata for ${allMessageIds.length} messages...`);
+  const allMetadata: EmailMetadata[] = [];
+  const CONCURRENCY = 20;
+  let completed = 0;
+  let rateLimited = 0;
+  let rateLimitedIds: string[] = [];
 
-    try {
-      const batchResults = await fetchMessagesBatch(accessToken, batch);
-      const validEmails = batchResults.filter((e): e is ParsedEmail => e !== null);
-      emails.push(...validEmails);
-    } catch (error) {
-      console.error(`[Gmail] Batch request failed:`, error);
+  for (let i = 0; i < allMessageIds.length; i += CONCURRENCY) {
+    const chunk = allMessageIds.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map(async (id) => {
+        try {
+          const response = await fetch(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          );
+          if (response.status === 429) {
+            rateLimited++;
+            return { rateLimited: true, id } as const;
+          }
+          if (!response.ok) return null;
+          const msg = (await response.json()) as GmailMessageResponse;
+          if (!msg.id || !msg.payload) return null;
+          const headers = msg.payload.headers || [];
+          const getHeader = (name: string) =>
+            headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+          const from = extractEmailAddress(getHeader('From'));
+          if (!from) return null;
+          return {
+            id: msg.id,
+            from,
+            to: extractEmailAddresses(getHeader('To')),
+            cc: extractEmailAddresses(getHeader('Cc')),
+            isSent: (msg.labelIds || []).includes('SENT'),
+          } as EmailMetadata;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    for (const r of results) {
+      if (r && 'rateLimited' in r) {
+        rateLimitedIds.push(r.id);
+      } else if (r) {
+        allMetadata.push(r);
+      }
+    }
+    completed += chunk.length;
+
+    if (completed % 5000 === 0 || completed >= allMessageIds.length) {
+      console.log(`[Gmail] Metadata: ${completed}/${allMessageIds.length} (${allMetadata.length} valid, ${rateLimited} rate-limited)`);
     }
 
-    const processed = Math.min(i + BATCH_SIZE, allMessageIds.length);
-    if (processed % 1000 === 0 || processed >= allMessageIds.length) {
-      console.log(`[Gmail] Processed ${processed}/${allMessageIds.length} messages (${emails.length} valid)`);
-    }
-
-    // Small delay between batches to be nice to the API
-    if (i + BATCH_SIZE < allMessageIds.length) {
-      await sleep(100);
+    // Back off if we're getting rate limited
+    if (rateLimited > completed * 0.1) {
+      await sleep(2000);
+    } else {
+      await sleep(50);
     }
   }
 
-  console.log(`[Gmail] Successfully parsed ${emails.length} emails`);
-  return emails;
+  // Retry rate-limited messages with exponential backoff
+  if (rateLimitedIds.length > 0) {
+    console.log(`[Gmail] Retrying ${rateLimitedIds.length} rate-limited messages...`);
+    for (let attempt = 0; attempt < 3 && rateLimitedIds.length > 0; attempt++) {
+      await sleep(Math.pow(2, attempt) * 5000); // 5s, 10s, 20s
+      const stillLimited: string[] = [];
+
+      for (let i = 0; i < rateLimitedIds.length; i += CONCURRENCY) {
+        const chunk = rateLimitedIds.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(
+          chunk.map(async (id) => {
+            try {
+              const response = await fetch(
+                `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc`,
+                { headers: { Authorization: `Bearer ${accessToken}` } }
+              );
+              if (response.status === 429) return { rateLimited: true, id } as const;
+              if (!response.ok) return null;
+              const msg = (await response.json()) as GmailMessageResponse;
+              if (!msg.id || !msg.payload) return null;
+              const headers = msg.payload.headers || [];
+              const getHeader = (name: string) =>
+                headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+              const from = extractEmailAddress(getHeader('From'));
+              if (!from) return null;
+              return {
+                id: msg.id, from,
+                to: extractEmailAddresses(getHeader('To')),
+                cc: extractEmailAddresses(getHeader('Cc')),
+                isSent: (msg.labelIds || []).includes('SENT'),
+              } as EmailMetadata;
+            } catch { return null; }
+          })
+        );
+        for (const r of results) {
+          if (r && 'rateLimited' in r) stillLimited.push(r.id);
+          else if (r) allMetadata.push(r);
+        }
+        await sleep(200);
+      }
+
+      console.log(`[Gmail] Retry attempt ${attempt + 1}: recovered ${rateLimitedIds.length - stillLimited.length}, still limited: ${stillLimited.length}`);
+      rateLimitedIds = stillLimited;
+    }
+
+    if (rateLimitedIds.length > 0) {
+      console.warn(`[Gmail] ⚠️ ${rateLimitedIds.length} messages could not be fetched after retries`);
+    }
+  }
+
+  console.log(`[Gmail] Phase 1 complete: ${allMetadata.length} metadata fetched (${rateLimitedIds.length} unrecoverable)`);
+
+  // Phase 2: Identify which messages we actually need
+  const neededIds = identifyNeededMessageIds(allMetadata, userEmail);
+  console.log(`[Gmail] Phase 2: Need ${neededIds.size} messages with full content`);
+
+  // Phase 3: Fetch full content for needed messages only
+  if (neededIds.size === 0) return [];
+  const fullEmails = await fetchMessagesByIds(accessToken, [...neededIds]);
+  console.log(`[Gmail] Phase 3 complete: ${fullEmails.length} full emails fetched`);
+  return fullEmails;
 }
 
 /**
@@ -429,6 +657,9 @@ function parseGmailMessage(msg: GmailMessageResponse): ParsedEmail | null {
     // Extract body content
     const { text: bodyText, html: bodyHtml } = extractBody(msg.payload);
 
+    const labels = msg.labelIds || [];
+    const isSent = labels.includes('SENT');
+
     return {
       from,
       fromName,
@@ -439,6 +670,8 @@ function parseGmailMessage(msg: GmailMessageResponse): ParsedEmail | null {
       messageId,
       bodyText,
       bodyHtml,
+      isSent,
+      labels,
     };
   } catch (error) {
     console.error('[Gmail] Error parsing message:', error);
@@ -580,18 +813,79 @@ function stripHtml(html: string): string {
  * Transform emails into ContactToUpsert format grouped by contact
  */
 function transformEmailsToContacts(emails: ParsedEmail[], userEmail: string): ContactToUpsert[] {
-  const userEmailSet = new Set([userEmail.toLowerCase()]);
   const contactMap = new Map<string, EmailContact>();
 
+  // Build user email set using multiple signals:
+  // 1. The connected email address
+  // 2. "from" addresses on SENT-labeled emails (Gmail native sent)
+  // 3. Imported emails: custom-label-only emails where "from" matches the user's name pattern
+  const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
+
+  // Collect from SENT-labeled emails
   for (const email of emails) {
-    const isFromMe = userEmailSet.has(email.from);
+    if (email.isSent) {
+      userEmailSet.add(email.from.toLowerCase());
+    }
+  }
+
+  // Detect imported accounts: if an email is in the mailbox but neither the "from"
+  // nor any "to"/"cc" contains a known user email, it was imported from another account.
+  // The user's imported address will appear frequently in both "from" (sent) and "to"
+  // (received) roles. External contacts may also appear in both roles (e.g. emailed you
+  // AND was CC'd), but at much lower frequency.
+  let foundNew = true;
+  while (foundNew) {
+    foundNew = false;
+    const fromCounts = new Map<string, number>();
+    const toCounts = new Map<string, number>();
+
+    for (const email of emails) {
+      const from = email.from.toLowerCase();
+      const allRecipients = [...email.to, ...email.cc].map(e => e.toLowerCase());
+
+      // Skip emails that involve a known user address
+      if (userEmailSet.has(from) || allRecipients.some(r => userEmailSet.has(r))) continue;
+
+      // This email involves no known user address — it's imported
+      fromCounts.set(from, (fromCounts.get(from) || 0) + 1);
+      for (const r of allRecipients) {
+        toCounts.set(r, (toCounts.get(r) || 0) + 1);
+      }
+    }
+
+    // The user's imported address dominates the orphan email pool.
+    // Find the top sender by fromCount, and only accept it if:
+    // 1. fromCount >= 20 (minimum volume)
+    // 2. It also appears as a recipient (toCount >= 5)
+    // 3. It sends at least 3x more than the next non-related candidate
+    const candidates = [...fromCounts.entries()]
+      .filter(([addr]) => (toCounts.get(addr) || 0) >= 5)
+      .sort((a, b) => b[1] - a[1]);
+
+    if (candidates.length > 0) {
+      const [topAddr, topCount] = candidates[0];
+      const secondCount = candidates.length > 1 ? candidates[1][1] : 0;
+      if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
+        userEmailSet.add(topAddr);
+        foundNew = true;
+        console.log(`[Gmail] Detected imported account: ${topAddr} (from=${topCount}, to=${toCounts.get(topAddr) || 0}, next=${secondCount})`);
+      }
+    }
+  }
+
+  console.log(`[Gmail] transformEmailsToContacts: ${emails.length} emails, userEmailSet=${JSON.stringify([...userEmailSet])}`);
+  const fromMeCount = emails.filter(e => e.isSent || userEmailSet.has(e.from.toLowerCase())).length;
+  console.log(`[Gmail]   isFromMe total: ${fromMeCount}`);
+
+  for (const email of emails) {
+    const isFromMe = email.isSent || userEmailSet.has(email.from.toLowerCase());
 
     // Determine the contact email(s)
     let contactEmails: string[] = [];
 
     if (isFromMe) {
-      // User sent this email - contacts are recipients
-      contactEmails = [...email.to, ...email.cc].filter(e => !userEmailSet.has(e));
+      // User sent this email - contacts are recipients (exclude user's own addresses)
+      contactEmails = [...email.to, ...email.cc].filter(e => !userEmailSet.has(e.toLowerCase()));
     } else {
       // User received this email - contact is sender
       contactEmails = [email.from];
@@ -675,7 +969,9 @@ function transformEmailsToContacts(emails: ParsedEmail[], userEmail: string): Co
 }
 
 /**
- * Import Gmail emails into the database using the shared manager
+ * Import Gmail emails into the database using the shared manager.
+ * Import detection in transformEmailsToContacts handles identifying imported accounts
+ * and adding them to userEmailSet automatically.
  */
 export async function parseGmailOAuthEmails(
   userId: string,
@@ -685,13 +981,84 @@ export async function parseGmailOAuthEmails(
 ): Promise<{ contacts: number; messages: number }> {
   console.log(`[Job ${jobId}] Processing ${emails.length} Gmail emails for user ${userId}`);
 
-  // Transform emails to contacts format
   const contactsToUpsert = transformEmailsToContacts(emails, userEmail);
   console.log(`[Job ${jobId}] Found ${contactsToUpsert.length} valid contacts (sent at least one email)`);
 
-  // Use shared manager for DB operations
   const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
   console.log(`[Job ${jobId}] ✅ Gmail sync complete: ${result.contacts} contacts, ${result.messages} messages`);
   return result;
+}
+
+/**
+ * Detect imported email accounts from parsed emails (without modifying userEmailSet).
+ * Returns list of email addresses that appear to be imported user accounts.
+ */
+export function detectImportedAccounts(emails: ParsedEmail[], userEmail: string): string[] {
+  const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
+  for (const email of emails) {
+    if (email.isSent) userEmailSet.add(email.from.toLowerCase());
+  }
+
+  const imported: string[] = [];
+  let foundNew = true;
+  while (foundNew) {
+    foundNew = false;
+    const fromCounts = new Map<string, number>();
+    const toCounts = new Map<string, number>();
+    for (const email of emails) {
+      const from = email.from.toLowerCase();
+      const allRecipients = [...email.to, ...email.cc].map(e => e.toLowerCase());
+      if (userEmailSet.has(from) || allRecipients.some(r => userEmailSet.has(r))) continue;
+      fromCounts.set(from, (fromCounts.get(from) || 0) + 1);
+      for (const r of allRecipients) {
+        toCounts.set(r, (toCounts.get(r) || 0) + 1);
+      }
+    }
+    const candidates = [...fromCounts.entries()]
+      .filter(([addr]) => (toCounts.get(addr) || 0) >= 5)
+      .sort((a, b) => b[1] - a[1]);
+    if (candidates.length > 0) {
+      const [topAddr, topCount] = candidates[0];
+      const secondCount = candidates.length > 1 ? candidates[1][1] : 0;
+      if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
+        userEmailSet.add(topAddr);
+        imported.push(topAddr);
+        foundNew = true;
+      }
+    }
+  }
+  return imported;
+}
+
+/**
+ * Search for emails matching a query and fetch their full content
+ */
+export async function searchAndFetchEmails(
+  accessToken: string,
+  query: string,
+  maxResults: number = 500
+): Promise<ParsedEmail[]> {
+  const messageIds: string[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const url = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
+    url.searchParams.set('q', query);
+    url.searchParams.set('maxResults', String(Math.min(maxResults - messageIds.length, 500)));
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+
+    const res = await fetchWithRetry(url.toString(), accessToken);
+    if (!res.ok) break;
+
+    const data = (await res.json()) as GmailMessageListResponse;
+    if (data.messages) messageIds.push(...data.messages.map(m => m.id));
+    pageToken = data.nextPageToken;
+    if (messageIds.length >= maxResults) break;
+  } while (pageToken);
+
+  if (messageIds.length === 0) return [];
+
+  console.log(`[Gmail] Fetching ${messageIds.length} messages for query "${query}"...`);
+  return fetchMessagesByIds(accessToken, messageIds.slice(0, maxResults));
 }

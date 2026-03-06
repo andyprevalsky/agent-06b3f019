@@ -731,68 +731,54 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       const left = window.screenX + (window.outerWidth - width) / 2;
       const top = window.screenY + (window.outerHeight - height) / 2;
 
-      const popup = window.open(
-        authUrl,
-        'gmail-oauth',
-        `width=${width},height=${height},left=${left},top=${top},scrollbars=yes`
-      );
+      // In Electron, window.open is intercepted by setWindowOpenHandler which opens
+      // in the system browser and returns null. Use openExternal as primary path.
+      const api = (window as any).api;
+      if (api?.openExternal) {
+        await api.openExternal(authUrl);
+      } else {
+        window.open(
+          authUrl,
+          'gmail-oauth',
+          `width=${width},height=${height},left=${left},top=${top},scrollbars=yes`
+        );
+      }
 
-      // Poll for popup close and then refresh integrations
-      const checkPopup = setInterval(async () => {
-        if (popup?.closed) {
-          clearInterval(checkPopup);
+      // Poll backend for integration status (works regardless of popup or external browser)
+      const pollForConnection = setInterval(async () => {
+        try {
+          const response = await fetch(`${backendUrl}/api/integrations`, {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+          });
+          if (!response.ok) return;
 
-          // Wait for backend to process the callback
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          const data = await response.json();
+          const integrations: Integration[] = data.integrations || [];
+          const gmailIntegration = integrations.find(i => i.name === 'gmail');
+          const isGmailConnected = gmailIntegration?.status === 'CONNECTED' || gmailIntegration?.status === 'SYNCING';
 
-          // Fetch updated integrations with retries
-          const fetchWithRetry = async (retries = 3): Promise<void> => {
-            try {
-              const response = await fetch(`${backendUrl}/api/integrations`, {
-                headers: {
-                  Authorization: `Bearer ${session.access_token}`,
-                },
-              });
-
-              if (response.ok) {
-                const data = await response.json();
-                const integrations: Integration[] = data.integrations || [];
-                console.log('[OnboardingData] Fetched integrations:', integrations);
-                const gmailIntegration = integrations.find(i => i.name === 'gmail');
-                console.log('[OnboardingData] Gmail integration:', gmailIntegration);
-
-                // Treat CONNECTED or SYNCING as connected (SYNCING means OAuth succeeded, just processing emails)
-                const isGmailConnected = gmailIntegration?.status === 'CONNECTED' || gmailIntegration?.status === 'SYNCING';
-                if (isGmailConnected) {
-                  // Prefer connectedEmails array if available
-                  if (gmailIntegration.config?.connectedEmails && gmailIntegration.config.connectedEmails.length > 0) {
-                    setConnectedEmails(gmailIntegration.config.connectedEmails);
-                  } else if (gmailIntegration.config?.connectedEmail) {
-                    const email = gmailIntegration.config.connectedEmail;
-                    if (!connectedEmails.includes(email)) {
-                      setConnectedEmails(prev => [...prev, email]);
-                    }
-                  }
-                } else if (retries > 0) {
-                  // Integration not ready yet, retry
-                  console.log('[OnboardingData] Gmail not connected yet, retrying...');
-                  await new Promise(resolve => setTimeout(resolve, 1000));
-                  return fetchWithRetry(retries - 1);
-                }
-              }
-            } catch (err) {
-              console.error('Failed to refresh integrations:', err);
-              if (retries > 0) {
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                return fetchWithRetry(retries - 1);
+          if (isGmailConnected) {
+            clearInterval(pollForConnection);
+            if (gmailIntegration.config?.connectedEmails && gmailIntegration.config.connectedEmails.length > 0) {
+              setConnectedEmails(gmailIntegration.config.connectedEmails);
+            } else if (gmailIntegration.config?.connectedEmail) {
+              const email = gmailIntegration.config.connectedEmail;
+              if (!connectedEmails.includes(email)) {
+                setConnectedEmails(prev => [...prev, email]);
               }
             }
-          };
-
-          await fetchWithRetry();
-          setGmailLoading(false);
+            setGmailLoading(false);
+          }
+        } catch (err) {
+          console.error('Failed to poll integrations:', err);
         }
-      }, 500);
+      }, 2000);
+
+      // Stop polling after 2 minutes (user may have cancelled)
+      setTimeout(() => {
+        clearInterval(pollForConnection);
+        setGmailLoading(false);
+      }, 120000);
     } catch (err) {
       console.error('Failed to connect Gmail:', err);
       setGmailLoading(false);
@@ -1219,9 +1205,9 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                     </svg>
                     <div className="flex flex-col">
                       <span className="text-sm text-foreground">Gmail</span>
-                      {connectedEmails.length > 0 && (
-                        <span className="text-xs text-muted-foreground truncate max-w-[140px]">{connectedEmails[0]}</span>
-                      )}
+                      {connectedEmails.map(email => (
+                        <span key={email} className="text-xs text-muted-foreground">{email}</span>
+                      ))}
                     </div>
                   </div>
 

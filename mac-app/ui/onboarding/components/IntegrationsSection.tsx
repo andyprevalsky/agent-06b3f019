@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useIntegrationHandlers } from '@/contexts/IntegrationHandlersContext';
 import { Check, Loader2 } from 'lucide-react';
+import { getStoredSession } from '@/lib/supabase';
 
 interface IntegrationsSectionProps {
   disabled?: boolean;
@@ -78,6 +79,33 @@ const IntegrationsSection = ({ disabled }: IntegrationsSectionProps) => {
   const [cookiesLoading, setCookiesLoading] = useState(false);
   const [gmailLoading, setGmailLoading] = useState(false);
 
+  // Load initial integration status from backend
+  useEffect(() => {
+    const checkStatus = async () => {
+      try {
+        const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
+        const session = getStoredSession();
+        const token = session?.access_token;
+        if (!token) return;
+        const res = await fetch(`${backendUrl}/api/integrations`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const integrations = data.integrations || [];
+        const gmail = integrations.find((i: any) => i.name === 'gmail');
+        if (gmail?.status === 'CONNECTED' || gmail?.status === 'SYNCING') {
+          setGmailConnected(true);
+        }
+        const chrome = integrations.find((i: any) => i.name === 'chrome');
+        if (chrome?.status === 'CONNECTED') {
+          setCookiesConnected(true);
+        }
+      } catch { /* ignore */ }
+    };
+    checkStatus();
+  }, []);
+
   const handleCookiesConnect = async () => {
     if (!handlers?.chromeCookies?.isAvailable) return;
 
@@ -95,30 +123,53 @@ const IntegrationsSection = ({ disabled }: IntegrationsSectionProps) => {
   const handleGmailConnect = async () => {
     setGmailLoading(true);
     try {
-      // Open Gmail OAuth in popup
-      const width = 500;
-      const height = 600;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-
       const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
-      const oauthUrl = `${backendUrl}/api/integrations/email/gmail/start?redirect=popup`;
+      const session = getStoredSession();
+      const token = session?.access_token;
 
-      const popup = window.open(
-        oauthUrl,
-        'gmail-oauth',
-        `width=${width},height=${height},left=${left},top=${top},scrollbars=yes`
-      );
+      const response = await fetch(`${backendUrl}/api/integrations/email/gmail/start`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
 
-      // Poll for popup close and check for success
-      const checkPopup = setInterval(() => {
-        if (popup?.closed) {
-          clearInterval(checkPopup);
-          setGmailLoading(false);
-          // Assume success if popup was closed (user completed flow)
-          setGmailConnected(true);
-        }
-      }, 500);
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.authUrl) {
+        throw new Error(payload?.error || 'Failed to start Gmail connection');
+      }
+
+      // Open in system browser (Electron intercepts window.open via setWindowOpenHandler)
+      const api = (window as any).api;
+      if (api?.openExternal) {
+        await api.openExternal(payload.authUrl);
+      } else {
+        window.open(payload.authUrl);
+      }
+
+      // Poll backend for connection status since we can't track the external browser
+      const pollForConnection = setInterval(async () => {
+        try {
+          const res = await fetch(`${backendUrl}/api/integrations`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          const gmail = (data.integrations || []).find((i: any) => i.name === 'gmail');
+          if (gmail?.status === 'CONNECTED' || gmail?.status === 'SYNCING') {
+            clearInterval(pollForConnection);
+            setGmailLoading(false);
+            setGmailConnected(true);
+          }
+        } catch { /* retry on next interval */ }
+      }, 2000);
+
+      // Stop polling after 2 minutes
+      setTimeout(() => {
+        clearInterval(pollForConnection);
+        setGmailLoading(false);
+      }, 120000);
     } catch (err) {
       console.error('Failed to connect Gmail:', err);
       setGmailLoading(false);

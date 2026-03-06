@@ -603,10 +603,19 @@ export async function checkNeedsInviteCode(): Promise<boolean> {
 }
 
 // Get paginated people in user's network
-export async function getPeople(page = 1, limit = 50): Promise<PeoplePaginatedResponse> {
+export async function getPeople(
+  page = 1,
+  limit = 50,
+  options?: { sort?: string; sortDirection?: 'asc' | 'desc'; search?: string }
+): Promise<PeoplePaginatedResponse> {
   const headers = getAuthHeaders();
 
-  const response = await fetch(`${API_BASE_WITH_PATH}/people?page=${page}&limit=${limit}`, {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+  if (options?.sort) params.set('sort', options.sort);
+  if (options?.sortDirection) params.set('sortDirection', options.sortDirection);
+  if (options?.search) params.set('search', options.search);
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/people?${params}`, {
     headers,
   });
 

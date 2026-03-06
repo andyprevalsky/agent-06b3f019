@@ -240,7 +240,29 @@ const mergeJson = (
   return { ...parseConfig(existing), ...updates } as Prisma.JsonObject;
 };
 
-const sendOAuthResultPage = (res: Response, opts: { success: boolean; message: string }) => {
+const ALLOWED_REDIRECT_PATTERNS = [
+  /^https?:\/\/localhost(:\d+)?/,
+  /^https?:\/\/127\.0\.0\.1(:\d+)?/,
+  /^https:\/\/[^/]*\.vercel\.app/,
+  /^https:\/\/roselabs\.ai/,
+  /^roselabs:\/\//,
+];
+
+function isAllowedRedirectUrl(url: string): boolean {
+  return ALLOWED_REDIRECT_PATTERNS.some(pattern => pattern.test(url));
+}
+
+const sendOAuthResult = (res: Response, opts: { success: boolean; message: string; returnUrl?: string | null; errorUrl?: string | null }) => {
+  // Redirect to the appropriate URL (supports both http URLs and deep links like roselabs://...)
+  const redirectTarget = opts.success ? opts.returnUrl : (opts.errorUrl || opts.returnUrl);
+  if (redirectTarget && isAllowedRedirectUrl(redirectTarget)) {
+    const url = new URL(redirectTarget);
+    url.searchParams.set('oauth_result', opts.success ? 'success' : 'error');
+    url.searchParams.set('message', opts.message);
+    return res.redirect(url.toString());
+  }
+
+  // Fallback: show HTML result page (for popup-based flow)
   const status = opts.success ? 200 : 400;
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -317,61 +339,19 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
-    // Fetch integrations and cookies in parallel
-    const [integrations, cookies] = await Promise.all([
-      prisma.integration.findMany({
-        where: { userId },
-        orderBy: { updatedAt: 'desc' },
-        include: {
-          emailCredentials: {
-            select: { email: true },
-          },
+    const integrations = await prisma.integration.findMany({
+      where: { userId },
+      orderBy: { updatedAt: 'desc' },
+      include: {
+        emailCredentials: {
+          select: { email: true },
         },
-      }),
-      prisma.cookie.findMany({
-        where: { userId },
-        select: { domain: true, name: true, expiresUtc: true },
-      }),
-    ]);
-
-    // Compute authenticated domains from non-expired auth cookies
-    const nowMicroseconds = BigInt(Date.now()) * 1000n + CHROME_EPOCH_OFFSET_MICROSECONDS;
-    const authenticatedDomains = new Set<string>();
-
-    for (const cookie of cookies) {
-      // Skip expired cookies
-      if (cookie.expiresUtc && cookie.expiresUtc > 0n && cookie.expiresUtc < nowMicroseconds) {
-        continue;
-      }
-
-      const nameLower = cookie.name.toLowerCase();
-      const domain = cookie.domain.replace(/^\./, '');
-
-      // Skip tracking domains
-      if (AD_TRACKING_DOMAINS.some(ad => domain.includes(ad))) {
-        continue;
-      }
-
-      // Skip false positive cookies
-      if (FALSE_POSITIVE_COOKIES.some(fp => nameLower.includes(fp.toLowerCase()))) {
-        continue;
-      }
-
-      // Check if cookie name matches auth patterns
-      if (AUTH_COOKIE_PATTERNS.some(pattern => nameLower.includes(pattern))) {
-        // Extract base domain (e.g., "mail.google.com" -> "google.com")
-        const parts = domain.split('.');
-        const baseDomain = parts.length >= 2
-          ? parts.slice(-2).join('.')
-          : domain;
-        authenticatedDomains.add(baseDomain);
-      }
-    }
+      },
+    });
 
     return res.json({
       integrations,
       count: integrations.length,
-      authenticatedDomains: Array.from(authenticatedDomains).sort(),
     });
   } catch (error) {
     console.error('Error fetching integrations:', error);
@@ -733,6 +713,7 @@ router.post('/email/upload', authenticate, upload.single('file') as any, async (
 });
 
 router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res: Response) => {
+  console.log(`[Integrations] POST /email/${req.params.provider}/start - user: ${req.user?.id?.slice(0, 8)}`);
   try {
     const providerKey = normalizeProvider(req.params.provider);
     if (!providerKey) {
@@ -776,6 +757,11 @@ router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res
       },
     });
 
+    // Store returnUrl/errorUrl from the frontend so the callback can redirect back
+    // For mac-app these are deep links (roselabs://oauth-success), for web they're http URLs
+    const returnUrl = req.body?.returnUrl || null;
+    const errorUrl = req.body?.errorUrl || null;
+
     // Create a new credential for this OAuth attempt (email is null until callback)
     // This allows multiple emails per provider since the unique constraint is now (userId, provider, email)
     const credential = await prisma.emailIntegrationCredential.create({
@@ -787,10 +773,14 @@ router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res
         pkceVerifier: codeVerifier,
         stateToken: state,
         scopes: config.scopes,
+        metadata: (returnUrl || errorUrl) ? { returnUrl, errorUrl } : undefined,
       },
     });
 
     const authUrl = buildAuthUrl(providerKey, { state, codeChallenge });
+    const redirectUri = buildRedirectUri(providerKey);
+    console.log(`[Integrations] OAuth redirect_uri: ${redirectUri}`);
+    console.log(`[Integrations] returnUrl in metadata: ${returnUrl || 'none'}`);
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
     return res.json({ authUrl, state, expiresAt, credentialId: credential.id });
   } catch (error) {
@@ -803,23 +793,28 @@ router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res
 });
 
 router.get('/email/:provider/callback', async (req, res: Response) => {
+  console.log(`[Integrations] GET /email/${req.params.provider}/callback - code: ${req.query.code ? 'present' : 'missing'}, state: ${req.query.state ? 'present' : 'missing'}`);
+  // returnUrl/errorUrl are extracted from credential metadata once available
+  let returnUrl: string | null = null;
+  let errorUrl: string | null = null;
+
   try {
     const providerKey = normalizeProvider(req.params.provider);
     if (!providerKey) {
-      return sendOAuthResultPage(res, { success: false, message: 'Unsupported email provider' });
+      return sendOAuthResult(res, { success: false, message: 'Unsupported email provider' });
     }
 
     const { code, state } = req.query;
     if (typeof code !== 'string') {
-      return sendOAuthResultPage(res, { success: false, message: 'Missing authorization code' });
+      return sendOAuthResult(res, { success: false, message: 'Missing authorization code' });
     }
     if (typeof state !== 'string') {
-      return sendOAuthResultPage(res, { success: false, message: 'Missing OAuth state' });
+      return sendOAuthResult(res, { success: false, message: 'Missing OAuth state' });
     }
 
     const config = EMAIL_PROVIDER_CONFIG[providerKey];
     if (!config.clientId) {
-      return sendOAuthResultPage(res, { success: false, message: `Missing client ID for ${providerKey}` });
+      return sendOAuthResult(res, { success: false, message: `Missing client ID for ${providerKey}` });
     }
 
     // Look up credential by state token (no auth header available on callback)
@@ -831,11 +826,16 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
     });
 
     if (!credential) {
-      return sendOAuthResultPage(res, { success: false, message: 'No pending OAuth request found or state mismatch' });
+      return sendOAuthResult(res, { success: false, message: 'No pending OAuth request found or state mismatch' });
     }
 
+    // Extract returnUrl/errorUrl from credential metadata for redirect-based flow
+    const metadata = credential.metadata as Record<string, unknown> | null;
+    returnUrl = metadata?.returnUrl as string || null;
+    errorUrl = metadata?.errorUrl as string || null;
+
     if (!credential.pkceVerifier) {
-      return sendOAuthResultPage(res, { success: false, message: 'Missing PKCE verifier for this request' });
+      return sendOAuthResult(res, { success: false, message: 'Missing PKCE verifier for this request', returnUrl, errorUrl });
     }
 
     const redirectUri = buildRedirectUri(providerKey);
@@ -859,6 +859,7 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
       });
 
       if (existingCredential) {
+        console.log(`[Integrations] Gmail already connected for ${tokenResult.userEmail}, refreshing tokens`);
         // Email already connected - delete the pending credential and update the existing one
         await prisma.emailIntegrationCredential.delete({
           where: { id: credential.id },
@@ -876,9 +877,21 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
           },
         });
 
-        return sendOAuthResultPage(res, {
+        // Ensure integration status is CONNECTED (start endpoint sets SYNCING)
+        await prisma.integration.update({
+          where: { id: existingCredential.integrationId },
+          data: {
+            status: IntegrationStatus.CONNECTED,
+            isActive: true,
+            lastSyncAt: new Date(),
+            lastSuccessfulSyncAt: new Date(),
+          },
+        });
+
+        return sendOAuthResult(res, {
           success: true,
           message: `${tokenResult.userEmail} was already connected. Tokens refreshed.`,
+          returnUrl, errorUrl,
         });
       }
     }
@@ -932,9 +945,11 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
     });
 
     const displayEmail = tokenResult.userEmail ? ` (${tokenResult.userEmail})` : '';
-    sendOAuthResultPage(res, {
+    console.log(`[Integrations] ✅ Gmail OAuth complete${displayEmail} - status: CONNECTED`);
+    sendOAuthResult(res, {
       success: true,
-      message: `Successfully connected ${providerKey.toUpperCase()}${displayEmail}. You can close this window.`,
+      message: `Successfully connected ${providerKey.toUpperCase()}${displayEmail}.`,
+      returnUrl, errorUrl,
     });
 
     // Process emails after returning response (same as iMessage pattern)
@@ -945,7 +960,7 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
 
           console.log(`[Job ${jobId}] Starting Gmail email sync for user ${credential.userId}`);
 
-          const emails = await fetchGmailEmails(tokenResult.accessToken);
+          const emails = await fetchGmailEmails(tokenResult.accessToken, tokenResult.userEmail!);
           const result = await parseGmailOAuthEmails(
             credential.userId,
             tokenResult.userEmail!,
@@ -990,9 +1005,10 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
     }
   } catch (error) {
     console.error('Error handling email OAuth callback:', error);
-    return sendOAuthResultPage(res, {
+    return sendOAuthResult(res, {
       success: false,
-      message: 'Failed to connect email account. You can close this window and try again.',
+      message: 'Failed to connect email account. Please try again.',
+      returnUrl, errorUrl,
     });
   }
 });

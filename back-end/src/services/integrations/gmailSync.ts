@@ -141,8 +141,44 @@ async function transformAndFilterEmails(
   userEmail: string,
   userId: string
 ): Promise<ContactToUpsert[]> {
-  const userEmailLower = userEmail.toLowerCase();
-  
+  // Build user email set (same logic as gmailParser.transformEmailsToContacts)
+  const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
+  for (const email of emails) {
+    if (email.isSent) {
+      userEmailSet.add(email.from.toLowerCase());
+    }
+  }
+  // Detect imported accounts: emails where neither from nor to/cc includes a known
+  // user address were imported. The user's imported address dominates the orphan pool.
+  let foundNew = true;
+  while (foundNew) {
+    foundNew = false;
+    const fromCounts = new Map<string, number>();
+    const toCounts = new Map<string, number>();
+    for (const email of emails) {
+      const from = email.from.toLowerCase();
+      const allRecipients = [...email.to, ...email.cc].map(e => e.toLowerCase());
+      if (userEmailSet.has(from) || allRecipients.some(r => userEmailSet.has(r))) continue;
+      fromCounts.set(from, (fromCounts.get(from) || 0) + 1);
+      for (const r of allRecipients) {
+        toCounts.set(r, (toCounts.get(r) || 0) + 1);
+      }
+    }
+    const candidates = [...fromCounts.entries()]
+      .filter(([addr]) => (toCounts.get(addr) || 0) >= 5)
+      .sort((a, b) => b[1] - a[1]);
+    if (candidates.length > 0) {
+      const [topAddr, topCount] = candidates[0];
+      const secondCount = candidates.length > 1 ? candidates[1][1] : 0;
+      if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
+        userEmailSet.add(topAddr);
+        foundNew = true;
+        console.log(`[GmailSync] Detected imported account: ${topAddr} (from=${topCount}, to=${toCounts.get(topAddr) || 0}, next=${secondCount})`);
+      }
+    }
+  }
+  console.log(`[GmailSync] userEmailSet: ${JSON.stringify([...userEmailSet])}`);
+
   // Group emails by contact
   const contactMap = new Map<string, {
     email: string;
@@ -160,12 +196,12 @@ async function transformAndFilterEmails(
   }>();
 
   for (const email of emails) {
-    const isFromMe = email.from.toLowerCase() === userEmailLower;
-    
+    const isFromMe = email.isSent || userEmailSet.has(email.from.toLowerCase());
+
     // Determine contact emails
     let contactEmails: string[] = [];
     if (isFromMe) {
-      contactEmails = [...email.to, ...email.cc].filter(e => e.toLowerCase() !== userEmailLower);
+      contactEmails = [...email.to, ...email.cc].filter(e => !userEmailSet.has(e.toLowerCase()));
     } else {
       contactEmails = [email.from];
     }
@@ -222,7 +258,6 @@ async function transformAndFilterEmails(
   }
 
   // Query database to find contacts user has ever sent to
-  // MessageRecord.to contains the recipient, and we need to find messages sent by the user
   const sentToContacts = await prisma.messageRecord.findMany({
     where: {
       channel: MessageChannel.EMAIL,
@@ -236,7 +271,7 @@ async function transformAndFilterEmails(
   });
 
   const historicallySentTo = new Set(sentToContacts.map(m => m.to?.toLowerCase()).filter(Boolean));
-  
+
   // Also include contacts we sent to in THIS batch
   for (const [email, contact] of contactMap) {
     if (contact.sentCount > 0) {
@@ -332,7 +367,7 @@ async function syncGmailForUser(
     if (historyResult.newHistoryId === '') {
       // History expired, need full sync
       console.log(`[GmailSync] History expired, falling back to full sync`);
-      emails = await fetchGmailEmails(accessToken);
+      emails = await fetchGmailEmails(accessToken, userEmail);
       const profile = await getGmailProfile(accessToken);
       newHistoryId = profile.historyId;
     } else if (historyResult.addedMessageIds.length === 0) {
@@ -347,7 +382,7 @@ async function syncGmailForUser(
   } else {
     // Full sync (first time)
     console.log(`[GmailSync] Performing full sync (no historyId)`);
-    emails = await fetchGmailEmails(accessToken);
+    emails = await fetchGmailEmails(accessToken, userEmail);
     const profile = await getGmailProfile(accessToken);
     newHistoryId = profile.historyId;
   }
@@ -356,7 +391,7 @@ async function syncGmailForUser(
   let messageCount = 0;
 
   if (emails.length > 0) {
-    // Transform and filter emails
+    // Transform and filter emails (import detection is built into transformAndFilterEmails)
     const contactsToUpsert = await transformAndFilterEmails(emails, userEmail, userId);
 
     if (contactsToUpsert.length > 0) {

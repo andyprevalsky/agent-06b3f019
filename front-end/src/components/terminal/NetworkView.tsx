@@ -17,53 +17,101 @@
  *     v
  * [PAGE_M] --> triggers new fetch
  *
- * PERSON DETAIL:
- * [LIST_VIEW] <-- selectedPerson: null
+ * SORTING (server-side):
+ * [UNSORTED] <-- sort: null
  *     |
- *     | (click person)
+ *     | (click header)
  *     v
- * [DETAIL_VIEW] <-- selectedPerson: Person
+ * [ASC] <-- sort: { key, direction: 'asc' }
  *     |
- *     | (close)
+ *     | (click same header)
  *     v
- * [LIST_VIEW]
+ * [DESC] <-- sort: { key, direction: 'desc' }
+ *     |
+ *     | (click same header)
+ *     v
+ * [UNSORTED]
+ * --> all sort changes trigger new fetch, reset to page 1
+ *
+ * SEARCH (server-side, debounced 300ms):
+ * [NO_FILTER] <-- searchQuery: ''
+ *     |
+ *     | (type in search bar, debounced)
+ *     v
+ * [FILTERING] <-- debouncedSearch: string --> triggers new fetch, reset to page 1
  *
  * States:
  * - data: PeoplePaginatedResponse | null
  * - loading: boolean
  * - error: string | null
  * - currentPage: number
- * - selectedPerson: Person | null
+ * - sort: SortState (null | { key: SortKey, direction: 'asc' | 'desc' })
+ * - searchQuery: string (immediate input value)
+ * - debouncedSearch: string (debounced value sent to API)
  */
 
-import { useState, useEffect } from 'react';
-import { getPeople, Person, PeoplePaginatedResponse } from '@/lib/api';
-import { ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { getPeople, PeoplePaginatedResponse } from '@/lib/api';
+import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
+
+type SortKey = 'firstName' | 'lastName' | 'email' | 'phoneNumber' | 'messagesExchanged' | 'company' | 'title' | 'communicationFrequency';
+type SortDirection = 'asc' | 'desc';
+type SortState = { key: SortKey; direction: SortDirection } | null;
 
 export default function NetworkView() {
   const [data, setData] = useState<PeoplePaginatedResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
-  const [selectedPerson, setSelectedPerson] = useState<Person | null>(null);
+  const [sort, setSort] = useState<SortState>({ key: 'communicationFrequency', direction: 'asc' });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
-  const fetchPeople = async (page: number) => {
-    try {
-      setLoading(true);
-      setError(null);
-      const response = await getPeople(page, 50);
-      setData(response);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load network');
-    } finally {
-      setLoading(false);
-    }
+  const handleSort = (key: SortKey) => {
+    setSort(prev => {
+      if (prev?.key !== key) return { key, direction: 'asc' };
+      if (prev.direction === 'asc') return { key, direction: 'desc' };
+      return null;
+    });
+    setCurrentPage(1);
+  };
+
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      setDebouncedSearch(value);
+      setCurrentPage(1);
+    }, 300);
   };
 
   useEffect(() => {
-    fetchPeople(currentPage);
-  }, [currentPage]);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    const fetchPeople = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const response = await getPeople(currentPage, 50, {
+          sort: sort?.key,
+          sortDirection: sort?.direction,
+          search: debouncedSearch || undefined,
+        });
+        setData(response);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load network');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchPeople();
+  }, [currentPage, sort, debouncedSearch]);
 
   const handlePrevPage = () => {
     if (currentPage > 1) {
@@ -86,32 +134,35 @@ export default function NetworkView() {
     return String(value);
   };
 
-  const formatCurrency = (value: number | null | undefined): string => {
-    if (value === null || value === undefined) return '—';
-    return `$${value.toLocaleString()}`;
-  };
-
-  const formatDate = (dateString: string): string => {
-    return new Date(dateString).toLocaleDateString();
-  };
-
   const hasData = data && data.people.length > 0;
   const showEmptyState = !loading && (!data || data.people.length === 0);
 
   return (
-    <div className="h-full overflow-y-auto pt-20">
-      <div className="container max-w-7xl mx-auto py-12 px-4">
-        <div className="mb-8 backdrop-blur-md bg-background/80 p-6 rounded-xl border border-border/50 dark:border-navi-light-light-black/50">
+    <div className="h-screen flex flex-col pt-24 pb-4">
+      <div className="container max-w-[1400px] mx-auto px-6 flex flex-col flex-1 min-h-0">
+        <div className="mb-4 backdrop-blur-md bg-background/80 p-6 rounded-xl border border-border/50 dark:border-navi-light-light-black/50 shrink-0">
           <h1 className="text-4xl font-bold mb-2">Network</h1>
           <p className="text-muted-foreground">
             Your personal and professional connections
           </p>
         </div>
 
-        <div className="backdrop-blur-[12px] shadow-lg border border-border/50 dark:border-navi-light-light-black/50 rounded-xl overflow-hidden flex flex-col" style={{ height: 'calc(100vh - 280px)' }}>
-          {/* Header with pagination */}
+        <div className="backdrop-blur-[12px] shadow-lg border border-border/50 dark:border-navi-light-light-black/50 rounded-xl overflow-hidden flex flex-col flex-1 min-h-0">
+          {/* Header with search and pagination */}
           <div className="flex items-center justify-between p-4 border-b border-border/50 dark:border-navi-light-light-black/50">
-            <h2 className="text-lg font-semibold">Contacts</h2>
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-semibold">Contacts</h2>
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder="Search contacts..."
+                  value={searchQuery}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  className="pl-8 pr-3 py-1.5 text-sm rounded-md border border-border/50 dark:border-navi-light-light-black/50 bg-transparent placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring w-56"
+                />
+              </div>
+            </div>
             <div className="flex items-center gap-4">
               {data && (
                 <span className="text-sm text-muted-foreground">
@@ -157,48 +208,58 @@ export default function NetworkView() {
           <table className="w-full text-sm">
             <thead className="sticky top-0 backdrop-blur-md border-b border-border/50 dark:border-navi-light-light-black/50 z-10">
               <tr>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">First Name</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Last Name</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Messages</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Email</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Phone</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Company</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Title</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Relation</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Relationship Quality</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Communication Freq</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Location</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Online Reach</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Net Worth</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Contact Status</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Bandwidth</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Network Orientation</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Power Ranking</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Age</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap">Added</th>
+                {([
+                  ['firstName', 'First'],
+                  ['lastName', 'Last'],
+                  ['email', 'Email'],
+                  ['phoneNumber', 'Phone'],
+                  ['messagesExchanged', 'Messages'],
+                  ['company', 'Company'],
+                  ['title', 'Title'],
+                  ['communicationFrequency', 'Communication Frequency'],
+                ] as [SortKey, string][]).map(([key, label]) => (
+                  <th
+                    key={key}
+                    onClick={() => handleSort(key)}
+                    className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground transition-colors"
+                  >
+                    <span className="inline-flex items-center gap-1">
+                      {label}
+                      {sort?.key === key ? (
+                        sort.direction === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
+                      ) : (
+                        <ChevronDown className="h-3 w-3 opacity-0" />
+                      )}
+                    </span>
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {loading && !data ? (
                 <tr>
-                  <td colSpan={19} className="px-4 py-12 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">
                     Loading network...
                   </td>
                 </tr>
               ) : error ? (
                 <tr>
-                  <td colSpan={19} className="px-4 py-12 text-center text-red-500">
+                  <td colSpan={8} className="px-4 py-12 text-center text-red-500">
                     Error: {error}
                   </td>
                 </tr>
               ) : showEmptyState ? (
                 <tr>
-                  <td colSpan={19} className="px-4 py-12 text-center">
+                  <td colSpan={8} className="px-4 py-12 text-center">
                     <div className="space-y-2">
-                      <p className="text-muted-foreground">No people in your network yet</p>
-                      <p className="text-sm text-muted-foreground/70">
-                        Connect your integrations to start building your network
+                      <p className="text-muted-foreground">
+                        {debouncedSearch ? 'No contacts match your search' : 'No people in your network yet'}
                       </p>
+                      {!debouncedSearch && (
+                        <p className="text-sm text-muted-foreground/70">
+                          Connect your integrations to start building your network
+                        </p>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -206,188 +267,25 @@ export default function NetworkView() {
                 data.people.map((person) => (
                 <tr
                   key={person.id}
-                  onClick={() => setSelectedPerson(person)}
-                  className="border-b border-border/30 dark:border-navi-light-light-black/30 hover:bg-white/20 dark:hover:bg-black/20 cursor-pointer transition-colors"
+                  className="border-b border-border/30 dark:border-navi-light-light-black/30 hover:bg-white/20 dark:hover:bg-black/20 transition-colors"
                 >
                   <td className="px-4 py-3 whitespace-nowrap">{person.firstName}</td>
                   <td className="px-4 py-3 whitespace-nowrap">{person.lastName}</td>
-                  <td className="px-4 py-3 whitespace-nowrap font-semibold">{person.messagesExchanged}</td>
                   <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.email)}</td>
                   <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.phoneNumber)}</td>
+                  <td className="px-4 py-3 whitespace-nowrap font-semibold">{person.messagesExchanged}</td>
                   <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.company)}</td>
                   <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.title)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.relation)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.relationshipQuality)}</td>
                   <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.communicationFrequency)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.location)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.totalOnlineReach)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatCurrency(person.estimatedNetWorthUsd)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.contactStatus)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.currentBandwidth)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.networkOrientation)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.estimatedWorldPowerRanking)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.age)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap text-muted-foreground">{formatDate(person.createdAt)}</td>
                 </tr>
               ))
               ) : null}
             </tbody>
           </table>
 
-          {/* Detail drawer - slides in from right within the table container */}
-          {selectedPerson && (
-            <div className="w-96 border-l border-border/50 dark:border-navi-light-light-black/50 backdrop-blur-md flex flex-col">
-              {/* Drawer header */}
-              <div className="flex items-center justify-between p-4 border-b border-border/50 dark:border-navi-light-light-black/50">
-            <h3 className="font-semibold">Contact Details</h3>
-            <button
-              onClick={() => setSelectedPerson(null)}
-              className="p-1 rounded hover:bg-white/10 dark:hover:bg-black/10 transition-colors"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-
-          {/* Drawer content */}
-          <div className="flex-1 overflow-auto p-4 space-y-4">
-            {/* Name section */}
-            <div>
-              <h4 className="text-lg font-semibold">
-                {selectedPerson.firstName} {selectedPerson.lastName}
-              </h4>
-              {selectedPerson.title && selectedPerson.company && (
-                <p className="text-sm text-muted-foreground">
-                  {selectedPerson.title} at {selectedPerson.company}
-                </p>
-              )}
-            </div>
-
-            {/* Engagement */}
-            <div className="space-y-2">
-              <h5 className="text-sm font-semibold text-muted-foreground uppercase">Engagement</h5>
-              <DetailRow label="Messages Exchanged" value={selectedPerson.messagesExchanged} />
-              <DetailRow label="Communication Frequency" value={selectedPerson.communicationFrequency} />
-              <DetailRow label="Relationship Quality" value={selectedPerson.relationshipQuality} />
-            </div>
-
-            {/* Contact Info */}
-            <div className="space-y-2">
-              <h5 className="text-sm font-semibold text-muted-foreground uppercase">Contact</h5>
-              <DetailRow label="Email" value={selectedPerson.email} />
-              <DetailRow label="Phone" value={selectedPerson.phoneNumber} />
-              <DetailRow label="Location" value={selectedPerson.location} />
-            </div>
-
-            {/* Professional */}
-            <div className="space-y-2">
-              <h5 className="text-sm font-semibold text-muted-foreground uppercase">Professional</h5>
-              <DetailRow label="Company" value={selectedPerson.company} />
-              <DetailRow label="Title" value={selectedPerson.title} />
-              <DetailRow label="Profession" value={selectedPerson.profession} />
-              <DetailRow label="Industry" value={selectedPerson.industry} />
-            </div>
-
-            {/* Relationship */}
-            <div className="space-y-2">
-              <h5 className="text-sm font-semibold text-muted-foreground uppercase">Relationship</h5>
-              <DetailRow label="Relation" value={selectedPerson.relation} />
-              <DetailRow label="Contact Status" value={selectedPerson.contactStatus} />
-              <DetailRow label="Current Bandwidth" value={selectedPerson.currentBandwidth} />
-              <DetailRow label="Network Orientation" value={selectedPerson.networkOrientation} />
-            </div>
-
-            {/* Metrics */}
-            <div className="space-y-2">
-              <h5 className="text-sm font-semibold text-muted-foreground uppercase">Metrics</h5>
-              <DetailRow label="Online Reach" value={selectedPerson.totalOnlineReach?.toLocaleString()} />
-              <DetailRow 
-                label="Estimated Net Worth" 
-                value={selectedPerson.estimatedNetWorthUsd ? formatCurrency(selectedPerson.estimatedNetWorthUsd) : undefined} 
-              />
-              <DetailRow label="World Power Ranking" value={selectedPerson.estimatedWorldPowerRanking} />
-            </div>
-
-            {/* Personal */}
-            <div className="space-y-2">
-              <h5 className="text-sm font-semibold text-muted-foreground uppercase">Personal</h5>
-              <DetailRow label="Age" value={selectedPerson.age} />
-            </div>
-
-            {/* Social Media */}
-            {(selectedPerson.linkedinUrl || selectedPerson.twitterHandle || 
-              selectedPerson.instagramHandle || selectedPerson.facebookUrl) && (
-              <div className="space-y-2">
-                <h5 className="text-sm font-semibold text-muted-foreground uppercase">Social Media</h5>
-                {selectedPerson.linkedinUrl && (
-                  <DetailRow 
-                    label="LinkedIn" 
-                    value={
-                      <a 
-                        href={selectedPerson.linkedinUrl} 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="text-blue-500 hover:underline"
-                      >
-                        {selectedPerson.linkedinUrl}
-                      </a>
-                    } 
-                  />
-                )}
-                {selectedPerson.twitterHandle && (
-                  <DetailRow label="Twitter" value={`@${selectedPerson.twitterHandle}`} />
-                )}
-                {selectedPerson.instagramHandle && (
-                  <DetailRow label="Instagram" value={`@${selectedPerson.instagramHandle}`} />
-                )}
-                {selectedPerson.facebookUrl && (
-                  <DetailRow 
-                    label="Facebook" 
-                    value={
-                      <a 
-                        href={selectedPerson.facebookUrl} 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="text-blue-500 hover:underline"
-                      >
-                        {selectedPerson.facebookUrl}
-                      </a>
-                    } 
-                  />
-                )}
-              </div>
-            )}
-
-            {/* Notes */}
-            {selectedPerson.notes && (
-              <div className="space-y-2">
-                <h5 className="text-sm font-semibold text-muted-foreground uppercase">Notes</h5>
-                <p className="text-sm whitespace-pre-wrap">{selectedPerson.notes}</p>
-              </div>
-            )}
-
-            {/* Metadata */}
-            <div className="space-y-2 pt-4 border-t border-border/50 dark:border-navi-light-light-black/50">
-              <DetailRow label="Added" value={formatDate(selectedPerson.createdAt)} />
-              <DetailRow label="Last Updated" value={formatDate(selectedPerson.updatedAt)} />
-            </div>
-          </div>
-        </div>
-      )}
         </div>
       </div>
       </div>
     </div>
   );
 }
-
-function DetailRow({ label, value }: { label: string; value: any }) {
-  const displayValue = value === null || value === undefined || value === '' ? '—' : value;
-  
-  return (
-    <div className="flex justify-between items-start gap-4 text-sm">
-      <span className="text-muted-foreground min-w-[140px]">{label}</span>
-      <span className="text-right flex-1 break-words">{displayValue}</span>
-    </div>
-  );
-}
-
