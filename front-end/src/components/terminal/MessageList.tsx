@@ -112,8 +112,10 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
 
   // Find timestamp of last ASSISTANT message with text - used to clean up orphaned IN_PROGRESS tools
   // Exclude empty ASSISTANT messages (e.g., file_pointer relays from sub-agents)
+  // Exclude DAG reasoning ASSISTANT messages - they run in parallel with other tools
+  // and should not trigger orphaned cleanup of legitimately running IN_PROGRESS tools
   const lastAssistantTimestamp = sortedMessages
-    .filter(m => m.role === 'ASSISTANT' && m.text?.trim())
+    .filter(m => m.role === 'ASSISTANT' && m.text?.trim() && m.metadata?.dagTaskIndex == null)
     .map(m => new Date(m.timestamp).getTime())
     .pop() ?? 0;
 
@@ -164,7 +166,7 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
     
     // Keep user attention IN_PROGRESS (different lifecycle - waiting for user)
     if (m.metadata?.isUserAttentionMessage) return true;
-    
+
     // For other IN_PROGRESS, only keep if it came after the last ASSISTANT message
     const toolTime = new Date(m.timestamp).getTime();
     return toolTime >= lastAssistantTimestamp;

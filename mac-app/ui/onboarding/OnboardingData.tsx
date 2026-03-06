@@ -224,6 +224,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
   // Socials state
   const [socialsExpanded, setSocialsExpanded] = useState(false);
+  const [linkedinSyncLoading, setLinkedinSyncLoading] = useState(false);
 
   // Agent Pay state
   const [agentPayModalOpen, setAgentPayModalOpen] = useState(false);
@@ -678,6 +679,55 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       console.error('Failed to connect Telegram:', err);
     } finally {
       setChatSyncLoading(null);
+    }
+  };
+
+  // Handle LinkedIn sync - spawns an agent to download LinkedIn data export
+  const handleLinkedInSync = async () => {
+    setLinkedinSyncLoading(true);
+    try {
+      const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
+      const session = await getSession();
+      const goal = `Download my LinkedIn data export and upload it to the platform.
+
+Steps:
+1. Use a browser agent to navigate to https://www.linkedin.com/mypreferences/d/download-my-data and request a full data export. Click "Request archive" to initiate.
+
+2. LinkedIn takes time to prepare the export (can be minutes to hours). Wait 10 minutes between checks. Use a browser agent to check my email inbox for an email from LinkedIn with subject containing "Your LinkedIn data archive is ready". Repeat checking every 10 minutes for up to 8 hours.
+
+3. When the email arrives, use a browser agent to:
+   - Open the email
+   - Click the download link
+   - Download the ZIP file from the LinkedIn download page
+
+4. After downloading the ZIP file, use a claude code agent to upload it to the backend (replace the file path with the actual downloaded ZIP path):
+   curl -X POST ${backendUrl}/api/integrations/linkedin/upload -H "Authorization: Bearer ${session?.access_token}" -F "file=@<path-to-downloaded-zip>"`;
+
+
+      const response = await fetch(`${backendUrl}/api/agents`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token}`,
+        },
+        body: JSON.stringify({
+          goal,
+          depth: 1,
+          source: 'MAC_APP',
+          price_limit_cents: 500,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to create agent');
+      }
+
+      console.log('[LinkedIn] Sync agent started successfully');
+    } catch (err) {
+      console.error('[LinkedIn] Failed to start sync agent:', err);
+    } finally {
+      setLinkedinSyncLoading(false);
     }
   };
 
@@ -1393,7 +1443,17 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                     </svg>
                     <span className="text-sm text-foreground">LinkedIn</span>
                   </div>
-                  <span className="text-xs text-muted-foreground italic">Coming soon</span>
+                  <button
+                    onClick={handleLinkedInSync}
+                    disabled={linkedinSyncLoading}
+                    className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
+                  >
+                    {linkedinSyncLoading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                  </button>
                 </div>
 
                 {/* Instagram */}

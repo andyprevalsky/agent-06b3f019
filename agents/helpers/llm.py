@@ -1116,28 +1116,6 @@ async def call_llm_structured_streaming(
                 "cancelled": False
             }
 
-        # Filter out attempt_completion if grouped with other tools (silently drop it)
-        # This ensures it never gets an IN_PROGRESS message or executes when batched
-        # Only applies to models with tool_calls (e.g., AgentAction, not PlannerResponse)
-        if hasattr(response, 'tool_calls') and response.tool_calls:
-            has_other_tools = any(
-                tc.tool != "attempt_completion"
-                for tc in response.tool_calls if tc
-            )
-            if has_other_tools:
-                original_count = len(response.tool_calls)
-                response.tool_calls = [
-                    tc for tc in response.tool_calls
-                    if tc and tc.tool != "attempt_completion"
-                ]
-                # Also filter from detected_tools_ordered
-                detected_tools_ordered = [
-                    (name, tid, ts) for name, tid, ts in detected_tools_ordered
-                    if name != "attempt_completion"
-                ]
-                if original_count != len(response.tool_calls):
-                    logger.info(f"🔇 Silently dropped attempt_completion (was grouped with {original_count - 1} other tools)")
-
         # Deduplicate single-call-per-step tools (keep only first occurrence)
         # These tools should never be called more than once in the same response
         SINGLE_CALL_TOOLS = {"send_message_to_user", "send_message_to_user_execute_phase"}
@@ -1250,22 +1228,6 @@ async def call_llm_structured_streaming(
     
     if final_response is None:
         raise ValueError(f"Streaming LLM returned no response (model={model})")
-
-    # Filter out attempt_completion if grouped with other tools (silently drop it)
-    # Only applies to models with tool_calls (e.g., AgentAction, not PlannerResponse)
-    if hasattr(final_response, 'tool_calls') and final_response.tool_calls:
-        has_other_tools = any(
-            tc.tool != "attempt_completion"
-            for tc in final_response.tool_calls if tc
-        )
-        if has_other_tools:
-            original_count = len(final_response.tool_calls)
-            final_response.tool_calls = [
-                tc for tc in final_response.tool_calls
-                if tc and tc.tool != "attempt_completion"
-            ]
-            if original_count != len(final_response.tool_calls):
-                logger.info(f"🔇 Silently dropped attempt_completion (was grouped with {original_count - 1} other tools)")
 
     # Deduplicate single-call-per-step tools (keep only first occurrence)
     # These tools should never be called more than once in the same response

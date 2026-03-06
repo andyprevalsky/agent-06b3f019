@@ -30,7 +30,7 @@ if (import.meta.env.DEV) {
   const originalError = console.error;
 
   const sendLog = (level: string, args: unknown[]) => {
-    fetch('http://localhost:3001/api/dev/log', {
+    fetch(`${(import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '')}/api/dev/log`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

@@ -36,6 +36,7 @@
  * - computeExpanded: boolean --> compute list expanded
  * - messagesSyncExpanded: boolean --> messages sync list expanded
  * - socialsExpanded: boolean --> socials list expanded
+ * - linkedinSyncLoading: boolean --> LinkedIn agent sync in progress
  * - iMessageSynced: boolean --> iMessage connected
  * - whatsAppConnected: boolean --> WhatsApp connected
  * - telegramConnected: boolean --> Telegram connected
@@ -212,6 +213,7 @@ export default function Integrations() {
   // Messages Sync state
   const [messagesSyncExpanded, setMessagesSyncExpanded] = useState(false);
   const [socialsExpanded, setSocialsExpanded] = useState(false);
+  const [linkedinSyncLoading, setLinkedinSyncLoading] = useState(false);
 
   // Accordion mutual exclusivity - only one section open at a time
   type AccordionSection = 'browsers' | 'passwords' | 'messagesSync' | 'compute' | 'socials';
@@ -506,6 +508,55 @@ export default function Integrations() {
       setError(err instanceof Error ? err.message : 'Failed to sync iMessage');
     } finally {
       setMessageSyncLoading(null);
+    }
+  };
+
+  // Handle LinkedIn sync - spawns an agent to download LinkedIn data export
+  const handleLinkedInSync = async () => {
+    setLinkedinSyncLoading(true);
+    try {
+      const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
+      const session = await getStoredSession();
+      const goal = `Download my LinkedIn data export and upload it to the platform.
+
+Steps:
+1. Use a browser agent to navigate to https://www.linkedin.com/mypreferences/d/download-my-data and request a full data export. Click "Request archive" to initiate.
+
+2. LinkedIn takes time to prepare the export (can be minutes to hours). Wait 10 minutes between checks. Use a browser agent to check my email inbox for an email from LinkedIn with subject containing "Your LinkedIn data archive is ready". Repeat checking every 10 minutes for up to 8 hours.
+
+3. When the email arrives, use a browser agent to:
+   - Open the email
+   - Click the download link
+   - Download the ZIP file from the LinkedIn download page
+
+4. After downloading the ZIP file, use a claude code agent to upload it to the backend:
+   curl -X POST ${backendUrl}/api/integrations/linkedin/upload -H "Authorization: Bearer ${session?.access_token}" -F "file=@/path/to/downloaded-linkedin-export.zip"`;
+
+      const response = await fetch(`${backendUrl}/api/agents`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.access_token}`,
+        },
+        body: JSON.stringify({
+          goal,
+          depth: 1,
+          source: 'MAC_APP',
+          price_limit_cents: 500,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to create agent');
+      }
+
+      console.log('[LinkedIn] Sync agent started successfully');
+    } catch (err) {
+      console.error('[LinkedIn] Failed to start sync agent:', err);
+      setError(err instanceof Error ? err.message : 'Failed to start LinkedIn sync');
+    } finally {
+      setLinkedinSyncLoading(false);
     }
   };
 
@@ -1354,18 +1405,47 @@ export default function Integrations() {
                     </div>
 
                     {/* LinkedIn */}
-                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-                      <div className="flex items-center gap-3">
-                        <svg className="w-6 h-6" viewBox="0 0 24 24">
-                          <rect width="24" height="24" rx="5" fill="#0A66C2" />
-                          <path fill="white" d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z" transform="scale(0.85) translate(2.1, 2.1)"/>
-                        </svg>
-                        <span className="text-sm">LinkedIn</span>
+                    {handlers.browserCookies?.isAvailable ? (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <svg className="w-6 h-6" viewBox="0 0 24 24">
+                            <rect width="24" height="24" rx="5" fill="#0A66C2" />
+                            <path fill="white" d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z" transform="scale(0.85) translate(2.1, 2.1)"/>
+                          </svg>
+                          <span className="text-sm">LinkedIn</span>
+                        </div>
+
+                        <button
+                          onClick={handleLinkedInSync}
+                          disabled={linkedinSyncLoading}
+                          className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
+                        >
+                          {linkedinSyncLoading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                        </button>
                       </div>
-                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                        Coming Soon
-                      </span>
-                    </div>
+                    ) : (
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <svg className="w-6 h-6" viewBox="0 0 24 24">
+                            <rect width="24" height="24" rx="5" fill="#0A66C2" />
+                            <path fill="white" d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z" transform="scale(0.85) translate(2.1, 2.1)"/>
+                          </svg>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm">LinkedIn</span>
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                              Desktop Only
+                            </span>
+                          </div>
+                        </div>
+                        <Button size="sm" variant="outline" asChild>
+                          <a href="/download">Download for Mac</a>
+                        </Button>
+                      </div>
+                    )}
 
                     {/* Instagram */}
                     <div className="px-4 py-2 flex items-center justify-between">

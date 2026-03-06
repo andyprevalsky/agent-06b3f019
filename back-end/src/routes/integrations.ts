@@ -15,6 +15,7 @@ import { prisma } from '../lib/prisma';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { fetchClaudeCodeAccessToken, fetchPoolToken, markPoolTokenRateLimited } from '../lib/claudeCredentials';
+import { importLinkedInData } from '../services/integrations/linkedinParser';
 
 const router = express.Router();
 
@@ -321,6 +322,10 @@ const AD_TRACKING_DOMAINS = [
 // Chromium epoch offset (Jan 1, 1601 to Jan 1, 1970 in microseconds)
 const CHROME_EPOCH_OFFSET_MICROSECONDS = 11644473600n * 1000000n;
 
+// Cache authenticated domains per user (5 min TTL) - avoids scanning millions of cookie rows on every request
+const authDomainsCache = new Map<string, { domains: string[]; expiresAt: number }>();
+const AUTH_DOMAINS_CACHE_TTL_MS = 5 * 60 * 1000;
+
 /**
  * GET /api/integrations
  *
@@ -339,6 +344,14 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
+    // Check cache for authenticated domains
+    const cached = authDomainsCache.get(userId);
+    const hasCachedDomains = cached && cached.expiresAt > Date.now();
+
+    console.log(`[Integrations GET] Fetching for user ${userId}${hasCachedDomains ? ' (domains cached)' : ''}`);
+    const queryStart = Date.now();
+
+    // Always fetch integrations; only query cookies if cache miss
     const integrations = await prisma.integration.findMany({
       where: { userId },
       orderBy: { updatedAt: 'desc' },
@@ -348,10 +361,51 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
         },
       },
     });
+    console.log(`[Integrations GET] integrations query done (${Date.now() - queryStart}ms)`);
+
+    let authenticatedDomains: string[];
+
+    if (hasCachedDomains) {
+      authenticatedDomains = cached.domains;
+    } else {
+      const authRegex = AUTH_COOKIE_PATTERNS.join('|');
+      const falsePositiveRegex = FALSE_POSITIVE_COOKIES.map(p => p.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      const adDomainRegex = AD_TRACKING_DOMAINS.map(d => d.replace(/\./g, '\\.')).join('|');
+      const nowMicroseconds = BigInt(Date.now()) * 1000n + CHROME_EPOCH_OFFSET_MICROSECONDS;
+
+      const domainRows = await prisma.$queryRawUnsafe<{ domain: string }[]>(
+        `SELECT DISTINCT
+           CASE
+             WHEN array_length(string_to_array(LTRIM(domain, '.'), '.'), 1) >= 2
+             THEN (string_to_array(LTRIM(domain, '.'), '.'))[array_length(string_to_array(LTRIM(domain, '.'), '.'), 1) - 1]
+               || '.' || (string_to_array(LTRIM(domain, '.'), '.'))[array_length(string_to_array(LTRIM(domain, '.'), '.'), 1)]
+             ELSE LTRIM(domain, '.')
+           END AS domain
+         FROM "Cookie"
+         WHERE "userId" = $1
+           AND name ~* $2
+           AND NOT name ~* $3
+           AND NOT domain ~* $4
+           AND ("expiresUtc" IS NULL OR "expiresUtc" <= 0 OR "expiresUtc" >= $5)`,
+        userId,
+        authRegex,
+        falsePositiveRegex,
+        adDomainRegex,
+        nowMicroseconds
+      ).catch((err) => {
+        console.error(`[Integrations GET] domains query failed (${Date.now() - queryStart}ms):`, err.message);
+        return [] as { domain: string }[];
+      });
+
+      authenticatedDomains = domainRows.map(r => r.domain).sort();
+      authDomainsCache.set(userId, { domains: authenticatedDomains, expiresAt: Date.now() + AUTH_DOMAINS_CACHE_TTL_MS });
+      console.log(`[Integrations GET] domains query done (${Date.now() - queryStart}ms, ${authenticatedDomains.length} domains, cached for 5m)`);
+    }
 
     return res.json({
       integrations,
       count: integrations.length,
+      authenticatedDomains,
     });
   } catch (error) {
     console.error('Error fetching integrations:', error);
@@ -537,6 +591,106 @@ router.post('/upload', authenticate, upload.single('file') as any, async (req: A
     
     return res.status(500).json({
       error: 'Failed to upload file',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * POST /api/integrations/linkedin/upload
+ *
+ * Upload a LinkedIn data export ZIP file.
+ * Parses Connections.csv, messages.csv, Profile.csv, Positions.csv
+ * and imports contacts + messages into the database.
+ */
+router.post('/linkedin/upload', authenticate, upload.single('file') as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const filePath = req.file.path;
+    const fileName = req.file.originalname;
+
+    if (!fileName.toLowerCase().endsWith('.zip')) {
+      fs.unlinkSync(filePath);
+      return res.status(400).json({ error: 'File must be a .zip file' });
+    }
+
+    console.log(`[LinkedIn] File uploaded: ${fileName} (${req.file.size} bytes) for user ${userId}`);
+
+    // Upsert integration record
+    const integration = await prisma.integration.upsert({
+      where: { userId_name: { userId, name: 'linkedin' } },
+      create: {
+        userId,
+        name: 'linkedin',
+        type: IntegrationType.DATA_SOURCE,
+        status: IntegrationStatus.SYNCING,
+        config: { fileName, uploadedAt: new Date().toISOString() },
+      },
+      update: {
+        status: IntegrationStatus.SYNCING,
+        config: { fileName, uploadedAt: new Date().toISOString() },
+      },
+    });
+
+    const jobId = integration.id;
+
+    try {
+      const result = await importLinkedInData(userId, filePath, jobId);
+
+      await prisma.integration.update({
+        where: { id: integration.id },
+        data: {
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+        },
+      });
+
+      // Cleanup temp file
+      fs.unlinkSync(filePath);
+
+      return res.json({
+        message: 'LinkedIn data imported successfully',
+        jobId,
+        contacts: result.contacts,
+        messages: result.messages,
+      });
+    } catch (parseError) {
+      console.error('[LinkedIn] Parse/import error:', parseError);
+
+      await prisma.integration.update({
+        where: { id: integration.id },
+        data: {
+          status: IntegrationStatus.SYNC_FAILED,
+          lastSyncAt: new Date(),
+          lastFailedSyncAt: new Date(),
+          failureReason: parseError instanceof Error ? parseError.message : 'Unknown error',
+        },
+      });
+
+      // Cleanup temp file
+      try { fs.unlinkSync(filePath); } catch {}
+
+      return res.status(500).json({
+        error: 'Failed to parse LinkedIn data',
+        details: parseError instanceof Error ? parseError.message : 'Unknown error',
+      });
+    }
+  } catch (error) {
+    console.error('[LinkedIn] Upload error:', error);
+
+    if (req.file) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+    }
+
+    return res.status(500).json({
+      error: 'Failed to upload LinkedIn data',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
   }
@@ -1566,7 +1720,7 @@ router.post('/cookies/upload', authenticate, upload.none() as any, async (req: A
             browser,
             // New fields
             cookie.creation_utc ? BigInt(cookie.creation_utc) : null,
-            cookie.top_frame_site_key || null,
+            cookie.top_frame_site_key || '',
             cookie.last_access_utc ? BigInt(cookie.last_access_utc) : null,
             cookie.has_expires ?? true,
             cookie.is_persistent ?? true,

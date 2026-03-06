@@ -29,6 +29,20 @@ router.post('/', authenticate, attachmentUpload.single('file') as any, async (re
       return;
     }
 
+    // Content validation: reject files whose bytes don't match their declared MIME type.
+    // This catches proxy/dev-server issues where HTML error pages are stored as PDFs, etc.
+    const head = req.file.buffer.subarray(0, 256).toString('utf-8').trimStart().toLowerCase();
+    const isHtml = head.startsWith('<!doctype') || head.startsWith('<html');
+    const declaredMime = req.file.mimetype;
+    if (isHtml && !declaredMime.includes('html')) {
+      console.error(`[Upload] Content mismatch: file "${req.file.originalname}" (${declaredMime}) contains HTML. Likely a proxy/dev-server error.`);
+      res.status(400).json({
+        error: 'File content does not match its type',
+        details: `Expected ${declaredMime} but received HTML. The file may have been intercepted by a dev server or proxy.`,
+      });
+      return;
+    }
+
     // Process the uploaded file (stored under userId, not agent-scoped)
     const filePointer = await processUploadedFile(
       userId,

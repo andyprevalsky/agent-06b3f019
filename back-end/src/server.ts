@@ -128,6 +128,24 @@ app.use(
   })
 );
 
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  const { method, path: urlPath } = req;
+  const body = req.body && Object.keys(req.body).length > 0
+    ? JSON.stringify(req.body).substring(0, 200)
+    : undefined;
+
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const logParts = [`[HTTP] ${method} ${urlPath} → ${res.statusCode} (${duration}ms)`];
+    if (body) logParts.push(`body=${body}`);
+    console.log(logParts.join(' '));
+  });
+
+  next();
+});
+
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

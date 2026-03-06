@@ -203,15 +203,19 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
 
       if (testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0) {
         // Fetch files from Vite dev server's public folder
-        // Use absolute URL to port 8080 since browser may be on a different origin (e.g. Conductor proxy)
-        const viteBase = 'http://localhost:8080';
-        files = await Promise.all(
+        // NOTE: test-assets must exist in EACH app's public/ dir.
+        // The mac-app symlinks to front-end/public/test-assets.
+        files = (await Promise.all(
           testPrompt.attachmentUrls.map(async (url) => {
-            const response = await fetch(`${viteBase}${url}`);
+            const response = await fetch(url);
+            // Detect Vite SPA fallback (returns index.html for missing files)
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('text/html')) {
+              console.error(`Test asset ${url} returned HTML — file missing from public/ folder`);
+              return null;
+            }
             const blob = await response.blob();
             const filename = url.split('/').pop() || 'attachment';
-            // Infer mime type from extension — blob.type can be wrong if
-            // Vite's SPA fallback serves index.html instead of the actual file
             const ext = filename.split('.').pop()?.toLowerCase();
             const mimeByExt: Record<string, string> = {
               jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png',
@@ -221,7 +225,7 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
             const mimeType = (ext && mimeByExt[ext]) || blob.type;
             return new File([blob], filename, { type: mimeType });
           })
-        );
+        )).filter((f): f is File => f !== null);
       }
 
       onSelectPrompt(testPrompt.prompt, files);

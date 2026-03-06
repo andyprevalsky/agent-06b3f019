@@ -5,9 +5,9 @@ const PERSON_CHUNK_SIZE = 50;
 const MESSAGE_BATCH_SIZE = 10000;
 
 export interface ContactToUpsert {
-  // Primary identifier (phone number or email)
+  // Primary identifier (phone number, email, or LinkedIn URL)
   identifier: string;
-  identifierType: 'phone' | 'email';
+  identifierType: 'phone' | 'email' | 'linkedin_url';
 
   // Person data
   firstName?: string;
@@ -113,9 +113,11 @@ export async function upsertPersonAndMessageRecords(
     // Build lookup map for person IDs
     const phoneContacts = chunk.filter(c => c.identifierType === 'phone');
     const emailContacts = chunk.filter(c => c.identifierType === 'email');
+    const linkedinContacts = chunk.filter(c => c.identifierType === 'linkedin_url');
 
     const phoneIdentifiers = phoneContacts.map(c => c.identifier);
     const emailIdentifiers = emailContacts.map(c => c.identifier);
+    const linkedinIdentifiers = linkedinContacts.map(c => c.identifier);
 
     // Fetch persons by phone
     const personsByPhone = phoneIdentifiers.length > 0
@@ -139,6 +141,14 @@ export async function upsertPersonAndMessageRecords(
         })
       : [];
 
+    // Fetch persons by LinkedIn URL
+    const personsByLinkedin = linkedinIdentifiers.length > 0
+      ? await prisma.person.findMany({
+          where: { userId, linkedinUrl: { in: linkedinIdentifiers } },
+          select: { id: true, linkedinUrl: true },
+        })
+      : [];
+
     // Build identifier -> personId map
     const personMap = new Map<string, string>();
 
@@ -155,6 +165,10 @@ export async function upsertPersonAndMessageRecords(
           }
         });
       }
+    });
+
+    personsByLinkedin.forEach(p => {
+      if (p.linkedinUrl) personMap.set(p.linkedinUrl, p.id);
     });
 
     // Process each contact's messages
@@ -225,9 +239,11 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
   // Separate contacts by type
   const phoneContacts = chunk.filter(c => c.identifierType === 'phone');
   const emailContacts = chunk.filter(c => c.identifierType === 'email');
+  const linkedinContacts = chunk.filter(c => c.identifierType === 'linkedin_url');
 
   // Collect all identifiers to check
   const phonesToCheck = phoneContacts.map(c => c.identifier);
+  const linkedinUrlsToCheck = linkedinContacts.map(c => c.identifier);
   const allEmailsToCheck = new Set<string>();
 
   // Add emails from email contacts
@@ -243,13 +259,19 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
     c.emailAddresses?.forEach(e => allEmailsToCheck.add(e));
   });
 
+  // Add emails from linkedin contacts (for cross-linking)
+  linkedinContacts.forEach(c => {
+    if (c.email) allEmailsToCheck.add(c.email);
+    c.emailAddresses?.forEach(e => allEmailsToCheck.add(e));
+  });
+
   const emailsArray = Array.from(allEmailsToCheck);
 
   // Query existing persons by phone
   const existingByPhone = phonesToCheck.length > 0
     ? await prisma.person.findMany({
         where: { userId, phoneNumber: { in: phonesToCheck } },
-        select: { id: true, phoneNumber: true, email: true, emailAddresses: true },
+        select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
       })
     : [];
 
@@ -260,7 +282,15 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
           userId,
           OR: [{ email: { in: emailsArray } }],
         },
-        select: { id: true, phoneNumber: true, email: true, emailAddresses: true },
+        select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
+      })
+    : [];
+
+  // Query existing persons by LinkedIn URL
+  const existingByLinkedin = linkedinUrlsToCheck.length > 0
+    ? await prisma.person.findMany({
+        where: { userId, linkedinUrl: { in: linkedinUrlsToCheck } },
+        select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
       })
     : [];
 
@@ -282,6 +312,11 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
         }
       });
     }
+  });
+
+  // Index by LinkedIn URL
+  existingByLinkedin.forEach(p => {
+    if (p.linkedinUrl) personMap.set(p.linkedinUrl, p);
   });
 
   // Build operations with cross-type deduplication
@@ -348,6 +383,7 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
 function buildPersonCreateData(userId: string, contact: ContactToUpsert) {
   const emailAddresses = contact.emailAddresses?.filter(Boolean) ?? [];
   const isEmail = contact.identifierType === 'email';
+  const isLinkedin = contact.identifierType === 'linkedin_url';
 
   // Determine primary email using best-email heuristic
   let primaryEmail: string | null = null;
@@ -361,11 +397,12 @@ function buildPersonCreateData(userId: string, contact: ContactToUpsert) {
 
   return {
     userId,
-    phoneNumber: isEmail ? null : contact.identifier,
+    phoneNumber: (isEmail || isLinkedin) ? null : contact.identifier,
     email: primaryEmail,
     emailAddresses,
     firstName: contact.firstName || '',
     lastName: contact.lastName || '',
+    ...(isLinkedin && { linkedinUrl: contact.identifier }),
     ...(contact.company && { company: contact.company }),
     ...(contact.title && { title: contact.title }),
   };
@@ -374,6 +411,7 @@ function buildPersonCreateData(userId: string, contact: ContactToUpsert) {
 function buildPersonUpdateData(contact: ContactToUpsert) {
   const emailAddresses = contact.emailAddresses?.filter(Boolean) ?? [];
   const isEmail = contact.identifierType === 'email';
+  const isLinkedin = contact.identifierType === 'linkedin_url';
 
   const data: Record<string, unknown> = {};
 
@@ -391,6 +429,10 @@ function buildPersonUpdateData(contact: ContactToUpsert) {
 
   if (contact.title) {
     data.title = contact.title;
+  }
+
+  if (isLinkedin) {
+    data.linkedinUrl = contact.identifier;
   }
 
   // Update email using same best-email heuristic
