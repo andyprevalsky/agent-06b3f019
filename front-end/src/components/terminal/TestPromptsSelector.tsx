@@ -150,37 +150,13 @@ For any services that require a API Key or Credential, mock the service for now 
   {
     title: 'Raise My Round',
     description: 'Fundraising outreach with pitch deck and VC/angel CSV',
-    prompt: `Reach out to every fund / angel / vc on my behalf
-
-Sourcing
-1. I've attached a list of angels & vcs to contact, it is not comprehensive though so please make sure the process is exhaustive. Identify which angels I already have an existing relationship with & which we will reach out cold.
-For cold outreach, send a linkedin message & an email to each contact you find
-
-Raising 1.5M @ 10M post-money cap
-Angels / Family Offices > Tier 1 VCs > Accelerators > Tier 2 VCs, but we should apply to all
-Close by end of march
-
-=== REFERENCE MATERIALS ===
-https://www.roselabs.ai/research/task-decomposer
-I've also attached our pitch deck, which you should upload for every relevant application.
-Pitch deck DocSend link: https://docsend.com/view/kdimuw6dfjf6k3si
-
-for cold outreach create a template based off this post by Race Capital
-
- • Clarity under compression - Explain the problem, why now, and your wedge in 2 minutes. No buzzwords.
- • Learning velocity - What did you believe 30 days ago that you've already changed your mind about?
-
-That's how I decide whether to lead or not. If you're cold-emailing VCs, skip "would love to chat."
-
-Send investors five bullets instead:
-
- • what changed in the stack
- • what became possible
- • who feels the pain first
- • what you ship in 30 days -> task completions with rapidly increasing task complexity
- • why this team wins -> Super-intelligence requires massive persistent compute to keep agent networks alive. Anthropic and OAI are already hitting compute ceilings serving their existing customer base (stateless API calls, code gen). They can't fast-follow into always-on autonomous agents because the constraint is physical (GPU supply), not technical. Brand optics also limit them — Anthropic can't be the company autonomously emailing and messaging on your behalf. Rose Labs is the credible third party built on top of existing model providers — we freely switch and specialize LLMs per task, and our entire architecture is purpose-built for long-running stateful agent compute, not stateless request-response. The race is: can we specialize super-intelligence to automate end-to-end verticals before incumbents solve their compute constraints? Because of those constraints and brand limitations, they can't eat everything — at best they build one in-house system, not a platform.
-
-Don't reapply to SPC or OSV (already submitted), but use previous application data as reference.`,
+    prompt: `Run a world class fundraising process to close my round by March
+- Assume we are starting from 0
+- Aman has already done intros, I'm handling those manually
+- Pitch deck DocSend link: https://docsend.com/view/kdimuw6dfjf6k3si
+- I've attached a list of angels & vcs to contact, it is not comprehensive so please make sure the process is exhaustive
+- dont apply to spc or osv grant, that's already done
+- I've attached my pitch deck & a list of investors to get started`,
     attachmentUrls: [
       '/test-assets/vcs-and-angels.csv',
       '/test-assets/pitch-deck/rose-labs-pitch-deck.pdf',

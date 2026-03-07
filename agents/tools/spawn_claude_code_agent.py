@@ -55,6 +55,26 @@ SILENCE_TIMEOUT_S = 1.0
 # Maximum runtime before timeout
 MAX_RUNTIME_S = 1800  # 30 minutes (matches E2B SANDBOX_TIMEOUT_MS)
 
+# Fatal error patterns in Claude Code output that should immediately abort the session.
+# These are unrecoverable inside a headless sandbox (e.g., OAuth login can't be completed).
+FATAL_ERROR_PATTERNS = [
+    ("authentication_error", "Claude Code authentication failed (401). The user's Claude credentials are invalid or expired. They need to re-sync their Claude Code credentials."),
+    ("Invalid authentication credentials", "Claude Code authentication failed. The user's API key or OAuth token is invalid."),
+    ("API Error: 401", "Claude Code received a 401 from the Anthropic API. The user's credentials need to be refreshed."),
+    ("Please run /login", "Claude Code is requesting interactive login, which cannot be completed in a sandbox."),
+]
+
+
+def _check_fatal_errors(output: str) -> Optional[str]:
+    """Check terminal output for fatal errors that should immediately abort the session.
+
+    Returns an error message if a fatal error is detected, None otherwise.
+    """
+    for pattern, message in FATAL_ERROR_PATTERNS:
+        if pattern in output:
+            return message
+    return None
+
 
 def _safe_time() -> float:
     """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
@@ -626,6 +646,29 @@ async def spawn_claude_code_activity(
                     pending_output = False
 
                     if filtered_output:
+                        # Check for fatal errors before calling parent LLM.
+                        # These errors (e.g., 401 auth failures) cannot be resolved
+                        # inside a headless sandbox and would cause the parent agent
+                        # to loop forever trying to fix them.
+                        fatal_error = _check_fatal_errors(filtered_output)
+                        if fatal_error:
+                            logger.error(
+                                "[ClaudeCode] Fatal error detected in output, aborting",
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                error=fatal_error,
+                            )
+                            action_summary.append(f"FATAL: {fatal_error}")
+                            await save_claude_code_message(
+                                agent_id=agent_id,
+                                title="Authentication Error",
+                                task_id=task_id,
+                                message=fatal_error,
+                                status=MessageStatus.ERROR,
+                                action_type="system",
+                            )
+                            raise Exception(fatal_error)
+
                         logger.info(
                             "[ClaudeCode] Silence detected, calling parent LLM",
                             agent_id=agent_id,

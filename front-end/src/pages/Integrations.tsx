@@ -53,6 +53,7 @@ import { Button } from '@/components/ui/button';
 import { Loader2, RefreshCw, Check } from 'lucide-react';
 import { useIntegrationHandlers, type BrowserType, type BrowserInfo } from '@/contexts/IntegrationHandlersContext';
 import { getStoredSession } from '@/lib/supabase';
+import { useAuth } from '@/hooks/useAuth';
 import AtlasPasswordModal from '@/components/AtlasPasswordModal';
 import ApplePasswordsModal from '@/components/ApplePasswordsModal';
 
@@ -174,6 +175,7 @@ interface ConnectedIntegration {
 
 export default function Integrations() {
   const handlers = useIntegrationHandlers();
+  const { isFullySignedIn } = useAuth();
   const [uploading, setUploading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -1237,8 +1239,8 @@ Steps:
                 )}
               </div>
 
-              {/* Compute - Expandable Section */}
-              <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
+              {/* Compute - Expandable Section (hidden for logged-out users) */}
+              {isFullySignedIn && <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
                 {/* Main row */}
                 <div className="p-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
@@ -1351,7 +1353,7 @@ Steps:
                     </div>
                   </div>
                 )}
-              </div>
+              </div>}
 
               {/* Socials - Expandable Section */}
               <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
