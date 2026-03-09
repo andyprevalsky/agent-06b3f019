@@ -1,5 +1,5 @@
 import { MessageChannel } from '@prisma/client';
-import fetch from 'node-fetch';
+import fetch, { RequestInit, Response } from 'node-fetch';
 import { logTruncate } from '../../lib/log';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
