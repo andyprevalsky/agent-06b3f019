@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { execSync, spawn } from 'child_process';
+import { execFileSync, execSync, spawn } from 'child_process';
 import { BrowserWindow } from 'electron';
 import { Crypto } from '../base/crypto';
 import { AuthService } from './auth';
@@ -158,9 +158,10 @@ export class ClaudeCredentialSync {
   }
 
   /**
-   * Run `claude auth login` to trigger OAuth flow in the browser.
+   * Run `claude setup-token` to create a long-lived OAuth token (1 year).
+   * Parses the token from stdout and writes it to the macOS Keychain.
    */
-  private static runClaudeAuthLogin(onStatus: (status: string) => void): Promise<void> {
+  private static runClaudeSetupToken(onStatus: (status: string) => void): Promise<void> {
     return new Promise((resolve, reject) => {
       const claudePath = this.getClaudePath();
       const env = this.getAugmentedEnv();
@@ -169,25 +170,28 @@ export class ClaudeCredentialSync {
       if (this._mockNoClaudeCode) {
         try {
           logConsole('ClaudeCredentialSync', 'MOCK: Running claude auth logout first');
-          execSync(`"${claudePath}" auth logout`, { stdio: 'pipe', env });
+          execFileSync(claudePath, ['auth', 'logout'], { stdio: 'pipe', env });
         } catch {
           // Ignore logout errors
         }
       }
 
       onStatus('Opening browser for authentication...');
-      logConsole('ClaudeCredentialSync', `Running: ${claudePath} auth login`);
+      logConsole('ClaudeCredentialSync', `Running: ${claudePath} setup-token`);
 
-      const proc = spawn(claudePath, ['auth', 'login'], {
+      const proc = spawn(claudePath, ['setup-token'], {
         env,
         stdio: 'pipe',
       });
 
+      let stdout = '';
       let stderr = '';
       proc.stderr.on('data', (d) => { stderr += d.toString(); });
       proc.stdout.on('data', (d) => {
-        const line = d.toString().trim();
-        if (line) logConsole('ClaudeCredentialSync', `auth login: ${line}`);
+        const chunk = d.toString();
+        stdout += chunk;
+        const line = chunk.trim();
+        if (line) logConsole('ClaudeCredentialSync', `setup-token: ${line}`);
       });
 
       const timer = setTimeout(() => {
@@ -197,11 +201,44 @@ export class ClaudeCredentialSync {
 
       proc.on('close', (code) => {
         clearTimeout(timer);
-        if (code === 0) {
-          logConsole('ClaudeCredentialSync', 'OAuth login completed successfully');
+        if (code !== 0) {
+          reject(new Error(`claude setup-token failed (exit ${code}): ${stderr.slice(0, 200)}`));
+          return;
+        }
+
+        // Parse the long-lived token from stdout
+        const tokenMatch = stdout.match(/(sk-ant-oat[A-Za-z0-9_-]+)/);
+        if (!tokenMatch) {
+          reject(new Error('Could not parse token from claude setup-token output'));
+          return;
+        }
+
+        const accessToken = tokenMatch[1];
+        logConsole('ClaudeCredentialSync', `Parsed long-lived token (${accessToken.length} chars)`);
+
+        // Build credential JSON and write to Keychain
+        const credentials = JSON.stringify({
+          claudeAiOauth: {
+            accessToken,
+            expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+          },
+        });
+
+        try {
+          // Remove old entry if it exists
+          try {
+            execFileSync('security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE], { stdio: 'pipe' });
+          } catch {
+            // No existing entry, that's fine
+          }
+
+          // Write new credentials to Keychain (use execFileSync to avoid shell injection)
+          const username = process.env.USER || 'unknown';
+          execFileSync('security', ['add-generic-password', '-s', KEYCHAIN_SERVICE, '-a', username, '-w', credentials], { stdio: 'pipe' });
+          logConsole('ClaudeCredentialSync', 'Long-lived token written to Keychain');
           resolve();
-        } else {
-          reject(new Error(`claude auth login failed (exit ${code}): ${stderr.slice(0, 200)}`));
+        } catch (err) {
+          reject(new Error(`Failed to write credentials to Keychain: ${err instanceof Error ? err.message : String(err)}`));
         }
       });
 
@@ -348,8 +385,8 @@ export class ClaudeCredentialSync {
           sendStatus('Claude Code installed');
         }
 
-        // Run OAuth login
-        await this.runClaudeAuthLogin(sendStatus);
+        // Run setup-token to get a long-lived (1 year) OAuth token
+        await this.runClaudeSetupToken(sendStatus);
 
         // Re-read credentials after OAuth
         sendStatus('Reading credentials...');
