@@ -184,8 +184,9 @@ export async function createSessionWithContext(
         useProxy: {
           geolocation: {
             country: geolocation.country,
-            state: geolocation.state,
-            city: geolocation.city,
+            // Steel only supports state for US proxies
+            ...(geolocation.country === 'US' && geolocation.state && { state: geolocation.state }),
+            ...(geolocation.city && { city: geolocation.city }),
           },
         },  // Residential proxy based on user's location
         solveCaptcha: true,  // Auto-solve CAPTCHAs
@@ -339,8 +340,8 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
     if (agent?.proxyCountry) {
       proxyGeo = {
         country: agent.proxyCountry,
-        state: agent.proxyState || DEFAULT_GEOLOCATION.state,
-        city: agent.proxyCity || DEFAULT_GEOLOCATION.city,
+        ...(agent.proxyState && { state: agent.proxyState }),
+        ...(agent.proxyCity && { city: agent.proxyCity }),
       };
     }
   }
@@ -370,8 +371,9 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
         useProxy: {
           geolocation: {
             country: proxyGeo.country,
-            state: proxyGeo.state,
-            city: proxyGeo.city,
+            // Steel only supports state for US proxies
+            ...(proxyGeo.country === 'US' && proxyGeo.state && { state: proxyGeo.state }),
+            ...(proxyGeo.city && { city: proxyGeo.city }),
           },
         },  // Residential proxy based on user's location
         solveCaptcha: true,

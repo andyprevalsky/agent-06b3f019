@@ -2,8 +2,8 @@ import { Request } from 'express';
 
 export interface ProxyGeoLocation {
   country: string;  // 2-letter country code (e.g., "US")
-  state: string;    // 2-letter state abbreviation (e.g., "TX")
-  city: string;     // City name uppercase (e.g., "DALLAS")
+  state?: string;   // 2-letter state abbreviation (e.g., "TX") - only valid for US
+  city?: string;    // City name uppercase (e.g., "DALLAS")
 }
 
 // US state name to abbreviation mapping
@@ -120,8 +120,8 @@ export async function getGeoFromIP(ip: string): Promise<ProxyGeoLocation | null>
 
     const result: ProxyGeoLocation = {
       country,
-      state: state.toUpperCase().substring(0, 2) || 'TX',  // Fallback to TX if empty
-      city: city.toUpperCase() || 'DALLAS',  // Fallback to DALLAS if empty
+      ...(state && { state: state.toUpperCase().substring(0, 2) }),
+      ...(city && { city: city.toUpperCase() }),
     };
 
     console.log(`[GeoIP] Resolved ${ip} -> ${result.city}, ${result.state}, ${result.country}`);

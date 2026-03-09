@@ -102,8 +102,8 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     const proxyGeo: ProxyGeoLocation = agent?.proxyCountry
       ? {
           country: agent.proxyCountry,
-          state: agent.proxyState || DEFAULT_GEOLOCATION.state,
-          city: agent.proxyCity || DEFAULT_GEOLOCATION.city,
+          ...(agent.proxyState && { state: agent.proxyState }),
+          ...(agent.proxyCity && { city: agent.proxyCity }),
         }
       : DEFAULT_GEOLOCATION;
 
