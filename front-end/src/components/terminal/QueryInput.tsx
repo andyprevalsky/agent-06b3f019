@@ -84,6 +84,7 @@ import {
   MAX_FILE_SIZE,
   MAX_TOTAL_ATTACHMENTS_SIZE,
 } from '@/lib/api';
+import { useAuth } from '@/hooks/useAuth';
 import RoseToolSetChip from './RoseToolSetChip';
 import TestPromptsSelector from './TestPromptsSelector';
 import AgentSettingsDialog from './AgentSettingsDialog';
@@ -187,6 +188,9 @@ export default function QueryInput({
   pendingPriceLimitCents = 100,
   onPendingPriceLimitChange,
 }: QueryInputProps) {
+  const { user: authUser } = useAuth();
+  const showTestPrompts = import.meta.env.DEV || authUser?.id === '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+
   // Tool picker removed - LLM automatically selects tools based on goal
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showTooltip, setShowTooltip] = useState(false);
@@ -610,8 +614,8 @@ export default function QueryInput({
               </div>
               {/* Rose-ToolSet Chip */}
               <RoseToolSetChip />
-              {/* Test Prompts Selector - Dev only */}
-              {import.meta.env.DEV && (
+              {/* Test Prompts Selector - Dev + Andy's account on prod */}
+              {showTestPrompts && (
                 <TestPromptsSelector
                   onSelectPrompt={(prompt, files) => {
                     onChange(prompt);
