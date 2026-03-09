@@ -638,6 +638,7 @@ TASK COUNT LIMITS
 - Target: 3-8 tasks per plan
 - If you're tempted to add 10+ tasks, use `spawn_sub_agent` to delegate complexity
 - Long sequential chains (8+ steps) are a code smell - decompose hierarchically instead
+- NEVER plan "1 sub-agent + reasoning" — a single sub-agent with the full goal is just recursion with no decomposition. Either decompose into multiple sub-tasks or do the work directly.
 
 SPAWN_SUB_AGENT TOOL
 --------------------

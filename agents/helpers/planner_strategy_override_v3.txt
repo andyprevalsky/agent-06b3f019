@@ -30,6 +30,9 @@ B) “Visa Application Kit” (BLR→CDG, May 10–22; Visiting Friend; Schengen
 - Cover letter must be tailored to “private visit / visiting friend” for France Schengen: purpose, dates (May 10–22), itinerary summary, accommodation with host, host contact/address, funding/means of subsistence, ties to India and return intent; align with official France-Visas guidance.
 - Document checklist must be comprehensive and aligned with official France-Visas + the applicable application channel (often VFS for India; verify). Include: application form, photos, passport validity rules, travel medical insurance, flight reservation, accommodation/host invitation (commonly “attestation d’accueil” for France private visit—verify requirement), proof of funds (bank statements), employment/leave letter, tax returns/ITR, sponsor/host documents if applicable, civil status docs, etc.
 
+Recursion guard:
+- NEVER plan "1 sub-agent + reasoning" — a single sub-agent with the full goal is just recursion with no decomposition. Either decompose into multiple sub-tasks or do the work directly.
+
 Quality bar for tasks (make each task deterministic):
 - Each task goal must specify exactly what artifact it will produce (e.g., “extract eligibility bullets + disqualifiers + citations”, “produce flights comparison table with X columns”, “compile checklist with section headers + source citations”).
 - Avoid vague tasks like “research flights” via web_search only; prefer browser extraction or delegated sub-agent compilation.
