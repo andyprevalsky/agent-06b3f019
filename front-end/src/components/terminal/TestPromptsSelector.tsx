@@ -178,11 +178,16 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
       let files: File[] | undefined;
 
       if (testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0) {
-        // Fetch files from Vite dev server's public folder
+        // Fetch files from the app's public folder.
         // NOTE: test-assets must exist in EACH app's public/ dir.
         // The mac-app symlinks to front-end/public/test-assets.
+        // In Electron prod mode (file:// protocol), absolute paths like /test-assets/...
+        // resolve to file:///test-assets/... which doesn't exist. Strip leading slash
+        // so the path resolves relative to the HTML document (works with base: './').
+        const isFileProtocol = window.location.protocol === 'file:';
         files = (await Promise.all(
-          testPrompt.attachmentUrls.map(async (url) => {
+          testPrompt.attachmentUrls.map(async (assetPath) => {
+            const url = isFileProtocol ? assetPath.replace(/^\//, '') : assetPath;
             const response = await fetch(url);
             // Detect Vite SPA fallback (returns index.html for missing files)
             const contentType = response.headers.get('content-type') || '';
