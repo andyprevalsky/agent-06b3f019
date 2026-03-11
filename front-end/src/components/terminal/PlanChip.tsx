@@ -244,7 +244,7 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
   };
 
   return (
-    <div className={cn('w-full max-w-lg', className)}>
+    <div className={cn('w-full max-w-lg overflow-hidden', className)}>
       {/* Chip Container */}
       <motion.div
         layout

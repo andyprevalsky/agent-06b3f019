@@ -18,13 +18,14 @@ from helpers.tool_schemas import TOOL_MODELS, create_agent_action_model
 logger = structlog.get_logger()
 
 
-def _build_agent_system_prompt(tool_name: str, goal: str) -> str:
+def _build_agent_system_prompt(tool_name: str, goal: str, alias_hint: str = "") -> str:
     """
     Build a full agent-style system prompt for parameter population.
 
     Args:
         tool_name: Name of the tool to call
         goal: The task goal
+        alias_hint: Original alias name (e.g. 'spawn_sub_agent') for type-specific instructions
 
     Returns:
         System prompt string
@@ -40,7 +41,42 @@ INSTRUCTIONS:
 2. Call the {tool_name} tool with appropriate parameters to accomplish the goal
 3. Your response field should briefly explain your reasoning
 4. You MUST call exactly one tool: {tool_name}
-5. Do NOT skip the tool call even if the goal appears already accomplished in context
+5. Do NOT skip the tool call even if the goal appears already accomplished in context"""
+
+    # Add type-specific param requirements for spawn_agent aliases
+    SPAWN_PARAM_REQUIREMENTS = {
+        "spawn_explore_agent": """
+SPAWN TYPE: explore
+- Set type="explore"
+- Required: goal (str)
+- Do NOT provide output_schema, verifier, start_url, or github_repo_link
+- Explore agents return free-form research summaries""",
+        "spawn_browser_agent": """
+SPAWN TYPE: browser
+- Set type="browser"
+- Required: goal (str), start_url (str), output_schema (object with field names → types)
+- output_schema MUST be provided — define the structured data you expect back
+- Example output_schema: {"order_confirmation": "str", "total_price": "str"}""",
+        "spawn_code_agent": """
+SPAWN TYPE: code
+- Set type="code"
+- Required: goal (str), output_schema (object with field names → types)
+- output_schema MUST be provided — define the structured data you expect back
+- Optional: github_repo_link (str), attachments (list of filenames)
+- Example output_schema: {"result": "str", "generated_file": "file_pointer"}""",
+        "spawn_sub_agent": """
+SPAWN TYPE: sub_agent
+- Set type="sub_agent"
+- Required: goal (str), output_schema (object with field names → types)
+- output_schema MUST be provided — define the structured data you expect back
+- Optional: read_only (bool), verifier (object), attachments (list of filenames)
+- Example output_schema: {"summary": "str", "findings": "list[str]"}""",
+    }
+
+    if alias_hint in SPAWN_PARAM_REQUIREMENTS:
+        prompt += SPAWN_PARAM_REQUIREMENTS[alias_hint]
+
+    prompt += f"""
 
 CRITICAL - FILE OUTPUT SCHEMA RULES:
 When defining output_schema fields, if the output is a FILE (image, document, PDF, generated artifact, etc.):
@@ -77,6 +113,7 @@ async def populate_tool_params_activity(
     goal: str,
     context: List[Dict],
     model: str,
+    alias_hint: str = "",
 ) -> Dict[str, Any]:
     """
     Populate tool parameters using LLM based on context.
@@ -90,6 +127,7 @@ async def populate_tool_params_activity(
         goal: The task goal from the plan
         context: Full message context
         model: LLM model to use (inherited from parent agent)
+        alias_hint: Original alias name (e.g. 'spawn_sub_agent') for type-specific prompt instructions
 
     Returns:
         Dict with tool parameters ready for execution
@@ -104,7 +142,7 @@ async def populate_tool_params_activity(
     AgentAction = create_agent_action_model([tool_name])
 
     # Build system prompt (full agent style, not just extraction)
-    system_prompt = _build_agent_system_prompt(tool_name, goal)
+    system_prompt = _build_agent_system_prompt(tool_name, goal, alias_hint)
 
     # Use build_llm_messages which handles file attachments (images, PDFs, etc.)
     # This ensures the LLM can see attached files and their filenames

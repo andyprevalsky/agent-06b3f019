@@ -9,7 +9,7 @@ import { prisma } from './prisma';
 // Use local Supabase functions in development, production URL otherwise
 const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
   ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
-  : 'http://localhost:54321/functions/v1';
+  : `http://localhost:${process.env.RESEARCH_PORT || '54321'}/functions/v1`;
 
 // Schema field types supported
 const FieldTypeSchema = z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]', 'file_pointer', 'list[file_pointer]']);

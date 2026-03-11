@@ -64,8 +64,8 @@ async def test_web_search_success():
             user_id=user_id,
         )
         
-        # Verify handle_tool_event was called 3 times (IN_PROGRESS, FINISHED, USAGE)
-        assert mock_handle.call_count == 3
+        # Verify handle_tool_event was called 2 times (IN_PROGRESS, FINISHED)
+        assert mock_handle.call_count == 2
 
         # First call should be IN_PROGRESS
         first_call = mock_handle.call_args_list[0]
@@ -75,13 +75,11 @@ async def test_web_search_success():
         # Second call should be FINISHED
         second_call = mock_handle.call_args_list[1]
         assert second_call.kwargs['event'].status == MessageStatus.FINISHED
-
-        # Third call should be USAGE
-        third_call = mock_handle.call_args_list[2]
-        assert third_call.kwargs['event'].type == EventType.USAGE
         
-        # Verify result
-        assert "Python" in result["answer"]
+        # Verify result (wrapped with usage)
+        assert "result" in result
+        assert "usage" in result
+        assert "Python" in result["result"]["answer"]
     
     print("✅ test_web_search_success passed")
 

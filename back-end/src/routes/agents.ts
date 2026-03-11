@@ -77,6 +77,7 @@ const createAgentSchema = z.object({
   model: z.string().optional().default('rose-labs/rose-1-lite'),
   reasoning_max_tokens: z.number().int().min(0).optional().default(256),
   source: z.enum(['WEB', 'MAC_APP']).optional().default('WEB'),
+  start_phase: z.enum(['plan', 'execute']).optional(), // Optional: bypass chat mode and start Temporal workflow directly
   task_queue: z.string().optional(), // Optional: for test isolation
   user_id: z.string().optional(), // Optional: for internal auth (sub-agent creation)
   parent_agent_id: z.string().uuid().optional(), // Optional: parent agent ID (for hierarchy)
@@ -408,6 +409,46 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
 
         throw error;
       }
+    } else if (body.start_phase) {
+      // ============================================
+      // ROOT AGENT: Direct Temporal workflow (bypass chat mode)
+      // Used for testing — goes straight into plan/execute phase
+      // ============================================
+      const startPhase = body.start_phase;
+      console.log(`🚀 Starting root agent directly in ${startPhase} phase (bypass chat)`, {
+        agentId: agent.agent.id,
+        goal: body.goal.substring(0, 100),
+      });
+
+      if (startPhase === 'execute') {
+        setResponseSchema(agent.agent.id).catch((err) => {
+          console.error('❌ Failed to set response schema (background)', {
+            agentId: agent.agent.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+
+      workflowId = await startAgentWorkflow({
+        agentId: agent.agent.id,
+        userId,
+        goal: body.goal,
+        model: body.model,
+        reasoningMaxTokens: body.reasoning_max_tokens,
+        verifier: {
+          type: verifier.type,
+          llmJudgePrompt: verifier.llm_judge_prompt,
+        },
+        startPhase,
+        priceLimitCents: agent.agent.priceLimitCents,
+      });
+
+      await prisma.agent.update({
+        where: { id: agent.agent.id },
+        data: { temporalWorkflowId: workflowId },
+      });
+
+      await broadcastAgentModeStarted(agent.agent.id);
     } else {
       // ============================================
       // ROOT AGENT: Start in Chat Mode

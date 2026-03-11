@@ -52,10 +52,9 @@ with workflow.unsafe.imports_passed_through():
     from tools.knowledge_base import save_blueprint_activity
     from tools.web_search import web_search
     from tools.web_fetch import web_fetch
-    from tools.spawn_sub_agents import spawn_sub_agent
+    from tools.grep import grep
     from helpers.error_utils import extract_error_message
-    from tools.spawn_browser_agent_v3 import spawn_browser_agent  # V3: browser-use + Rose API
-    from tools.spawn_claude_code_agent import spawn_claude_code_agent  # Claude Code in E2B sandbox
+    from tools.spawn_agent import spawn_agent  # Unified: browser/code/sub_agent/explore
     from tools.search_user_network import search_user_network_for_people
     from tools.find_all import find_all
     from tools.enrich import enrich
@@ -66,6 +65,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.attempt_completion import attempt_completion
     from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
     from helpers.sms_activities import get_agent_source, send_direct_sms_activity, notify_sms_event_activity
+    from helpers.query_parent_state import query_parent_state_activity
     from tools.request_user_signup import request_user_signup
     from tools.call_phone_number import call_phone_number, get_manager as get_call_phone_manager
     from tools.people_search import people_search
@@ -82,8 +82,7 @@ logger = structlog.get_logger()
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
-    "spawn_browser_agent": spawn_browser_agent,
-    "spawn_claude_code_agent": spawn_claude_code_agent,
+    "spawn_agent": spawn_agent,  # Unified: browser/code/sub_agent/explore
     "deep_research": deep_research,
     "wait_seconds": wait_seconds,
     "send_message_to_user": send_message_to_user,
@@ -91,7 +90,6 @@ TOOL_EXECUTORS = {
     "enable_write_permissions": enable_write_permissions,
     "web_search": web_search,
     "web_fetch": web_fetch,
-    "spawn_sub_agent": spawn_sub_agent,
     "search_user_network_for_people": search_user_network_for_people,
     "find_all": find_all,
     "enrich": enrich,
@@ -105,6 +103,7 @@ TOOL_EXECUTORS = {
     "request_user_signup": request_user_signup,
     "call_phone_number": call_phone_number,
     "people_search": people_search,
+    "grep": grep,
 }
 
 # Tools requiring user approval before execution
@@ -236,14 +235,10 @@ class AgentWorkflow:
     async def resume(self):
         """Resume workflow execution. Blocked if parent is still paused/cost-limited."""
         if self.parent_workflow_id:
-            try:
-                parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                state = await parent.query("parent_state_query")
-                if state.get("is_cost_limit_reached") or state.get("is_paused"):
-                    workflow.logger.warning("Cannot resume — parent is still paused/cost-limited")
-                    return
-            except Exception as e:
-                workflow.logger.warning(f"Parent state check failed on resume, allowing: {e}")
+            state = await self._query_parent_state()
+            if state.get("is_cost_limit_reached") or state.get("is_paused"):
+                workflow.logger.warning("Cannot resume — parent is still paused/cost-limited")
+                return
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
         self._paused_by_parent = False
@@ -416,14 +411,10 @@ class AgentWorkflow:
     async def price_limit_increased(self, data: dict):
         """Price limit increased. Cascades to children."""
         if self.parent_workflow_id:
-            try:
-                parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                state = await parent.query("parent_state_query")
-                if state.get("is_cost_limit_reached"):
-                    workflow.logger.warning("Cannot accept price_limit_increased — parent still cost-limited")
-                    return
-            except Exception as e:
-                workflow.logger.warning(f"Parent state check failed on price_limit_increased, allowing: {e}")
+            state = await self._query_parent_state()
+            if state.get("is_cost_limit_reached"):
+                workflow.logger.warning("Cannot accept price_limit_increased — parent still cost-limited")
+                return
 
         new_limit = data.get("new_limit_cents", 25)
         workflow.logger.info(f"💰 Price limit increased to {new_limit} cents")
@@ -469,7 +460,7 @@ class AgentWorkflow:
         self.user_id = user_id
         self.goal = goal
         self.model = model
-        self.current_phase = "PLAN"  # Track current phase for condensor
+        self.current_phase = "PLAN"
         self.reasoning_max_tokens = reasoning_max_tokens
         self.verifier = verifier
         self.parent_workflow_id = parent_workflow_id
@@ -541,7 +532,7 @@ class AgentWorkflow:
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
-        self.user_context_section = user_context_section  # Store for condensor
+        self.user_context_section = user_context_section
 
         # Fetch user's custom system name (for approval messages and SMS)
         try:
@@ -627,20 +618,16 @@ class AgentWorkflow:
         # If sub-agent, check parent's pause/cost-limit state before starting work
         # (covers race condition where signal arrived after spawn but before we're ready)
         if self.parent_workflow_id:
-            try:
-                parent_handle = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                state = await parent_handle.query("parent_state_query")
-                if state.get("is_paused"):
-                    workflow.logger.info("Parent is paused - inheriting pause state")
-                    self.is_paused = True
-                    self._paused_by_parent = True
-                if state.get("is_cost_limit_reached"):
-                    workflow.logger.info("Parent hit cost limit - inheriting cost limit state")
-                    self._cost_limit_reached = True
-                    self.is_paused = True
-                    self._paused_by_parent = True
-            except Exception as e:
-                workflow.logger.warning(f"Failed to query parent state: {e}")
+            state = await self._query_parent_state()
+            if state.get("is_paused"):
+                workflow.logger.info("Parent is paused - inheriting pause state")
+                self.is_paused = True
+                self._paused_by_parent = True
+            if state.get("is_cost_limit_reached"):
+                workflow.logger.info("Parent hit cost limit - inheriting cost limit state")
+                self._cost_limit_reached = True
+                self.is_paused = True
+                self._paused_by_parent = True
 
         # =====================================================================
         # Tool lists from centralized source of truth
@@ -648,8 +635,9 @@ class AgentWorkflow:
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = EXECUTE_PHASE_TOOLS
 
-        # Determine whether to skip PLAN phase
-        skip_plan = (start_phase == "execute")
+        # Determine whether to skip PLAN phase and/or DAG
+        skip_plan = start_phase in ("execute", "execute_continued")
+        skip_dag = (start_phase == "execute_continued")  # After continue_as_new, DAG already ran
 
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)
@@ -717,33 +705,36 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-        # Try DAG execution if a plan exists
-        plan_data = extract_plan_from_context(execute_context)
-        if plan_data:
-            workflow.logger.info("[DAG] Found plan, attempting DAG execution")
-            dag = TaskDAG(plan_data)
-
-            dag_result = await execute_dag(
-                dag=dag,
-                agent_id=agent_id,
-                user_id=user_id,
-                model=model,
-                context=execute_context,
-                execute_activity=workflow.execute_activity,
-                post_message=self._post_message,
-                execute_tool=self._execute_tool,
-                handle_tool_event_fn=self._handle_tool_event,
-                poll_messages=self._poll_messages,
-            )
-
-            # DAG completed or failed - both hand off to run_agent
-            # run_agent polls from DB (DAG already posted results there)
-            if dag_result["status"] == "completed":
-                workflow.logger.info("[DAG] Tasks completed, handing off to LLM for attempt_completion")
-            else:
-                workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
+        # Try DAG execution if a plan exists (skip after continue_as_new — DAG already ran)
+        if skip_dag:
+            workflow.logger.info("[DAG] Skipping DAG (continued after context reset)")
         else:
-            workflow.logger.info("[DAG] No plan found, using LLM-driven execution")
+            plan_data = extract_plan_from_context(execute_context)
+            if plan_data:
+                workflow.logger.info("[DAG] Found plan, attempting DAG execution")
+                dag = TaskDAG(plan_data)
+
+                dag_result = await execute_dag(
+                    dag=dag,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    model=model,
+                    context=execute_context,
+                    execute_activity=workflow.execute_activity,
+                    post_message=self._post_message,
+                    execute_tool=self._execute_tool,
+                    handle_tool_event_fn=self._handle_tool_event,
+                    poll_messages=self._poll_messages,
+                )
+
+                # DAG completed or failed - both hand off to run_agent
+                # run_agent polls from DB (DAG already posted results there)
+                if dag_result["status"] == "completed":
+                    workflow.logger.info("[DAG] Tasks completed, handing off to LLM for attempt_completion")
+                else:
+                    workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
+            else:
+                workflow.logger.info("[DAG] No plan found, using LLM-driven execution")
 
         # LLM-driven execution (after DAG, or if no plan)
         # Note: Don't pass initial_context - run_agent polls from DB each step
@@ -873,7 +864,30 @@ class AgentWorkflow:
     async def _handle_context_overflow(self, compressed_context: List[Dict]) -> None:
         """Handle context overflow via continue_as_new."""
         workflow.logger.info("Context overflow → continue_as_new")
+
+        # Post a visible tool message so the user sees the context reset
+        try:
+            await workflow.execute_activity(
+                post_agent_message,
+                args=[
+                    self.agent_id,
+                    "Context compressed — continuing with summarized history.",
+                    "TOOL",
+                    {
+                        "toolCallId": str(workflow.uuid4()),
+                        "toolName": "context_reset",
+                        "toolStatus": "FINISHED",
+                        "title": "Context Reset",
+                    },
+                ],
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except Exception:
+            pass  # Non-fatal — don't block continue_as_new
+
         # Temporal SDK requires args=[] for multi-param workflows
+        # Use "execute_continued" to skip DAG re-execution (DAG already ran)
         workflow.continue_as_new(args=[
             self.agent_id,
             self.user_id,
@@ -886,7 +900,7 @@ class AgentWorkflow:
             self.parent_agent_id,
             self.depth,
             self.bus_id,
-            "execute",  # start_phase: skip PLAN since we already have context
+            "execute_continued",  # Skip both PLAN and DAG — go straight to LLM
             self.max_iterations,
             self.price_limit_cents,
         ])
@@ -1075,6 +1089,18 @@ class AgentWorkflow:
         if tool_name not in TOOL_EXECUTORS:
             return {"error": True, "message": f"Unknown tool: {tool_name}"}
 
+        # Enforce: during PLAN phase, spawn_agent only allows type="explore"
+        if (
+            tool_name == "spawn_agent"
+            and self.current_phase == "PLAN"
+            and tool_args.get("type") != "explore"
+        ):
+            return {
+                "error": True,
+                "message": "During PLAN phase, spawn_agent only supports type='explore'. "
+                           "Use set_plan to create tasks for browser/code/sub_agent agents.",
+            }
+
         # Track tool as in-use with human-readable display string
         tool_display = format_tool_display(tool_name, tool_args)
         self.tools_in_use.add(tool_display)
@@ -1103,11 +1129,10 @@ class AgentWorkflow:
                 "search_x402_bazaar", "pay_for_x402_bazaar_service",
                 "call_phone_number",
                 "people_search",
+                "grep",
             }
 
             if tool_name in NEW_SIGNATURE_TOOLS:
-                # Track start time for condensor timing (includes tool + condensor)
-                tool_start_time = workflow.now()
                 tool_call_dict = {"tool": tool_name, **tool_args}
 
                 result = await executor(
@@ -1125,18 +1150,6 @@ class AgentWorkflow:
                     # Extract actual result for caller
                     result = result.get("result", result)
 
-                # Condensor: check tool's condensor_enabled flag and condense result
-                manager = self._get_tool_manager(tool_name)
-                if manager and getattr(manager, 'condensor_enabled', False):
-                    result = await self._condense_tool_result(
-                        tool_name=tool_name,
-                        tool_call_id=tool_call_id,
-                        tool_call=tool_call_dict,
-                        original_usage=original_usage,
-                        start_time=tool_start_time,
-                        result=result,
-                    )
-
                 # Post downloaded files as ASSISTANT messages (like browser/code agents do)
                 # This makes FilePointers visible in the frontend and agent context
                 downloaded_files = (result.get("original", {}) or {}).get("downloaded_files", []) if isinstance(result, dict) else []
@@ -1153,9 +1166,14 @@ class AgentWorkflow:
             else:
                 # Legacy signature: (workflow_instance, tool_call, tool_call_id)
                 # These yield ToolEvents and call workflow_instance._handle_tool_event
-                last_status = await executor(self, {"tool": tool_name, **tool_args}, tool_call_id)
+                executor_result = await executor(self, {"tool": tool_name, **tool_args}, tool_call_id)
+                # spawn_agent returns (last_status, summary) tuple
+                if isinstance(executor_result, tuple):
+                    last_status, result_text = executor_result
+                else:
+                    last_status, result_text = executor_result, ""
                 failed = last_status == MessageStatus.ERROR
-                return {"success": not failed, "message": f"{tool_name} completed"}
+                return {"success": not failed, "message": result_text or f"{tool_name} completed"}
 
         except asyncio.CancelledError:
             # User paused the agent - don't show as error
@@ -1166,10 +1184,10 @@ class AgentWorkflow:
             error_msg = extract_error_message(e)
             workflow.logger.error(f"Tool {tool_name} failed: {error_msg}")
 
-            # For spawn_sub_agent, include sub-agent context so frontend renders
+            # For spawn_agent (sub_agent type), include sub-agent context so frontend renders
             # as a proper sub-agent failure (SubAgentTree) instead of a raw chip
             error_metadata = None
-            if tool_name == "spawn_sub_agent":
+            if tool_name == "spawn_agent" and tool_args.get("type") == "sub_agent":
                 meta = {}
                 # Find the child agent spawned by this tool_call_id
                 for child_id, tid in getattr(self, 'child_tool_ids', {}).items():
@@ -1224,186 +1242,6 @@ class AgentWorkflow:
     # =========================================================================
     # HELPERS
     # =========================================================================
-
-    def _get_tool_manager(self, tool_name: str):
-        """Get the ToolManager instance for a tool to check flags like condensor_enabled."""
-        TOOL_MANAGERS = {
-            "web_search": lambda: __import__('tools.web_search', fromlist=['get_manager']).get_manager(),
-            "web_fetch": lambda: __import__('tools.web_fetch', fromlist=['get_manager']).get_manager(),
-        }
-        if tool_name in TOOL_MANAGERS:
-            return TOOL_MANAGERS[tool_name]()
-        return None
-
-    async def _condense_tool_result(
-        self,
-        tool_name: str,
-        tool_call_id: str,
-        tool_call: Dict[str, Any],
-        original_usage: Dict[str, Any],
-        start_time,
-        result: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Condense tool result using LLM. Called from _execute_tool after tool returns."""
-        from helpers.condensor import condense_tool_result_activity
-        from helpers.prompts import build_system_prompt
-        from helpers.model_pricing import fetch_model_pricing
-        from tools.base import format_tool_message
-        import json
-
-        # Post IN_PROGRESS via self._handle_tool_event (sends to FE)
-        await self._handle_tool_event(
-            ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"Condensing {tool_name.replace('_', ' ').title()}",
-                message="Extracting relevant information",
-                status=MessageStatus.IN_PROGRESS
-            ),
-            tool_call_id,
-            tool_name
-        )
-
-        # Build system prompt for condensor context
-        system_prompt = build_system_prompt(
-            phase=self.current_phase,
-            enabled_tools=[],
-            user_context_section=getattr(self, 'user_context_section', "") or "",
-        )
-
-        # Format result for condensing
-        result_str = json.dumps(result, indent=2, default=str)
-
-        # Call condensor activity
-        condensor_result = await workflow.execute_activity(
-            condense_tool_result_activity,
-            args=[result_str, system_prompt, self.model, tool_name, 500],
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=RetryPolicy(
-                maximum_attempts=2,
-                backoff_coefficient=2.0,
-                initial_interval=timedelta(seconds=1),
-            )
-        )
-
-        condensed_message = condensor_result["condensed"]
-        condensor_usage = condensor_result["usage"]
-
-        # Calculate elapsed time (from tool start to condensor finish)
-        elapsed_time = (workflow.now() - start_time).total_seconds()
-
-        # Calculate combined cost
-        # 1. Original tool service cost (e.g., Parallel AI Search)
-        tool_service_cost = sum(
-            s.get("cost_cents", 0)
-            for s in original_usage.get("service", [])
-        )
-
-        # 2. Original tool LLM cost (if tool uses LLM internally)
-        tool_llm_cost = 0
-        for llm_item in original_usage.get("llm", []):
-            tokens_in = llm_item.get("tokens_in", 0)
-            tokens_out = llm_item.get("tokens_out", 0)
-            model = llm_item.get("model", "")
-            if tokens_in or tokens_out:
-                try:
-                    pricing = await workflow.execute_activity(
-                        fetch_model_pricing,
-                        args=[model],
-                        start_to_close_timeout=timedelta(seconds=10),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                    tool_llm_cost += (
-                        (tokens_in * pricing["input_cents_per_1k"] / 1000) +
-                        (tokens_out * pricing["output_cents_per_1k"] / 1000)
-                    )
-                except Exception:
-                    pass
-
-        tool_cost_cents = tool_service_cost + tool_llm_cost
-
-        # 3. Condensor LLM cost (calculate from tokens using model pricing)
-        condensor_cost_cents = 0
-        if condensor_usage.get("tokens_in") or condensor_usage.get("tokens_out"):
-            try:
-                pricing = await workflow.execute_activity(
-                    fetch_model_pricing,
-                    args=[condensor_usage["model"]],
-                    start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                condensor_cost_cents = (
-                    (condensor_usage["tokens_in"] * pricing["input_cents_per_1k"] / 1000) +
-                    (condensor_usage["tokens_out"] * pricing["output_cents_per_1k"] / 1000)
-                )
-            except Exception:
-                # If pricing fetch fails, continue without cost
-                pass
-
-            # Track condensor LLM usage
-            await self._track_usage({
-                "llm": [{
-                    "tokens_in": condensor_usage["tokens_in"],
-                    "tokens_out": condensor_usage["tokens_out"],
-                    "model": condensor_usage["model"],
-                    "provider": "Condensor",
-                }],
-                "service": [],
-            }, tool_name=f"{tool_name}_condensor")
-
-        total_cost_cents = tool_cost_cents + condensor_cost_cents
-
-        # Preserve sources/images/links/downloaded_files from original result (not subject to condensation)
-        sources = result.get("sources", [])
-        images = result.get("images", [])
-        links = result.get("links", [])
-        downloaded_files = result.get("downloaded_files", [])
-
-        # Format message using standard tool format (pass sources through for display)
-        condensed_result = {"content": condensed_message}
-        if sources:
-            condensed_result["sources"] = sources
-        if images:
-            condensed_result["images"] = images
-        if links:
-            condensed_result["links"] = links
-        if downloaded_files:
-            condensed_result["downloaded_files"] = downloaded_files
-
-        formatted_message = format_tool_message(
-            params=tool_call,
-            result=condensed_result,
-            time_elapsed=elapsed_time,
-            cost_cents=total_cost_cents
-        )
-
-        # Post FINISHED with formatted condensed result (sends to FE)
-        await self._handle_tool_event(
-            ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"{tool_name.replace('_', ' ').title()} completed",
-                message=formatted_message,
-                status=MessageStatus.FINISHED
-            ),
-            tool_call_id,
-            tool_name
-        )
-
-        # Return condensed result for context
-        # "message" key is what run_agent.py uses to build context text
-        # Append sources/images/links so they appear in the LLM's context
-        context_parts = [condensed_message]
-        if sources:
-            context_parts.append("\n**Sources:** " + ", ".join(sources))
-        if images:
-            context_parts.append("\n**Images:** " + ", ".join(images))
-        if links:
-            context_parts.append("\n**Links:** " + ", ".join(links))
-        if downloaded_files:
-            file_list = ", ".join(f["original_filename"] for f in downloaded_files)
-            context_parts.append(f"\n**Downloaded Files:** {file_list}")
-        context_message = "\n".join(context_parts)
-
-        return {"message": context_message, "condensed": True, "original": result}
 
     async def _track_tokens_and_cost(self, result: Dict) -> None:
         """Track context size and token_count from run_agent result.
@@ -1566,6 +1404,26 @@ class AgentWorkflow:
     # COST LIMIT HELPERS
     # =========================================================================
 
+    async def _query_parent_state(self) -> Dict:
+        """Query parent workflow's state via activity (uses Temporal client).
+
+        ExternalWorkflowHandle only supports signal/cancel, not query.
+        This activity bridges the gap by querying via the client.
+        Returns empty dict on failure (caller decides how to handle).
+        """
+        if not self.parent_workflow_id:
+            return {}
+        try:
+            return await workflow.execute_activity(
+                query_parent_state_activity,
+                args=[self.parent_workflow_id],
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to query parent state: {e}")
+            return {}
+
     async def _check_parent_state(self) -> None:
         """Pull-based parent state check. Mirrors parent's pause/cost-limit state.
 
@@ -1575,35 +1433,35 @@ class AgentWorkflow:
         """
         if not self.parent_workflow_id:
             return
-        try:
-            parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
-            state = await parent.query("parent_state_query")
-            parent_cost_limited = state.get("is_cost_limit_reached", False)
-            parent_paused = state.get("is_paused", False)
 
-            if parent_cost_limited:
-                if not self._cost_limit_reached:
-                    workflow.logger.warning("Parent hit cost limit — inheriting state")
-                    self._cost_limit_reached = True
-                    self.is_paused = True
-                    self._paused_by_parent = True
-                    await self._update_tree_state(status="COST_LIMIT_REACHED")
-            elif parent_paused:
-                if not self.is_paused:
-                    workflow.logger.warning("Parent is paused — inheriting state")
-                    self.is_paused = True
-                    self._paused_by_parent = True
-                    await self._update_tree_state(status="PAUSED")
-            else:
-                # Parent is running — unpause if we were paused by parent
-                if self._paused_by_parent:
-                    workflow.logger.info("Parent resumed — clearing inherited pause")
-                    self._cost_limit_reached = False
-                    self.is_paused = False
-                    self._paused_by_parent = False
-                    await self._update_tree_state(status="ACTIVE")
-        except Exception as e:
-            workflow.logger.warning(f"Failed to check parent state: {e}")
+        state = await self._query_parent_state()
+        if not state:
+            return
+
+        parent_cost_limited = state.get("is_cost_limit_reached", False)
+        parent_paused = state.get("is_paused", False)
+
+        if parent_cost_limited:
+            if not self._cost_limit_reached:
+                workflow.logger.warning("Parent hit cost limit — inheriting state")
+                self._cost_limit_reached = True
+                self.is_paused = True
+                self._paused_by_parent = True
+                await self._update_tree_state(status="COST_LIMIT_REACHED")
+        elif parent_paused:
+            if not self.is_paused:
+                workflow.logger.warning("Parent is paused — inheriting state")
+                self.is_paused = True
+                self._paused_by_parent = True
+                await self._update_tree_state(status="PAUSED")
+        else:
+            # Parent is running — unpause if we were paused by parent
+            if self._paused_by_parent:
+                workflow.logger.info("Parent resumed — clearing inherited pause")
+                self._cost_limit_reached = False
+                self.is_paused = False
+                self._paused_by_parent = False
+                await self._update_tree_state(status="ACTIVE")
 
     def _get_pending_child_workflow_ids(self) -> List[str]:
         """Get workflow IDs of pending children for signaling."""

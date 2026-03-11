@@ -241,7 +241,7 @@ async function transformAndFilterEmails(
 
       contact.messages.push({
         from: email.from,
-        to: contactEmail,
+        to: isFromMe ? contactEmail : userEmail,
         subject: email.subject,
         date: email.date,
         body: bodyContent,
@@ -321,30 +321,45 @@ async function syncGmailForUser(
   userId: string,
   credential: {
     id: string;
+    email: string | null;
     accessToken: string | null;
     refreshToken: string | null;
     expiresAt: Date | null;
     metadata: unknown;
   },
-  integration: {
-    id: string;
-    config: unknown;
-  }
+  integrationId: string
 ): Promise<{ success: boolean; contacts: number; messages: number }> {
-  console.log(`[GmailSync] Starting sync for user ${userId}`);
+  const credentialEmail = credential.email || '';
+  console.log(`[GmailSync] Starting sync for user ${userId} (${credentialEmail})`);
 
   // Get valid access token
   const accessToken = await getValidAccessToken(credential);
   if (!accessToken) {
-    console.error(`[GmailSync] Failed to get valid access token for user ${userId}`);
+    console.error(`[GmailSync] Failed to get valid access token for ${credentialEmail}`);
+    return { success: false, contacts: 0, messages: 0 };
+  }
+
+  // Re-fetch integration from DB to get the latest config.
+  // Without this, sequential credential syncs clobber each other's historyIds
+  // and counts because they all spread from the same stale config snapshot.
+  const integration = await prisma.integration.findUnique({
+    where: { id: integrationId },
+    select: { id: true, config: true },
+  });
+  if (!integration) {
+    console.error(`[GmailSync] Integration ${integrationId} not found`);
     return { success: false, contacts: 0, messages: 0 };
   }
 
   const config = (integration.config || {}) as IntegrationConfig;
-  const historyId = config.historyId;
-  
-  // Get user email from metadata or profile
-  let userEmail = config.userEmail || (credential.metadata as { email?: string })?.email;
+
+  // Per-credential historyId: stored in config.historyIds[credentialEmail]
+  // Falls back to legacy config.historyId for the primary account
+  const historyIds = (config as any).historyIds as Record<string, string> | undefined;
+  const historyId = historyIds?.[credentialEmail] || (credentialEmail === config.userEmail ? config.historyId : undefined);
+
+  // Use the credential's own email for sender detection
+  let userEmail = credentialEmail;
   if (!userEmail) {
     try {
       const profile = await getGmailProfile(accessToken);
@@ -360,28 +375,29 @@ async function syncGmailForUser(
 
   if (historyId) {
     // Incremental sync using History API
-    console.log(`[GmailSync] Performing incremental sync from historyId: ${historyId}`);
-    
+    console.log(`[GmailSync] Performing incremental sync for ${credentialEmail} from historyId: ${historyId}`);
+
     const historyResult = await fetchGmailHistory(accessToken, historyId);
-    
+
     if (historyResult.newHistoryId === '') {
       // History expired, need full sync
-      console.log(`[GmailSync] History expired, falling back to full sync`);
+      console.log(`[GmailSync] History expired for ${credentialEmail}, falling back to full sync`);
       emails = await fetchGmailEmails(accessToken, userEmail);
       const profile = await getGmailProfile(accessToken);
       newHistoryId = profile.historyId;
     } else if (historyResult.addedMessageIds.length === 0) {
       // No new messages
-      console.log(`[GmailSync] No new messages`);
+      console.log(`[GmailSync] No new messages for ${credentialEmail}`);
       newHistoryId = historyResult.newHistoryId;
     } else {
       // Fetch the new messages
+      console.log(`[GmailSync] ${historyResult.addedMessageIds.length} new messages for ${credentialEmail}`);
       emails = await fetchMessagesByIds(accessToken, historyResult.addedMessageIds);
       newHistoryId = historyResult.newHistoryId;
     }
   } else {
-    // Full sync (first time)
-    console.log(`[GmailSync] Performing full sync (no historyId)`);
+    // Full sync (first time for this credential)
+    console.log(`[GmailSync] Performing full sync for ${credentialEmail} (no historyId)`);
     emails = await fetchGmailEmails(accessToken, userEmail);
     const profile = await getGmailProfile(accessToken);
     newHistoryId = profile.historyId;
@@ -399,7 +415,7 @@ async function syncGmailForUser(
       const result = await upsertPersonAndMessageRecords(
         userId,
         contactsToUpsert,
-        `gmail-sync-${Date.now()}`
+        `gmail-sync-${credentialEmail}-${Date.now()}`
       );
       contactCount = result.contacts;
       messageCount = result.messages;
@@ -410,7 +426,9 @@ async function syncGmailForUser(
   const existingContacts = (config.contacts as number) || 0;
   const existingMessages = (config.messages as number) || 0;
 
-  // Update integration with new historyId and lastSyncAt
+  // Update integration with per-credential historyId
+  const updatedHistoryIds = { ...(historyIds || {}), [credentialEmail]: newHistoryId };
+
   await prisma.integration.update({
     where: { id: integration.id },
     data: {
@@ -419,15 +437,16 @@ async function syncGmailForUser(
       status: IntegrationStatus.CONNECTED,
       config: {
         ...config,
-        historyId: newHistoryId,
-        userEmail,
+        historyIds: updatedHistoryIds,
+        // Keep legacy historyId for backwards compat with primary account
+        ...(credentialEmail === config.userEmail ? { historyId: newHistoryId } : {}),
         contacts: existingContacts + contactCount,
         messages: existingMessages + messageCount,
       },
     },
   });
 
-  console.log(`[GmailSync] ✅ Sync complete for user ${userId}: ${contactCount} new contacts, ${messageCount} new messages (total: ${existingContacts + contactCount} contacts, ${existingMessages + messageCount} messages)`);
+  console.log(`[GmailSync] ✅ Sync complete for ${credentialEmail}: ${contactCount} new contacts, ${messageCount} new messages`);
   return { success: true, contacts: contactCount, messages: messageCount };
 }
 
@@ -437,19 +456,18 @@ async function syncGmailForUser(
 export async function runGmailSyncJob(): Promise<void> {
   console.log('[GmailSync] Starting sync job...');
 
-  const cutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
+  const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
 
   // Find Gmail integrations that are due for sync.
-  // Include CONNECTED, SYNCING, and SYNC_FAILED statuses — if an integration
-  // hasn't synced in over an hour, it should be retried regardless of status.
+  // CONNECTED/SYNC_FAILED: always eligible (sync immediately)
+  // SYNCING: only re-pick if lastSyncAt > 1 hour ago (crash recovery)
   const dueIntegrations = await prisma.integration.findMany({
     where: {
       name: 'gmail',
       isActive: true,
-      status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNCING, IntegrationStatus.SYNC_FAILED] },
       OR: [
-        { lastSyncAt: null },
-        { lastSyncAt: { lt: cutoff } },
+        { status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNC_FAILED] } },
+        { status: IntegrationStatus.SYNCING, lastSyncAt: { lt: syncIntervalCutoff } },
       ],
     },
     include: {
@@ -465,48 +483,50 @@ export async function runGmailSyncJob(): Promise<void> {
   let failCount = 0;
 
   for (const integration of dueIntegrations) {
-    const credential = integration.emailCredentials[0];
-    
-    if (!credential || !credential.refreshToken) {
+    const validCredentials = integration.emailCredentials.filter(c => c.refreshToken);
+
+    if (validCredentials.length === 0) {
       console.log(`[GmailSync] Skipping integration ${integration.id} - no valid credentials`);
       continue;
     }
 
-    // Immediately mark as syncing to prevent other servers from picking it up
+    // Mark as syncing with timestamp to prevent duplicate pickup.
+    // lastSyncAt acts as a lock — the query won't re-pick this for 30 min (crash recovery).
     await prisma.integration.update({
       where: { id: integration.id },
-      data: { lastSyncAt: new Date() },
+      data: { status: IntegrationStatus.SYNCING, lastSyncAt: new Date() },
     });
 
-    try {
-      const result = await syncGmailForUser(integration.userId, credential, integration);
-      
-      if (result.success) {
-        successCount++;
-      } else {
-        failCount++;
-        // Update integration status on failure
-        await prisma.integration.update({
-          where: { id: integration.id },
-          data: {
-            lastSyncAt: new Date(),
-            lastFailedSyncAt: new Date(),
-            status: IntegrationStatus.SYNC_FAILED,
-            failureReason: 'Sync failed - check logs',
-          },
-        });
+    // Sync each credential (email account) separately
+    let allSucceeded = true;
+    let lastError: string | null = null;
+
+    for (const credential of validCredentials) {
+      try {
+        console.log(`[GmailSync] Syncing credential ${credential.email} for integration ${integration.id}`);
+        const result = await syncGmailForUser(integration.userId, credential, integration.id);
+
+        if (!result.success) {
+          allSucceeded = false;
+          lastError = `Sync failed for ${credential.email}`;
+        }
+      } catch (error) {
+        console.error(`[GmailSync] Error syncing ${credential.email}:`, error);
+        allSucceeded = false;
+        lastError = error instanceof Error ? error.message : 'Unknown error';
       }
-    } catch (error) {
-      console.error(`[GmailSync] Error syncing integration ${integration.id}:`, error);
+    }
+
+    if (allSucceeded) {
+      successCount++;
+    } else {
       failCount++;
-      
       await prisma.integration.update({
         where: { id: integration.id },
         data: {
-          lastSyncAt: new Date(),
           lastFailedSyncAt: new Date(),
           status: IntegrationStatus.SYNC_FAILED,
-          failureReason: error instanceof Error ? error.message : 'Unknown error',
+          failureReason: lastError || 'Sync failed - check logs',
         },
       });
     }

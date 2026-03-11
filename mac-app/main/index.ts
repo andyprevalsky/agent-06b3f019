@@ -166,7 +166,7 @@ function createMainWindow() {
   }
 
   if (config.isDev) {
-    mainWindow.loadURL('http://localhost:5174');
+    mainWindow.loadURL(`http://localhost:${process.env.MAC_APP_PORT || '5174'}`);
     mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../ui/index.html'));
@@ -178,7 +178,7 @@ function createMainWindow() {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const appOrigin = config.isDev ? 'http://localhost:5174' : 'file://';
+    const appOrigin = config.isDev ? `http://localhost:${process.env.MAC_APP_PORT || '5174'}` : 'file://';
     if (!url.startsWith(appOrigin)) {
       event.preventDefault();
       shell.openExternal(url);
@@ -233,7 +233,7 @@ function createQuickQueryWindow() {
   }
 
   if (config.isDev) {
-    quickQueryWindow.loadURL('http://localhost:5174/launcher.html');
+    quickQueryWindow.loadURL(`http://localhost:${process.env.MAC_APP_PORT || '5174'}/launcher.html`);
   } else {
     quickQueryWindow.loadFile(path.join(__dirname, '../../ui/launcher.html'));
   }

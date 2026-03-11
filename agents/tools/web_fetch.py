@@ -37,7 +37,6 @@ class WebFetchManager(ToolManager):
 
     tool_name = "web_fetch"
     read_only = True  # Research phase tool
-    condensor_enabled = True  # Condense results before adding to context
 
     async def execute_tool(
         self,
@@ -76,7 +75,7 @@ class WebFetchManager(ToolManager):
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="🌐 Fetching web content",
+                title="Fetching web content",
                 message=f"Extracting from {url}: {display_objective}",
                 status=MessageStatus.IN_PROGRESS
             ),
@@ -107,31 +106,28 @@ class WebFetchManager(ToolManager):
             # Parallel AI Extract pricing: ~$0.005 per URL
             total_cost_cents = 0.5
 
-            # Only post FINISHED if condensor won't handle it
-            # (condensor posts its own FINISHED with condensed result)
-            if not self.condensor_enabled:
-                # Format success message using standardized format
-                message = format_tool_message(
-                    params=tool_call,
-                    result=result,
-                    time_elapsed=elapsed_time,
-                    cost_cents=total_cost_cents
-                )
+            # Format success message using standardized format
+            message = format_tool_message(
+                params=tool_call,
+                result=result,
+                time_elapsed=elapsed_time,
+                cost_cents=total_cost_cents
+            )
 
-                # Post-execution success
-                await handle_tool_event(
-                    event=ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title="Web fetch completed",
-                        message=message,
-                        status=MessageStatus.FINISHED
-                    ),
-                    agent_id=agent_id,
-                    tool_call_id=tool_call_id,
-                    tool_name="web_fetch",
-                    execute_activity=execute_activity,
-                    user_id=user_id,
-                )
+            # Post-execution success
+            await handle_tool_event(
+                event=ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Web fetch completed",
+                    message=message,
+                    status=MessageStatus.FINISHED
+                ),
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="web_fetch",
+                execute_activity=execute_activity,
+                user_id=user_id,
+            )
 
             # Return with standardized usage for workflow cost tracking
             return {

@@ -5,6 +5,7 @@ import { logConsole, logConsoleError } from '../../base/logger';
 interface Integration {
   name: string;
   status: string;
+  lastSyncAt?: string | null;
   config?: Record<string, unknown>;
 }
 
@@ -116,7 +117,7 @@ export class IntegrationCache {
       const data = await response.json() as { integrations?: Integration[] };
       const all = data.integrations ?? [];
       const connected = new Set(
-        all.filter(i => i.status === 'CONNECTED').map(i => i.name)
+        all.filter(i => i.status !== 'NOT_CONNECTED').map(i => i.name)
       );
 
       logConsole('IntegrationCache', `Fetched ${all.length} integrations, ${connected.size} connected`);

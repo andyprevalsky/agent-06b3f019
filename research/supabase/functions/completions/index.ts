@@ -179,17 +179,6 @@ function truncateForLogging(obj: any, maxBase64Length = 100): any {
   return obj;
 }
 
-function logOutgoingSseChunk(tag: string, payload: string): void {
-  // Log raw SSE lines so debugging can copy/paste exact "data: {...}" frames.
-  const lines = payload.split('\n').filter(Boolean);
-  for (const line of lines) {
-    if (line.startsWith('data:')) {
-      console.log(line);
-    } else {
-      console.log(`[SSE_OUT:${tag}] ${line}`);
-    }
-  }
-}
 
 function escapeForJsonString(content: string): string {
   return content
@@ -3357,7 +3346,6 @@ async function handleStreaming(
             pool_size: currentPoolSize
           };
           const payload = `data: ${JSON.stringify(chunk)}\n\n`;
-          logOutgoingSseChunk('direct-delta', payload);
           controller.enqueue(encoder.encode(payload));
         };
 
@@ -3440,12 +3428,10 @@ async function handleStreaming(
                 pool_size: currentPoolSize
               };
               const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
-              logOutgoingSseChunk('direct-usage', payload);
               controller.enqueue(encoder.encode(payload));
               console.log(`📊 Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}`);
             }
             const donePayload = 'data: [DONE]\n\n';
-            logOutgoingSseChunk('direct-done', donePayload);
             controller.enqueue(encoder.encode(donePayload));
             controller.close();
             break;
@@ -3568,7 +3554,6 @@ async function handleStreaming(
                   parsed.pool_name = currentPoolName;
                   parsed.pool_size = currentPoolSize;
                   const payload = `data: ${JSON.stringify(parsed)}\n\n`;
-                  logOutgoingSseChunk('direct-passthrough', payload);
                   controller.enqueue(encoder.encode(payload));
                 }
               } catch (e) {
@@ -4909,7 +4894,6 @@ serve(async (req) => {
                       openAIFormat.timings = timings;
 
                       const payload = `data: ${JSON.stringify(openAIFormat)}\n\n`;
-                      logOutgoingSseChunk('racing-anthropic-delta', payload);
                       controller.enqueue(encoder.encode(payload));
                       return;
                     }
@@ -4944,10 +4928,8 @@ serve(async (req) => {
                     }
 
                     const payload = `data: ${JSON.stringify(parsed)}\n\n`;
-                    logOutgoingSseChunk('racing-passthrough', payload);
                     controller.enqueue(encoder.encode(payload));
                   } catch (e) {
-                    logOutgoingSseChunk('racing-raw-line', `${line}\n`);
                     controller.enqueue(encoder.encode(`${line}\n`));
                   }
                 }
@@ -4988,12 +4970,10 @@ serve(async (req) => {
                       timings
                     };
                     const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
-                    logOutgoingSseChunk('racing-anthropic-usage', payload);
                     controller.enqueue(encoder.encode(payload));
                     console.log(`📊 Anthropic usage adjusted: ${anthropicInputTokens} input × ${modelsRaced} models = ${adjustedInputTokens} total input tokens`);
                   }
                   const donePayload = 'data: [DONE]\n\n';
-                  logOutgoingSseChunk('racing-done', donePayload);
                   controller.enqueue(encoder.encode(donePayload));
                   controller.close();
                   break;

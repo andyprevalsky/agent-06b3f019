@@ -135,6 +135,11 @@ For any services that require a API Key or Credential, mock the service for now 
     prompt: 'I want to play volleyball with some friends this weekend in san francisco.\nCan you figure out who would be down and coordinate the space & procurment of equipment?\nEnsure its less then 30$ total',
   },
   {
+    title: 'Test Explore Agent',
+    description: 'Tests explore agent with network search, sorting, and external research',
+    prompt: 'Get me all VCs I know, sort them by most recently contacted, then find a piece of information about them that you didnt get from my messages. Use Explore Agent',
+  },
+  {
     title: 'Test Message Person',
     description: 'Tests unified message_person tool with email and iMessage channels',
     prompt: "Send an email and a imessage to myself, 972-977-7432, for testing purposes, don't ask any questions. The message should try to get me to launch this product.",

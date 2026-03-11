@@ -25,7 +25,7 @@ def test_manager_singleton():
 
 
 async def test_web_fetch_success():
-    """Test successful web fetch execution with condensor_enabled=True."""
+    """Test successful web fetch execution."""
     manager = get_manager()
 
     # Mock execute_activity callable
@@ -72,13 +72,17 @@ async def test_web_fetch_success():
             user_id=user_id,
         )
 
-        # condensor_enabled=True means tool only posts IN_PROGRESS (workflow handles FINISHED)
-        assert mock_handle.call_count == 1
+        # Tool posts IN_PROGRESS then FINISHED
+        assert mock_handle.call_count == 2
 
         # First call should be IN_PROGRESS
         first_call = mock_handle.call_args_list[0]
         assert first_call.kwargs['event'].status == MessageStatus.IN_PROGRESS
         assert "What is Python?" in first_call.kwargs['event'].message
+
+        # Second call should be FINISHED
+        second_call = mock_handle.call_args_list[1]
+        assert second_call.kwargs['event'].status == MessageStatus.FINISHED
 
         # Verify result structure (wrapped with usage)
         assert "result" in result

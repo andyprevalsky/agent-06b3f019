@@ -300,6 +300,10 @@ def convert_context_to_messages(
             messages.append(assistant_msg)
             
         elif role == 'TOOL':
+            # Skip sub-agent internal messages (browser steps, explore greps, etc.)
+            if metadata.get('subAgentId'):
+                continue
+
             # Skip IN_PROGRESS messages - only send FINISHED results to LLM
             if metadata.get('toolStatus') == 'IN_PROGRESS':
                 continue
@@ -379,15 +383,19 @@ async def build_llm_messages(
 
     def parse_timestamp(ts) -> datetime:
         """Parse timestamp to datetime, return epoch for invalid/missing."""
+        from datetime import timezone
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
         if not ts:
-            return datetime.min
+            return epoch
         if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                return ts.replace(tzinfo=timezone.utc)
             return ts
         try:
             # ISO format: 2024-01-15T10:30:00.000Z
             return datetime.fromisoformat(ts.replace('Z', '+00:00'))
         except (ValueError, AttributeError):
-            return datetime.min
+            return epoch
 
     tool_messages_by_id: Dict[str, Dict] = {}  # toolCallId -> latest FINISHED message
     filtered_context = []
@@ -399,6 +407,11 @@ async def build_llm_messages(
         if role == "TOOL":
             tool_status = metadata.get("toolStatus")
             tool_call_id = metadata.get("toolCallId")
+
+            # Skip sub-agent internal messages (browser steps, explore greps, etc.)
+            # These are tagged with subAgentId; only init/completion messages omit it
+            if metadata.get("subAgentId"):
+                continue
 
             # Skip IN_PROGRESS messages
             if tool_status == "IN_PROGRESS":
@@ -2081,7 +2094,7 @@ async def call_llm_activity(
             messages=messages,
             model=model,
             temperature=1.0,
-            max_tokens=4096,
+            max_tokens=8192,
             response_model=AgentActionModel,
             on_chunk=on_chunk,
             reasoning_max_tokens=reasoning_max_tokens if reasoning_max_tokens > 0 else None,

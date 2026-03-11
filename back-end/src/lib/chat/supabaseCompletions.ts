@@ -14,7 +14,7 @@ import { logJson } from '../log';
 
 const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
   ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
-  : 'http://localhost:54321/functions/v1';
+  : `http://localhost:${process.env.RESEARCH_PORT || '54321'}/functions/v1`;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
 const ROSE_API_KEY = process.env.ROSE_API_KEY || '';
 

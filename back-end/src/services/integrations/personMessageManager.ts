@@ -110,7 +110,7 @@ export async function upsertPersonAndMessageRecords(
     // Upsert persons for this chunk
     await upsertContactsChunk(userId, chunk);
 
-    // Build lookup map for person IDs
+    // Build lookup map for person IDs with a single consolidated query
     const phoneContacts = chunk.filter(c => c.identifierType === 'phone');
     const emailContacts = chunk.filter(c => c.identifierType === 'email');
     const linkedinContacts = chunk.filter(c => c.identifierType === 'linkedin_url');
@@ -119,44 +119,31 @@ export async function upsertPersonAndMessageRecords(
     const emailIdentifiers = emailContacts.map(c => c.identifier);
     const linkedinIdentifiers = linkedinContacts.map(c => c.identifier);
 
-    // Fetch persons by phone
-    const personsByPhone = phoneIdentifiers.length > 0
-      ? await prisma.person.findMany({
-          where: { userId, phoneNumber: { in: phoneIdentifiers } },
-          select: { id: true, phoneNumber: true },
-        })
-      : [];
+    // Single query to fetch all persons matching any identifier type
+    const orConditions: Array<Record<string, unknown>> = [];
+    if (phoneIdentifiers.length > 0) {
+      orConditions.push({ phoneNumber: { in: phoneIdentifiers } });
+    }
+    if (emailIdentifiers.length > 0) {
+      orConditions.push({ email: { in: emailIdentifiers } });
+      orConditions.push({ emailAddresses: { array_contains: emailIdentifiers } });
+    }
+    if (linkedinIdentifiers.length > 0) {
+      orConditions.push({ linkedinUrl: { in: linkedinIdentifiers } });
+    }
 
-    // Fetch persons by email
-    const personsByEmail = emailIdentifiers.length > 0
+    const matchedPersons = orConditions.length > 0
       ? await prisma.person.findMany({
-          where: {
-            userId,
-            OR: [
-              { email: { in: emailIdentifiers } },
-              { emailAddresses: { array_contains: emailIdentifiers } },
-            ],
-          },
-          select: { id: true, email: true, emailAddresses: true },
-        })
-      : [];
-
-    // Fetch persons by LinkedIn URL
-    const personsByLinkedin = linkedinIdentifiers.length > 0
-      ? await prisma.person.findMany({
-          where: { userId, linkedinUrl: { in: linkedinIdentifiers } },
-          select: { id: true, linkedinUrl: true },
+          where: { userId, OR: orConditions },
+          select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
         })
       : [];
 
     // Build identifier -> personId map
     const personMap = new Map<string, string>();
 
-    personsByPhone.forEach(p => {
+    matchedPersons.forEach(p => {
       if (p.phoneNumber) personMap.set(p.phoneNumber, p.id);
-    });
-
-    personsByEmail.forEach(p => {
       if (p.email) personMap.set(p.email, p.id);
       if (p.emailAddresses && Array.isArray(p.emailAddresses)) {
         (p.emailAddresses as string[]).forEach(email => {
@@ -165,9 +152,6 @@ export async function upsertPersonAndMessageRecords(
           }
         });
       }
-    });
-
-    personsByLinkedin.forEach(p => {
       if (p.linkedinUrl) personMap.set(p.linkedinUrl, p.id);
     });
 
@@ -267,43 +251,30 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
 
   const emailsArray = Array.from(allEmailsToCheck);
 
-  // Query existing persons by phone
-  const existingByPhone = phonesToCheck.length > 0
-    ? await prisma.person.findMany({
-        where: { userId, phoneNumber: { in: phonesToCheck } },
-        select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
-      })
-    : [];
+  // Single consolidated query for existing persons matching any identifier type
+  const orConditions: Array<Record<string, unknown>> = [];
+  if (phonesToCheck.length > 0) {
+    orConditions.push({ phoneNumber: { in: phonesToCheck } });
+  }
+  if (emailsArray.length > 0) {
+    orConditions.push({ email: { in: emailsArray } });
+  }
+  if (linkedinUrlsToCheck.length > 0) {
+    orConditions.push({ linkedinUrl: { in: linkedinUrlsToCheck } });
+  }
 
-  // Query existing persons by email
-  const existingByEmail = emailsArray.length > 0
+  const existingPersons = orConditions.length > 0
     ? await prisma.person.findMany({
-        where: {
-          userId,
-          OR: [{ email: { in: emailsArray } }],
-        },
-        select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
-      })
-    : [];
-
-  // Query existing persons by LinkedIn URL
-  const existingByLinkedin = linkedinUrlsToCheck.length > 0
-    ? await prisma.person.findMany({
-        where: { userId, linkedinUrl: { in: linkedinUrlsToCheck } },
+        where: { userId, OR: orConditions },
         select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
       })
     : [];
 
   // Build comprehensive lookup maps
-  const personMap = new Map<string, (typeof existingByPhone)[0]>();
+  const personMap = new Map<string, (typeof existingPersons)[0]>();
 
-  // Index by phone number
-  existingByPhone.forEach(p => {
+  existingPersons.forEach(p => {
     if (p.phoneNumber) personMap.set(p.phoneNumber, p);
-  });
-
-  // Index by email (primary and all emailAddresses)
-  existingByEmail.forEach(p => {
     if (p.email) personMap.set(p.email, p);
     if (p.emailAddresses && Array.isArray(p.emailAddresses)) {
       (p.emailAddresses as string[]).forEach(email => {
@@ -312,10 +283,6 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
         }
       });
     }
-  });
-
-  // Index by LinkedIn URL
-  existingByLinkedin.forEach(p => {
     if (p.linkedinUrl) personMap.set(p.linkedinUrl, p);
   });
 
@@ -325,7 +292,7 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
   const processedPersonIds = new Set<string>();
 
   for (const contact of chunk) {
-    let existing: (typeof existingByPhone)[0] | undefined;
+    let existing: (typeof existingPersons)[0] | undefined;
 
     // Try to find existing Person by multiple identifiers
     // 1. Try primary identifier

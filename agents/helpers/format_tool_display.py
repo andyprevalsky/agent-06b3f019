@@ -19,8 +19,7 @@ def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
     """
     formatters = {
         "web_search": lambda args: f"Searching the web for {_truncate(args.get('query', '...'), 50)}",
-        "spawn_browser_agent": lambda args: f"Browsing the web to {_truncate(args.get('goal', '...'), 50)}",
-        "spawn_sub_agent": lambda args: f"Delegating task: {_truncate(args.get('sub_agent', {}).get('goal', '...'), 50)}",
+        "spawn_agent": lambda args: _format_spawn_agent(args),
         "deep_research": lambda args: f"Researching {_truncate(args.get('query', '...'), 50)}",
         "wait_seconds": lambda args: f"Waiting {args.get('seconds', '?')} seconds",
         "send_message_to_user": lambda args: "Messaging user",
@@ -35,6 +34,7 @@ def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
         "search_x402_bazaar": lambda args: f"Searching bazaar for {_truncate(args.get('query', '...'), 40)}",
         "pay_for_x402_bazaar_service": lambda args: f"Paying for {_truncate(args.get('service', '...'), 30)}",
         "request_user_signup": lambda args: "Requesting signup",
+        "grep": lambda args: f"Searching messages for {_truncate(args.get('pattern', '...'), 40)}",
     }
 
     formatter = formatters.get(tool_name)
@@ -44,6 +44,19 @@ def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
         except Exception:
             return tool_name
     return tool_name
+
+
+def _format_spawn_agent(args: Dict[str, Any]) -> str:
+    """Format spawn_agent display based on type."""
+    agent_type = args.get("type", "")
+    goal = _truncate(args.get("goal", "..."), 50)
+    type_labels = {
+        "explore": f"Researching: {goal}",
+        "browser": f"Browsing the web to {goal}",
+        "code": f"Coding: {goal}",
+        "sub_agent": f"Delegating task: {goal}",
+    }
+    return type_labels.get(agent_type, f"Spawning agent: {goal}")
 
 
 def _truncate(text: str, max_len: int) -> str:

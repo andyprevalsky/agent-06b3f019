@@ -19,7 +19,7 @@ import structlog
 import uuid
 
 # All imports at module level - no inline imports to avoid workflow sandbox issues
-from temporalio import workflow
+from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from pydantic import BaseModel
 from helpers.llm import call_llm_structured_streaming, check_progress, call_llm_activity, build_llm_messages, _pending_llm_context
@@ -100,6 +100,9 @@ async def run_agent(
     
     # Skip LLM verification call
     skip_verification: bool = False,
+
+    # Skip update_agent_status broadcasts (used by explore agent to avoid overwriting parent's context_size)
+    skip_status_updates: bool = False,
     
     # PLAN phase mode - requires set_plan before completion, posts "sit back" message
     is_plan_loop: bool = False,
@@ -320,6 +323,10 @@ async def run_agent(
                 last_text = [""]
                 
                 async def on_chunk(text_so_far: str, token_count_chunk: int):
+                    # Heartbeat so Temporal knows the activity is alive during long LLM calls
+                    if is_inside_temporal_activity:
+                        activity.heartbeat(f"LLM streaming: {token_count_chunk} tokens")
+
                     # Check if paused mid-stream
                     if check_paused and await check_paused():
                         raise asyncio.CancelledError("Paused")
@@ -350,7 +357,7 @@ async def run_agent(
                     messages=messages,
                     model=model,
                     temperature=1.0,
-                    max_tokens=4096,
+                    max_tokens=8192,
                     response_model=AgentAction,
                     on_chunk=on_chunk,
                     reasoning_max_tokens=reasoning_max_tokens,
@@ -464,16 +471,18 @@ async def run_agent(
             tree_tokens_out = tokens_out + children_tokens_out
 
             # Persist + broadcast tree tokens after each LLM call
-            try:
-                await execute_activity(
-                    update_agent_status,
-                    args=[agent_id, "ACTIVE", iteration / max_iterations, f"Processing",
-                          token_count, context_size, len(context), tree_tokens_in, tree_tokens_out],
-                    start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update agent status after LLM call: {e}")
+            # Skip when running as explore agent — its context_size would overwrite the parent's
+            if not skip_status_updates:
+                try:
+                    await execute_activity(
+                        update_agent_status,
+                        args=[agent_id, "ACTIVE", iteration / max_iterations, f"Processing",
+                              token_count, context_size, len(context), tree_tokens_in, tree_tokens_out],
+                        start_to_close_timeout=timedelta(seconds=15),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update agent status after LLM call: {e}")
                 # Non-fatal - continue execution
 
         except asyncio.CancelledError:
@@ -727,6 +736,9 @@ async def run_agent(
                 # Skip LLM verification if requested
                 if skip_verification:
                     logger.info("⏭️ Skipping LLM verification")
+                    # Prefer the explicit result from attempt_completion tool args,
+                    # fall back to the model's text response
+                    completion_result = tool_args.get("result", "") or response_text or ""
                     return {
                         "status": "completed",
                         "context": context,
@@ -735,6 +747,7 @@ async def run_agent(
                         "token_count": token_count,
                         "context_size": context_size,
                         "message": "",
+                        "final_response": completion_result,
                     }
 
                 # Run verifier
@@ -851,8 +864,15 @@ async def run_agent(
 
 
 def _estimate_tokens(context: List[Dict]) -> int:
-    """Rough token estimation: ~4 chars per token."""
-    text = "\n".join([m.get("text", "") for m in context])
+    """Rough token estimation: ~4 chars per token.
+
+    Excludes sub-agent internal messages (tagged with subAgentId) since
+    these are filtered out before sending to the LLM.
+    """
+    text = "\n".join([
+        m.get("text", "") for m in context
+        if not (m.get("metadata") or {}).get("subAgentId")
+    ])
     return len(text) // 4
 
 

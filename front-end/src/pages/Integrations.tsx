@@ -246,7 +246,7 @@ export default function Integrations() {
         const validBrowserTypes: BrowserType[] = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas'];
         const newConnectedBrowsers = new Set<BrowserType>();
         for (const integration of integrations) {
-          if (validBrowserTypes.includes(integration.name as BrowserType) && integration.status === 'CONNECTED') {
+          if (validBrowserTypes.includes(integration.name as BrowserType)) {
             newConnectedBrowsers.add(integration.name as BrowserType);
           }
         }
@@ -254,28 +254,28 @@ export default function Integrations() {
 
         // Check for password integrations
         const chromePasswordsIntegration = integrations.find((i: ConnectedIntegration) =>
-          (i.name === 'chrome_passwords' || i.name === 'chrome') && i.status === 'CONNECTED'
+          (i.name === 'chrome_passwords' || i.name === 'chrome')
         );
         setChromePasswordsSynced(!!chromePasswordsIntegration);
 
         // Apple passwords have their own integration
-        const applePasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'apple_passwords' && i.status === 'CONNECTED');
+        const applePasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'apple_passwords');
         setApplePasswordsSynced(!!applePasswordsIntegration);
 
         // Atlas passwords have their own integration
-        const atlasPasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'atlas_passwords' && i.status === 'CONNECTED');
+        const atlasPasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'atlas_passwords');
         setAtlasPasswordsSynced(!!atlasPasswordsIntegration);
 
         // Claude Code credentials
-        const claudeCodeIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'claude_code' && i.status === 'CONNECTED');
+        const claudeCodeIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'claude_code');
         setClaudeCodeSynced(!!claudeCodeIntegration);
 
         // Messaging integrations
-        const imessageIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'imessage' && i.status === 'CONNECTED');
+        const imessageIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'imessage');
         setIMessageSynced(!!imessageIntegration);
-        const whatsappIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'whatsapp' && i.status === 'CONNECTED');
+        const whatsappIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'whatsapp');
         setWhatsAppConnected(!!whatsappIntegration);
-        const telegramIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'telegram' && i.status === 'CONNECTED');
+        const telegramIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'telegram');
         setTelegramConnected(!!telegramIntegration);
       }
     } catch (err) {
@@ -655,7 +655,7 @@ Steps:
             const res = await fetch(`${API_BASE_WITH_PATH}/integrations`, { headers });
             if (!res.ok) return;
             const data = await res.json();
-            const gmail = (data.integrations || []).find((i: any) => i.name === provider && (i.status === 'CONNECTED' || i.status === 'SYNCING'));
+            const gmail = (data.integrations || []).find((i: any) => i.name === provider);
             if (gmail) {
               clearInterval(pollForConnection);
               setConnectingProvider(null);
@@ -1072,12 +1072,12 @@ Steps:
                   <button
                     onClick={() => toggleSection('messagesSync')}
                     className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                      iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED')
+                      iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail')
                         ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                         : 'bg-primary text-primary-foreground hover:bg-primary/90'
                     }`}
                   >
-                    {iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED') ? (
+                    {iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail') ? (
                       <Check className="w-4 h-4" />
                     ) : (
                       <RefreshCw className="w-4 h-4" />
@@ -1158,7 +1158,7 @@ Steps:
                         <div className="flex flex-col">
                           <span className="text-sm">Gmail</span>
                           {(() => {
-                            const gmail = connectedIntegrations.find(i => i.name === 'gmail' && i.status === 'CONNECTED');
+                            const gmail = connectedIntegrations.find(i => i.name === 'gmail');
                             const emails = gmail?.config?.connectedEmails || (gmail?.config?.connectedEmail ? [gmail.config.connectedEmail] : []);
                             return emails.map((email: string) => (
                               <span key={email} className="text-xs text-muted-foreground">{email}</span>
@@ -1171,14 +1171,14 @@ Steps:
                         onClick={() => handleEmailConnect('gmail')}
                         disabled={connectingProvider === 'gmail'}
                         className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                          connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED')
+                          connectedIntegrations.some(i => i.name === 'gmail')
                             ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                             : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
                         }`}
                       >
                         {connectingProvider === 'gmail' ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : connectedIntegrations.some(i => i.name === 'gmail' && i.status === 'CONNECTED') ? (
+                        ) : connectedIntegrations.some(i => i.name === 'gmail') ? (
                           <Check className="w-3.5 h-3.5" />
                         ) : (
                           <RefreshCw className="w-3.5 h-3.5" />

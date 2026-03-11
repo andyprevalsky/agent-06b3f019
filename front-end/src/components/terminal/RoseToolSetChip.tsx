@@ -36,9 +36,9 @@ interface RoseTool {
 
 const ROSE_SYSTEM_TOOLS: RoseTool[] = [
   {
-    name: 'spawn_sub_agent',
-    displayName: 'Spawn Sub-Agent',
-    description: 'Recursively break down arbitrarily complex goals into proximate, context-independent & parallelizable sub goals. Rose can spawn up to 10,000 agents for any single goal.',
+    name: 'spawn_agent',
+    displayName: 'Spawn Agent',
+    description: 'Spawn autonomous agents: explore (research), browser (web tasks), code (coding), or sub-agent (complex delegation). Unified tool for all agent types.',
   },
   {
     name: 'x402',
@@ -58,7 +58,7 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
     description: 'Discover entities matching criteria using natural language queries.',
   },
   {
-    name: 'spawn_browser_agent',
+    name: 'browser_agent',
     displayName: 'Browser Agent',
     description: 'Complete complex, multi-step web tasks autonomously using AI to navigate and interact.',
   },

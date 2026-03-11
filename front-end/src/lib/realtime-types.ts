@@ -175,6 +175,7 @@ export type ToolName =
   | 'send_sms_as_user'
   | 'send_email'
   | 'set_plan'
+  | 'spawn_agent'
   | 'spawn_browser_agent'
   | 'spawn_claude_code_agent'
   | 'spawn_sub_agent'
@@ -243,6 +244,22 @@ export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
 export interface SpawnSubAgentMetadata extends BaseToolMetadata {
   toolName: 'spawn_sub_agent';
   subAgentIds?: string[];
+}
+
+/**
+ * Metadata for spawn_agent tool messages (unified agent spawning).
+ * See agents/tools/spawn_agent.py:save_explore_message
+ */
+export interface SpawnAgentMetadata extends BaseToolMetadata {
+  toolName: 'spawn_agent';
+  /** Agent type: explore, browser, code, sub_agent */
+  agentType?: 'explore' | 'browser' | 'code' | 'sub_agent';
+  /** Unique task ID for this agent session */
+  taskId?: string;
+  /** Routes intermediate messages to sub-panel */
+  subAgentId?: string;
+  /** Indicates an error occurred */
+  error?: boolean;
 }
 
 /**
@@ -450,6 +467,24 @@ export function isSpawnClaudeCodeAgentMessage(
   msg: InsertMessagePayload
 ): msg is ToolMessagePayload<SpawnClaudeCodeAgentMetadata> {
   return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'spawn_claude_code_agent';
+}
+
+/**
+ * Type guard for spawn_agent messages (unified: explore/browser/code/sub_agent).
+ */
+export function isSpawnAgentMessage(
+  msg: InsertMessagePayload
+): msg is ToolMessagePayload<SpawnAgentMetadata> {
+  return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'spawn_agent';
+}
+
+/**
+ * Type guard for explore agent messages (spawn_agent with agentType=explore).
+ */
+export function isExploreAgentMessage(
+  msg: InsertMessagePayload
+): boolean {
+  return isSpawnAgentMessage(msg) && (msg.metadata as SpawnAgentMetadata).agentType === 'explore';
 }
 
 /**

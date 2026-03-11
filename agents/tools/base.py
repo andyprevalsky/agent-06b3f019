@@ -503,9 +503,6 @@ class ToolManager(ABC):
     # Set to True in subclass for read-only tools (used in RESEARCH phase)
     read_only: bool = False
 
-    # Set to True in subclass to enable result condensing before adding to context
-    condensor_enabled: bool = False
-    
     @property
     @abstractmethod
     def tool_name(self) -> str:

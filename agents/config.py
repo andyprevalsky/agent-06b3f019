@@ -275,7 +275,7 @@ def load_config() -> AppConfig:
     # Use local Supabase functions in development, production URL otherwise
     environment = os.getenv("ENVIRONMENT", "production")
     rose_functions_url = (
-        "http://localhost:54321/functions/v1"
+        f"http://localhost:{os.getenv('RESEARCH_PORT', '54321')}/functions/v1"
         if environment != "production"
         else "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1"
     )

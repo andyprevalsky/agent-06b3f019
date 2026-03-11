@@ -33,6 +33,7 @@ import uploadRouter from './routes/upload';
 import feedbackRouter from './routes/feedback';
 import imessageRouter from './routes/imessage';
 import memoryRouter from './routes/memory';
+import dataRouter from './routes/data';
 import { prisma } from './lib/prisma';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
@@ -265,6 +266,7 @@ app.use('/api/api-keys', apiKeysRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/memory', memoryRouter);
+app.use('/api/data', dataRouter);
 
 // Catch-all authenticated route (must be AFTER x402 routes)
 app.use('/api', authenticate, formatRouter);
@@ -300,13 +302,15 @@ app.listen(PORT, () => {
     console.log(`💰 x402 Bazaar: POST /api/x402/spawn-agent (min $0.05 USDC)`);
   }
 
-  // Start Gmail sync cron job (every 5 minutes)
-  cron.schedule('*/5 * * * *', () => {
+  // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
+  const runSync = () => {
     console.log('[Cron] Running Gmail sync job...');
     runGmailSyncJob().catch(err => {
       console.error('[Cron] Gmail sync job error:', err);
     });
-  });
+  };
+  runSync();
+  cron.schedule('*/5 * * * *', runSync);
   console.log(`⏰ Cron: Gmail sync scheduled (every 5 minutes)`);
 });
 

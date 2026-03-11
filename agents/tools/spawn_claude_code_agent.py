@@ -1188,7 +1188,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             type=EventType.POST_MESSAGE,
             title="Starting Claude Code sandbox",
             message='',
-            status=MessageStatus.IN_PROGRESS
+            status=MessageStatus.IN_PROGRESS,
+            metadata={"toolName": "spawn_claude_code_agent"}
         )
 
         try:
@@ -1242,7 +1243,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     title="Claude Code Session Cancelled",
                     message="User paused the agent",
                     status=MessageStatus.FINISHED,
-                    metadata={"action_type": "session_cancelled"}
+                    metadata={"action_type": "session_cancelled", "toolName": "spawn_claude_code_agent"}
                 )
                 return
 
@@ -1284,6 +1285,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 message=result.get("message", ""),
                 status=MessageStatus.FINISHED,
                 metadata={
+                    "toolName": "spawn_claude_code_agent",
                     "task_id": result.get("task_id"),
                     "action_type": "task_complete",
                     "structured_response": result.get("structured_response"),
@@ -1307,7 +1309,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 type=EventType.POST_MESSAGE,
                 title="Claude Code failed",
                 message=extract_error_message(e),
-                status=MessageStatus.ERROR
+                status=MessageStatus.ERROR,
+                metadata={"toolName": "spawn_claude_code_agent"}
             )
             raise
 

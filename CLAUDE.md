@@ -148,6 +148,72 @@ Env vars are in `back-end/.env`:
 - `RENDER_SERVICE_ID` - `srv-d3jga77diees73cgrvk0`
 - `RENDER_OWNER_ID` - `tea-csppgi56l47c73djvpig`
 
+## Autonomous Agent Testing
+
+When testing agent features (new tools, explore agent, spawn_agent, etc.), follow this loop:
+
+**1. Look up the real user ID:**
+```bash
+cd back-end && npx tsx scripts/dump-sms-context.ts  # userId for phone +19729777432
+```
+Real user ID: `1f85ff25-6e29-4c1b-8739-f917bd101a30` (Andy Prevalsky)
+
+**2. Create an agent:**
+```bash
+curl -s -X POST "http://localhost:3001/api/agents" \
+  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "...", "start_phase": "plan"}'
+```
+Use `"start_phase": "plan"` to bypass chat mode and go directly into the Temporal workflow (plan → execute).
+Use `"start_phase": "execute"` to skip planning too. Omit `start_phase` for normal chat mode.
+
+**3. Poll messages every 10 seconds via GET agent detail:**
+```bash
+curl -s "http://localhost:3001/api/agents/{agent_id}" \
+  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
+```
+Messages are in the response under `.messages[]`. Each message has `role`, `message`, and `metadata` (JSON with `toolName`, `toolStatus`, `title`, etc.).
+
+**4. On ANY unexpected behavior, IMMEDIATELY follow this strict sequence (no exceptions):**
+
+```
+Step 1: DELETE the agent (stop bleeding tokens)
+   curl -s -X DELETE "http://localhost:3001/api/agents/{agent_id}" \
+     -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+     -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
+
+Step 2: KILL the run script (stop all services)
+   pkill -f worker.py; pkill -f "npx tsx watch"; pkill -f "npx vite"; pkill -f electron
+   lsof -ti :3001 | xargs kill -9  # force-free the port if needed
+
+Step 3: READ logs and DIAGNOSE
+   - Read agents/navi-worker-log.txt for tracebacks/errors
+   - Query DB if needed to get raw message data
+   - Identify the ROOT CAUSE before writing any code
+
+Step 4: FIX the root cause in code
+
+Step 5: RESTART the run script (resets log files, picks up code changes)
+   CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME=managua-v1 bash scripts/run.sh
+   Wait for "Worker started, waiting for tasks..." in the log
+
+Step 6: Create a NEW agent and go back to step 3 (poll messages)
+```
+
+**CRITICAL: Do NOT skip steps or reorder them.** Especially:
+- Do NOT continue polling a failed agent — delete it FIRST
+- Do NOT make fixes without killing the run script FIRST (workers don't hot-reload)
+- Do NOT restart the run script without reading logs FIRST (you'll just hit the same error)
+
+**Key gotchas:**
+- Temporal workers don't hot-reload — must kill and restart after code changes
+- Old agents can't resume after code changes (Temporal nondeterminism error) — always create fresh
+- The `run.sh` script sets `TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME` which overrides `back-end/.env`
+- `spawn_agent.py` imports MUST be at module level (not lazy inside methods) because it runs inside Temporal's workflow sandbox. Lazy imports trigger `threading.Lock` errors.
+
 ## Ralph Instructions
 
 - If the next step is to check a log file, make sure to call the tool. NEVER ask the user to check a log file for you.

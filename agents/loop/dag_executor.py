@@ -29,8 +29,22 @@ from loop.context_utils import poll_and_update_context
 logger = structlog.get_logger()
 
 # Planning-time aliases → Execution-time tool names
-# No aliases needed - planner uses spawn_sub_agent directly
-TOOL_ALIASES = {}
+# Planner uses separate names (spawn_browser_agent, etc.) that map to unified spawn_agent
+TOOL_ALIASES = {
+    "spawn_explore_agent": "spawn_agent",
+    "spawn_browser_agent": "spawn_agent",
+    "spawn_code_agent": "spawn_agent",
+    "spawn_sub_agent": "spawn_agent",
+}
+
+# When aliases resolve to spawn_agent, force the correct type param
+# so the param-populator LLM can't pick the wrong agent type
+ALIAS_TYPE_OVERRIDES = {
+    "spawn_explore_agent": {"type": "explore"},
+    "spawn_browser_agent": {"type": "browser"},
+    "spawn_code_agent": {"type": "code"},
+    "spawn_sub_agent": {"type": "sub_agent"},
+}
 
 
 def extract_error_message(e: Exception) -> str:
@@ -420,10 +434,23 @@ async def _execute_single_task(
 
             params = await execute_activity(
                 populate_tool_params_activity,
-                args=[actual_tool, task.goal, context, model],
+                args=[actual_tool, task.goal, context, model, task.tool_name],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+
+            # Force correct type for spawn_agent aliases (LLM can't be trusted to pick the right type)
+            type_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
+            if type_override:
+                workflow.logger.info(f"[DAG] Applying type override for {task.tool_name}: {type_override}")
+                params.update(type_override)
+                # Explore agents don't use output_schema/verifier — strip them if LLM added them
+                if type_override.get("type") == "explore":
+                    params.pop("output_schema", None)
+                    params.pop("verifier", None)
+                    params.pop("start_url", None)
+                    params.pop("github_repo_link", None)
+                    params.pop("read_only", None)
 
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)

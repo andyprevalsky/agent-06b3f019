@@ -3582,7 +3582,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             type=EventType.POST_MESSAGE,
             title="Starting up a browser",
             message='',
-            status=MessageStatus.IN_PROGRESS
+            status=MessageStatus.IN_PROGRESS,
+            metadata={"toolName": "spawn_browser_agent"}
         )
 
         try:
@@ -3650,7 +3651,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         title="Browser Session Paused",
                         message="User paused the browser agent",
                         status=MessageStatus.FINISHED,
-                        metadata={"action_type": "session_paused"}
+                        metadata={"toolName": "spawn_browser_agent", "action_type": "session_paused"}
                     )
                     return
 
@@ -3712,6 +3713,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             message="",
                             status=MessageStatus.FINISHED,
                             metadata={
+                                "toolName": "spawn_browser_agent",
                                 "task_id": write_lock_resume_state.get("task_id"),
                                 "requestUserApproval": {
                                     "writePermission": True,
@@ -3730,7 +3732,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             title="Action blocked by user",
                             message=f"User denied permission for {result.get('approval_type', 'action')}",
                             status=MessageStatus.FINISHED,
-                            metadata={"action_type": "write_lock_rejected"}
+                            metadata={"toolName": "spawn_browser_agent", "action_type": "write_lock_rejected"}
                         )
                         return
 
@@ -3775,6 +3777,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 title="Browser automation complete",
                 message=result.get("message", ""),
                 status=final_status,
+                metadata={"toolName": "spawn_browser_agent"},
                 data={"usage": tool_usage}
             )
 
@@ -3787,7 +3790,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 type=EventType.POST_MESSAGE,
                 title="Browser automation failed",
                 message=str(e),
-                status=MessageStatus.ERROR
+                status=MessageStatus.ERROR,
+                metadata={"toolName": "spawn_browser_agent"},
             )
             raise
 

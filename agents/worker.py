@@ -78,7 +78,9 @@ from helpers.llm import call_planner_llm_activity, set_response_schema_activity,
 from helpers.attachments import resolve_attachments_activity
 from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
-from helpers.condensor import condense_tool_result_activity
+from tools.spawn_agent import spawn_explore_agent_activity, fetch_full_network_metadata
+from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
+from tools.grep import grep_activity, fetch_local_data_summary
 from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
 from helpers.sms_activities import (
     get_agent_source,
@@ -162,6 +164,9 @@ async def main():
     )
     
     logger.info("Connected to Temporal Cloud")
+
+    # Make client available to query_parent_state_activity
+    set_temporal_client(client)
     
     # Configure workflow sandbox to passthrough logging libraries
     # These libraries use threading.local which isn't allowed in the sandbox,
@@ -236,7 +241,10 @@ async def main():
             update_agent_status,
             compress_context,
             generate_completion_summary,
-            condense_tool_result_activity,
+            spawn_explore_agent_activity,
+            fetch_full_network_metadata,
+            grep_activity,
+            fetch_local_data_summary,
             get_model_context_window,
             fetch_agent_tools,
             query_blueprints_activity,
@@ -262,6 +270,8 @@ async def main():
             # Shared memory activities
             get_shared_memory,
             append_shared_memory,
+            # Parent state query (for sub-agent → parent communication)
+            query_parent_state_activity,
         ],
         max_concurrent_activities=config.temporal.max_concurrent_activities,
         max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,

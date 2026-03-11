@@ -147,10 +147,21 @@ export class IMessageSync {
       // Check integration status via cache
       const integration = await IntegrationCache.getIntegration('imessage');
 
-      // Only sync if already connected (user has previously synced)
-      if (!integration || integration.status !== 'CONNECTED') {
-        console.log('[IMessageSync] Skipping sync - integration not connected');
+      // Only sync if integration exists (user has previously synced)
+      if (!integration || integration.status === 'NOT_CONNECTED') {
+        console.log('[IMessageSync] Skipping sync - integration not found');
         return;
+      }
+
+      // If SYNCING and last sync was < 1 hour ago, skip (sync is likely still in progress)
+      if (integration.status === 'SYNCING' && integration.lastSyncAt) {
+        const lastSyncAge = Date.now() - new Date(integration.lastSyncAt).getTime();
+        const ONE_HOUR = 60 * 60 * 1000;
+        if (lastSyncAge < ONE_HOUR) {
+          console.log(`[IMessageSync] Skipping sync - already syncing (last sync ${Math.round(lastSyncAge / 60000)}m ago)`);
+          return;
+        }
+        console.log(`[IMessageSync] Re-syncing - SYNCING status stale (last sync ${Math.round(lastSyncAge / 60000)}m ago)`);
       }
 
       const integrationConfig = integration.config as { lastFrontendAccessAt?: string } | undefined;

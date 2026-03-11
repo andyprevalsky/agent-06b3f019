@@ -8,16 +8,17 @@ const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
 // Retryable Prisma error codes:
 // P1001 - Can't reach database server
+// P1017 - Server has closed the connection (Supabase pooler idle timeout)
 // P2024 - Timed out fetching a new connection from the pool
-const RETRYABLE_ERROR_CODES = new Set(['P1001', 'P2024']);
+const RETRYABLE_ERROR_CODES = new Set(['P1001', 'P1017', 'P2024']);
 
 // Add connection pool parameters if not already present
 function getConnectionUrl(): string {
   const url = process.env.DATABASE_URL || '';
 
   const params: string[] = [];
-  if (!url.includes('connection_limit')) params.push('connection_limit=25');
-  if (!url.includes('pool_timeout')) params.push('pool_timeout=20');
+  if (!url.includes('connection_limit')) params.push('connection_limit=10');
+  if (!url.includes('pool_timeout')) params.push('pool_timeout=30');
 
   if (params.length === 0) return url;
 

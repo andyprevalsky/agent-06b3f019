@@ -27,6 +27,7 @@ import { isFilePointer, FilePointerDisplay } from './ClaudeCodeChip';
 // Tool name → Human-readable label mapping (mirrors backend TOOL_DISPLAY_NAMES)
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
   web_search: 'Web Searches',
+  spawn_agent: 'Agents Spawned',
   spawn_sub_agent: 'Sub Agents Spawned',
   spawn_browser_agent: 'Browser Agents Spawned',
   spawn_claude_code_agent: 'Code Agents Spawned',

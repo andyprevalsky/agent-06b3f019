@@ -192,8 +192,8 @@ export class TelegramSync {
 
     // Get integration with config to check status and get lastFrontendAccessAt
     const integration = await IntegrationCache.getIntegration('telegram');
-    if (!integration || integration.status !== 'CONNECTED') {
-      console.log('[TelegramSync] Cannot sync historical - integration not connected');
+    if (!integration || integration.status === 'NOT_CONNECTED') {
+      console.log('[TelegramSync] Cannot sync historical - integration not found');
       return 0;
     }
 

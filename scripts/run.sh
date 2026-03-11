@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 if [ -z "$CONDUCTOR_PORT" ]; then
   echo '❌ CONDUCTOR_PORT not set. Run via Conductor.'
@@ -9,19 +9,141 @@ fi
 export BACKEND_PORT=$CONDUCTOR_PORT
 export FRONTEND_PORT=$(($BACKEND_PORT + 1))
 export HEALTH_PORT=$(($BACKEND_PORT + 2))
+export RESEARCH_PORT=$(($BACKEND_PORT + 3))
 export BACKEND_API_URL=http://localhost:$BACKEND_PORT
 export VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT
 export BACKEND_URL=http://localhost:$BACKEND_PORT
-export MAC_APP_PORT=5174
+export MAC_APP_PORT=$(($BACKEND_PORT + 4))
 export ALLOWED_ORIGINS=http://localhost:$FRONTEND_PORT,http://localhost:$MAC_APP_PORT
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
 
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT queue=$TEMPORAL_TASK_QUEUE"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT research=$RESEARCH_PORT mac-app=$MAC_APP_PORT queue=$TEMPORAL_TASK_QUEUE"
 
-(cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee backend-logs.log) &
-(cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log) &
-(cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log) &
-(cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT ./scripts/run_local_worker.sh) &
-(cd research && rm -f research-logs.log && ./run-local.sh 2>&1 | tee research-logs.log) &
+# Pre-flight: stop stale Supabase containers (avoids killing Docker proxy processes)
+if command -v supabase &>/dev/null && docker ps &>/dev/null 2>&1; then
+    (cd research/supabase && supabase stop 2>/dev/null) || true
+fi
 
-wait
+# Pre-flight: kill anything holding our ports from a previous run (skip Docker processes)
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT; do
+    pids=$(lsof -ti :"$port" 2>/dev/null) || true
+    if [ -n "$pids" ]; then
+        # Filter out Docker processes to avoid killing the Docker engine
+        safe_pids=""
+        for pid in $pids; do
+            cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
+            if ! echo "$cmd" | grep -qi docker; then
+                safe_pids="$safe_pids $pid"
+            fi
+        done
+        if [ -n "$safe_pids" ]; then
+            echo "⚠️  Port $port in use — killing stale processes"
+            echo "$safe_pids" | xargs kill -9 2>/dev/null || true
+        fi
+    fi
+done
+pkill -f "mac-app/node_modules" 2>/dev/null || true
+
+PIDS=()
+NAMES=()
+SHUTTING_DOWN=false
+
+kill_tree() {
+    local pid=$1
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_tree "$child"
+    done
+    kill "$pid" 2>/dev/null || true
+}
+
+cleanup() {
+    if $SHUTTING_DOWN; then return; fi
+    SHUTTING_DOWN=true
+    echo "🛑 Stopping all services..."
+    # Kill tracked PID trees first
+    for pid in "${PIDS[@]}"; do
+        kill_tree "$pid"
+    done
+    # Stop Supabase containers gracefully
+    if command -v supabase &>/dev/null && docker ps &>/dev/null 2>&1; then
+        (cd research/supabase && supabase stop 2>/dev/null) || true
+    fi
+    # Kill anything still holding our ports (skip Docker processes)
+    for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT; do
+        for pid in $(lsof -ti :"$port" 2>/dev/null); do
+            cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
+            echo "$cmd" | grep -qi docker || kill "$pid" 2>/dev/null || true
+        done
+    done
+    # Electron spawns GPU/renderer helpers that don't bind tracked ports
+    pkill -f "mac-app/node_modules" 2>/dev/null || true
+    wait 2>/dev/null
+}
+trap cleanup EXIT
+
+# Wrapper: run a service and write its exit code to a temp file on failure
+FAIL_DIR=$(mktemp -d)
+run_service() {
+    local name="$1"
+    shift
+    "$@"
+    local code=$?
+    if [ $code -ne 0 ]; then
+        echo "$name" > "$FAIL_DIR/failed"
+        echo "$code" > "$FAIL_DIR/exit_code"
+    fi
+    return $code
+}
+
+# Launch each service
+run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee backend-logs.log' &
+PIDS+=($!); NAMES+=("back-end")
+
+run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
+PIDS+=($!); NAMES+=("front-end")
+
+run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
+PIDS+=($!); NAMES+=("mac-app")
+
+run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT ./scripts/run_local_worker.sh' &
+PIDS+=($!); NAMES+=("agents")
+
+run_service "research" bash -c 'set -eo pipefail; cd research && rm -f research-logs.log && ./run-local.sh 2>&1 | tee research-logs.log' &
+PIDS+=($!); NAMES+=("research")
+
+# Poll for failed children every second
+while true; do
+    if $SHUTTING_DOWN; then break; fi
+
+    # Check if any process has died
+    for i in "${!PIDS[@]}"; do
+        pid="${PIDS[$i]}"
+        if ! kill -0 "$pid" 2>/dev/null; then
+            # Process is gone — get its exit code
+            wait "$pid" 2>/dev/null
+            code=$?
+            name="${NAMES[$i]}"
+            if [ $code -ne 0 ]; then
+                echo ""
+                echo "❌ $name exited with code $code — shutting down all services."
+                cleanup
+                rm -rf "$FAIL_DIR"
+                exit $code
+            fi
+            # Exited cleanly — remove from tracking
+            unset "PIDS[$i]"
+            unset "NAMES[$i]"
+        fi
+    done
+
+    # If all children are gone, exit
+    remaining=0
+    for pid in "${PIDS[@]}"; do
+        if [ -n "$pid" ]; then remaining=1; break; fi
+    done
+    if [ $remaining -eq 0 ]; then break; fi
+
+    sleep 1
+done
+
+rm -rf "$FAIL_DIR"

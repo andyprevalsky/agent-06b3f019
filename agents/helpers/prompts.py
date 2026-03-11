@@ -11,29 +11,11 @@ from helpers.tool_schemas import TOOL_MODELS
 # SHARED PROMPT SECTIONS (deduplicated)
 # ============================================================================
 
-CONDENSOR_PROMPT = """Extract ONLY essential information for the main agent from this tool result.
-
-MAIN AGENT SYSTEM PROMPT:
-{system_prompt}
-
-INSTRUCTIONS:
-1. Extract key information relevant to the agent's task
-2. Preserve critical & relevant data: names, numbers, URLs, facts
-3. Remove verbose formatting, repetition, boilerplate
-4. Be concise but don't lose important data
-5. If no relevant data found, that is ok, just return your reasoning instead of the data
-
-TOOL RESULT:
-{tool_result}
-
-Output the condensed version:"""
-
-
 CRITICAL_CONSTRAINTS_BOX = """
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ PARALLEL EXECUTION: All tool_calls in one response execute IN PARALLEL  │
-│ EPHEMERAL SESSIONS: spawn_browser_agent/spawn_claude_code_agent start   │
-│                     fresh each call - no state persists between calls   │
+│ EPHEMERAL SESSIONS: spawn_agent(type=browser/code) start fresh each     │
+│                     call - no state persists between calls              │
 │ CAUSAL DEPS: If B needs A's result, emit A alone, wait, then emit B     │
 └─────────────────────────────────────────────────────────────────────────┘
 """
@@ -49,45 +31,33 @@ FILE_RULES = """
 # ============================================================================
 
 TOOL_GUIDANCE = {
-    "spawn_browser_agent": """Ephemeral session. 25-step limit. For short web trajectories (purchases, forms, JS-heavy sites).
-Do work OUTSIDE browser when possible. Give deepest starting URL.
-Do NOT use for information gathering - use web_search/web_fetch instead. Only use browser if those tools have failed.
-IMPORTANT: Browser cookies are ONLY synced for the start_url domain. The agent will only be logged in on that site.
+    "spawn_agent": """Unified tool to spawn autonomous agents. Set type to determine capabilities:
+
+type="explore": Research agent for ALL information gathering (web search, web fetch).
+  Just provide a goal string - the explore agent searches thoroughly and returns a summary.
+  Use this for ANY research, fact-finding, or data gathering task.
+  ALWAYS use explore for information needs - do NOT use web_search/web_fetch directly.
+
+type="browser": Ephemeral session. 25-step limit. For short web trajectories (purchases, forms, JS-heavy sites).
+  Requires: start_url, output_schema. Do NOT use for information gathering - use explore.
+  IMPORTANT: Browser cookies are ONLY synced for the start_url domain.
+
+type="code": Ephemeral sandbox. For coding tasks: code execution, data processing, file generation.
+  Requires: output_schema. Each agent = ONE focused task under 10 minutes.
+  Use type='file_pointer' in output_schema for generated files.
+
+type="sub_agent": Delegate complex tasks with own planning cycle. Run concurrently.
+  Requires: output_schema. Use for parallel work or decomposing complex goals.
 
 <bad-example>
-spawn_browser_agent("Login to site")
-spawn_browser_agent("Add item to cart")  ← SESSION LOST! Starts fresh.
+spawn_agent(type="browser", goal="Login to site")
+spawn_agent(type="browser", goal="Add item to cart")  SESSION LOST! Starts fresh.
 </bad-example>
 
 <good-example>
-spawn_browser_agent("Login, add item to cart, checkout")  ← Single session for full flow
+spawn_agent(type="explore", goal="Find pricing for Acme Corp enterprise plans")
+spawn_agent(type="browser", start_url="https://x.com", goal="Login, post tweet, logout", output_schema=...)
 </good-example>""",
-
-    "spawn_claude_code_agent": """Ephemeral session. For general coding tasks: code execution, data processing, file generation, analysis.
-Define WHAT you want (inputs + outputs), not HOW to do it. The agent figures out implementation.
-- Pass files via `attachments: ["filename.ext"]`
-- Capture results via `output_schema`. Use type='file_pointer' for generated files.
-- Each agent = ONE focused task (1 component, 1 endpoint, 1 script). NOT an entire project.
-- Sandboxes can die on long tasks. Keep each agent's work under 10 minutes.
-
-<bad-example>
-spawn_claude_code_agent("Build a full website with 5 pages, routing, and deployment")  ← Too broad, will timeout
-</bad-example>
-
-<bad-example>
-spawn_claude_code_agent("Process the data")  ← No attachments, no output_schema
-</bad-example>
-
-<good-example>
-spawn_claude_code_agent(
-  goal="Take test.csv, compute column averages, generate a bar chart",
-  attachments=["test.csv"],
-  output_schema=[{name: "averages", type: "str"}, {name: "chart", type: "file_pointer"}]
-)
-</good-example>""",
-
-    "spawn_sub_agent": """Context-independent parallelization only. Sub-agents run concurrently.
-Use for: parallel work, evaluating hypotheses, decomposing complex goals.""",
 
     "send_message_to_user": """Must be ONLY tool in that turn. Use is_question=true for clarifications.""",
 
@@ -101,9 +71,13 @@ Use for: parallel work, evaluating hypotheses, decomposing complex goals.""",
 
     "wait_seconds": """Pause execution for a specified number of seconds (1-3600).""",
 
-    "people_search": """Search for people using Exa's people index. Natural language query for name, role, company, skills.""",
-
     "send_message_to_user_execute_phase": """Send an informational message to the user during execution (non-blocking). Use for status updates.""",
+
+    "message_person": """Send a message to a person via iMessage or email. Provide a person identifier (name, phone, or email) and describe the intent — the tool generates the message, reads history, and requests user approval before sending. Do NOT write the message yourself.""",
+
+    "call_phone_number": """Make an outbound phone call to extract structured data via voice AI. Provide a phone number, system prompt, and output schema. Only call ONCE per number — do NOT make parallel calls to the same number.""",
+
+    "grep": """Search user's local data (message threads) by keyword. Searches iMessage and email conversations for matching messages with surrounding context. Use empty string to return all messages.""",
 }
 
 BEHAVIORAL_RULES = """
@@ -233,6 +207,7 @@ ENABLED tools
 -> web_search
 -> web_fetch
 -> send_message_to_user
+-> spawn_agent (type="explore" ONLY — no other spawn types in PLAN phase)
 
 To Progress From this Node in the State Machine
 -> call set_plan to progress to SET_PLAN Node
@@ -242,9 +217,15 @@ NODE: SET_PLAN
 ENABLED TOOLS
 -> send_message_to_user
 
+DISABLED TOOLS (do NOT call these after set_plan)
+-> spawn_agent — NOT available here. All execution happens in the EXECUTE phase.
+-> web_search, web_fetch — research must be done BEFORE set_plan.
+
 To Progress From this Node in the State Machine
 -> call send_message_to_user to progress to ASK_QUESTION Node
 -> call attempt_completion to progress to EXIT Node
+
+IMPORTANT: set_plan does NOT transition you to the execute phase. You are still in the PLAN phase after calling set_plan. You MUST call attempt_completion to transition to the EXECUTE phase.
 
 NODE: ASK_QUESTION
 ─────────────────────────────
@@ -755,9 +736,54 @@ OUTPUT JSON ONLY - no prose, no commentary outside the JSON structure."""
     return base_prompt
 
 
+EXPLORE_AGENT_SYSTEM_PROMPT = """You are a research agent that gathers information from the web AND the user's local data.
+
+Current timestamp: {current_timestamp}
+
+You have access to:
+- web_search: Search the web for public information
+- web_fetch: Fetch and read full web pages
+- grep: Search the user's local data (message threads, etc.) — like grep on a filesystem
+- attempt_completion: Return your findings in the `result` field — this is what gets sent back to the caller
+
+APPROACH:
+- Decide whether the answer lives on the web, in the user's local data, or both
+- For web: start broad, then narrow with specific searches. Use web_fetch when snippets aren't enough.
+- For local data: use grep to search message threads by keyword. Results include surrounding messages for context.
+- Cross-reference information from multiple sources
+- When you have enough information, call attempt_completion
+
+GREP USAGE:
+- grep searches the user's message threads (iMessage, email conversations)
+- Pattern is plain text (not regex) — use '' (empty string) to return all messages without filtering
+- Optional filters: source (e.g., "messages"), person_id (email, phone, or full name to search one person's thread), since (ISO timestamp cutoff)
+- The 'since' parameter accepts ISO 8601 timestamps (e.g., "2025-06-01T00:00:00Z"). Use the current timestamp above to calculate relative time ranges.
+- Results return matching messages with surrounding context (like grep -C)
+- If grep returns no results, try different keywords or broaden the time range
+
+QUALITY:
+- Be thorough — make multiple searches from different angles
+- Include specific facts, numbers, names, URLs when available
+- Note conflicting information or uncertainty
+- Cite sources when possible
+- NEVER repeat a search you already ran. If a search returned no results, try a DIFFERENT keyword or approach. If you've exhausted reasonable keywords, call attempt_completion with what you have.
+
+{network_metadata}
+{local_data_summary}
+
+IMPORTANT: Call attempt_completion with your concrete findings in the `result` field.
+Do NOT keep searching indefinitely — synthesize what you have and complete.
+The `result` field is what gets returned to the parent agent — make it detailed and actionable.
+
+OUTPUT SIZE: Your entire response (reasoning + response + tool_calls) must fit within ~8000 tokens.
+The `result` field inside attempt_completion should be under 6000 tokens to leave room for the rest.
+If your findings are extensive, synthesize key insights rather than dumping raw search results or verbose JSON arrays."""
+
+
 __all__ = [
     "build_system_prompt",
     "build_verifier_prompt",
     "build_browser_system_prompt",
     "build_planner_system_prompt",
+    "EXPLORE_AGENT_SYSTEM_PROMPT",
 ]

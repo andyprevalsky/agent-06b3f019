@@ -28,6 +28,9 @@ dist-ssr
 *.sln
 *.sw?
 *.pyc
+
+# Auto-generated supabase config (ports are dynamic per worktree)
+research/supabase/config.toml
 # Python
 __pycache__/
 *.py[cod]

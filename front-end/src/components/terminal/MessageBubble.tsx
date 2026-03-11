@@ -3,6 +3,7 @@
  *
  * MESSAGE TYPE ROUTING (checked in order):
  * - isSubAgentTool → SubAgentTree/SubAgentToolBubble
+ * - isExploreAgent → ExploreAgentBubble (grouped by taskId, with step history)
  * - isSignupRequest → SignupPromptBubble
  * - isSetPlanTool → PlanChip
  * - isClaudeCodeTool → ClaudeCodeChip
@@ -48,6 +49,7 @@ import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import SubAgentToolBubble from './SubAgentToolBubble';
+import ExploreAgentBubble, { type ExploreStep } from './ExploreAgentBubble';
 import SignupPromptBubble from './SignupPromptBubble';
 import SubAgentTree from './SubAgentTree';
 import ClaudeCodeChip from './ClaudeCodeChip';
@@ -79,6 +81,8 @@ interface MessageBubbleProps {
   onSubmitFeedback?: (feedback: FeedbackData) => Promise<void>;
   /** Streaming plan char count (for set_plan IN_PROGRESS PlanChip) */
   planCharCount?: number;
+  /** Explore agent step history (passed from MessageList grouping) */
+  exploreStepHistory?: ExploreStep[];
 }
 
 interface ToolMessageData {
@@ -816,7 +820,7 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback, planCharCount }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback, planCharCount, exploreStepHistory }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -835,6 +839,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   // Check if this is a sub-agent tool message (actual spawn_sub_agent calls, not browser actions)
   const isSubAgentTool = message.metadata?.toolName === 'spawn_sub_agent';
+
+  // Check if this is an explore agent message (spawn_agent with agentType=explore)
+  const isExploreAgent = isTool && message.metadata?.toolName === 'spawn_agent' && message.metadata?.agentType === 'explore';
 
   // Check if this is a set_plan tool message (render as PlanChip)
   const isSetPlanTool = isTool && message.metadata?.toolName === 'set_plan';
@@ -989,6 +996,25 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   }, [isSubAgentTool, message.metadata, message.text, onNavigateToAgent]);
 
   if (subAgentBubble) return subAgentBubble;
+
+  // Explore agent: render as ExploreAgentBubble with grouped step history
+  if (isExploreAgent) {
+    const toolStatus = (message.metadata?.toolStatus as string) || 'IN_PROGRESS';
+    // Step history is passed as a prop from MessageList's explore grouping
+    const stepHistory = exploreStepHistory || [
+      { title: message.metadata?.title as string || '', status: toolStatus, timestamp: message.timestamp, message: message.text || '', toolName: message.metadata?.toolName as string || '' },
+    ];
+    return (
+      <ExploreAgentBubble
+        title={message.metadata?.title as string || ''}
+        fullGoal={message.metadata?.fullGoal as string || ''}
+        message={message.text || ''}
+        status={toolStatus as 'IN_PROGRESS' | 'FINISHED' | 'ERROR'}
+        stepHistory={stepHistory}
+        onTypingComplete={onTypingComplete}
+      />
+    );
+  }
 
   // request_user_signup: render as SignupPromptBubble
   if (isSignupRequest && agentId) {

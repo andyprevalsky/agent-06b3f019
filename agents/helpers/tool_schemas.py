@@ -17,8 +17,7 @@ logger = structlog.get_logger(__name__)
 
 # Tools available during PLAN phase (research + create execution plan)
 PLAN_PHASE_TOOLS = [
-    "web_search",
-    "web_fetch",
+    "spawn_agent",  # Only type="explore" allowed in PLAN (enforced at runtime)
     "send_message_to_user",
     "set_plan",
     "attempt_completion",
@@ -26,13 +25,8 @@ PLAN_PHASE_TOOLS = [
 
 # Tools available during EXECUTE phase (run the plan)
 EXECUTE_PHASE_TOOLS = [
-    "spawn_browser_agent",
-    "spawn_claude_code_agent",
-    "spawn_sub_agent",
+    "spawn_agent",  # Unified: type=browser|code|sub_agent|explore
     "wait_seconds",
-    # "web_search",        # available in plan phase; removed from execute to stay within 8 anyOf limit
-    # "web_fetch",         # available in plan phase; removed from execute to stay within 8 anyOf limit
-    # "people_search",     # removed from execute to stay within 8 anyOf limit
     "send_message_to_user_execute_phase",
     "call_phone_number",
     "message_person",
@@ -40,14 +34,14 @@ EXECUTE_PHASE_TOOLS = [
 ]
 
 # Tools the planner can assign to tasks (what shows up in task.tool_name)
+# These use separate names so the planner doesn't need to understand spawn_agent params.
+# The DAG executor converts these to spawn_agent via TOOL_ALIASES.
 PLANNER_ASSIGNABLE_TOOLS = [
+    "spawn_explore_agent",
     "spawn_browser_agent",
-    "spawn_claude_code_agent",
+    "spawn_code_agent",
     "spawn_sub_agent",
     "wait_seconds",
-    "web_search",
-    "web_fetch",
-    "people_search",
     "call_phone_number",
     "message_person",
     "send_message_to_user_execute_phase",
@@ -56,13 +50,11 @@ PLANNER_ASSIGNABLE_TOOLS = [
 
 class PlanToolName(str, Enum):
     """The tool to execute for this task, or 'reasoning' for thinking/analysis."""
+    spawn_explore_agent = "spawn_explore_agent"
     spawn_browser_agent = "spawn_browser_agent"
-    spawn_claude_code_agent = "spawn_claude_code_agent"
+    spawn_code_agent = "spawn_code_agent"
     spawn_sub_agent = "spawn_sub_agent"
     wait_seconds = "wait_seconds"
-    web_search = "web_search"
-    web_fetch = "web_fetch"
-    people_search = "people_search"
     call_phone_number = "call_phone_number"
     message_person = "message_person"
     send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
@@ -189,6 +181,21 @@ class WebFetchTool(BaseModel):
     )
 
 
+class GrepTool(BaseModel):
+    """Search user's local data (message threads) by keyword.
+
+    Searches iMessage and email conversation threads for matching messages.
+    Returns matching messages with surrounding context (like grep -C).
+    Pattern is plain text (not regex). Use empty string '' to return all messages (no filter).
+    """
+
+    tool: Literal["grep"]
+    pattern: str = Field(description="Text to search for in messages (plain text, not regex). Use '' to return all messages. E.g. 'dinner', 'project update'")
+    source: str = Field(default="messages", description="Data source to search. Currently only 'messages' is available.")
+    person_id: Optional[str] = Field(default=None, description="Optional person identifier to scope search to one thread. Can be an email address, phone number, or full name.")
+    since: Optional[str] = Field(default=None, description="ISO 8601 timestamp cutoff — only return messages after this time. E.g. '2025-06-01T00:00:00Z'. Defaults to 365 days ago.")
+
+
 class PeopleSearchTool(BaseModel):
     """Tool call for searching for people using Exa's people index."""
 
@@ -312,60 +319,66 @@ class MessagePersonTool(BaseModel):
     )
 
 
-class SpawnBrowserAgentTool(BaseModel):
-    """Spawn an autonomous browser agent to complete short, simple web tasks. Best for: purchases, checkouts, form submissions, downloading files, and reading content from JS-heavy sites. The browser agent should be used for short simple trajectories, not complex reasoning loops - it has a 25-step limit. Provide a complete, high-level goal - the browser agent will autonomously execute all necessary steps. Login state and saved payment methods persist across sessions. Minimize the work done by this tool and keep the trajectory as short as possible. Do not call this tool multiple times in parallel."""
+class SpawnAgentTool(BaseModel):
+    """Spawn an autonomous agent. Type determines capabilities and required config:
 
-    tool: Literal["spawn_browser_agent"]
-    start_url: str = Field(
-        description="The URL to navigate to first. Must be a URL normally visited by a user in common website interaction. Bad: 'https://x.com/compose/post'. Good: 'https://x.com' (when posting). The browser will automatically navigate here before starting."
-    )
-    goal: str = Field(
-        description="Complete, high-level goal for the autonomous browser agent to accomplish. Examples: 'Buy this item', 'Post a tweet saying Hello World', 'Reorder my last Uber Eats order'"
-    )
-    output_schema: ResponseSchemaConfig
-    attachments: Optional[List[str]] = Field(
-        default=None,
-        description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'photo.jpg'). Do NOT use the file's `id` field or any other format."
-    )
+    type="explore": Research agent for ALL information gathering.
+      Required: goal (str). Do NOT pass output_schema or verifier — explore agents return free-form summaries.
+      Example: spawn_agent(type="explore", goal="Find pricing for Acme Corp products")
 
+    type="browser": Web automation (purchases, forms, JS-heavy sites).
+      Required: goal (str), start_url (str), output_schema (ResponseSchemaConfig).
+      Optional: attachments (list of URLs/file paths).
+      25-step limit. Login state persists. Do NOT use for info gathering - use explore.
 
-class SpawnClaudeCodeAgentTool(BaseModel):
-    """Spawn an autonomous Claude Code agent to complete coding tasks in an ephemeral E2B sandbox.
+    type="code": Coding tasks in ephemeral E2B sandbox.
+      Required: goal (str), output_schema (ResponseSchemaConfig).
+      Optional: github_repo_link (str), attachments (list of URLs/file paths).
+      Each agent = ONE focused task. Keep under 10 minutes.
 
-    The Claude Code agent has access to a full Linux environment with:
-    - File system (read, write, edit files)
-    - Terminal (run any bash commands)
-    - Git (clone repos, create branches, commit)
-    - Package managers (npm, pip, etc.)
-
-    TASK SCOPING: Each agent should complete ONE focused deliverable in under 10 minutes.
-    Think "create one component" or "add one feature" - NOT "build an entire app".
-
-    Size heuristics (pick the SMALLEST unit that makes sense):
-    - 1 page/component/endpoint per agent
-    - 1 data pipeline or analysis per agent
-    - 1 config/scaffold step per agent (others depend on this)
-
-    If a task can be broken into 2+ subtasks with no context dependency, you MUST split them
-    into separate agents. Monolithic tasks WILL fail due to sandbox timeouts.
-
-    A GitHub repo is automatically created and linked for every agent. All Claude Code
-    work is pushed to this repo. Use file_pointer in output_schema to return files
-    to the parent agent's context.
+    type="sub_agent": Delegate complex task with own planning cycle.
+      Required: goal (str), output_schema (ResponseSchemaConfig).
+      Optional: read_only (bool), verifier (VerifierConfig), attachments.
     """
 
-    tool: Literal["spawn_claude_code_agent"]
-    goal: str = Field(
-        description="Complete coding goal for Claude Code to accomplish. Examples: 'Clone the repo at https://github.com/user/project, add TypeScript support, and push changes to a new branch', 'Create a Python script that analyzes CSV data and generates a report', 'Set up a new React project with Tailwind CSS and create a landing page component'"
+    tool: Literal["spawn_agent"]
+    type: Literal["browser", "code", "sub_agent", "explore"]
+    goal: str = Field(description="Task/objective for the agent")
+
+    output_schema: Optional[ResponseSchemaConfig] = Field(
+        default=None,
+        description=(
+            "REQUIRED for type=browser, type=code, type=sub_agent. "
+            "MUST NOT be provided for type=explore. "
+            "Defines the structured data the agent returns. "
+            "Example: {\"summary\": \"str\", \"items\": \"list[str]\", \"file\": \"file_pointer\"}"
+        )
     )
-    output_schema: ResponseSchemaConfig
     attachments: Optional[List[str]] = Field(
         default=None,
-        description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'data.csv'). Do NOT use the file's `id` field or any other format."
+        description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context."
     )
+
+    start_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "REQUIRED for type=browser. Not used by other types. "
+            "The URL to navigate to first. Must be a user-facing URL, not a deep-link."
+        )
+    )
+    # code only - GitHub repo to clone into sandbox
     github_repo_link: Optional[str] = Field(
         default=None,
-        description="GitHub repository URL to clone into the sandbox before starting. The agent will work inside the cloned repo directory and automatically push changes to main. Format: 'https://github.com/{owner}/{repo}' (e.g., 'https://github.com/acme-corp/my-project'). Only repos you have been granted access to can be cloned."
+        description="(code only) GitHub repository URL to clone. Format: 'https://github.com/{owner}/{repo}'"
+    )
+    # sub_agent only
+    read_only: Optional[bool] = Field(
+        default=None,
+        description="(sub_agent only) True if sub-agent must stay read-only (plan-phase spawn)."
+    )
+    verifier: Optional[VerifierConfig] = Field(
+        default=None,
+        description="(sub_agent only) Verification config for evaluating agent success."
     )
 
 
@@ -679,20 +692,19 @@ class AttemptCompletionTool(BaseModel):
 
     A verifier will run to confirm completion. If verification passes, the loop exits.
     If not, you'll receive feedback and can continue working.
+
+    The result field contains your final output — the concrete answer, data, or findings.
+    This is what gets returned to the caller.
     """
 
     tool: Literal["attempt_completion"]
+    result: str = Field(
+        default="",
+        description="Your final result — the concrete answer, data, or findings to return."
+    )
 
 
-class SpawnSubAgentTool(BaseModel):
-    """Tool call for spawning a sub-agent to work on a subtask.
-
-    IMPORTANT: When defining the output_schema, if the sub-agent needs to return any FILES
-    (images, documents, generated artifacts, etc.), you MUST use 'file_pointer' or 'list[file_pointer]'
-    as the field type. Using 'str' for file paths will NOT work - files will not be transferred."""
-
-    tool: Literal["spawn_sub_agent"]
-    sub_agent: SubAgentConfig
+# SpawnSubAgentTool removed - unified into SpawnAgentTool above
 
 
 # ============================================================================
@@ -817,9 +829,7 @@ TOOL_MODELS = {
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "enable_write_permissions": EnableWritePermissionsTool,
-    "spawn_browser_agent": SpawnBrowserAgentTool,
-    "spawn_claude_code_agent": SpawnClaudeCodeAgentTool,
-    "spawn_sub_agent": SpawnSubAgentTool,
+    "spawn_agent": SpawnAgentTool,
     "search_user_network_for_people": SearchUserNetworkTool,
     "find_all": FindAllTool,
     "enrich": EnrichTool,
@@ -835,7 +845,12 @@ TOOL_MODELS = {
     "pay_for_x402_bazaar_service": PayForX402BazaarServiceTool,
     # Phone calling tool
     "call_phone_number": CallPhoneNumberTool,
+    # Local data search
+    "grep": GrepTool,
 }
+
+# Tools available inside the explore agent (subset of read-only tools)
+EXPLORE_AGENT_TOOLS = ["web_search", "web_fetch", "grep", "attempt_completion"]
 
 # ============================================================================
 # Dynamic AgentAction Model Generation
@@ -933,9 +948,7 @@ __all__ = [
     "SendSmsAsUserTool",
     "SendEmailTool",
     "MessagePersonTool",
-    "SpawnBrowserAgentTool",
-    "SpawnClaudeCodeAgentTool",
-    "SpawnSubAgentTool",
+    "SpawnAgentTool",
     "SearchUserNetworkTool",
     "FindAllTool",
     "EnrichTool",
@@ -948,6 +961,7 @@ __all__ = [
     "SearchX402BazaarTool",
     "PayForX402BazaarServiceTool",
     "CallPhoneNumberTool",
+    "GrepTool",
     "TOOL_MODELS",
     "create_agent_action_model",
     "ProgressScore",

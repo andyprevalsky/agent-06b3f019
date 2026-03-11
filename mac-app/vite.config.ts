@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   base: './',
   server: {
-    port: 5174,
+    port: parseInt(process.env.MAC_APP_PORT || '5174'),
   },
   build: {
     outDir: 'dist/ui',

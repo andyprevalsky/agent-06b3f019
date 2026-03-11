@@ -14,7 +14,8 @@
  * ├─ Filter by subAgentId (main chat vs sub-agent panels)
  * ├─ Filter out SYSTEM role messages
  * ├─ Filter out hidden messages (metadata.hidden === true, e.g., custom system prompt)
- * └─ Deduplicate tool messages by toolCallId
+ * ├─ Deduplicate tool messages by toolCallId
+ * └─ Group explore agent messages by taskId (one chip per explore session, hide internal grep/web_search)
  *
  * THINKING DISPLAY:
  * Show when ALL conditions met (with 500ms debounce):
@@ -55,6 +56,7 @@ import { cn } from '@/lib/utils';
 import { useAgentContext, StreamingBubble } from '@/contexts/AgentContext';
 import { Message, startAgent } from '@/lib/api';
 import MessageBubble from './MessageBubble';
+import { type ExploreStep } from './ExploreAgentBubble';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { Button } from '@/components/ui/button';
 import { FeedbackData } from './FeedbackBanner';
@@ -105,7 +107,7 @@ function StreamingMarkdown({ text }: { text: string }) {
 // Helper functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function deduplicateToolMessages(messages: Message[]): Message[] {
+function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, ExploreStep[]>] {
   const sortedMessages = [...messages].sort((a, b) => 
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
@@ -163,9 +165,12 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
   const cleanedToolMessages = deduplicatedToolMessages.filter(m => {
     // Keep all FINISHED/ERROR tools
     if (m.metadata?.toolStatus !== 'IN_PROGRESS') return true;
-    
+
     // Keep user attention IN_PROGRESS (different lifecycle - waiting for user)
     if (m.metadata?.isUserAttentionMessage) return true;
+
+    // Keep explore agent messages (they have their own lifecycle managed by explore grouping)
+    if (m.metadata?.agentType === 'explore') return true;
 
     // For other IN_PROGRESS, only keep if it came after the last ASSISTANT message
     const toolTime = new Date(m.timestamp).getTime();
@@ -181,12 +186,85 @@ function deduplicateToolMessages(messages: Message[]): Message[] {
     m.metadata?.toolName !== 'set_plan' || m.message_id === latestSetPlan?.message_id
   );
 
-  const deduplicatedMessages = [...nonToolMessages, ...withCompressedPlans];
-  deduplicatedMessages.sort((a, b) => 
+  // Group explore agent messages by taskId.
+  // Each taskId has:
+  //   - One init message (spawn_agent, toolCallId=init_tool_call_id) → the "chip" representative
+  //   - Tool action messages (grep, web_search, web_fetch) → steps inside the chip
+  //   - Thinking messages (spawn_agent, title="Explore agent thinking") → shown as thinking steps
+  //
+  // Standard dedup already collapsed each toolCallId's IN_PROGRESS → FINISHED.
+  // We collect them by taskId, pick the init message as representative, and attach steps.
+  const exploreMessagesByTask = new Map<string, Message[]>();
+
+  for (const m of withCompressedPlans) {
+    if (m.metadata?.agentType === 'explore') {
+      const taskId = m.metadata?.taskId as string;
+      if (taskId) {
+        const existing = exploreMessagesByTask.get(taskId) || [];
+        existing.push(m);
+        exploreMessagesByTask.set(taskId, existing);
+      }
+    }
+  }
+
+  const exploreRepresentatives = new Set<string>();
+  const exploreHidden = new Set<string>();
+  const exploreStepMap = new Map<string, ExploreStep[]>();
+
+  for (const [, msgs] of exploreMessagesByTask) {
+    // Sort chronologically (oldest first)
+    msgs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+    // Pick representative: the init spawn_agent message (first one, or terminal one)
+    const terminalSpawn = msgs.find(m =>
+      m.metadata?.toolName === 'spawn_agent' &&
+      (m.metadata?.toolStatus === 'FINISHED' || m.metadata?.toolStatus === 'ERROR')
+    );
+    const firstSpawn = msgs.find(m => m.metadata?.toolName === 'spawn_agent');
+    const representative = terminalSpawn || firstSpawn || msgs[0];
+
+    // Steps = all non-representative messages, sorted chronologically (newest at bottom)
+    const steps: ExploreStep[] = msgs
+      .filter(m => m.message_id !== representative.message_id)
+      .map(m => {
+        const status = (m.metadata?.toolStatus as string) || 'IN_PROGRESS';
+        const title = (m.metadata?.title as string) || '';
+        // Thinking messages (spawn_agent with title "Explore agent thinking") carry content even when IN_PROGRESS
+        const isThinking = m.metadata?.toolName === 'spawn_agent' && title === 'Explore agent thinking';
+        // IN_PROGRESS messages repeat the title as the message body — show empty instead
+        // Exception: thinking messages carry the actual thinking text
+        const message = (status === 'IN_PROGRESS' && !isThinking) ? '' : (m.text || '');
+        return {
+          title,
+          status,
+          timestamp: m.timestamp,
+          message,
+          toolName: (m.metadata?.toolName as string) || '',
+        };
+      });
+
+    exploreStepMap.set(representative.message_id, steps);
+    exploreRepresentatives.add(representative.message_id);
+
+    for (const m of msgs) {
+      if (m.message_id !== representative.message_id) {
+        exploreHidden.add(m.message_id);
+      }
+    }
+  }
+
+  const withExploreGrouped = withCompressedPlans.filter(m => {
+    if (exploreRepresentatives.has(m.message_id)) return true;
+    if (exploreHidden.has(m.message_id)) return false;
+    return true;
+  });
+
+  const deduplicatedMessages = [...nonToolMessages, ...withExploreGrouped];
+  deduplicatedMessages.sort((a, b) =>
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  return deduplicatedMessages;
+  return [deduplicatedMessages, exploreStepMap];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -261,16 +339,19 @@ export function MessageList({
   // FILTER MESSAGES for this subAgentId
   // ═══════════════════════════════════════════════════════════════════════════
   
-  const filteredMessages = useMemo(() => {
+  const filteredMessagesAndSteps = useMemo(() => {
     const targetSubAgentId = subAgentId ?? null;
 
     // Filter messages for this subAgentId
     const filtered = messages.filter(m => {
       const msgSubAgentId = m.metadata?.subAgentId ?? null;
       // Main chat (null) shows messages without subAgentId
-      // Sub-agent shows only messages with matching subAgentId
+      // Exception: explore agent internal messages use subAgentId for LLM filtering
+      // but are grouped/hidden by deduplicateToolMessages via taskId
       if (targetSubAgentId === null) {
-        return msgSubAgentId === null;
+        if (msgSubAgentId === null) return true;
+        if (m.metadata?.agentType === 'explore') return true;
+        return false;
       }
       return msgSubAgentId === targetSubAgentId;
     });
@@ -284,6 +365,8 @@ export function MessageList({
     // Deduplicate tool messages
     return deduplicateToolMessages(withoutHidden);
   }, [messages, subAgentId]);
+
+  const [filteredMessages, exploreStepMap] = filteredMessagesAndSteps;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // REGISTER HANDLER to receive realtime messages
@@ -589,6 +672,7 @@ export function MessageList({
           onSendMessage={selectedAgentId ? handleSendMessage : undefined}
           compact={compact}
           onSubmitFeedback={onSubmitFeedback}
+          exploreStepHistory={exploreStepMap.get(message.message_id)}
           planCharCount={
             message.metadata?.toolName === 'set_plan' &&
             message.metadata?.toolStatus === 'IN_PROGRESS' &&

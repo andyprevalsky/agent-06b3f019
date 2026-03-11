@@ -16,9 +16,12 @@ from temporalio.common import RetryPolicy
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 from helpers.tool_schemas import TOOL_MODELS, PLANNER_ASSIGNABLE_TOOLS
 
-# Manual descriptions for planning-only tools (not in TOOL_MODELS)
+# Manual descriptions for planner-facing tool names (mapped to spawn_agent via DAG aliases)
 PLANNING_TOOL_DESCRIPTIONS = {
-    "spawn_sub_agent": "Delegate a complex task to a sub-agent with its own planning/execution cycle. Use for tasks too complex for a single tool call.",
+    "spawn_explore_agent": "Research agent for information gathering (web search, web fetch, message search across iMessage/email). Returns free-form summary.",
+    "spawn_browser_agent": "Web automation agent for purchases, forms, JS-heavy sites. Needs start_url.",
+    "spawn_code_agent": "Coding agent in ephemeral E2B sandbox. Optional github_repo_link.",
+    "spawn_sub_agent": "Delegate complex task with own planning cycle. Supports verifier.",
     "reasoning": "Pure thinking/analysis step with no external tool call. Use for synthesizing results or making decisions.",
 }
 
@@ -308,7 +311,9 @@ class SetPlanManager(ToolManager):
 
                     await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
                     planner_result = planner_result_raw.get("result", planner_result_raw)
-            except Exception as e:
+            except BaseException as e:
+                if isinstance(e, GeneratorExit):
+                    raise
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Planner Error",

@@ -40,6 +40,7 @@ import {
   Brain,
   FileEdit,
   Upload,
+  RefreshCw,
   type LucideIcon
 } from 'lucide-react';
 
@@ -71,6 +72,8 @@ export function isClaudeCodeTool(toolName: string): boolean {
  */
 export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
+  'spawn_agent': Search,  // Unified agent tool (explore/browser/code/sub_agent)
+  'grep': FileSearch,     // Local data search (message threads)
   'spawn_browser_agent': Globe,
   'send_sms': MessageSquare,
   'send_sms_as_user': MessageSquare,
@@ -174,6 +177,9 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'code_write_file': FileEdit,
   'code_bash': Terminal,
   'code_thinking': Brain,
+
+  // Context management
+  'context_reset': RefreshCw,
 };
 
 /**
@@ -188,6 +194,7 @@ const DISPLAY_PREFIX_ICONS: [string, LucideIcon][] = [
   ['Browsing the web', Globe],
   ['Delegating', Users],
   ['Researching', FileSearch],
+  ['Exploring', Search],
   ['Waiting', Clock],
   ['Messaging', MessageSquare],
   ['Sending SMS', MessageSquare],
