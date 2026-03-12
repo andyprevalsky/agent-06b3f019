@@ -8,7 +8,7 @@ Uses the SAME call_llm_structured_streaming function as run_agent to ensure
 consistent behavior between DAG execution and the main agent loop.
 """
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from temporalio import activity
 import structlog
 
@@ -30,16 +30,24 @@ def _build_agent_system_prompt(tool_name: str, goal: str, alias_hint: str = "") 
     Returns:
         System prompt string
     """
-    prompt = f"""You are an AI agent executing a specific task from a plan.
+    prompt = f"""You are an AI agent executing a specific task from a plan. Your role is to ensure that the Required Tool is called with exactly the parameters necessary in order to complete the Goal below. The Goal below is the objective that the tool you are calling must accomplish — for agent-spawning tools, this means the Goal becomes the spawned agent's mission.
+
+When calling a tool that creates an agent, the parameters you pass are the ONLY context that agent will have. If you mention a file but don't include that file-pointer in attachments, the agent will NOT have access to that file. You may not assume any context gets transferred over — if there is context from the conversation that the agent will rely on to complete its goal, you MUST reiterate that context in the goal string. This is very important.
+
+You will be graded:
+- points are deducted for including context that is not necessary to the goal in the goal string.
+- points are deducted for NOT including context that is necessary to the goal in the goal string.
+- points are deducted for adding new information that was NOT previously mentioned in any context fed to you.
+- points are deducted if the goal string you output does not adhere to the Goal below. Do not change the intention of the goal even if it is against your better judgment.
 
 CURRENT TASK:
 Goal: {goal}
 Required Tool: {tool_name}
 
 INSTRUCTIONS:
-1. Analyze the goal and the conversation context
-2. Call the {tool_name} tool with appropriate parameters to accomplish the goal
-3. Your response field should briefly explain your reasoning
+1. Analyze the Goal and the conversation context
+2. Call the {tool_name} tool with parameters that will accomplish the Goal
+3. You should explain your reasoning
 4. You MUST call exactly one tool: {tool_name}
 5. Do NOT skip the tool call even if the goal appears already accomplished in context"""
 
@@ -114,6 +122,7 @@ async def populate_tool_params_activity(
     context: List[Dict],
     model: str,
     alias_hint: str = "",
+    claude_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Populate tool parameters using LLM based on context.
@@ -128,6 +137,7 @@ async def populate_tool_params_activity(
         context: Full message context
         model: LLM model to use (inherited from parent agent)
         alias_hint: Original alias name (e.g. 'spawn_sub_agent') for type-specific prompt instructions
+        claude_token: Optional Claude OAuth token for direct Anthropic calls
 
     Returns:
         Dict with tool parameters ready for execution
@@ -140,6 +150,9 @@ async def populate_tool_params_activity(
     # Create AgentAction model with only the target tool available
     # This constrains the LLM to only call the tool we need
     AgentAction = create_agent_action_model([tool_name])
+
+    # Always use rose-1-ultra for param population (higher quality context transfer)
+    model = "rose-labs/rose-1-ultra"
 
     # Build system prompt (full agent style, not just extraction)
     system_prompt = _build_agent_system_prompt(tool_name, goal, alias_hint)
@@ -158,15 +171,15 @@ async def populate_tool_params_activity(
         async def noop_callback(text_so_far: str, token_count: int):
             pass
 
-        # Use SAME function as run_agent - this is the key fix!
         pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
             messages=messages,
             model=model,
-            temperature=1.0,  # Same as run_agent
-            max_tokens=4096,  # Same as run_agent
+            temperature=0.38,
+            max_tokens=4096,
             response_model=AgentAction,
             on_chunk=noop_callback,
-            reasoning_max_tokens=256,  # Same as run_agent default
+            reasoning_max_tokens=2048,
+            claude_token=claude_token,
         )
 
         # Extract tool calls from the Pydantic result

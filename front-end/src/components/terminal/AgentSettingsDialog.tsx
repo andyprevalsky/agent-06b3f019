@@ -27,6 +27,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { useAuth } from '@/hooks/useAuth';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -80,6 +81,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
   const [modalPosition, setModalPosition] = useState<{ bottom: number; right: number }>({ bottom: 80, right: 16 });
   const { toast } = useToast();
   const { models } = useAppData();
+  const { authUser } = useAuth();
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const [showDeleteSection, setShowDeleteSection] = useState(false);
   const [confirmEnabled, setConfirmEnabled] = useState(false);
@@ -329,8 +331,8 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
                 </p>
               </div>
 
-              {/* Debug Info (Development Only) */}
-              {import.meta.env.DEV && (
+              {/* Debug Info (Development + Admin) */}
+              {(import.meta.env.DEV || authUser?.id === '1f85ff25-6e29-4c1b-8739-f917bd101a30') && (
                 <div className="space-y-2 pt-3 border-t border-dashed">
                   <div className="flex justify-between text-xs">
                     <span className="text-muted-foreground">Agent ID</span>

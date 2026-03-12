@@ -1,0 +1,38 @@
+name: Auto-tag Mac App Release
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  auto-tag:
+    # Only run when a PR with 'MAC-APP-RELEASE' label is merged
+    if: >-
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'MAC-APP-RELEASE')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        run: |
+          LATEST_TAG=$(git tag --sort=-v:refname | head -1)
+          V="${LATEST_TAG#v}"
+          MAJOR=$(echo "$V" | cut -d. -f1)
+          MINOR=$(echo "$V" | cut -d. -f2)
+          PATCH=$(echo "$V" | cut -d. -f3)
+          NEW_PATCH=$((PATCH + 1))
+          TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+
+          echo "Latest tag: $LATEST_TAG"
+          echo "New tag: $TAG"
+
+          git tag "$TAG"
+          git push origin "$TAG"

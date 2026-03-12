@@ -234,6 +234,7 @@ async def execute_dag(
     execute_tool: Callable[[str, Dict, str], Awaitable[Dict]],
     handle_tool_event_fn: Callable[[ToolEvent, str, str], Awaitable[None]],
     poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,
+    claude_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute DAG with maximum parallelism.
@@ -303,6 +304,7 @@ async def execute_dag(
                     post_message=post_message,
                     execute_tool=execute_tool,
                     handle_tool_event_fn=handle_tool_event_fn,
+                    claude_token=claude_token,
                 )
                 asyncio_task = asyncio.create_task(coro)
                 pending_tasks[task.index] = asyncio_task
@@ -370,6 +372,7 @@ async def _execute_single_task(
     post_message: Callable[[str, str, Optional[Dict]], Awaitable[None]],
     execute_tool: Callable[[str, Dict, str], Awaitable[Dict]],
     handle_tool_event_fn: Callable[[ToolEvent, str, str], Awaitable[None]],
+    claude_token: Optional[str] = None,
 ) -> bool:
     """
     Execute a single task from the DAG.
@@ -435,7 +438,7 @@ async def _execute_single_task(
 
             params = await execute_activity(
                 populate_tool_params_activity,
-                args=[actual_tool, task.goal, context, model, task.tool_name],
+                args=[actual_tool, task.goal, context, model, task.tool_name, claude_token],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )

@@ -725,6 +725,7 @@ class AgentWorkflow:
                     execute_tool=self._execute_tool,
                     handle_tool_event_fn=self._handle_tool_event,
                     poll_messages=self._poll_messages,
+                    claude_token=self.claude_max_token,
                 )
 
                 # DAG completed or failed - both hand off to run_agent
