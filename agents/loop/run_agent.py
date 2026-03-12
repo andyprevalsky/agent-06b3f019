@@ -353,17 +353,30 @@ async def run_agent(
                         sequence[0] += 1
                         last_text[0] = text_so_far
                 
-                pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
-                    messages=messages,
-                    model=model,
-                    temperature=1.0,
-                    max_tokens=8192,
-                    response_model=AgentAction,
-                    on_chunk=on_chunk,
-                    reasoning_max_tokens=reasoning_max_tokens,
-                    agent_id=agent_id,
-                    claude_token=current_claude_token,
-                )
+                # Retry up to 3 times on parse failures (matches workflow path's RetryPolicy)
+                max_llm_attempts = 3
+                for llm_attempt in range(1, max_llm_attempts + 1):
+                    try:
+                        pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
+                            messages=messages,
+                            model=model,
+                            temperature=1.0,
+                            max_tokens=8192,
+                            response_model=AgentAction,
+                            on_chunk=on_chunk,
+                            reasoning_max_tokens=reasoning_max_tokens,
+                            agent_id=agent_id,
+                            claude_token=current_claude_token,
+                        )
+                        break  # Success
+                    except (ValueError, Exception) as e:
+                        if llm_attempt < max_llm_attempts and "Failed to parse" in str(e):
+                            logger.warning(f"[run_agent] LLM parse failed (attempt {llm_attempt}/{max_llm_attempts}), retrying", error=str(e))
+                            # Reset streaming state for retry
+                            sequence[0] = 0
+                            last_text[0] = ""
+                            continue
+                        raise
                 
                 # Convert Pydantic tool_calls to dicts (same as call_llm_activity does)
                 tool_calls_as_dicts = []

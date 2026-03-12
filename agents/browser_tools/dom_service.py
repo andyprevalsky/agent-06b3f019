@@ -484,13 +484,14 @@ class DOMService:
                 except ImportError:
                     logger.warning("📸 PIL not available for dimension check")
 
-                # Always save screenshots to disk for debugging
-                debug_dir = "/tmp/browser_screenshots"
-                os.makedirs(debug_dir, exist_ok=True)
-                filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
-                with open(filename, "wb") as f:
-                    f.write(screenshot_bytes)
-                logger.info(f"📸 [DEBUG] Saved to {filename}")
+                # Save screenshots to disk for debugging (dev only)
+                if os.getenv("ENVIRONMENT") != "production":
+                    debug_dir = "/tmp/browser_screenshots"
+                    os.makedirs(debug_dir, exist_ok=True)
+                    filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
+                    with open(filename, "wb") as f:
+                        f.write(screenshot_bytes)
+                    logger.info(f"📸 [DEBUG] Saved to {filename}")
 
             except Exception as e:
                 logger.error(f"📸 Failed to analyze screenshot: {e}")

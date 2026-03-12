@@ -135,6 +135,11 @@ For any services that require a API Key or Credential, mock the service for now 
     prompt: 'I want to play volleyball with some friends this weekend in san francisco.\nCan you figure out who would be down and coordinate the space & procurment of equipment?\nEnsure its less then 30$ total',
   },
   {
+    title: 'Test Wait For',
+    description: 'Tests wait_for with price trigger and phone call action',
+    prompt: 'Once bitcoin reaches 72K, call my phone number and tell me.',
+  },
+  {
     title: 'Test Explore Agent',
     description: 'Tests explore agent with network search, sorting, and external research',
     prompt: 'Get me all VCs I know, sort them by most recently contacted, then find a piece of information about them that you didnt get from my messages. Use Explore Agent',
@@ -166,6 +171,18 @@ For any services that require a API Key or Credential, mock the service for now 
       '/test-assets/vcs-and-angels.csv',
       '/test-assets/pitch-deck/rose-labs-pitch-deck.pdf',
     ],
+  },
+  {
+    title: 'Family Office & Angel Outreach',
+    description: 'Personalized outreach to 700 angels for ML research feedback calls',
+    prompt: `I've attached a CSV of ~700 angels. Get me on a call to chat with as many of the people on this list as possible.
+
+Each message should be personalized, sent from andy@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer
+
+We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent manage each individual relationship, and be responsible for follow-ups, responses, getting them on a call via generating a calendly link on a browser agent etc.
+
+Since you are limited on the sub-agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.`,
+    attachmentUrls: ['/test-assets/vcs-and-angels.csv'],
   },
 ];
 

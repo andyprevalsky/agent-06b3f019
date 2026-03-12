@@ -320,6 +320,9 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fetchedOutput, setFetchedOutput] = useState(false);
 
+  // Ref to track completion state for WS close handler (avoids stale closure)
+  const isCompletedRef = useRef(false);
+
   // Extract data from context messages
   const { isComplete, isSuccess, isVerifying, outputSchema, structuredResponse, failureMessage, githubRepoUrl } = useMemo(() => {
     const claudeCodeMessages = messages.filter(m => m.metadata?.task_id === taskId);
@@ -367,6 +370,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
   // Update chip state based on completion/verifying
   useEffect(() => {
     if (isComplete) {
+      isCompletedRef.current = true;
       setChipState(isSuccess ? 'completed' : 'failed');
     } else if (isVerifying) {
       setChipState('verifying');
@@ -480,7 +484,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
 
   // Connect to WebSocket with retry logic
   const connectWebSocket = useCallback((attempt: number = 0) => {
-    if (!wsUrl || isComplete) return;
+    if (!wsUrl || isCompletedRef.current) return;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
@@ -511,6 +515,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
             terminalInstance.current?.write(msg.data);
             break;
           case 'exit':
+            isCompletedRef.current = true;
             setChipState(msg.code === 0 ? 'completed' : 'failed');
             break;
           case 'error':
@@ -532,24 +537,25 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
       // Retry with fixed delays (only if not complete)
       // Don't set failed state here - let DB messages drive state via realtime
       // WS close is expected when task completes (backend closes connection)
-      if (attempt < MAX_RETRIES - 1 && !isComplete) {
+      // Use ref to avoid stale closure — isComplete from DB may lag behind WS exit
+      if (attempt < MAX_RETRIES - 1 && !isCompletedRef.current) {
         const delay = RETRY_DELAYS[attempt] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
         setTimeout(() => connectWebSocket(attempt + 1), delay);
       }
       // State will be updated via useEffect when isComplete changes from DB
     };
-  }, [wsUrl, isComplete]);
+  }, [wsUrl]);
 
   // Connect WS on mount
   useEffect(() => {
-    if (wsUrl && !isComplete) {
+    if (wsUrl && !isCompletedRef.current) {
       connectWebSocket(0);
     }
 
     return () => {
       wsRef.current?.close();
     };
-  }, [wsUrl, isComplete, connectWebSocket]);
+  }, [wsUrl, connectWebSocket]);
 
   // Close WebSocket when task completes or component state indicates completion
   useEffect(() => {

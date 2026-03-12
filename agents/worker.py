@@ -79,6 +79,7 @@ from helpers.attachments import resolve_attachments_activity
 from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
 from tools.spawn_agent import spawn_explore_agent_activity, fetch_full_network_metadata
+from tools.wait_for import evaluate_condition_activity
 from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
 from tools.grep import grep_activity, fetch_local_data_summary
 from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
@@ -243,6 +244,7 @@ async def main():
             generate_completion_summary,
             spawn_explore_agent_activity,
             fetch_full_network_metadata,
+            evaluate_condition_activity,
             grep_activity,
             fetch_local_data_summary,
             get_model_context_window,

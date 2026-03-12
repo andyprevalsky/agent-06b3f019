@@ -1432,7 +1432,8 @@ async def call_llm(
     model: Optional[str] = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
-    response_format: Optional[Dict] = None
+    response_format: Optional[Dict] = None,
+    claude_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call OpenRouter LLM for agent reasoning.
@@ -1470,6 +1471,8 @@ async def call_llm(
             }
             if response_format:
                 request_body["response_format"] = response_format
+            if claude_token:
+                request_body["claude_token"] = claude_token
 
             # Log outbound request summary for debugging 400s
             logger.debug(

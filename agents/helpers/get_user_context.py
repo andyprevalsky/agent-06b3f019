@@ -296,10 +296,8 @@ def _format_user_context(
 
     # Section: Authenticated Browser Sessions
     if authenticated_sites:
-        sites_str = ", ".join(authenticated_sites[:50])  # Limit to 50 sites
-        if len(authenticated_sites) > 50:
-            sites_str += f", ... (+{len(authenticated_sites) - 50} more)"
-        
+        sites_str = ", ".join(authenticated_sites)
+
         sections.append(
             "AUTHENTICATED BROWSER SESSIONS\n"
             "You have stored auth credentials for these sites. When using spawn_browser_agent\n"

@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from test_web_search import run_all_tests as test_web_search
 from test_web_fetch import run_all_tests as test_web_fetch
 from test_send_message_to_user import run_all_tests as test_send_message_to_user
-from test_wait_seconds import run_all_tests as test_wait_seconds
+from test_wait_for import run_all_tests as test_wait_for
 from test_spawn_sub_agents import run_all_tests as test_spawn_sub_agents
 from test_knowledge_base import run_all_tests as test_knowledge_base
 from test_send_sms import run_all_tests as test_send_sms
@@ -97,8 +97,8 @@ async def main():
     
     sync_start = time.time()
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        wait_seconds_result = test_wait_seconds()
-    wait_seconds_duration = (time.time() - sync_start) * 1000
+        wait_for_result = test_wait_for()
+    wait_for_duration = (time.time() - sync_start) * 1000
     
     sync_start = time.time()
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -119,7 +119,7 @@ async def main():
     # Include Spawn Sub-Agents result (convert duration to ms)
     results.append((spawn_result[0], spawn_result[1], int(spawn_result[2] * 1000)))
     
-    results.append(("Wait Seconds", wait_seconds_result, int(wait_seconds_duration)))
+    results.append(("Wait For", wait_for_result, int(wait_for_duration)))
     results.append(("Send Message To User", request_attention_result, int(request_attention_duration)))
     
     # Calculate summary

@@ -313,10 +313,29 @@ const FALSE_POSITIVE_COOKIES = [
   '_zitok', 'receive-cookie-deprecation',
 ];
 
-// Ad/tracking domains to exclude
+// Ad/tracking domains to exclude — only pure ad-tech/tracking infrastructure
+// that no real user would intentionally log into
 const AD_TRACKING_DOMAINS = [
+  // Google ad/analytics
   'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
-  'facebook.com', 'fbcdn.net', 'analytics.google.com',
+  'analytics.google.com',
+  // Social tracking pixels (not the main sites)
+  'fbcdn.net',
+  // Ad exchanges / SSPs / DSPs
+  'adition.com', 'adnxs.com', 'adprime.com', 'colossusssp.com',
+  'cpmstar.com', 'deepintent.com', 'dianomi.com', 'dotomi.com',
+  'eqads.com', 'extremereach.io', 'infolinks.com', 'krushmedia.com',
+  'loopme.me', 'mookie1.com', 'pubmatic.com', 'servenobid.com',
+  'sharethrough.com', 'smilewanted.com', 'stackadapt.com',
+  'taboola.com', 'tappx.com', 'tsyndicate.com', 'vrtcal.com',
+  'ymmobi.com', 'connatix.com', 'openwebmp.com',
+  // Ad-tech intermediaries / cookie sync
+  'bqstreamer.com', 'medialiance.com', 'mediawallahscript.com',
+  'minutemedia-prebid.com', 'rezync.com', 'rkdms.com',
+  'shb-sync.com', 'tk0x1.com', 'ib-ibi.com',
+  // Tracking / analytics / fingerprinting
+  'alphonso.tv', 'clickonometrics.pl', 'fly-metrics.net',
+  'iesnare.com', 'intentsify.io', 'iovation.com', 'securecafenet.com',
 ];
 
 // Chromium epoch offset (Jan 1, 1601 to Jan 1, 1970 in microseconds)

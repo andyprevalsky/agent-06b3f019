@@ -81,13 +81,14 @@ def composite_cursor_on_screenshot(screenshot_b64: str, x: int, y: int) -> str:
         rgb.save(buf, format="PNG")
         result_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-        # Save composited screenshot to /tmp for visual inspection
-        debug_dir = "/tmp/browser_screenshots"
-        os.makedirs(debug_dir, exist_ok=True)
-        filename = f"{debug_dir}/composited_{int(time_module.time() * 1000)}.png"
-        with open(filename, "wb") as f:
-            f.write(buf.getvalue())
-        logger.info(f"🎯 [CURSOR] Composited cursor at ({x},{y}), saved to {filename}")
+        # Save composited screenshot to /tmp for visual inspection (dev only)
+        if os.getenv("ENVIRONMENT") != "production":
+            debug_dir = "/tmp/browser_screenshots"
+            os.makedirs(debug_dir, exist_ok=True)
+            filename = f"{debug_dir}/composited_{int(time_module.time() * 1000)}.png"
+            with open(filename, "wb") as f:
+                f.write(buf.getvalue())
+            logger.info(f"🎯 [CURSOR] Composited cursor at ({x},{y}), saved to {filename}")
 
         return result_b64
     except Exception as e:

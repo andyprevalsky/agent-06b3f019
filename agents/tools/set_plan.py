@@ -23,6 +23,7 @@ PLANNING_TOOL_DESCRIPTIONS = {
     "spawn_code_agent": "Coding agent in ephemeral E2B sandbox. Optional github_repo_link.",
     "spawn_sub_agent": "Delegate complex task with own planning cycle. Supports verifier.",
     "reasoning": "Pure thinking/analysis step with no external tool call. Use for synthesizing results or making decisions.",
+    "wait_for": "Wait until a timestamp or condition is met. Timestamp mode: provide until_timestamp (ISO 8601). Condition mode: provide condition (natural language) + check_interval_seconds + max_checks. Explore agents periodically check the condition. Use for polling/monitoring tasks (e.g., 'check every 15 min if package delivered').",
 }
 
 

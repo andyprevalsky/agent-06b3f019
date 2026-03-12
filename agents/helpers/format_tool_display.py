@@ -21,7 +21,11 @@ def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
         "web_search": lambda args: f"Searching the web for {_truncate(args.get('query', '...'), 50)}",
         "spawn_agent": lambda args: _format_spawn_agent(args),
         "deep_research": lambda args: f"Researching {_truncate(args.get('query', '...'), 50)}",
-        "wait_seconds": lambda args: f"Waiting {args.get('seconds', '?')} seconds",
+        "wait_for": lambda args: (
+            f"Waiting until {args.get('until_timestamp', '?')}"
+            if args.get("until_timestamp")
+            else f"Waiting for {_truncate(args.get('condition', '...'), 50)}"
+        ),
         "send_message_to_user": lambda args: "Messaging user",
         "search_user_network_for_people": lambda args: f"Searching contacts for {_truncate(args.get('name', args.get('query', '...')), 30)}",
         "find_all": lambda args: f"Finding all {_truncate(args.get('objective', '...'), 40)}",

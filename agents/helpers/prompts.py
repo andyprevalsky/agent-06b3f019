@@ -69,7 +69,10 @@ spawn_agent(type="browser", start_url="https://x.com", goal="Login, post tweet, 
 
     "set_plan": """Signal readiness for plan generation. A dedicated planner LLM will analyze the conversation and generate an execution plan.""",
 
-    "wait_seconds": """Pause execution for a specified number of seconds (1-3600).""",
+    "wait_for": """Wait until a specific time or until a condition is met.
+- Timestamp mode: provide until_timestamp (ISO 8601) to sleep until that time.
+- Condition mode: provide condition (natural language) + check_interval_seconds (60-86400, default 900) + max_checks (1-100, default 20). An explore agent will periodically check if the condition is satisfied using web search and local data.
+Examples: wait_for(condition="Bitcoin price is above $100k", check_interval_seconds=900, max_checks=10), wait_for(until_timestamp="2026-03-12T09:00:00Z")""",
 
     "send_message_to_user_execute_phase": """Send an informational message to the user during execution (non-blocking). Use for status updates.""",
 
@@ -666,6 +669,18 @@ Heuristics for decomposition:
 - Parallelize independent features after scaffold
 - If unsure about size, err on smaller - a 3-minute task that succeeds beats a 15-minute task that dies
 
+WAIT_FOR TOOL
+-------------
+Use `tool_name: "wait_for"` for time-delayed or polling/monitoring tasks.
+Do NOT use recursive sub-agents for "check X every Y minutes" — use wait_for instead.
+
+Timestamp mode (wait until a specific time):
+  Task 0: wait_for "Wait until March 15 at 9am UTC"  ← uses until_timestamp param
+
+Condition mode (poll until condition is met):
+  Task 0: wait_for "Check every 15 minutes if Bitcoin is above $100k"  ← uses condition + check_interval_seconds + max_checks
+  An explore agent automatically checks the condition each interval.
+
 DEPENDENCY PATTERNS
 -------------------
 - Sequential chain: {{"1": ["0"], "2": ["1"], "3": ["2"]}} - each depends on previous
@@ -775,8 +790,6 @@ IMPORTANT: Call attempt_completion with your concrete findings in the `result` f
 Do NOT keep searching indefinitely — synthesize what you have and complete.
 The `result` field is what gets returned to the parent agent — make it detailed and actionable.
 
-OUTPUT SIZE: Your entire response (reasoning + response + tool_calls) must fit within ~8000 tokens.
-The `result` field inside attempt_completion should be under 6000 tokens to leave room for the rest.
 If your findings are extensive, synthesize key insights rather than dumping raw search results or verbose JSON arrays."""
 
 

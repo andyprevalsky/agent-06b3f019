@@ -26,7 +26,7 @@ PLAN_PHASE_TOOLS = [
 # Tools available during EXECUTE phase (run the plan)
 EXECUTE_PHASE_TOOLS = [
     "spawn_agent",  # Unified: type=browser|code|sub_agent|explore
-    "wait_seconds",
+    "wait_for",
     "send_message_to_user_execute_phase",
     "call_phone_number",
     "message_person",
@@ -41,7 +41,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "spawn_browser_agent",
     "spawn_code_agent",
     "spawn_sub_agent",
-    "wait_seconds",
+    "wait_for",
     "call_phone_number",
     "message_person",
     "send_message_to_user_execute_phase",
@@ -54,7 +54,7 @@ class PlanToolName(str, Enum):
     spawn_browser_agent = "spawn_browser_agent"
     spawn_code_agent = "spawn_code_agent"
     spawn_sub_agent = "spawn_sub_agent"
-    wait_seconds = "wait_seconds"
+    wait_for = "wait_for"
     call_phone_number = "call_phone_number"
     message_person = "message_person"
     send_message_to_user_execute_phase = "send_message_to_user_execute_phase"
@@ -153,11 +153,28 @@ class SubAgentConfig(BaseModel):
     )
 
 
-class WaitSecondsTool(BaseModel):
-    """Tool call for pausing execution."""
+class WaitForTool(BaseModel):
+    """Tool call for waiting until a timestamp or condition is met."""
 
-    tool: Literal["wait_seconds"]
-    seconds: int = Field(ge=1, le=3600, description="Number of seconds to wait (1-3600)")
+    tool: Literal["wait_for"]
+    until_timestamp: Optional[str] = Field(
+        default=None,
+        description="ISO 8601 timestamp to wait until (e.g., '2026-03-12T09:00:00Z'). Mutually exclusive with condition."
+    )
+    condition: Optional[str] = Field(
+        default=None,
+        description="Natural language condition to poll for (e.g., 'Bitcoin price drops below $50,000'). An explore agent will periodically check if this condition is satisfied."
+    )
+    check_interval_seconds: Optional[int] = Field(
+        default=900,
+        ge=60, le=86400,
+        description="Seconds between condition checks (60-86400, default 900). Only used with condition."
+    )
+    max_checks: Optional[int] = Field(
+        default=20,
+        ge=1, le=100,
+        description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition."
+    )
 
 
 class WebSearchTool(BaseModel):
@@ -821,7 +838,7 @@ class CallPhoneNumberTool(BaseModel):
 
 # Map tool names to their Pydantic models
 TOOL_MODELS = {
-    "wait_seconds": WaitSecondsTool,
+    "wait_for": WaitForTool,
     "web_search": WebSearchTool,
     "web_fetch": WebFetchTool,
     "people_search": PeopleSearchTool,
@@ -938,7 +955,7 @@ class ProgressScore(BaseModel):
 __all__ = [
     "VerifierConfig",
     "SubAgentConfig",
-    "WaitSecondsTool",
+    "WaitForTool",
     "WebSearchTool",
     "DeepResearchTool",
     "SendMessageToUserTool",

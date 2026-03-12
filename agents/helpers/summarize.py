@@ -20,7 +20,7 @@ TOOL_DISPLAY_NAMES = {
     "message_person": "Messages Sent",
     "search_user_network_for_people": "Network Searches",
     "send_message_to_user": "User Messages",
-    "wait_seconds": "Wait Operations",
+    "wait_for": "Wait Operations",
     "set_plan": "Plans Set",
     "search_x402_bazaar": "Bazaar Searches",
     "pay_for_x402_bazaar_service": "Bazaar Payments",

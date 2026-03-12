@@ -45,7 +45,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.base import ToolEvent, AssistantEvent, EventType, MessageStatus
     # Tool executors (map tool name → workflow helper)
     from tools.deep_research import deep_research
-    from tools.wait_seconds import wait_seconds
+    from tools.wait_for import wait_for
     from tools.send_message_to_user import send_message_to_user
     from tools.enable_write_permissions import enable_write_permissions
     from tools.request_user_approval import request_user_approval_direct, UserRejectedError
@@ -84,7 +84,7 @@ logger = structlog.get_logger()
 TOOL_EXECUTORS = {
     "spawn_agent": spawn_agent,  # Unified: browser/code/sub_agent/explore
     "deep_research": deep_research,
-    "wait_seconds": wait_seconds,
+    "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
     "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
     "enable_write_permissions": enable_write_permissions,

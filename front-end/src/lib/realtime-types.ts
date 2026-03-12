@@ -182,6 +182,7 @@ export type ToolName =
   | 'web_search'
   | 'search_x402_bazaar'
   | 'pay_for_x402_bazaar_service'
+  | 'wait_for'
   | 'wait_seconds';
 
 /**
@@ -244,6 +245,40 @@ export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
 export interface SpawnSubAgentMetadata extends BaseToolMetadata {
   toolName: 'spawn_sub_agent';
   subAgentIds?: string[];
+  subAgentId?: string;
+  busId?: string;
+}
+
+/**
+ * Metadata for wait_for tool messages.
+ * See agents/tools/wait_for.py
+ */
+export interface WaitForMetadata extends BaseToolMetadata {
+  toolName: 'wait_for';
+  /** 'condition' or 'timestamp' */
+  waitForMode?: 'condition' | 'timestamp';
+  /** Natural-language condition being polled (condition mode) */
+  condition?: string;
+  /** ISO 8601 target timestamp (timestamp mode) */
+  untilTimestamp?: string;
+  /** Seconds between checks (condition mode) */
+  checkIntervalSeconds?: number;
+  /** Current check number (condition mode, during polling) */
+  checkNum?: number;
+  /** Maximum number of checks (condition mode) */
+  maxChecks?: number;
+  /** Duration to wait in seconds (timestamp mode) */
+  durationSeconds?: number;
+  /** Whether the condition was met (condition mode) */
+  conditionMet?: boolean;
+  /** Links to explore agent task for FE grouping (condition mode) */
+  exploreTaskId?: string;
+  /** Structured data from FINISHED events */
+  data?: {
+    condition_met?: boolean;
+    checks_completed?: number;
+    evidence?: string;
+  };
 }
 
 /**
@@ -399,6 +434,7 @@ export type ToolMessageMetadata =
   | SpawnBrowserAgentMetadata
   | SpawnClaudeCodeAgentMetadata
   | SpawnSubAgentMetadata
+  | WaitForMetadata
   | SetPlanMetadata
   | SendMessageToUserMetadata
   | RequestUserSignupMetadata

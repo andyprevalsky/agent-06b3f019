@@ -35,6 +35,7 @@ TOOL_ALIASES = {
     "spawn_browser_agent": "spawn_agent",
     "spawn_code_agent": "spawn_agent",
     "spawn_sub_agent": "spawn_agent",
+    "wait_seconds": "wait_for",  # Backward compat for old plans
 }
 
 # When aliases resolve to spawn_agent, force the correct type param
@@ -309,8 +310,11 @@ async def execute_dag(
 
         if not pending_tasks:
             # No tasks running and none ready - stuck (shouldn't happen with valid DAG)
-            workflow.logger.warning("[DAG] No pending tasks and DAG not complete - breaking")
-            break
+            workflow.logger.warning("[DAG] No pending tasks and DAG not complete - returning for LLM recovery")
+            return {
+                "status": "needs_llm",
+                "context": context,
+            }
 
         # Wait for ANY task to complete
         done, _ = await asyncio.wait(
@@ -348,12 +352,6 @@ async def execute_dag(
             workflow.logger.info(f"[DAG] Task {task_index} completed")
 
         # Loop continues - get_ready_tasks will now return newly ready dependents
-
-    if dag.has_failed():
-        return {
-            "status": "needs_llm",
-            "context": context,
-        }
 
     workflow.logger.info("[DAG] Execution complete")
     return {
@@ -415,22 +413,25 @@ async def _execute_single_task(
             return True
 
         else:
-            # Tool task - emit IN_PROGRESS, execute, emit FINISHED
-            await handle_tool_event_fn(
-                ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=task.tool_name,
-                    message=task.goal,
-                    status=MessageStatus.IN_PROGRESS,
-                ),
-                tool_call_id,
-                task.tool_name
-            )
-
-            # Resolve alias and populate params
+            # Resolve alias first (needed to decide if tool manages its own events)
             actual_tool = TOOL_ALIASES.get(task.tool_name, task.tool_name)
             if actual_tool != task.tool_name:
                 workflow.logger.info(f"[DAG] Resolved alias: {task.tool_name} → {actual_tool}")
+
+            # Legacy event-driven tools manage their own IN_PROGRESS/FINISHED events
+            SELF_MANAGED_TOOLS = {"wait_for", "spawn_agent"}
+            if actual_tool not in SELF_MANAGED_TOOLS:
+                # Tool task - emit IN_PROGRESS, execute, emit FINISHED
+                await handle_tool_event_fn(
+                    ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=task.tool_name,
+                        message=task.goal,
+                        status=MessageStatus.IN_PROGRESS,
+                    ),
+                    tool_call_id,
+                    task.tool_name
+                )
 
             params = await execute_activity(
                 populate_tool_params_activity,
@@ -456,7 +457,8 @@ async def _execute_single_task(
             result = await execute_tool(actual_tool, params, tool_call_id)
 
             # Check for error status
-            if result.get("status") == "error" or result.get("success") is False:
+            # _execute_tool returns {"error": True} on exception, {"success": False} on tool failure
+            if result.get("error") or result.get("success") is False or result.get("status") == "error":
                 return False
 
             return True

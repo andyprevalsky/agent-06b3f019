@@ -15,7 +15,8 @@
  * ├─ Filter out SYSTEM role messages
  * ├─ Filter out hidden messages (metadata.hidden === true, e.g., custom system prompt)
  * ├─ Deduplicate tool messages by toolCallId
- * └─ Group explore agent messages by taskId (one chip per explore session, hide internal grep/web_search)
+ * ├─ Group explore agent messages by taskId (one chip per explore session, hide internal grep/web_search)
+ * └─ Group wait_for messages by toolCallId (preserve check history as steps)
  *
  * THINKING DISPLAY:
  * Show when ALL conditions met (with 500ms debounce):
@@ -57,6 +58,7 @@ import { useAgentContext, StreamingBubble } from '@/contexts/AgentContext';
 import { Message, startAgent } from '@/lib/api';
 import MessageBubble from './MessageBubble';
 import { type ExploreStep } from './ExploreAgentBubble';
+import { type WaitForCheck } from './WaitForChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { Button } from '@/components/ui/button';
 import { FeedbackData } from './FeedbackBanner';
@@ -107,7 +109,7 @@ function StreamingMarkdown({ text }: { text: string }) {
 // Helper functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, ExploreStep[]>] {
+function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, ExploreStep[]>, Map<string, WaitForCheck[]>] {
   const sortedMessages = [...messages].sort((a, b) => 
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
@@ -120,6 +122,19 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
     .filter(m => m.role === 'ASSISTANT' && m.text?.trim() && m.metadata?.dagTaskIndex == null)
     .map(m => new Date(m.timestamp).getTime())
     .pop() ?? 0;
+
+  // Collect raw wait_for messages BEFORE dedup collapse (for step history)
+  const rawWaitForByToolCallId = new Map<string, Message[]>();
+  for (const m of sortedMessages) {
+    if (m.role === 'TOOL' && m.metadata?.toolName === 'wait_for') {
+      const toolCallId = m.metadata?.toolCallId;
+      if (toolCallId) {
+        const existing = rawWaitForByToolCallId.get(toolCallId) || [];
+        existing.push(m);
+        rawWaitForByToolCallId.set(toolCallId, existing);
+      }
+    }
+  }
 
   const toolMessageMap = new Map<string, { message: Message; firstTimestamp: string }>();
   const nonToolMessages: Message[] = [];
@@ -138,8 +153,9 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
       
       if (existing) {
         const isAttention = !!message.metadata?.isUserAttentionMessage;
+        const isWaitFor = message.metadata?.toolName === 'wait_for';
         toolMessageMap.set(toolCallId, {
-          message: isAttention
+          message: (isAttention || isWaitFor)
             ? { ...message, message_id: existing.message.message_id }
             : message,
           firstTimestamp: existing.firstTimestamp
@@ -171,6 +187,9 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
 
     // Keep explore agent messages (they have their own lifecycle managed by explore grouping)
     if (m.metadata?.agentType === 'explore') return true;
+
+    // Keep wait_for messages (long-running with their own lifecycle)
+    if (m.metadata?.toolName === 'wait_for') return true;
 
     // For other IN_PROGRESS, only keep if it came after the last ASSISTANT message
     const toolTime = new Date(m.timestamp).getTime();
@@ -210,8 +229,17 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
   const exploreRepresentatives = new Set<string>();
   const exploreHidden = new Set<string>();
   const exploreStepMap = new Map<string, ExploreStep[]>();
+  // taskId → pre-built explore data for reuse by wait_for checks
+  const exploreDataByTaskId = new Map<string, {
+    repMessageId: string;
+    title: string;
+    fullGoal?: string;
+    message: string;
+    status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
+    steps: ExploreStep[];
+  }>();
 
-  for (const [, msgs] of exploreMessagesByTask) {
+  for (const [taskId, msgs] of exploreMessagesByTask) {
     // Sort chronologically (oldest first)
     msgs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
@@ -246,6 +274,16 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
     exploreStepMap.set(representative.message_id, steps);
     exploreRepresentatives.add(representative.message_id);
 
+    // Store pre-built explore data keyed by taskId for wait_for reuse
+    exploreDataByTaskId.set(taskId, {
+      repMessageId: representative.message_id,
+      title: (representative.metadata?.title as string) || '',
+      fullGoal: (representative.metadata?.data?.goal as string) || undefined,
+      message: representative.text || '',
+      status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as 'IN_PROGRESS' | 'FINISHED' | 'ERROR',
+      steps,
+    });
+
     for (const m of msgs) {
       if (m.message_id !== representative.message_id) {
         exploreHidden.add(m.message_id);
@@ -259,12 +297,85 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
     return true;
   });
 
-  const deduplicatedMessages = [...nonToolMessages, ...withExploreGrouped];
+  // Build step history for wait_for messages from raw pre-dedup data.
+  // Standard dedup collapsed multiple wait_for events (same toolCallId) into the latest one.
+  // We reconstruct the check history from the raw messages collected before dedup.
+  // Explore data is looked up from exploreDataByTaskId (built once above, not re-processed).
+  const waitForCheckMap = new Map<string, WaitForCheck[]>();
+  const waitForChildExploreIds = new Set<string>(); // explore representatives owned by wait_for
+
+  for (const [toolCallId, rawMsgs] of rawWaitForByToolCallId) {
+    if (rawMsgs.length <= 1) continue;
+    rawMsgs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+    // Find the representative (dedup'd message) in the current list
+    const representative = withExploreGrouped.find(m => m.metadata?.toolCallId === toolCallId);
+    if (!representative) continue;
+
+    // Build checks from raw messages:
+    // - Exclude the initial event (no checkNum — it's "Waiting for X", not a check)
+    // - Deduplicate by checkNum: each check emits "checking..." then a result;
+    //   keep only the latest message per checkNum (the result)
+    // - Include the representative — it naturally wins its checkNum in dedup
+    const withCheckNum = rawMsgs
+      .filter(m => m.metadata?.checkNum != null);
+
+    // Dedup by checkNum: later message wins (rawMsgs already sorted chronologically)
+    const latestByCheckNum = new Map<number, Message>();
+    for (const m of withCheckNum) {
+      latestByCheckNum.set(m.metadata!.checkNum as number, m);
+    }
+
+    const checks: WaitForCheck[] = Array.from(latestByCheckNum.values())
+      .map(m => {
+        const exploreTaskId = m.metadata?.exploreTaskId as string | undefined;
+
+        // Look up pre-built explore data by taskId (single source of truth, no re-processing)
+        let explore: WaitForCheck['explore'] = undefined;
+        if (exploreTaskId) {
+          const data = exploreDataByTaskId.get(exploreTaskId);
+          if (data) {
+            waitForChildExploreIds.add(data.repMessageId);
+            explore = {
+              title: data.title,
+              fullGoal: data.fullGoal,
+              message: data.message,
+              status: data.status,
+              steps: data.steps,
+            };
+          }
+        }
+
+        return {
+          title: (m.metadata?.title as string) || '',
+          status: ((m.metadata?.toolStatus as string) || 'IN_PROGRESS') as WaitForCheck['status'],
+          timestamp: m.timestamp,
+          message: m.text || '',
+          checkNum: m.metadata?.checkNum as number | undefined,
+          maxChecks: m.metadata?.maxChecks as number | undefined,
+          conditionMet: m.metadata?.conditionMet as boolean | undefined,
+          exploreTaskId,
+          explore,
+        };
+      });
+
+    // Representative is already included in latestByCheckNum (it wins naturally as the
+    // chronologically last message for its checkNum). No separate re-addition needed.
+
+    waitForCheckMap.set(representative.message_id, checks);
+  }
+
+  // Filter out explore agents that are children of wait_for (they render inside WaitForChip)
+  const withWaitForChildrenHidden = withExploreGrouped.filter(m =>
+    !waitForChildExploreIds.has(m.message_id)
+  );
+
+  const deduplicatedMessages = [...nonToolMessages, ...withWaitForChildrenHidden];
   deduplicatedMessages.sort((a, b) =>
     new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  return [deduplicatedMessages, exploreStepMap];
+  return [deduplicatedMessages, exploreStepMap, waitForCheckMap];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -366,7 +477,7 @@ export function MessageList({
     return deduplicateToolMessages(withoutHidden);
   }, [messages, subAgentId]);
 
-  const [filteredMessages, exploreStepMap] = filteredMessagesAndSteps;
+  const [filteredMessages, exploreStepMap, waitForCheckMap] = filteredMessagesAndSteps;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // REGISTER HANDLER to receive realtime messages
@@ -673,6 +784,7 @@ export function MessageList({
           compact={compact}
           onSubmitFeedback={onSubmitFeedback}
           exploreStepHistory={exploreStepMap.get(message.message_id)}
+          waitForChecks={waitForCheckMap.get(message.message_id)}
           planCharCount={
             message.metadata?.toolName === 'set_plan' &&
             message.metadata?.toolStatus === 'IN_PROGRESS' &&

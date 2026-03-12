@@ -4,6 +4,7 @@
  * MESSAGE TYPE ROUTING (checked in order):
  * - isSubAgentTool → SubAgentTree/SubAgentToolBubble
  * - isExploreAgent → ExploreAgentBubble (grouped by taskId, with step history)
+ * - isWaitFor → WaitForChip (grouped by toolCallId, with check history)
  * - isSignupRequest → SignupPromptBubble
  * - isSetPlanTool → PlanChip
  * - isClaudeCodeTool → ClaudeCodeChip
@@ -50,6 +51,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import SubAgentToolBubble from './SubAgentToolBubble';
 import ExploreAgentBubble, { type ExploreStep } from './ExploreAgentBubble';
+import WaitForChip, { type WaitForCheck } from './WaitForChip';
 import SignupPromptBubble from './SignupPromptBubble';
 import SubAgentTree from './SubAgentTree';
 import ClaudeCodeChip from './ClaudeCodeChip';
@@ -83,6 +85,8 @@ interface MessageBubbleProps {
   planCharCount?: number;
   /** Explore agent step history (passed from MessageList grouping) */
   exploreStepHistory?: ExploreStep[];
+  /** Wait_for check history (passed from MessageList grouping) */
+  waitForChecks?: WaitForCheck[];
 }
 
 interface ToolMessageData {
@@ -820,7 +824,7 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback, planCharCount, exploreStepHistory }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback, planCharCount, exploreStepHistory, waitForChecks }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -842,6 +846,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   // Check if this is an explore agent message (spawn_agent with agentType=explore)
   const isExploreAgent = isTool && message.metadata?.toolName === 'spawn_agent' && message.metadata?.agentType === 'explore';
+
+  // Check if this is a wait_for tool message (render as WaitForChip)
+  const isWaitFor = isTool && message.metadata?.toolName === 'wait_for';
 
   // Check if this is a set_plan tool message (render as PlanChip)
   const isSetPlanTool = isTool && message.metadata?.toolName === 'set_plan';
@@ -1011,6 +1018,23 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
         message={message.text || ''}
         status={toolStatus as 'IN_PROGRESS' | 'FINISHED' | 'ERROR'}
         stepHistory={stepHistory}
+        onTypingComplete={onTypingComplete}
+      />
+    );
+  }
+
+  // wait_for: render as WaitForChip with grouped check history
+  if (isWaitFor) {
+    const toolStatus = (message.metadata?.toolStatus as string) || 'IN_PROGRESS';
+    const checkHistory = waitForChecks || [];
+    return (
+      <WaitForChip
+        title={message.metadata?.title as string || ''}
+        message={message.text || ''}
+        status={toolStatus as 'IN_PROGRESS' | 'FINISHED' | 'ERROR'}
+        checks={checkHistory}
+        metadata={message.metadata as any}
+        startTimestamp={message.timestamp}
         onTypingComplete={onTypingComplete}
       />
     );

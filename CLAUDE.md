@@ -79,6 +79,8 @@ Check these when errors occur:
 
 11. **Short timeouts, check logs** - Never set bash timeouts longer than 5 minutes; use short timeouts and check task output periodically to ensure long-running tasks complete smoothly.
 
+12. **Do NOT over-truncate** - Never aggressively truncate content, especially important context flows. Truncate SPARINGLY and only when necessary to fit content inside a frontend component (e.g., chip/bubble UI with limited space). When in doubt, keep the full content.
+
 ## Temporal/Agent Patterns
 
 - Workflows must be **deterministic** - no random, no wall-clock time, use `workflow.now()`

@@ -163,6 +163,10 @@ async def spawn_explore_agent_activity(
     # (so cost tracking uses the real model, not the requested model)
     llm_iteration_usage: List[Dict] = []
 
+    # Collect raw tool call results (web_search, web_fetch, grep) for callers
+    # that need evidence without the explore agent's interpretation (e.g. wait_for)
+    tool_call_results: List[str] = []
+
     async def on_tokens(tokens_in_delta: int, tokens_out_delta: int, actual_model: Optional[str] = None):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append({
@@ -256,11 +260,11 @@ async def spawn_explore_agent_activity(
         import json
         try:
             result_str = json.dumps(actual_result, default=str)
-            # Truncate to avoid blowing up context
-            if len(result_str) > 8000:
-                result_str = result_str[:8000] + "... (truncated)"
         except Exception:
-            result_str = str(actual_result)[:8000]
+            result_str = str(actual_result)
+
+        # Collect raw tool results for callers (e.g. wait_for condition evaluator)
+        tool_call_results.append(f"[{tool_name}] {result_str}")
 
         return {"success": True, "message": result_str}
 
@@ -302,6 +306,7 @@ async def spawn_explore_agent_activity(
         "tokens_out": result.get("tokens_out", 0),
         "accumulated_usage": accumulated_usage,
         "llm_iteration_usage": llm_iteration_usage,
+        "tool_call_results": tool_call_results,
     }
 
 
@@ -430,35 +435,49 @@ class SpawnAgentManager(ToolManager):
         workflow_instance,
         tool_call: Dict[str, Any],
         tool_call_id: str,
+        *,
+        task_id: Optional[str] = None,
+        network_metadata: Optional[str] = None,
+        local_data_summary: Optional[str] = None,
+        display_goal: Optional[str] = None,
     ) -> AsyncGenerator[ToolEvent, None]:
-        """Spawn explore agent - research sub-agent."""
+        """Spawn explore agent - research sub-agent.
+
+        Optional kwargs allow callers (e.g. wait_for) to provide pre-fetched
+        data and a known task_id, avoiding redundant fetches and enabling
+        cross-referencing between parent tool events and explore messages.
+        display_goal overrides the goal shown in the UI (e.g. clean condition text).
+        """
         goal = tool_call.get("goal", "")
-        task_id = str(uuid_module.uuid4())
+        ui_goal = display_goal or goal
+        task_id = task_id or str(uuid_module.uuid4())
 
         # IN_PROGRESS
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="Exploring",
-            message=goal[:200],
+            message=ui_goal[:200],
             status=MessageStatus.IN_PROGRESS,
-            metadata={"agentType": "explore", "taskId": task_id, "fullGoal": goal},
+            metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
         )
 
         try:
-            # Fetch network metadata and local data summary in parallel
-            network_metadata = await workflow.execute_activity(
-                fetch_full_network_metadata,
-                args=[workflow_instance.user_id],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
+            # Fetch network metadata and local data summary if not provided
+            if network_metadata is None:
+                network_metadata = await workflow.execute_activity(
+                    fetch_full_network_metadata,
+                    args=[workflow_instance.user_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
 
-            local_data_summary = await workflow.execute_activity(
-                fetch_local_data_summary,
-                args=[workflow_instance.user_id],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
+            if local_data_summary is None:
+                local_data_summary = await workflow.execute_activity(
+                    fetch_local_data_summary,
+                    args=[workflow_instance.user_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
 
             # Run explore agent activity with pause polling (like browser agent)
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
@@ -510,11 +529,12 @@ class SpawnAgentManager(ToolManager):
                     title="Research cancelled",
                     message="Explore agent cancelled by user",
                     status=MessageStatus.FINISHED,
-                    metadata={"agentType": "explore", "taskId": task_id, "fullGoal": goal},
+                    metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
                 )
                 return
 
             explore_result = result.get("result", "No results found.")
+            explore_tool_call_results = result.get("tool_call_results", [])
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
 
@@ -529,8 +549,8 @@ class SpawnAgentManager(ToolManager):
             # FINISHED with result and usage
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=goal[:200],
-                message=explore_result[:2000],
+                title=ui_goal[:200],
+                message=explore_result,
                 status=MessageStatus.FINISHED,
                 data={
                     "usage": {
@@ -538,8 +558,9 @@ class SpawnAgentManager(ToolManager):
                         "service": combined_service,
                     },
                     "result": explore_result,
+                    "tool_call_results": explore_tool_call_results,
                 },
-                metadata={"agentType": "explore", "taskId": task_id, "fullGoal": goal},
+                metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
             )
 
         except BaseException as e:
@@ -552,10 +573,10 @@ class SpawnAgentManager(ToolManager):
             logger.error("Explore agent failed", error=error_msg, goal=goal[:100], exc_type=type(e).__name__)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=goal[:200],
-                message=error_msg[:500],
+                title=ui_goal[:200],
+                message=error_msg,
                 status=MessageStatus.ERROR,
-                metadata={"agentType": "explore", "taskId": task_id, "fullGoal": goal},
+                metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
             )
 
     async def _spawn_browser(

@@ -116,22 +116,15 @@ class SpawnSubAgentManager(ToolManager):
         if not sub_agent:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="🚀 Spawning sub-agent",
+                title="Sub-agent failed",
                 message="No sub-agent specified",
-                status=MessageStatus.ERROR
+                status=MessageStatus.ERROR,
+                metadata={"toolName": "spawn_sub_agent"},
             )
             return
 
         goal = sub_agent.get("goal", "Unknown goal")
 
-        # 1. Pre-execution status
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="🚀 Spawning sub-agent",
-            message=f"Delegating task: {goal}",
-            status=MessageStatus.IN_PROGRESS
-        )
-        
         try:
             # Get workflow info
             info = workflow.info()
@@ -237,6 +230,7 @@ class SpawnSubAgentManager(ToolManager):
                 message="",
                 status=MessageStatus.IN_PROGRESS,
                 metadata={
+                    "toolName": "spawn_sub_agent",
                     "subAgentIds": [child_agent_id],
                     "busId": bus_id,
                 }
@@ -361,6 +355,7 @@ class SpawnSubAgentManager(ToolManager):
                 message=child_summary,
                 status=MessageStatus.FINISHED,
                 metadata={
+                    "toolName": "spawn_sub_agent",
                     "subAgentIds": [child_agent_id],
                     "busId": bus_id,
                     "structured_response": structured_response,
@@ -372,9 +367,10 @@ class SpawnSubAgentManager(ToolManager):
             logger.error("Failed to spawn sub-agent", error=error_msg)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="❌ Sub-agent failed",
+                title="Sub-agent failed",
                 message=f"Error spawning sub-agent: {error_msg}",
-                status=MessageStatus.ERROR
+                status=MessageStatus.ERROR,
+                metadata={"toolName": "spawn_sub_agent"},
             )
 
 

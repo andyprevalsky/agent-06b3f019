@@ -84,6 +84,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'save_blueprint': Save,
   'web_search': Search,
   'web_fetch': Globe,
+  'wait_for': Clock,
   'wait_seconds': Clock,
   'deep_research': FileSearch,
   'people_search': Users,

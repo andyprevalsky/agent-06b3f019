@@ -147,7 +147,7 @@ const YUTORI_MODEL = 'n1-latest';
 
 // Anthropic CUA (Computer Use) API configuration
 const ANTHROPIC_CUA_MODEL = 'claude-sonnet-4-20250514';
-const ANTHROPIC_CUA_BETA = 'computer-use-2025-01-24';
+const ANTHROPIC_CUA_BETA = 'computer-use-2025-11-24';
 
 // Helper to truncate base64 data in objects for logging
 function truncateForLogging(obj: any, maxBase64Length = 100): any {
@@ -1165,7 +1165,7 @@ function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
     const entry = req.action_history[i];
     
     // Map our action names to CUA action names
-    const cuaAction = mapToCUAAction(entry.action, entry.params);
+    const cuaAction = mapToCUAAction(entry.action, entry.params, entry.coordinates);
     
     // Handle actions that don't map to CUA tool calls (like goto/navback)
     if (cuaAction === null) {
@@ -1246,7 +1246,7 @@ function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
   
   // CUA computer tool definition
   const tools = [{
-    type: 'computer_20250124',
+    type: 'computer_20251124',
     name: 'computer',
     display_width_px: req.browser_state.viewport.width,
     display_height_px: req.browser_state.viewport.height,
@@ -1257,21 +1257,21 @@ function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
 }
 
 // Map our action names to Anthropic CUA action format
-function mapToCUAAction(action: string, params?: Record<string, any>): any {
+function mapToCUAAction(action: string, params?: Record<string, any>, coordinates?: { x: number; y: number }): any {
   switch (action) {
     case 'click':
       return {
         action: 'left_click',
-        coordinate: params?.coordinates ? [params.coordinates.x, params.coordinates.y] : [0, 0]
+        coordinate: coordinates ? [coordinates.x, coordinates.y] : [0, 0]
       };
     case 'type':
     case 'input_text':
       return { action: 'type', text: params?.text || '' };
     case 'scroll':
     case 'scroll_down':
-      return { action: 'scroll', coordinate: [640, 400], direction: 'down', amount: 300 };
+      return { action: 'scroll', coordinate: coordinates ? [coordinates.x, coordinates.y] : [640, 400], direction: params?.direction || 'down', amount: params?.amount || 300 };
     case 'scroll_up':
-      return { action: 'scroll', coordinate: [640, 400], direction: 'up', amount: 300 };
+      return { action: 'scroll', coordinate: coordinates ? [coordinates.x, coordinates.y] : [640, 400], direction: 'up', amount: params?.amount || 300 };
     case 'press_key':
       return { action: 'key', key: params?.key || 'Enter' };
     case 'goto':
@@ -3220,7 +3220,13 @@ async function handleStreaming(
     };
 
     if (system) {
-      anthropicBody.system = system;
+      if (claudeAuth) {
+        // Use array format with cache_control for prompt caching (system prompt is
+        // identical across explore agent iterations — caching avoids re-processing)
+        anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+      } else {
+        anthropicBody.system = system;
+      }
     }
     if (temperature !== undefined) {
       anthropicBody.temperature = temperature;
