@@ -32,6 +32,8 @@ interface RoseCompletionChunk {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
   };
 }
 
@@ -2298,12 +2300,13 @@ async function raceModels(
         };
         
         if (system) {
-          anthropicBody.system = system;
+          // Array format with cache_control for prompt caching (stable across racing retries)
+          anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
         }
         if (temperature !== undefined) {
           anthropicBody.temperature = temperature;
         }
-        
+
         // Transform response_format to Anthropic's output_format
         if (responseFormat?.json_schema?.schema) {
           const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
@@ -2312,7 +2315,7 @@ async function raceModels(
             schema: transformedSchema
           };
         }
-        
+
         console.log(`🔮 Calling Anthropic directly for ${anthropicModel}`);
         console.log(`[Anthropic Race] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
         response = await fetch(ANTHROPIC_API_URL, {
@@ -3140,6 +3143,7 @@ async function handleStreaming(
   poolName: string,     // Added: for debugging
   poolSize: number,     // Added: for debugging
   claudeAuth?: { token: string },  // Optional: user's Claude OAuth token (uses Bearer auth + Claude Code headers)
+  skipCache?: boolean,  // Optional: skip cache_control breakpoints (for single-use calls like param populator)
   stallConfig?: {
     timeoutMs: number,  // Max ms between content deltas before triggering fallback
     onFallback: () => Promise<{
@@ -3220,12 +3224,12 @@ async function handleStreaming(
     };
 
     if (system) {
-      if (claudeAuth) {
-        // Use array format with cache_control for prompt caching (system prompt is
-        // identical across explore agent iterations — caching avoids re-processing)
-        anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+      if (skipCache) {
+        anthropicBody.system = [{ type: 'text', text: system }];
       } else {
-        anthropicBody.system = system;
+        // Array format with cache_control for prompt caching.
+        // System prompt is identical across agent iterations — caching avoids re-processing.
+        anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
       }
     }
     if (temperature !== undefined) {
@@ -3234,7 +3238,30 @@ async function handleStreaming(
 
     nativeToolMode = applyAnthropicToolConfig(anthropicBody, responseFormat, !!claudeAuth);
 
-    console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`);
+    // Add cache_control breakpoints on messages at regular intervals.
+    // Anthropic allows up to 4 breakpoints total; 1 is on system, leaving 3 for messages.
+    // Place every 20 messages (matching Anthropic's 20-block lookback window).
+    if (!skipCache && anthropicBody.messages.length > 0) {
+      const MAX_MSG_BREAKPOINTS = 3;
+      const INTERVAL = 20;
+      let placed = 0;
+      // Walk backwards, place breakpoints at intervals from the end
+      for (let i = anthropicBody.messages.length - 1; i >= 0 && placed < MAX_MSG_BREAKPOINTS; i -= INTERVAL) {
+        const msg = anthropicBody.messages[i];
+        if (typeof msg.content === 'string') {
+          // Convert string content to array format so we can attach cache_control
+          msg.content = [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }];
+        } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+          msg.content[msg.content.length - 1].cache_control = { type: 'ephemeral' };
+        }
+        placed++;
+      }
+      if (placed > 0) {
+        console.log(`💾 Placed ${placed} message cache breakpoints across ${anthropicBody.messages.length} messages`);
+      }
+    }
+
+    console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}${skipCache ? ' (skip_cache)' : ''}`);
 
     // Use Claude OAuth token (user's subscription) or Rose's API key
     const anthropicHeaders: Record<string, string> = {
@@ -3331,6 +3358,8 @@ async function handleStreaming(
         // Anthropic usage tracking - capture from message_start and message_delta
         let anthropicInputTokens = 0;
         let anthropicOutputTokens = 0;
+        let anthropicCacheCreationTokens = 0;
+        let anthropicCacheReadTokens = 0;
 
         // Native tool mode: reconstruct streaming JSON matching structured output format.
         // With tool_choice=auto, model produces text + tool_use blocks naturally.
@@ -3426,7 +3455,9 @@ async function handleStreaming(
                 usage: {
                   prompt_tokens: anthropicInputTokens,
                   completion_tokens: anthropicOutputTokens,
-                  total_tokens: anthropicInputTokens + anthropicOutputTokens
+                  total_tokens: anthropicInputTokens + anthropicOutputTokens,
+                  cache_creation_input_tokens: anthropicCacheCreationTokens,
+                  cache_read_input_tokens: anthropicCacheReadTokens,
                 },
                 requested_model: requestedModel,
                 actual_model: currentModel,
@@ -3435,7 +3466,8 @@ async function handleStreaming(
               };
               const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
               controller.enqueue(encoder.encode(payload));
-              console.log(`📊 Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}`);
+              const cacheHitPct = anthropicInputTokens > 0 ? Math.round(anthropicCacheReadTokens / (anthropicInputTokens + anthropicCacheCreationTokens + anthropicCacheReadTokens) * 100) : 0;
+              console.log(`📊 Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}, cache_hit=${cacheHitPct}%`);
             }
             const donePayload = 'data: [DONE]\n\n';
             controller.enqueue(encoder.encode(donePayload));
@@ -3459,10 +3491,13 @@ async function handleStreaming(
 
                 // Transform Anthropic streaming events to OpenAI format
                 if (isAnthropicModel(currentModel)) {
-                  // Capture input tokens from message_start
-                  if (parsed.type === 'message_start' && parsed.message?.usage?.input_tokens) {
-                    anthropicInputTokens = parsed.message.usage.input_tokens;
-                    console.log(`📊 Anthropic input_tokens captured: ${anthropicInputTokens}`);
+                  // Capture input tokens and cache metrics from message_start
+                  if (parsed.type === 'message_start' && parsed.message?.usage) {
+                    const msgUsage = parsed.message.usage;
+                    anthropicInputTokens = msgUsage.input_tokens || 0;
+                    anthropicCacheCreationTokens = msgUsage.cache_creation_input_tokens || 0;
+                    anthropicCacheReadTokens = msgUsage.cache_read_input_tokens || 0;
+                    console.log(`📊 Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`);
                     continue;
                   }
 
@@ -4296,6 +4331,7 @@ serve(async (req) => {
       model_preference,  // Optional: 'SMART' | 'FAST' | 'CHEAP' for hardcoded model selection
       conversation_id,  // Optional: ensures same model used for entire conversation
       claude_token,  // Optional: user's Claude OAuth token for direct Anthropic call (skips racing, $0 cost)
+      skip_cache,    // Optional: disable prompt caching (saves 1.25x write cost for single-use calls)
       ...otherParams
     } = rawBody;
 
@@ -4304,7 +4340,7 @@ serve(async (req) => {
     let messages = originalMessages;
 
     // Log incoming messages for debugging
-    console.log(`🌐 [${requestId}] Chat completion request for model: ${model}`);
+    console.log(`🌐 [${requestId}] Chat completion request for model: ${model}${skip_cache ? ' (skip_cache)' : ''}`);
     console.log(`📝 [${requestId}] Received ${messages?.length || 0} messages:`, JSON.stringify(truncateForLogging(messages), null, 2));
 
     // Default reasoning tokens to 256 if reasoning is enabled but no max_tokens specified
@@ -4366,6 +4402,7 @@ serve(async (req) => {
             'claude-token',
             1,
             { token: claude_token },  // claudeAuth
+            !!skip_cache,  // skipCache
             {
               timeoutMs: 20000,
               onFallback: async () => {
@@ -4394,7 +4431,13 @@ serve(async (req) => {
             messages: anthropicMessages,
             max_tokens: maxTokens || 4096,
           };
-          if (system) anthropicBody.system = system;
+          if (system) {
+            if (skip_cache) {
+              anthropicBody.system = [{ type: 'text', text: system }];
+            } else {
+              anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+            }
+          }
           if (temperature !== undefined) anthropicBody.temperature = temperature;
           if (cappedReasoning?.max_tokens) {
             anthropicBody.thinking = { type: 'enabled', budget_tokens: cappedReasoning.max_tokens };
@@ -4466,12 +4509,16 @@ serve(async (req) => {
                 prompt_tokens: apiUsage.input_tokens || 0,
                 completion_tokens: apiUsage.output_tokens || 0,
                 total_tokens: (apiUsage.input_tokens || 0) + (apiUsage.output_tokens || 0),
+                cache_creation_input_tokens: apiUsage.cache_creation_input_tokens || 0,
+                cache_read_input_tokens: apiUsage.cache_read_input_tokens || 0,
               },
               requested_model: model,
               actual_model: claudeActualModel,
               pool_name: 'claude-token',
               pool_size: 1,
             };
+
+            console.log(`📊 [${requestId}] Non-streaming cache metrics: cache_read=${apiUsage.cache_read_input_tokens || 0}, cache_write=${apiUsage.cache_creation_input_tokens || 0}`);
 
             return new Response(JSON.stringify(finalResponse), {
               headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -4501,12 +4548,16 @@ serve(async (req) => {
               prompt_tokens: apiUsage.input_tokens || 0,
               completion_tokens: apiUsage.output_tokens || 0,
               total_tokens: (apiUsage.input_tokens || 0) + (apiUsage.output_tokens || 0),
+              cache_creation_input_tokens: apiUsage.cache_creation_input_tokens || 0,
+              cache_read_input_tokens: apiUsage.cache_read_input_tokens || 0,
             },
             requested_model: model,
             actual_model: claudeActualModel,
             pool_name: 'claude-token',
             pool_size: 1,
           };
+
+          console.log(`📊 [${requestId}] Non-streaming cache metrics: cache_read=${apiUsage.cache_read_input_tokens || 0}, cache_write=${apiUsage.cache_creation_input_tokens || 0}`);
 
           return new Response(JSON.stringify(finalResponse), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },

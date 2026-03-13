@@ -445,28 +445,11 @@ async def build_llm_messages(
     # Use filtered context for the rest of the function
     context = filtered_context
 
-    # First pass: collect all unique file_pointers from context
-    # This builds an explicit list of available files for the LLM
-    available_files: Dict[str, str] = {}  # filename -> mime_type
-    for msg in context:
-        file_pointer = msg.get("file_pointer") or msg.get("filePointer")
-        if file_pointer and isinstance(file_pointer, dict):
-            fp = FilePointer.from_dict(file_pointer)
-            if fp.original_filename and fp.original_filename not in available_files:
-                available_files[fp.original_filename] = fp.mime_type
-
-    # Append "Available Files" section to system prompt if files exist
-    # This ensures the LLM knows exactly what files it can pass to sub-agents
-    if available_files:
-        files_list = "\n".join([f"- {name} ({mime})" for name, mime in available_files.items()])
-        system_prompt = system_prompt + f"""
-
-## Available Files
-Files in your context (use exact filenames):
-{files_list}
-
-To pass files to spawn_browser_agent, spawn_claude_code_agent, or spawn_sub_agent:
-  attachments: [{", ".join([f'"{name}"' for name in available_files.keys()])}]"""
+    # NOTE: "Available Files" section was previously appended to system_prompt here,
+    # but this mutated the system prompt every time a new file appeared, breaking
+    # Anthropic prompt caching (cache is prefix-based, system prompt change = full miss).
+    # Files are already embedded as multimodal content in their respective messages,
+    # and the static system prompt already has guidance on passing files via attachments.
 
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -598,6 +581,7 @@ async def call_llm_structured_streaming(
     on_raw_progress: Optional[Callable[[int], Awaitable[None]]] = None,  # Called with total accumulated bytes (reasoning + json)
     claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
+    skip_cache: bool = False,  # Skip prompt caching (for single-use calls like param populator)
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -631,7 +615,7 @@ async def call_llm_structured_streaming(
     if is_rose_model:
         # Generate unique request ID for tracing
         request_id = str(uuid.uuid4())[:8]
-        logger.info(f"📤 [{request_id}] Streaming Rose model via Supabase: {model} → {config.rose.api_url}")
+        logger.info(f"📤 [{request_id}] Streaming Rose model via Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}")
 
         # Build JSON schema from Pydantic model
         schema = prepare_schema_for_openai(response_model)
@@ -664,6 +648,9 @@ async def call_llm_structured_streaming(
         if claude_token:
             request_body["claude_token"] = claude_token
             logger.info("🔑 Passing claude_token to Rose endpoint for direct Anthropic call")
+
+        if skip_cache:
+            request_body["skip_cache"] = True
 
         # Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
         if reasoning_max_tokens:
@@ -796,7 +783,12 @@ async def call_llm_structured_streaming(
                             # Capture usage from final chunk (sent when stream_options.include_usage=true)
                             if chunk_data.get("usage"):
                                 stream_usage = chunk_data["usage"]
-                                logger.info(f"📊 Usage received: prompt={stream_usage.get('prompt_tokens', 0)} completion={stream_usage.get('completion_tokens', 0)}")
+                                cache_read = stream_usage.get('cache_read_input_tokens', 0)
+                                cache_write = stream_usage.get('cache_creation_input_tokens', 0)
+                                prompt_tokens = stream_usage.get('prompt_tokens', 0)
+                                total_input = prompt_tokens + cache_read + cache_write
+                                cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
+                                logger.info(f"📊 Usage received: prompt={prompt_tokens} completion={stream_usage.get('completion_tokens', 0)} cache_read={cache_read} cache_write={cache_write} cache_hit={cache_pct}%")
 
                             # Extract delta content
                             choices = chunk_data.get("choices", [])
@@ -1117,6 +1109,9 @@ async def call_llm_structured_streaming(
                 # Include racing-adjusted values if present
                 "winner_prompt_tokens": stream_usage.get("winner_prompt_tokens"),
                 "winner_completion_tokens": stream_usage.get("winner_completion_tokens"),
+                # Cache metrics from Anthropic prompt caching
+                "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
+                "cache_read_input_tokens": stream_usage.get("cache_read_input_tokens", 0),
             }
         else:
             usage = {
@@ -1126,7 +1121,9 @@ async def call_llm_structured_streaming(
                 "actual_model": actual_model,
                 "pool_name": pool_name,
                 "pool_size": pool_size,
-                "cancelled": False
+                "cancelled": False,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
             }
 
         # Deduplicate single-call-per-step tools (keep only first occurrence)
@@ -1434,6 +1431,7 @@ async def call_llm(
     max_tokens: int = 4096,
     response_format: Optional[Dict] = None,
     claude_token: Optional[str] = None,
+    skip_cache: bool = False,
 ) -> Dict[str, Any]:
     """
     Call OpenRouter LLM for agent reasoning.
@@ -1461,7 +1459,7 @@ async def call_llm(
             # Generate unique request ID for tracing
             request_id = str(uuid.uuid4())[:8]
             # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
-            logger.info(f"📤 [{request_id}] Routing Rose model to Supabase: {model} → {config.rose.api_url}")
+            logger.info(f"📤 [{request_id}] Routing Rose model to Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}")
 
             request_body = {
                 "model": model,
@@ -1473,6 +1471,8 @@ async def call_llm(
                 request_body["response_format"] = response_format
             if claude_token:
                 request_body["claude_token"] = claude_token
+            if skip_cache:
+                request_body["skip_cache"] = True
 
             # Log outbound request summary for debugging 400s
             logger.debug(
@@ -1640,7 +1640,8 @@ async def _call_llm_verifier(
     actual_model = "unknown"
     pool_name = "unknown"
     chunk_count = 0
-    
+    stream_usage = None
+
     stream_interrupted = False
     try:
         async with httpx.AsyncClient(timeout=60.0) as http_client:
@@ -1677,6 +1678,10 @@ async def _call_llm_verifier(
                         if chunk_data.get("pool_name"):
                             pool_name = chunk_data["pool_name"]
 
+                        # Capture usage from final chunk (includes cache metrics)
+                        if chunk_data.get("usage"):
+                            stream_usage = chunk_data["usage"]
+
                         choices = chunk_data.get("choices", [])
                         if not choices:
                             continue
@@ -1698,29 +1703,35 @@ async def _call_llm_verifier(
             f"accumulated json={len(accumulated_json)} chars, reasoning={len(accumulated_reasoning)} chars: {e}"
         )
 
-    logger.info(f"🏁 Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}")
-    
+    # Log cache metrics if available
+    cache_read = stream_usage.get("cache_read_input_tokens", 0) if stream_usage else 0
+    cache_write = stream_usage.get("cache_creation_input_tokens", 0) if stream_usage else 0
+    prompt_toks = stream_usage.get("prompt_tokens", 0) if stream_usage else 0
+    logger.info(f"🏁 Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}, cache_read={cache_read}, cache_write={cache_write}")
+
     # Parse JSON - handle thinking models that put JSON in reasoning
     json_content = accumulated_json
-    
+
     if not json_content and accumulated_reasoning:
         # Thinking models might put JSON in reasoning
         json_match = re.search(r'\{[\s\S]*\}', accumulated_reasoning)
         if json_match:
             json_content = json_match.group(0)
             logger.info("📦 Extracted JSON from reasoning (thinking model)")
-    
+
     if not json_content:
         raise ValueError(f"No JSON content received (chunks={chunk_count}, model={actual_model})")
 
     parsed = json.loads(json_content)
 
     usage = {
-        "prompt_tokens": 0,
-        "completion_tokens": chunk_count,
-        "total_tokens": chunk_count,
+        "prompt_tokens": prompt_toks,
+        "completion_tokens": stream_usage.get("completion_tokens", chunk_count) if stream_usage else chunk_count,
+        "total_tokens": stream_usage.get("total_tokens", chunk_count) if stream_usage else chunk_count,
         "actual_model": actual_model,
         "pool_name": pool_name,
+        "cache_creation_input_tokens": cache_write,
+        "cache_read_input_tokens": cache_read,
     }
 
     return parsed, usage
@@ -2401,6 +2412,7 @@ async def call_planner_llm_activity(
             on_chunk=on_plan_heartbeat,
             on_raw_progress=on_plan_progress,
             claude_token=claude_max_token,
+            skip_cache=True,  # Plan is generated once per iteration — no cache reuse
         )
         llm_elapsed = time.perf_counter() - llm_start
         activity_elapsed = time.perf_counter() - activity_start

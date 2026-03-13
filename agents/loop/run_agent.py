@@ -137,6 +137,8 @@ async def run_agent(
     tokens_out = 0
     token_count = 0
     context_size = 0  # Current context window usage (prompt_tokens from last LLM call)
+    cache_read_total = 0  # Cumulative cache read tokens (prompt caching hits)
+    cache_write_total = 0  # Cumulative cache creation tokens (prompt caching misses)
     iteration = iteration_offset
     blueprint_queried = False
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
@@ -183,6 +185,16 @@ async def run_agent(
     # Use custom response_model if provided (e.g., browser agent), otherwise create from tools
     AgentAction = response_model if response_model else create_agent_action_model(tools)
     
+    def _log_cache_summary(status: str):
+        """Log cache performance summary at end of run."""
+        total_input = tokens_in + cache_read_total + cache_write_total
+        if total_input > 0 and (cache_read_total > 0 or cache_write_total > 0):
+            hit_pct = round(cache_read_total / total_input * 100)
+            logger.info(
+                f"💾 Cache summary [{status}]: read={cache_read_total} write={cache_write_total} uncached={tokens_in} "
+                f"hit={hit_pct}% iterations={iteration} agent={agent_id}"
+            )
+
     logger.info(
         f"run_agent starting",
         agent_id=agent_id,
@@ -455,6 +467,16 @@ async def run_agent(
             tokens_out += llm_tokens_out
             token_count += llm_total
             context_size = llm_tokens_in  # Current context = prompt tokens of last LLM call
+
+            # Track cache metrics
+            iter_cache_read = usage.get("cache_read_input_tokens", 0)
+            iter_cache_write = usage.get("cache_creation_input_tokens", 0)
+            cache_read_total += iter_cache_read
+            cache_write_total += iter_cache_write
+            if iter_cache_read > 0 or iter_cache_write > 0:
+                total_input = llm_tokens_in + iter_cache_read + iter_cache_write
+                cache_pct = round(iter_cache_read / total_input * 100) if total_input > 0 else 0
+                logger.info(f"💾 Cache i{iteration}: read={iter_cache_read} write={iter_cache_write} uncached={llm_tokens_in} hit={cache_pct}% | cumulative: read={cache_read_total} write={cache_write_total}")
 
             # Notify workflow of token usage for cost tracking and limit checking
             # This happens BEFORE tree token broadcast so cost limit can pause before more work
@@ -736,6 +758,7 @@ async def run_agent(
                         }
                     )
 
+                    _log_cache_summary("completed")
                     return {
                         "status": "completed",
                         "context": context,
@@ -752,6 +775,7 @@ async def run_agent(
                     # Prefer the explicit result from attempt_completion tool args,
                     # fall back to the model's text response
                     completion_result = tool_args.get("result", "") or response_text or ""
+                    _log_cache_summary("completed-no-verify")
                     return {
                         "status": "completed",
                         "context": context,
@@ -794,6 +818,7 @@ async def run_agent(
 
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
+                    _log_cache_summary("completed-verified")
                     return {
                         "status": "completed",
                         "context": context,
@@ -856,6 +881,7 @@ async def run_agent(
         except Exception as e:
             logger.error(f"Final verifier call failed: {e}")
 
+    _log_cache_summary("max_iterations")
     return {
         "status": "max_iterations",
         "context": context,

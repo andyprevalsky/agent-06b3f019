@@ -120,6 +120,7 @@ async def evaluate_condition_activity(
             },
         },
         claude_token=claude_token,
+        skip_cache=True,  # Unique evidence each poll — no cache reuse
     )
     raw = result.get("content", "")
 

@@ -707,17 +707,22 @@ class AttemptCompletionTool(BaseModel):
     In PLAN phase: Call when plan is ready and you no longer need clarifications.
     In EXECUTE phase: Call when you believe the goal has been fully accomplished.
 
-    A verifier will run to confirm completion. If verification passes, the loop exits.
-    If not, you'll receive feedback and can continue working.
+    When you call this, a separate verifier LLM will evaluate whether you actually
+    completed the task. The verifier strictly looks at the tools you called and their
+    results — NOT the result field below. Make sure your work is reflected in your
+    tool calls, not just described in the result.
 
-    The result field contains your final output — the concrete answer, data, or findings.
-    This is what gets returned to the caller.
+    If verification passes, the loop exits. If not, you'll receive feedback and can
+    continue working.
+
+    Still populate the result field with your final answer/findings — it is used for
+    logging and display purposes.
     """
 
     tool: Literal["attempt_completion"]
     result: str = Field(
         default="",
-        description="Your final result — the concrete answer, data, or findings to return."
+        description="Summary of your final result for logging and display. The verifier does not see this — it evaluates your tool calls directly."
     )
 
 

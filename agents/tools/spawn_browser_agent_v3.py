@@ -2038,7 +2038,7 @@ def get_browser_system_prompt(
         custom_instructions: Additional instructions
         available_files: List of filenames available for upload
     """
-    current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    current_time = datetime.now().strftime("%B %d, %Y at %I %p")
 
     # Build available files section if files are present
     files_section = ""

@@ -180,6 +180,7 @@ async def populate_tool_params_activity(
             on_chunk=noop_callback,
             reasoning_max_tokens=2048,
             claude_token=claude_token,
+            skip_cache=True,  # Unique system prompt per call — caching wastes 1.25x write cost
         )
 
         # Extract tool calls from the Pydantic result

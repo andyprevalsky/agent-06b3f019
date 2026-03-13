@@ -244,7 +244,7 @@ Claude Code can read and process these files as needed.
 When Claude Code creates files the user needs, it should copy them to /home/user/output/
 Files in this directory will be automatically uploaded and returned to the user."""
 
-    current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    current_time = datetime.now().strftime("%B %d, %Y at %I %p")
     system_prompt = f"""You are interacting with Claude Code, a terminal-based coding agent working on a task.
 
 Current time: {current_time}

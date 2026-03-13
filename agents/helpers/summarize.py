@@ -165,6 +165,7 @@ Format your response as:
             model=model,
             temperature=0.3,
             max_tokens=1000,
+            skip_cache=True,  # One-shot call — no cache reuse
         )
 
         learnings = result.get("content", "")
@@ -259,6 +260,7 @@ Just write plain text describing what was done."""
             model=model,
             temperature=0.3,
             max_tokens=200,  # Brief summary only needs ~50-100 tokens
+            skip_cache=True,  # One-shot call — no cache reuse
         )
 
         summary = result.get("content", "")

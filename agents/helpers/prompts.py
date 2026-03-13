@@ -61,7 +61,7 @@ spawn_agent(type="browser", start_url="https://x.com", goal="Login, post tweet, 
 
     "send_message_to_user": """Must be ONLY tool in that turn. Use is_question=true for clarifications.""",
 
-    "attempt_completion": """Must be ONLY tool in that turn. Call when goal is 100% done with proof.""",
+    "attempt_completion": """Must be ONLY tool in that turn. Call when goal is 100% done. A separate verifier LLM will check your work by looking at the tools you called — NOT the result field.""",
 
     "web_search": """Search the web for real-time information. Use for current events, recent data, fact-checking.""",
 
@@ -121,7 +121,7 @@ def build_system_prompt(
         shared_memory_section: Optional shared memory from run to include
     """
     disabled_tools = disabled_tools or []
-    current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    current_time = datetime.now().strftime("%B %d, %Y at %I %p")
 
     # ========================================================================
     # 1. IDENTITY
@@ -564,7 +564,7 @@ The final plan must ensure the following data is gathered:
 
 Plan tasks to explicitly capture this information before completion."""
 
-    current_time = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    current_time = datetime.now().strftime("%B %d, %Y at %I %p")
     base_prompt = f"""ROLE
 ----
 Plan a goal into minimal, parallelizable tasks with a precise, acyclic dependency graph.
