@@ -54,10 +54,8 @@ const BU_RACE_TIMEOUT_MS = 45000;      // 45s overall race timeout
 // Model pools for Rose variants - sync with backend/src/routes/rose.ts
 const MODEL_POOLS: Record<string, string[]> = {
   'rose-1-lite': [
-    'moonshotai/kimi-k2-0905',
-    'openai/gpt-5.2',
-    'google/gemini-2.5-flash',
-    // 'anthropic/claude-haiku-4.5'  // Disabled: Anthropic API credits depleted
+    'google/gemini-3-flash-preview',
+    'moonshotai/kimi-k2.5',
   ],
   'rose-1-ultra': [
     // 'anthropic/claude-opus-4.6',  // Disabled: Anthropic API credits depleted
@@ -73,6 +71,12 @@ const MODEL_POOLS: Record<string, string[]> = {
     // 'anthropic/claude-opus-4.6',    // Index 3 - DOM-only (direct Anthropic API) — Disabled: Anthropic API credits depleted
   ]
 };
+
+// Pools that use waterfall routing (sequential fallback) instead of trio racing
+const WATERFALL_POOLS = new Set(['rose-1-lite']);
+
+// Waterfall config
+const WATERFALL_TIMEOUT_MS = 60000;  // 60s per-model timeout
 
 // ============================================
 // FILE SIZE CAPABILITY FILTERING
@@ -2137,6 +2141,95 @@ interface RacingConfig {
   trioSize: number;
 }
 
+// Waterfall streaming: try models sequentially until one succeeds.
+// Unlike trio racing (parallel), this sends input tokens to only ONE model per request.
+async function waterfallStream(
+  pool: string[],
+  messages: any[],
+  temperature: number | undefined,
+  maxTokens: number | undefined,
+  seed: number | undefined,
+  tools: any[] | undefined,
+  toolChoice: any,
+  responseFormat: any,
+  reasoning: { max_tokens?: number } | undefined,
+  openRouterKey: string,
+  supabaseUrl: string,
+  requestedModel: string,
+  poolName: string,
+  poolSize: number,
+  conversation_id: string | null,
+  supabase: any,
+): Promise<Response> {
+  const errors: string[] = [];
+
+  for (let i = 0; i < pool.length; i++) {
+    const model = pool[i];
+    const isLast = i === pool.length - 1;
+    console.log(`🔄 Waterfall [${i + 1}/${pool.length}]: trying ${model}`);
+
+    try {
+      const response = await withTimeout(
+        handleStreaming(
+          model,
+          messages,
+          temperature,
+          maxTokens,
+          seed,
+          tools,
+          toolChoice,
+          responseFormat,
+          reasoning,
+          openRouterKey,
+          supabaseUrl,
+          requestedModel,
+          false,  // isCerebras
+          poolName,
+          poolSize,
+        ),
+        WATERFALL_TIMEOUT_MS,
+        `waterfall-${model}`
+      );
+
+      // handleStreaming returns a Response — check if it's an error status
+      if (!response.ok) {
+        const errText = await response.text().catch(() => 'unknown');
+        const msg = `${model} returned ${response.status}: ${errText.slice(0, 200)}`;
+        console.warn(`⚠️ Waterfall: ${msg}`);
+        errors.push(msg);
+        continue;
+      }
+
+      console.log(`✅ Waterfall winner: ${model} (attempt ${i + 1}/${pool.length})`);
+
+      // Save winning model for conversation
+      if (conversation_id) {
+        await saveConversationModel(supabase, conversation_id, model, poolName);
+      }
+
+      return response;
+    } catch (err: any) {
+      const msg = `${model} failed: ${err.message || err}`;
+      console.warn(`⚠️ Waterfall: ${msg}`);
+      errors.push(msg);
+
+      if (!isLast) {
+        console.log(`🔄 Waterfall: falling through to next model`);
+      }
+    }
+  }
+
+  // All models failed
+  console.error(`❌ Waterfall: all ${pool.length} models failed`, errors);
+  return new Response(JSON.stringify({
+    error: 'All waterfall models failed',
+    details: errors,
+  }), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    status: 500,
+  });
+}
+
 // Select a random trio from the pool, calculate delays based on cached latencies
 //
 // Strategy:
@@ -3590,6 +3683,17 @@ async function handleStreaming(
                   }
                   lastContentTime = Date.now();
                   hasReceivedContent = true;
+
+                  // Translate OpenRouter cache fields to canonical Anthropic format
+                  if (parsed.usage?.prompt_tokens_details) {
+                    const details = parsed.usage.prompt_tokens_details;
+                    const cachedTokens = details.cached_tokens || 0;
+                    const cacheWriteTokens = details.cache_write_tokens || 0;
+                    parsed.usage.cache_read_input_tokens = cachedTokens;
+                    parsed.usage.cache_creation_input_tokens = cacheWriteTokens;
+                    parsed.usage.prompt_tokens = Math.max(0, parsed.usage.prompt_tokens - cachedTokens - cacheWriteTokens);
+                  }
+
                   parsed.requested_model = requestedModel;
                   parsed.actual_model = currentModel;
                   parsed.pool_name = currentPoolName;
@@ -4780,33 +4884,13 @@ serve(async (req) => {
       }
     }
 
-    // Handle streaming with trio racing
+    // Handle streaming with trio racing or waterfall
     if (stream && !selectedModel) {
       const openRouterKey = Deno.env.get('OPENROUTER_API_KEY')!;
-      
-      // ===== TIMING INSTRUMENTATION =====
-      const timings: { [key: string]: number } = {};
-      const raceStartTime = Date.now();
-      timings.race_start = 0;
-      
-      // Get cached latencies for this pool
-      const cacheStartTime = Date.now();
-      const { latencies: cachedLatencies, needsRefresh, missingModels } = await getCachedLatencies(supabase, poolName, pool);
-      timings.cache_lookup_ms = Date.now() - cacheStartTime;
-      console.log(`⏱️ TIMING: cache_lookup=${timings.cache_lookup_ms}ms`);
-      
-      // If cache is stale/missing, fire latency probes in PARALLEL with the race
-      // Probes use a standard test prompt, not the user's messages
-      let probePromise: Promise<void> | null = null;
-      if (needsRefresh && missingModels.length > 0) {
-        console.log(`🔬 Cache needs refresh, firing probes in parallel for: ${missingModels.join(', ')}`);
-        // Fire probes in background - don't await, let them run alongside the race
-        probePromise = fireLatencyProbes(missingModels, poolName, openRouterKey, supabaseUrl, supabase);
-        timings.probes_fired = missingModels.length;
-      } else {
-        timings.probes_fired = 0;
-      }
-      
+
+      // ===== SHARED POOL FILTERING =====
+      // Apply filters before both waterfall and racing paths
+
       // Filter out Anthropic models if schema has 9+ tool types (Anthropic limit is 8 anyOf branches)
       let effectivePool = pool;
       if (response_format) {
@@ -4824,6 +4908,63 @@ serve(async (req) => {
       const maxFileSize = getMaxBase64FileSizeBytes(messages);
       if (maxFileSize > 0) {
         effectivePool = filterPoolByFileSize(effectivePool, maxFileSize);
+      }
+
+      if (effectivePool.length === 0) {
+        return new Response(JSON.stringify({ error: 'No eligible models in pool after filtering' }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 500,
+        });
+      }
+
+      // ===== WATERFALL MODE =====
+      // For pools configured for waterfall (sequential fallback), skip trio racing entirely.
+      // This sends input tokens to only ONE model per request (saves cost vs racing 3 models).
+      if (WATERFALL_POOLS.has(poolName)) {
+        console.log(`🔄 Waterfall mode for pool: ${poolName} (${effectivePool.length} models)`);
+        return await waterfallStream(
+          effectivePool,
+          messages,
+          temperature,
+          maxTokens,
+          seed,
+          tools,
+          tool_choice,
+          response_format,
+          reasoning,
+          openRouterKey,
+          supabaseUrl,
+          model,
+          poolName,
+          effectivePool.length,
+          conversation_id,
+          supabase,
+        );
+      }
+
+      // ===== TRIO RACING MODE =====
+
+      // ===== TIMING INSTRUMENTATION =====
+      const timings: { [key: string]: number } = {};
+      const raceStartTime = Date.now();
+      timings.race_start = 0;
+
+      // Get cached latencies for this pool
+      const cacheStartTime = Date.now();
+      const { latencies: cachedLatencies, needsRefresh, missingModels } = await getCachedLatencies(supabase, poolName, pool);
+      timings.cache_lookup_ms = Date.now() - cacheStartTime;
+      console.log(`⏱️ TIMING: cache_lookup=${timings.cache_lookup_ms}ms`);
+
+      // If cache is stale/missing, fire latency probes in PARALLEL with the race
+      // Probes use a standard test prompt, not the user's messages
+      let probePromise: Promise<void> | null = null;
+      if (needsRefresh && missingModels.length > 0) {
+        console.log(`🔬 Cache needs refresh, firing probes in parallel for: ${missingModels.join(', ')}`);
+        // Fire probes in background - don't await, let them run alongside the race
+        probePromise = fireLatencyProbes(missingModels, poolName, openRouterKey, supabaseUrl, supabase);
+        timings.probes_fired = missingModels.length;
+      } else {
+        timings.probes_fired = 0;
       }
 
       // Select racing trio with delays (using current cached values, even if stale)
@@ -4919,6 +5060,8 @@ serve(async (req) => {
               // Anthropic usage tracking - capture from message_start and message_delta
               let anthropicInputTokens = 0;
               let anthropicOutputTokens = 0;
+              let anthropicCacheCreationTokens = 0;
+              let anthropicCacheReadTokens = 0;
 
               // Process the firstData buffer immediately
               console.log(`⏱️ TIMING: processing firstData buffer (${firstData.length} chars)`);
@@ -4945,11 +5088,14 @@ serve(async (req) => {
 
                     // Transform Anthropic streaming events to OpenAI format (same as handleStreaming)
                     if (isAnthropicModel(winningModel)) {
-                      // Capture input tokens from message_start
+                      // Capture input tokens and cache metrics from message_start
                       if (parsed.type === 'message_start') {
-                        if (parsed.message?.usage?.input_tokens) {
-                          anthropicInputTokens = parsed.message.usage.input_tokens;
-                          console.log(`📊 Anthropic input_tokens captured: ${anthropicInputTokens}`);
+                        if (parsed.message?.usage) {
+                          const msgUsage = parsed.message.usage;
+                          anthropicInputTokens = msgUsage.input_tokens || 0;
+                          anthropicCacheCreationTokens = msgUsage.cache_creation_input_tokens || 0;
+                          anthropicCacheReadTokens = msgUsage.cache_read_input_tokens || 0;
+                          console.log(`📊 Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`);
                         }
                         return;
                       }
@@ -5015,12 +5161,31 @@ serve(async (req) => {
                     }
                     parsed.timings = timings;
 
+                    // Translate OpenRouter cache fields to canonical Anthropic format
+                    if (parsed.usage?.prompt_tokens_details) {
+                      const details = parsed.usage.prompt_tokens_details;
+                      const cachedTokens = details.cached_tokens || 0;
+                      const cacheWriteTokens = details.cache_write_tokens || 0;
+
+                      // Set canonical fields
+                      parsed.usage.cache_read_input_tokens = cachedTokens;
+                      parsed.usage.cache_creation_input_tokens = cacheWriteTokens;
+
+                      // Adjust prompt_tokens to Anthropic semantics (exclude cached tokens)
+                      // OpenRouter prompt_tokens is total (incl cached); Anthropic is non-cached only
+                      parsed.usage.prompt_tokens = Math.max(0, parsed.usage.prompt_tokens - cachedTokens - cacheWriteTokens);
+
+                      console.log(`📊 Cache translated: read=${cachedTokens}, write=${cacheWriteTokens}, uncached=${parsed.usage.prompt_tokens}`);
+                    }
+
                     // Adjust usage to reflect TRUE cost (all racing models consumed input tokens)
                     if (parsed.usage && parsed.usage.prompt_tokens) {
                       const winnerPromptTokens = parsed.usage.prompt_tokens;
                       const winnerCompletionTokens = parsed.usage.completion_tokens || 0;
                       parsed.usage.prompt_tokens = winnerPromptTokens * modelsRaced;
                       parsed.usage.total_tokens = parsed.usage.prompt_tokens + winnerCompletionTokens;
+                      // Preserve cache fields (NOT multiplied — only winner had cache hits)
+                      // cache_read_input_tokens and cache_creation_input_tokens stay as-is
                       console.log(`📊 Usage adjusted: ${winnerPromptTokens} input × ${modelsRaced} models = ${parsed.usage.prompt_tokens} total input tokens`);
                     }
 
@@ -5056,7 +5221,9 @@ serve(async (req) => {
                       usage: {
                         prompt_tokens: adjustedInputTokens,
                         completion_tokens: anthropicOutputTokens,
-                        total_tokens: adjustedInputTokens + anthropicOutputTokens
+                        total_tokens: adjustedInputTokens + anthropicOutputTokens,
+                        cache_creation_input_tokens: anthropicCacheCreationTokens,
+                        cache_read_input_tokens: anthropicCacheReadTokens,
                       },
                       requested_model: model,
                       actual_model: winningModel,

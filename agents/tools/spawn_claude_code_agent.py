@@ -208,6 +208,7 @@ async def call_parent_llm(
     agent_id: str,
     on_chunk: Callable[[str, int], Awaitable[None]],
     model: str = "rose-labs/rose-1-lite",
+    claude_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call the parent agent's LLM to decide whether to respond or complete.
@@ -295,6 +296,7 @@ Set attempt_completion=false when:
             response_model=ClaudeCodeParentResponse,
             on_chunk=on_chunk,
             agent_id=agent_id,
+            claude_token=claude_token,
         )
 
         return {
@@ -331,6 +333,7 @@ async def spawn_claude_code_activity(
     attachments: Optional[List[Dict[str, Any]]] = None,
     model: str = "rose-labs/rose-1-lite",
     github_repo_url: Optional[str] = None,
+    claude_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Claude Code agent activity using E2B Desktop Sandbox.
@@ -347,6 +350,7 @@ async def spawn_claude_code_activity(
         attachments: File attachments from context to upload to sandbox
         model: Model to use for verifier (inherited from parent agent)
         github_repo_url: Optional GitHub repo URL to clone before starting Claude Code
+        claude_token: Optional Claude OAuth token for direct Anthropic calls
     """
     from helpers.llm import check_progress
     from helpers.prompts import build_verifier_prompt
@@ -685,6 +689,7 @@ async def spawn_claude_code_activity(
                             agent_id=agent_id,
                             on_chunk=on_chunk,
                             model=model,
+                            claude_token=claude_token,
                         )
 
                         # Track usage
@@ -806,7 +811,7 @@ async def spawn_claude_code_activity(
             remote_session_schema = transform_schema_for_remote_session(output_schema)
             progress_result = await call_temporal_activity_from_activity(
                 check_progress,
-                args=[verifier_context, verifier_prompt, model, "EXECUTE", remote_session_schema],
+                args=[verifier_context, verifier_prompt, model, "EXECUTE", remote_session_schema, claude_token],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
@@ -1195,11 +1200,12 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         try:
             # Get model from workflow instance (inherit parent's model)
             model = getattr(workflow_instance, 'model', 'rose-labs/rose-1-lite')
+            claude_token = getattr(workflow_instance, 'claude_max_token', None)
 
             # Start activity with limited retries (expensive/long-running)
             activity_handle = workflow.start_activity(
                 spawn_claude_code_activity,
-                args=[user_id, agent_id, goal, tool_call_id, output_schema, attachments if attachments else None, model, github_repo_url],
+                args=[user_id, agent_id, goal, tool_call_id, output_schema, attachments if attachments else None, model, github_repo_url, claude_token],
                 start_to_close_timeout=timedelta(minutes=35),  # 30 min sandbox + 5 min headroom for verifier/close
                 heartbeat_timeout=timedelta(seconds=60),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,

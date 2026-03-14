@@ -299,7 +299,7 @@ class WaitForManager(ToolManager):
             local_data_summary = ""
 
         model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
-        claude_token = getattr(workflow_instance, "claude_max_token", None)
+        claude_token = None  # wait_for uses cheap lite waterfall, no claudeAuth
         spawn_mgr = SpawnAgentManager()
         all_usage: Dict[str, list] = {"llm": [], "service": []}
 

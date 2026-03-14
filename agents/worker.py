@@ -110,6 +110,9 @@ logging.getLogger('cdp_use.client').setLevel(logging.WARNING)
 logging.getLogger('cdp_use.cdp').setLevel(logging.WARNING)
 logging.getLogger('cdp_use.cdp.registry').setLevel(logging.WARNING)
 logging.getLogger('websockets.client').setLevel(logging.WARNING)
+# Silence verbose httpx connection-level traces
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 # Silence verbose Temporal heartbeat logging
 logging.getLogger('temporalio.activity').setLevel(logging.WARNING)
 logging.getLogger('temporalio.worker').setLevel(logging.WARNING)

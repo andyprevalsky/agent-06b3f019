@@ -289,7 +289,7 @@ async def save_blueprint_deprecated(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": conversation_json}
             ],
-            model="google/gemini-2.5-flash",
+            model="rose-labs/rose-1-lite",
             temperature=0.3,  # Lower temperature for more focused compression
             max_tokens=4000,  # Allow enough tokens for compressed messages
             response_format={"type": "json_object"}  # Request JSON output

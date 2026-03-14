@@ -3160,7 +3160,7 @@ async def spawn_browser_agent_activity_v3(
                     try:
                         progress_result = await call_temporal_activity_from_activity(
                             check_progress,
-                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE", remote_session_schema],
+                            args=[verifier_context, verifier_prompt, "rose-labs/rose-1-ultra", "EXECUTE", remote_session_schema, token_state.access_token],
                             start_to_close_timeout=timedelta(seconds=7),
                         )
                     except TimeoutError:

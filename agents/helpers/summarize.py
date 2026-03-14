@@ -107,7 +107,7 @@ def _format_tool_stats_footer(tool_counts: Dict[str, int]) -> str:
 async def compress_context(
     context: List[Dict],
     iteration_count: int,
-    model: str = "anthropic/claude-sonnet-4.5"
+    model: str = "rose-labs/rose-1-lite"
 ) -> str:
     """
     Use LLM to compress context into key learnings.
@@ -192,7 +192,7 @@ Continue working toward the task with a fresh start."""
 async def generate_completion_summary(
     context: List[Dict[str, Any]],
     goal: str,
-    model: str = "anthropic/claude-sonnet-4.5",
+    model: str = "rose-labs/rose-1-lite",
     structured_response: Dict[str, Any] = None,
     output_schema: Dict[str, Any] = None,
     sub_agent_tool_counts: Dict[str, int] = None,

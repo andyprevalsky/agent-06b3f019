@@ -74,9 +74,9 @@ async def run_agent(
     # For tree token aggregation - returns (children_tokens_in, children_tokens_out)
     get_children_tokens: Optional[Callable[[], Tuple[int, int]]] = None,
 
-    # For cost tracking - called after each LLM call with token deltas + actual_model
+    # For cost tracking - called after each LLM call with token deltas + actual_model + cache tokens
     # Workflow uses this to calculate cost and check price limit in real-time
-    on_tokens: Optional[Callable[[int, int, Optional[str]], Awaitable[None]]] = None,
+    on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
     
     # Custom response model (for browser agent with different tool schemas)
     # If None, uses create_agent_action_model(tools)
@@ -482,7 +482,13 @@ async def run_agent(
             # This happens BEFORE tree token broadcast so cost limit can pause before more work
             if on_tokens:
                 try:
-                    await on_tokens(llm_tokens_in, llm_tokens_out, usage.get("actual_model"))
+                    await on_tokens(
+                        llm_tokens_in,
+                        llm_tokens_out,
+                        usage.get("actual_model"),
+                        cache_read_input_tokens=iter_cache_read,
+                        cache_creation_input_tokens=iter_cache_write,
+                    )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed: {e}")
 

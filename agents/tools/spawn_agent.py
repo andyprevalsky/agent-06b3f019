@@ -256,13 +256,21 @@ async def spawn_explore_agent_activity(
     # that need evidence without the explore agent's interpretation (e.g. wait_for)
     tool_call_results: List[str] = []
 
-    async def on_tokens(tokens_in_delta: int, tokens_out_delta: int, actual_model: Optional[str] = None):
+    async def on_tokens(
+        tokens_in_delta: int,
+        tokens_out_delta: int,
+        actual_model: Optional[str] = None,
+        cache_read_input_tokens: int = 0,
+        cache_creation_input_tokens: int = 0,
+    ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append({
             "tokens_in": tokens_in_delta,
             "tokens_out": tokens_out_delta,
             "model": actual_model or model,
             "provider": "Explore Agent",
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
         })
 
     # Wrap execute_activity to inject taskId into all internal tool messages
@@ -576,7 +584,7 @@ class SpawnAgentManager(ToolManager):
 
             # Run explore agent activity with pause polling (like browser agent)
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
-            claude_token = getattr(workflow_instance, "claude_max_token", None)
+            claude_token = None  # Explore uses cheap lite waterfall, no claudeAuth
             activity_handle = workflow.start_activity(
                 spawn_explore_agent_activity,
                 args=[

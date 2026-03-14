@@ -5,22 +5,14 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// Model pools for Rose variants - sync with backend/src/routes/rose.ts
+// Model pools for Rose variants - sync with research/supabase/functions/completions/index.ts
 const MODEL_POOLS = {
   'rose-1-lite': [
-    // 'openai/gpt-oss-120b', // Disabled - produces 120+ garbage tool calls disconnected from reasoning
-    // 'qwen/qwen3-235b-a22b-thinking-2507', // Disabled - produces garbage tool calls disconnected from reasoning
-    'moonshotai/kimi-k2-0905',
-    // 'deepseek/deepseek-v3.2-exp', // Disabled - produces garbage tool calls disconnected from reasoning
-    'openai/gpt-5.2',
-    'mistralai/mistral-medium-3.1',
-    'google/gemini-2.5-flash',
-    'nousresearch/hermes-4-405b',
-    'minimax/minimax-m2',
-    'x-ai/grok-4-fast'
+    'google/gemini-3-flash-preview',
+    'moonshotai/kimi-k2.5',
   ],
   'rose-1-ultra': [
-    'anthropic/claude-opus-4.6',
+    // 'anthropic/claude-opus-4.6',  // Disabled: Anthropic API credits depleted
     'openai/gpt-5.2',
     'google/gemini-3-pro-preview',
     'moonshotai/kimi-k2.5'
@@ -30,6 +22,7 @@ const MODEL_POOLS = {
   'rose-1-browser-use': [
     'browser-use',              // Fixed: $0.10 input, $0.40 output per 1M tokens
     'yutori/n1',                // Via OpenRouter
+    'openai/gpt-5.2',          // Via OpenRouter
   ]
 };
 

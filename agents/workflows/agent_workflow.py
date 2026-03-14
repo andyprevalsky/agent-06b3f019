@@ -1322,9 +1322,21 @@ class AgentWorkflow:
                 workflow.logger.warning(f"⚠️ No pricing for model {model}, skipping cost for {tokens_in}/{tokens_out} tokens")
                 continue
 
+            input_rate = pricing["input_cents_per_1k"]
+            output_rate = pricing["output_cents_per_1k"]
+
+            # Apply provider-specific cache discounts if cache fields present
+            cache_read = llm.get("cache_read_input_tokens", 0)
+            cache_write = llm.get("cache_creation_input_tokens", 0)
+            is_anthropic = model and ('claude' in model.lower() or model.lower().endswith('-claude'))
+            cache_read_mult = 0.1 if is_anthropic else 0.25
+            cache_write_mult = 1.25 if is_anthropic else 1.0
+
             cost_cents = (
-                (tokens_in * pricing["input_cents_per_1k"] / 1000) +
-                (tokens_out * pricing["output_cents_per_1k"] / 1000)
+                (tokens_in * input_rate / 1000) +
+                (cache_read * input_rate * cache_read_mult / 1000) +
+                (cache_write * input_rate * cache_write_mult / 1000) +
+                (tokens_out * output_rate / 1000)
             )
             if cost_cents > 0:
                 total_cost_cents += cost_cents
@@ -1476,10 +1488,24 @@ class AgentWorkflow:
             sum(self.children_tokens_out.values()),
         )
 
-    async def _on_tokens(self, tokens_in_delta: int, tokens_out_delta: int, actual_model: Optional[str] = None) -> None:
+    async def _on_tokens(
+        self,
+        tokens_in_delta: int,
+        tokens_out_delta: int,
+        actual_model: Optional[str] = None,
+        cache_read_input_tokens: int = 0,
+        cache_creation_input_tokens: int = 0,
+    ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
         This enables real-time cost tracking and limit checking, not just at phase boundaries.
+
+        Args:
+            tokens_in_delta: Non-cached input tokens (Anthropic semantics)
+            tokens_out_delta: Output/completion tokens
+            actual_model: The model that actually served the request
+            cache_read_input_tokens: Cached input tokens read (discounted pricing)
+            cache_creation_input_tokens: Tokens written to cache (may cost extra for Anthropic)
         """
         # Update workflow token state (keep in sync with run_agent local vars)
         self.tokens_in += tokens_in_delta
@@ -1502,7 +1528,9 @@ class AgentWorkflow:
                 self.claude_max_token = None
                 self.claude_max_token_fetched_at = None
 
-        # Use actual_model pricing if available (e.g., "-claude" suffix = $0)
+        # Use actual_model pricing if available
+        # For Anthropic models: hardcoded pricing (includes -claude passthrough = $0)
+        # For OpenRouter models: falls back to pool-average (self.input_cents_per_1k)
         input_rate = self.input_cents_per_1k
         output_rate = self.output_cents_per_1k
         if actual_model:
@@ -1516,18 +1544,29 @@ class AgentWorkflow:
                         f"in={tokens_in_delta}, out={tokens_out_delta}"
                     )
 
-        # Calculate cost from tokens using pricing (fractional cents to avoid truncation)
+        # Calculate cost with provider-specific cache discounts
+        # Anthropic direct: cache read = 0.1x input, cache write = 1.25x input
+        # OpenRouter (all other providers): cache read = 0.25x input, cache write = 1.0x input
+        is_anthropic = actual_model and ('claude' in actual_model.lower() or actual_model.lower().endswith('-claude'))
+        cache_read_mult = 0.1 if is_anthropic else 0.25
+        cache_write_mult = 1.25 if is_anthropic else 1.0
+
         cost_cents = 0.0
         if input_rate > 0 or output_rate > 0:
-            cost_cents = (
-                (tokens_in_delta * input_rate / 1000) +
-                (tokens_out_delta * output_rate / 1000)
-            )
+            input_cost = tokens_in_delta * input_rate / 1000
+            cache_read_cost = cache_read_input_tokens * input_rate * cache_read_mult / 1000
+            cache_write_cost = cache_creation_input_tokens * input_rate * cache_write_mult / 1000
+            output_cost = tokens_out_delta * output_rate / 1000
+            cost_cents = input_cost + cache_read_cost + cache_write_cost + output_cost
+
             if cost_cents > 0:
                 self.own_cost_cents += cost_cents
+                cache_info = ""
+                if cache_read_input_tokens > 0 or cache_creation_input_tokens > 0:
+                    cache_info = f", cache_read={cache_read_input_tokens}@{cache_read_mult}x, cache_write={cache_creation_input_tokens}@{cache_write_mult}x"
                 workflow.logger.info(
                     f"💰 LLM cost: +{cost_cents:.2f}c (total own: {self.own_cost_cents:.1f}c, "
-                    f"in={tokens_in_delta}, out={tokens_out_delta})"
+                    f"in={tokens_in_delta}, out={tokens_out_delta}{cache_info})"
                 )
 
                 # Recalculate subtree cost and check limit (for root) or signal parent
