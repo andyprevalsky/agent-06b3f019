@@ -1,6 +1,7 @@
 """Event-driven spawn_sub_agent tool implementation."""
 
 import asyncio
+import random
 from dataclasses import asdict
 from typing import List, Dict, Any, AsyncGenerator
 from datetime import timedelta
@@ -411,6 +412,7 @@ async def spawn_sub_agent_activity(
         sub_agents: List of agent configs, each with:
             - goal (str): The subtask goal
             - verifier (dict): {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "..."}
+            - start_phase (str, optional): "plan" (default) or "execute"
             - attachments (list[str], optional): Filenames to pass to this sub-agent
         parent_agent_id: Parent agent ID (for hierarchy)
         parent_workflow_id: Parent workflow ID (for signaling)
@@ -470,108 +472,161 @@ async def spawn_sub_agent_activity(
                 logger.warning(f"Failed to fetch parent attachments: {e}")
                 # Continue without attachments - don't fail the spawn
 
+        # Spawn strategy:
+        # - Pool pattern with max 10 parallel spawn requests
+        # - Per-agent retries with exponential backoff + jitter
+        # - Attempt ALL agents before returning (never exit early on partial failures)
+        MAX_PARALLEL_SPAWNS = 10
+        MAX_SPAWN_ATTEMPTS = 4
+        BASE_BACKOFF_SECONDS = 0.5
+        RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Spawn all agents concurrently using internal API key
-            tasks = []
-            for agent in sub_agents:
-                # Resolve attachments for this sub-agent
-                resolved_attachments = []
-                if agent.get("attachments"):
-                    for filename in agent["attachments"]:
-                        if filename in filename_to_pointer:
-                            resolved_attachments.append(filename_to_pointer[filename])
-                        else:
-                            logger.warning(
-                                f"Attachment not found in parent context: {filename}",
-                                available_files=list(filename_to_pointer.keys())
+            semaphore = asyncio.Semaphore(MAX_PARALLEL_SPAWNS)
+
+            async def spawn_one_with_retry(index: int, agent_cfg: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
+                async with semaphore:
+                    goal = agent_cfg.get("goal", "")
+                    activity.heartbeat(f"Spawning sub-agent {index + 1}/{len(sub_agents)}")
+
+                    # Resolve attachments for this sub-agent
+                    resolved_attachments = []
+                    if agent_cfg.get("attachments"):
+                        for filename in agent_cfg["attachments"]:
+                            if filename in filename_to_pointer:
+                                resolved_attachments.append(filename_to_pointer[filename])
+                            else:
+                                logger.warning(
+                                    f"Attachment not found in parent context: {filename}",
+                                    available_files=list(filename_to_pointer.keys())
+                                )
+
+                    # start_phase must be strict: plan | execute
+                    start_phase = str(agent_cfg.get("start_phase", "plan")).strip().lower()
+                    if start_phase not in {"plan", "execute"}:
+                        start_phase = "plan"
+
+                    payload = {
+                        "user_id": user_id,  # For internal auth
+                        "goal": goal,
+                        "verifier": agent_cfg["verifier"],
+                        "start_phase": start_phase,
+                        "parent_agent_id": parent_agent_id,
+                        "parent_workflow_id": parent_workflow_id,
+                        "depth": depth,
+                        "pause_state": parent_is_paused,  # Inherit parent's pause state
+                        "response_schema": agent_cfg.get("output_schema"),
+                        "bus_id": bus_id,  # Shared bus channel for tree updates
+                        "max_iterations": 25,
+                        "source": parent_source,  # Inherit source from parent
+                        "model": parent_model,  # Always inherit model from parent
+                    }
+                    if resolved_attachments:
+                        payload["attachments"] = resolved_attachments
+
+                    last_error = "unknown error"
+                    for attempt in range(1, MAX_SPAWN_ATTEMPTS + 1):
+                        try:
+                            logger.info(
+                                "Spawning sub-agent",
+                                index=index,
+                                attempt=attempt,
+                                payload=payload,
+                            )
+                            response = await client.post(
+                                f"{backend_url}/api/agents",
+                                headers={
+                                    "X-API-Key": api_key,
+                                    "Content-Type": "application/json"
+                                },
+                                json=payload
                             )
 
-                # Build payload - tool_ids intentionally omitted, backend selects tools automatically
-                # user_phone removed - fetched from user context in workflow
-                payload = {
-                    "user_id": user_id,  # For internal auth
-                    "goal": agent["goal"],
-                    "verifier": agent["verifier"],
-                    "parent_agent_id": parent_agent_id,
-                    "parent_workflow_id": parent_workflow_id,
-                    "depth": depth,
-                    "pause_state": parent_is_paused,  # Inherit parent's pause state
-                    # Pass output schema from tool call (required for sub-agents)
-                    "response_schema": agent.get("output_schema"),
-                    "bus_id": bus_id,  # Shared bus channel for tree updates
-                    "max_iterations": 25,
-                    "source": parent_source,  # Inherit source from parent
-                }
+                            # Success
+                            if response.is_success:
+                                data = response.json()
+                                logger.info(
+                                    "Sub-agent spawned",
+                                    agent_id=data.get("agent_id"),
+                                    workflow_id=data.get("temporal_workflow_id"),
+                                    goal=data.get("goal", goal),
+                                    index=index,
+                                )
+                                return index, {
+                                    "agent_id": data["agent_id"],
+                                    "temporal_workflow_id": data["temporal_workflow_id"],
+                                    "goal": data["goal"],
+                                    "model": data["model"],
+                                    "status": data["status"]
+                                }
 
-                # Add resolved attachments if any
-                if resolved_attachments:
-                    payload["attachments"] = resolved_attachments
+                            # Retryable HTTP error
+                            status_code = response.status_code
+                            response_text = response.text[:500]
+                            last_error = f"HTTP {status_code}: {response_text}"
+                            if status_code in RETRYABLE_STATUS_CODES and attempt < MAX_SPAWN_ATTEMPTS:
+                                delay = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                                jitter = random.uniform(0, delay * 0.3)
+                                sleep_s = delay + jitter
+                                logger.warning(
+                                    "Retrying sub-agent spawn after HTTP error",
+                                    index=index,
+                                    attempt=attempt,
+                                    status_code=status_code,
+                                    sleep_seconds=round(sleep_s, 2),
+                                )
+                                await asyncio.sleep(sleep_s)
+                                continue
 
-                # Always inherit model from parent
-                payload["model"] = parent_model
-                # Note: reasoning_max_tokens not passed - sub-agents use backend default (256)
+                            # Non-retryable or exhausted retries
+                            logger.error(
+                                "Failed to spawn sub-agent - HTTP error",
+                                index=index,
+                                goal=goal,
+                                status_code=status_code,
+                                response_text=response_text,
+                            )
+                            break
 
-                logger.info("Spawning sub-agent", payload=payload)
-                tasks.append(
-                    client.post(
-                        f"{backend_url}/api/agents",
-                        headers={
-                            "X-API-Key": api_key,
-                            "Content-Type": "application/json"
-                        },
-                        json=payload
-                    )
-                )
-            
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Parse results
-            spawned = []
-            for i, response in enumerate(responses):
-                if isinstance(response, Exception):
-                    logger.error(
-                        "Failed to spawn sub-agent",
-                        index=i,
-                        goal=sub_agents[i]["goal"],
-                        error=str(response)
-                    )
-                    spawned.append({
-                        "error": str(response),
-                        "goal": sub_agents[i]["goal"],
+                        except Exception as e:
+                            last_error = str(e)
+                            if attempt < MAX_SPAWN_ATTEMPTS:
+                                delay = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                                jitter = random.uniform(0, delay * 0.3)
+                                sleep_s = delay + jitter
+                                logger.warning(
+                                    "Retrying sub-agent spawn after exception",
+                                    index=index,
+                                    attempt=attempt,
+                                    error=last_error,
+                                    sleep_seconds=round(sleep_s, 2),
+                                )
+                                await asyncio.sleep(sleep_s)
+                                continue
+                            logger.error(
+                                "Failed to spawn sub-agent - exception",
+                                index=index,
+                                goal=goal,
+                                error=last_error,
+                            )
+                            break
+
+                    return index, {
+                        "error": last_error,
+                        "goal": goal,
                         "status": "FAILED"
-                    })
-                else:
-                    try:
-                        response.raise_for_status()
-                        data = response.json()
-                    except Exception as e:
-                        # Log the full error response
-                        error_detail = {
-                            "status_code": response.status_code,
-                            "response_text": response.text,
-                            "error": str(e)
-                        }
-                        logger.error(
-                            "Failed to spawn sub-agent - bad response",
-                            index=i,
-                            goal=sub_agents[i]["goal"],
-                            **error_detail
-                        )
-                        raise
-                    spawned.append({
-                        "agent_id": data["agent_id"],
-                        "temporal_workflow_id": data["temporal_workflow_id"],
-                        "goal": data["goal"],
-                        "model": data["model"],
-                        "status": data["status"]
-                    })
-                    
-                    logger.info(
-                        "Sub-agent spawned",
-                        agent_id=data["agent_id"],
-                        workflow_id=data["temporal_workflow_id"],
-                        goal=data["goal"]
-                    )
+                    }
+
+            # Schedule all spawns with bounded concurrency (pool pattern)
+            tasks = [
+                asyncio.create_task(spawn_one_with_retry(i, agent_cfg))
+                for i, agent_cfg in enumerate(sub_agents)
+            ]
+
+            spawned: List[Dict[str, Any]] = [{} for _ in sub_agents]
+            for finished in asyncio.as_completed(tasks):
+                idx, result = await finished
+                spawned[idx] = result
             
             # Count results
             completed = sum(1 for s in spawned if s.get("status") != "FAILED")

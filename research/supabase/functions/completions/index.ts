@@ -4019,10 +4019,50 @@ serve(async (req) => {
 
           // Rate limited — signal caller to fall back to racing
           if (response.status === 429) {
+            const parseEpochHeader = (raw: string | null): number | null => {
+              if (!raw) return null;
+              const num = Number(raw);
+              if (!Number.isFinite(num) || num <= 0) return null;
+              return Math.floor(num);
+            };
+            const parseRetryAfter = (raw: string | null): number | null => {
+              if (!raw) return null;
+              const seconds = Number(raw);
+              if (!Number.isFinite(seconds) || seconds <= 0) return null;
+              return Math.floor(seconds);
+            };
+
+            const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+            const unifiedReset = parseEpochHeader(response.headers.get('anthropic-ratelimit-unified-reset'));
+            const unified5hReset = parseEpochHeader(response.headers.get('anthropic-ratelimit-unified-5h-reset'));
+            const unified7dReset = parseEpochHeader(response.headers.get('anthropic-ratelimit-unified-7d-reset'));
+            const chosenResetEpoch = unifiedReset ?? unified5hReset ?? unified7dReset ??
+              (retryAfter ? Math.floor(Date.now() / 1000) + retryAfter : null);
+            const rateLimitedUntil = chosenResetEpoch
+              ? new Date(chosenResetEpoch * 1000).toISOString()
+              : null;
+
+            let rateLimitMessage = '';
+            try {
+              const parsed = JSON.parse(errorText);
+              rateLimitMessage = parsed?.error?.message || parsed?.message || '';
+            } catch {
+              rateLimitMessage = errorText.slice(0, 300);
+            }
+
             console.warn(`⚠️ [${requestId}] Claude mode rate limited, signaling fallback to racing`);
             return new Response(JSON.stringify({
               error: 'CLAUDE_RATE_LIMITED',
               fallback: 'racing',
+              rateLimitedUntil,
+              rateLimitHeaders: {
+                retryAfter: response.headers.get('retry-after'),
+                unifiedStatus: response.headers.get('anthropic-ratelimit-unified-status'),
+                unifiedReset: response.headers.get('anthropic-ratelimit-unified-reset'),
+                representativeClaim: response.headers.get('anthropic-ratelimit-unified-representative-claim'),
+                overageDisabledReason: response.headers.get('anthropic-ratelimit-unified-overage-disabled-reason'),
+              },
+              message: rateLimitMessage || 'Claude account is rate limited',
               request_id: requestId,
             }), {
               headers: { ...corsHeaders, "Content-Type": "application/json" },

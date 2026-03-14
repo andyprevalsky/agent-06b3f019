@@ -174,13 +174,26 @@ class MessagePersonManager(ToolManager):
         # Handle no person found
         person = history_result.get("person")
         if not person:
-            yield ToolEvent(type=EventType.POST_MESSAGE,
-                            title=f"No person found: {person_display}",
-                            message=history_result.get("message", f"No person found matching: {person_display}"),
-                            status=MessageStatus.ERROR)
-            return
+            # Cold outreach: if person_id is a direct email or phone, create synthetic person
+            cold_email = id_fields.get("email")
+            cold_phone = id_fields.get("phone")
+            if cold_email or cold_phone:
+                person = {
+                    "firstName": "",
+                    "lastName": "",
+                    "email": cold_email,
+                    "phoneNumber": cold_phone,
+                }
+                logger.info("Cold outreach - no existing contact, using direct identifier",
+                            email=cold_email, phone=cold_phone)
+            else:
+                yield ToolEvent(type=EventType.POST_MESSAGE,
+                                title=f"No person found: {person_display}",
+                                message=history_result.get("message", f"No person found matching: {person_display}"),
+                                status=MessageStatus.ERROR)
+                return
 
-        # We have a resolved person
+        # We have a resolved person (or synthetic cold contact)
         person_display = _format_person_display(person)
         messages = history_result.get("messages", [])
         person_phone = person.get("phoneNumber")
@@ -253,12 +266,22 @@ class MessagePersonManager(ToolManager):
         conversation_context = _build_conversation_summary(workflow_instance.context)
         messages_context = _format_messages_for_context(messages, limit=100)
 
+        # Extract the user's real name from user context (the person sending the message)
+        user_name = workflow_instance.system_name  # fallback
+        user_context = getattr(workflow_instance, 'user_context_section', '') or ''
+        for line in user_context.split('\n'):
+            if line.strip().startswith('Name:'):
+                extracted = line.strip().replace('Name:', '').strip()
+                if extracted:
+                    user_name = extracted
+                break
+
         try:
             gen_result = await workflow.execute_activity(
                 generate_message_activity,
                 args=[
                     model,
-                    workflow_instance.system_name,
+                    user_name,
                     conversation_context,
                     person_display,
                     messages_context,
@@ -298,8 +321,10 @@ class MessagePersonManager(ToolManager):
 
 **To:** {person_display} ({recipient})"""
 
-        if channel == "email" and generated_subject:
-            approval_text += f"\n**Subject:** {generated_subject}"
+        if channel == "email":
+            approval_text += f"\n**From:** {from_email}"
+            if generated_subject:
+                approval_text += f"\n**Subject:** {generated_subject}"
 
         approval_text += f"""
 
@@ -324,9 +349,12 @@ Reply to approve, or say "no" to cancel."""
             return
 
         # ── Step 5: Send ─────────────────────────────────────────────────
+        sending_msg = f"Delivering message to **{person_display}**..."
+        if channel == "email":
+            sending_msg = f"Delivering email from **{from_email}** to **{person_display}**..."
         yield ToolEvent(type=EventType.POST_MESSAGE,
                         title=f"Sending {channel_label} to {person_display}",
-                        message=f"Delivering message to **{person_display}**...",
+                        message=sending_msg,
                         status=MessageStatus.IN_PROGRESS)
 
         try:
@@ -358,7 +386,7 @@ Reply to approve, or say "no" to cancel."""
                                              maximum_interval=timedelta(seconds=10)),
                 )
         except Exception as e:
-            error_str = str(e)
+            error_str = extract_root_error(e)
             if channel == "email" and ("gmail" in error_str.lower() or "not connected" in error_str.lower()):
                 error_str = "Email integration is not setup for the current user"
             elif channel == "imessage" and ("imessage" in error_str.lower() or "mac" in error_str.lower()):
@@ -371,9 +399,15 @@ Reply to approve, or say "no" to cancel."""
 
         # ── Done ─────────────────────────────────────────────────────────
         preview = generated_message if len(generated_message) <= 200 else generated_message[:197] + "..."
+        finished_parts = [f"**To:** {person_display} ({recipient})"]
+        if channel == "email":
+            finished_parts.append(f"**From:** {from_email}")
+            if generated_subject:
+                finished_parts.append(f"**Subject:** {generated_subject}")
+        finished_parts.append(f"\n**Message:**\n{preview}")
         yield ToolEvent(type=EventType.POST_MESSAGE,
                         title=f"{channel_label} sent to {person_display}",
-                        message=f"**To:** {person_display} ({recipient})\n\n**Message:**\n{preview}",
+                        message="\n".join(finished_parts),
                         status=MessageStatus.FINISHED)
 
 
@@ -513,8 +547,9 @@ async def generate_message_activity(
             f"Sign the email as {system_name}."
         )
 
-    system_prompt = f"""You are ghostwriting a message for {system_name}. The message must sound like it was written
-by {system_name} themselves - you are writing IN THEIR VOICE, not as an assistant.
+    system_prompt = f"""You are ghostwriting a message on behalf of the user, {system_name}. This message will be sent
+from {system_name}'s personal account - it must sound exactly like {system_name} wrote it themselves.
+You are NOT an AI assistant writing a message. You ARE {system_name}, writing to {person_name}.
 
 **Channel:** {channel_label}
 
@@ -531,10 +566,11 @@ VOICE & STYLE RULES:
 
 CONTENT RULES:
 - Write ONLY the message content (and subject if email). No meta-commentary.
-- Be authentic and genuine - this message is sent from {system_name}'s account.
+- Be authentic and genuine - this message is sent from {system_name}'s personal account, not from an AI.
 - CRITICAL: NEVER use em dashes ("\u2014") anywhere in the message. This is a strict, non-negotiable rule. Always use regular hyphens (-) or commas instead.
 - Reference specific shared context when relevant (previous conversations, mutual interests).
 - Do NOT include placeholder text like [your name] or [company].
+- Sign the message as {system_name}, not as an AI assistant or agent name.
 """
 
     user_prompt = f"""## Channel

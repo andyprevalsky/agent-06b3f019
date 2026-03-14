@@ -247,13 +247,92 @@ async def test_email_no_email(mock_workflow):
     manager = MessagePersonManager()
     wi = _make_workflow_instance()
     events = []
-    async for event in manager.execute_tool(wi, {"person_id": "John Smith", "channel": "email", "intent": "say hi"}, "tc-1"):
+    async for event in manager.execute_tool(wi, {"person_id": "John Smith", "channel": "email", "from_email": "me@test.com", "intent": "say hi"}, "tc-1"):
         events.append(event)
 
     assert any(e.status == MessageStatus.ERROR for e in events)
     error_event = [e for e in events if e.status == MessageStatus.ERROR][0]
     assert "No email address" in error_event.message
     print("✅ test_email_no_email passed")
+
+
+@patch("tools.message_person.request_user_approval_direct", new_callable=AsyncMock)
+@patch("tools.message_person.workflow")
+async def test_cold_outreach_email(mock_workflow, mock_approval):
+    """Cold outreach: person_id is an email not in contacts → creates synthetic person and continues."""
+    call_count = {"read": 0, "fetch_recent": 0, "generate": 0, "send_email": 0}
+
+    async def mock_execute_activity(activity_fn, args=None, **kwargs):
+        name = getattr(activity_fn, "__name__", str(activity_fn))
+
+        if "read_message_history" in name:
+            call_count["read"] += 1
+            return {"person": None, "messages": [], "message": "No person found"}
+        elif "fetch_recent_messages" in name:
+            call_count["fetch_recent"] += 1
+            return {"messages": [], "count": 0}
+        elif "generate_message" in name:
+            call_count["generate"] += 1
+            return {"message": "Hi, wanted to connect about Rose Labs.", "subject": "Quick intro"}
+        elif "send_email" in name:
+            call_count["send_email"] += 1
+            return {"messageId": "msg-1", "threadId": "thread-1"}
+        return {}
+
+    mock_workflow.execute_activity = AsyncMock(side_effect=mock_execute_activity)
+    mock_approval.return_value = None  # Approved
+
+    manager = MessagePersonManager()
+    wi = _make_workflow_instance()
+    events = []
+    # Use email as person_id - should work even though person is not in contacts
+    async for event in manager.execute_tool(wi, {
+        "person_id": "stranger@example.com",
+        "channel": "email",
+        "from_email": "me@test.com",
+        "intent": "Introduce Rose Labs",
+    }, "tc-1"):
+        events.append(event)
+
+    # Should complete successfully with FINISHED status
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses, \
+        f"Cold outreach should succeed. Events: {[(e.title, e.status) for e in events]}"
+
+    # Verify the full flow executed
+    assert call_count["read"] == 1
+    assert call_count["fetch_recent"] == 1
+    assert call_count["generate"] == 1
+    assert call_count["send_email"] == 1
+
+    # Verify the finished event references the email
+    finished = [e for e in events if e.status == MessageStatus.FINISHED][0]
+    assert "stranger@example.com" in finished.message
+    print("✅ test_cold_outreach_email passed")
+
+
+@patch("tools.message_person.workflow")
+async def test_cold_outreach_name_still_errors(mock_workflow):
+    """Cold outreach with just a name (no email/phone) → still errors since we can't send."""
+    mock_workflow.execute_activity = AsyncMock(return_value={
+        "person": None, "messages": [], "message": "No person found matching: Unknown Person",
+    })
+
+    manager = MessagePersonManager()
+    wi = _make_workflow_instance()
+    events = []
+    async for event in manager.execute_tool(wi, {
+        "person_id": "Unknown Person",
+        "channel": "email",
+        "from_email": "me@test.com",
+        "intent": "say hi",
+    }, "tc-1"):
+        events.append(event)
+
+    assert any(e.status == MessageStatus.ERROR for e in events)
+    error_event = [e for e in events if e.status == MessageStatus.ERROR][0]
+    assert "No person found" in error_event.message
+    print("✅ test_cold_outreach_name_still_errors passed")
 
 
 def test_manager_singleton():
@@ -354,6 +433,7 @@ async def test_full_email_flow(mock_workflow, mock_approval):
     async for event in manager.execute_tool(wi, {
         "person_id": "Bob Lee",
         "channel": "email",
+        "from_email": "rose@roselabs.ai",
         "intent": "Get them interested in angel investing in Rose Labs",
     }, "tc-1"):
         events.append(event)
@@ -396,6 +476,8 @@ async def run_all_tests():
         await test_no_person_found()
         await test_imessage_no_phone()
         await test_email_no_email()
+        await test_cold_outreach_email()
+        await test_cold_outreach_name_still_errors()
         await test_full_imessage_flow()
         await test_full_email_flow()
 

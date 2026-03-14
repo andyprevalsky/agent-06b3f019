@@ -35,6 +35,7 @@ TOOL_ALIASES = {
     "spawn_browser_agent": "spawn_agent",
     "spawn_code_agent": "spawn_agent",
     "spawn_sub_agent": "spawn_agent",
+    "spawn_sub_agent_for_each": "spawn_agent",
     "wait_seconds": "wait_for",  # Backward compat for old plans
 }
 
@@ -45,6 +46,7 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_browser_agent": {"type": "browser"},
     "spawn_code_agent": {"type": "code"},
     "spawn_sub_agent": {"type": "sub_agent"},
+    "spawn_sub_agent_for_each": {"type": "swarm"},
 }
 
 

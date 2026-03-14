@@ -18,6 +18,11 @@ const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
 const ROSE_API_KEY = process.env.ROSE_API_KEY || '';
 
+// Retry config
+const MAX_RETRIES = 3;
+const INITIAL_BACKOFF_MS = 1000;
+const RETRYABLE_STATUS_CODES = new Set([408, 429, 502, 503, 504]);
+
 // Content block for multimodal messages
 export interface ContentBlock {
   type: string;
@@ -99,32 +104,60 @@ export async function createStreamingCompletion(
 
   console.log('[SupabaseCompletions] Request to Rose:', logJson(requestBody));
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-      'x-api-key': ROSE_API_KEY,
-    },
-    body: JSON.stringify(requestBody),
-  });
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'x-api-key': ROSE_API_KEY,
+        },
+        body: JSON.stringify(requestBody),
+      });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error('[SupabaseCompletions] Request failed', {
-      status: response.status,
-      statusText: response.statusText,
-      error: errorText.substring(0, 500),
-    });
-    throw new Error(`Supabase completions failed: ${response.status} ${errorText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
+          const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
+          console.warn(`[SupabaseCompletions] Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`);
+          await new Promise((r) => setTimeout(r, backoff));
+          lastError = new Error(`Supabase completions failed: ${response.status} ${errorText}`);
+          continue;
+        }
+        console.error('[SupabaseCompletions] Request failed', {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorText.substring(0, 500),
+        });
+        throw new Error(`Supabase completions failed: ${response.status} ${errorText}`);
+      }
+
+      if (!response.body) {
+        throw new Error('No response body from Supabase completions');
+      }
+
+      if (attempt > 1) {
+        console.log(`[SupabaseCompletions] Succeeded on attempt ${attempt}/${MAX_RETRIES}`);
+      }
+
+      // Return an async iterable that parses SSE events
+      return parseSSEStream(response.body);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      // Retry on network errors (fetch throws on connection refused, timeout, etc.)
+      if (attempt < MAX_RETRIES && !(lastError.message.startsWith('Supabase completions failed:'))) {
+        const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
+        console.warn(`[SupabaseCompletions] Network error, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms:`, lastError.message);
+        await new Promise((r) => setTimeout(r, backoff));
+        continue;
+      }
+      throw lastError;
+    }
   }
 
-  if (!response.body) {
-    throw new Error('No response body from Supabase completions');
-  }
-
-  // Return an async iterable that parses SSE events
-  return parseSSEStream(response.body);
+  throw lastError || new Error('Supabase completions failed after retries');
 }
 
 /**

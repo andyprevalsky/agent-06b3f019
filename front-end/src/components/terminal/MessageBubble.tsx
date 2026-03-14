@@ -87,6 +87,8 @@ interface MessageBubbleProps {
   exploreStepHistory?: ExploreStep[];
   /** Wait_for check history (passed from MessageList grouping) */
   waitForChecks?: WaitForCheck[];
+  /** Hide sub-agent tree header (when grouped with preceding tree) */
+  hideSubAgentTreeHeader?: boolean;
 }
 
 interface ToolMessageData {
@@ -824,7 +826,7 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback, planCharCount, exploreStepHistory, waitForChecks }: MessageBubbleProps) {
+export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback, planCharCount, exploreStepHistory, waitForChecks, hideSubAgentTreeHeader }: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -956,6 +958,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
                 onNavigateToAgent(agentId);
               }
             }}
+            hideHeader={hideSubAgentTreeHeader}
           />
         </div>
       );
@@ -1000,7 +1003,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
         </div>
       </div>
     );
-  }, [isSubAgentTool, message.metadata, message.text, onNavigateToAgent]);
+  }, [isSubAgentTool, message.metadata, message.text, onNavigateToAgent, hideSubAgentTreeHeader]);
 
   if (subAgentBubble) return subAgentBubble;
 

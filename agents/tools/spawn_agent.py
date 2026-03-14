@@ -6,6 +6,9 @@ for research/information gathering.
 """
 
 import asyncio
+import csv
+import io
+import json
 import uuid as uuid_module
 from typing import Dict, Any, AsyncGenerator, Optional, List
 from datetime import timedelta
@@ -15,11 +18,11 @@ from temporalio.exceptions import ActivityError, CancelledError as TemporalCance
 import structlog
 import httpx
 
-from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, format_tool_message
+from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
-from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
+from tools.spawn_sub_agents import get_manager as get_sub_agent_manager, spawn_sub_agent_activity
 from helpers.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from config import load_config
 
@@ -36,10 +39,10 @@ def _validate_spawn_params(tool_call: dict) -> None:
 
     if not agent_type:
         raise ValueError(
-            "spawn_agent requires 'type'. Must be one of: 'browser', 'code', 'sub_agent', 'explore'."
+            "spawn_agent requires 'type'. Must be one of: 'browser', 'code', 'sub_agent', 'explore', 'swarm'."
         )
 
-    valid_types = {"browser", "code", "sub_agent", "explore"}
+    valid_types = {"browser", "code", "sub_agent", "explore", "swarm"}
     if agent_type not in valid_types:
         raise ValueError(
             f"spawn_agent type='{agent_type}' is invalid. Must be one of: {', '.join(sorted(valid_types))}."
@@ -55,11 +58,26 @@ def _validate_spawn_params(tool_call: dict) -> None:
             "spawn_agent(type='browser') requires 'start_url'. Provide the URL to navigate to."
         )
 
-    if agent_type in ("browser", "code", "sub_agent") and not tool_call.get("output_schema"):
+    if agent_type in ("browser", "code", "sub_agent", "swarm") and not tool_call.get("output_schema"):
         raise ValueError(
             f"spawn_agent(type='{agent_type}') requires 'output_schema'. "
             "Define the expected response structure with fields."
         )
+
+    if agent_type in ("sub_agent", "swarm"):
+        start_phase = tool_call.get("start_phase")
+        if start_phase is not None and str(start_phase).strip().lower() not in ("plan", "execute"):
+            raise ValueError(
+                "spawn_agent(type='sub_agent'|'swarm') start_phase must be either 'plan' or 'execute'."
+            )
+
+    if agent_type == "swarm":
+        has_items = isinstance(tool_call.get("items"), list) and len(tool_call.get("items")) > 0
+        has_csv = isinstance(tool_call.get("items_csv"), str) and bool(tool_call.get("items_csv").strip())
+        if not has_items and not has_csv:
+            raise ValueError(
+                "spawn_agent(type='swarm') requires either 'items' (list) or 'items_csv' (string)."
+            )
 
     if agent_type == "explore":
         if tool_call.get("output_schema"):
@@ -72,6 +90,77 @@ def _validate_spawn_params(tool_call: dict) -> None:
                 "spawn_agent(type='explore') does not support 'verifier'. "
                 "Only type='sub_agent' supports verification."
             )
+
+
+def _resolve_start_phase(tool_call: Dict[str, Any]) -> str:
+    """Resolve strict start_phase for sub-agents (plan|execute only)."""
+    phase = str(tool_call.get("start_phase", "plan")).strip().lower()
+    return "execute" if phase == "execute" else "plan"
+
+
+def _coerce_swarm_items(tool_call: Dict[str, Any]) -> List[Any]:
+    """Parse swarm items from list or CSV input."""
+    items = tool_call.get("items")
+    if isinstance(items, list) and items:
+        return items
+
+    csv_raw = tool_call.get("items_csv")
+    if not isinstance(csv_raw, str) or not csv_raw.strip():
+        return []
+
+    text = csv_raw.strip()
+    rows: List[Any] = []
+
+    # Use DictReader only when header is likely present. This avoids dropping
+    # the first row for plain CSV lists with no header.
+    has_header = False
+    try:
+        has_header = csv.Sniffer().has_header(text[:4096])
+    except Exception:
+        has_header = False
+
+    if has_header:
+        try:
+            dict_reader = csv.DictReader(io.StringIO(text))
+            if dict_reader.fieldnames:
+                rows = [dict(r) for r in dict_reader]
+                rows = [r for r in rows if any(v not in (None, "") for v in r.values())]
+                if rows:
+                    return rows
+        except Exception:
+            pass
+
+    # Fallback: plain CSV rows (single-column or multi-column)
+    reader = csv.reader(io.StringIO(text))
+    for row in reader:
+        if not row:
+            continue
+        cleaned = [str(c).strip() for c in row if str(c).strip()]
+        if not cleaned:
+            continue
+        if len(cleaned) == 1:
+            rows.append(cleaned[0])
+        else:
+            rows.append({"values": cleaned})
+
+    return rows
+
+
+def _build_swarm_goal(
+    base_goal: str,
+    item: Any,
+) -> str:
+    """Build a per-item sub-agent goal from shared goal + row context."""
+    if isinstance(item, dict):
+        item_text = json.dumps(item, ensure_ascii=True)
+    else:
+        item_text = str(item)
+
+    return (
+        f"{base_goal}\n\n"
+        "Use this row context for the task below.\n"
+        f"Row item:\n{item_text}"
+    )
 
 
 # =============================================================================
@@ -257,7 +346,6 @@ async def spawn_explore_agent_activity(
 
         # Serialize the actual result into message so run_agent puts it in context.
         # Without this, the model only sees "grep completed" and never the actual data.
-        import json
         try:
             result_str = json.dumps(actual_result, default=str)
         except Exception:
@@ -409,6 +497,10 @@ class SpawnAgentManager(ToolManager):
         try:
             _validate_spawn_params(tool_call)
         except ValueError as e:
+            # Swarm must stay a thin wrapper with no swarm-specific tool events.
+            # Bubble validation errors to workflow-level handling.
+            if agent_type == "swarm":
+                raise
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="spawn_agent failed",
@@ -428,6 +520,9 @@ class SpawnAgentManager(ToolManager):
                 yield event
         elif agent_type == "sub_agent":
             async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
+                yield event
+        elif agent_type == "swarm":
+            async for event in self._spawn_swarm(workflow_instance, tool_call, tool_call_id):
                 yield event
 
     async def _spawn_explore(
@@ -634,6 +729,7 @@ class SpawnAgentManager(ToolManager):
             "goal": tool_call.get("goal"),
             "output_schema": tool_call.get("output_schema"),
             "read_only": tool_call.get("read_only", False),
+            "start_phase": _resolve_start_phase(tool_call),
             "attachments": tool_call.get("attachments"),
         }
         if tool_call.get("verifier"):
@@ -653,6 +749,124 @@ class SpawnAgentManager(ToolManager):
         manager = get_sub_agent_manager()
         async for event in manager.execute_tool(workflow_instance, sub_agent_tool_call, tool_call_id):
             yield event
+
+    async def _spawn_swarm(
+        self,
+        workflow_instance,
+        tool_call: Dict[str, Any],
+        tool_call_id: str,
+    ) -> AsyncGenerator[ToolEvent, None]:
+        """
+        Thin wrapper: calls _spawn_sub_agent for each item in items/items_csv.
+
+        Two-phase approach:
+        1. SPAWN phase — create all children as fast as possible (MAX_INFLIGHT
+           concurrent spawns). Each _spawn_sub_agent generator yields one
+           IN_PROGRESS event once the child is created; we consume that event,
+           then free the slot for the next spawn.
+        2. DRAIN phase — resume all generators concurrently. Each one blocks on
+           workflow.wait_condition until its child completes, then yields
+           FINISHED/ERROR. We wait for ALL to finish before returning so the
+           DAG doesn't advance until the entire swarm is done.
+        """
+        items = _coerce_swarm_items(tool_call)
+        if not items:
+            raise ValueError("No items to process. Provide items or items_csv.")
+
+        MAX_DEPTH = 4
+        if workflow_instance.depth >= MAX_DEPTH:
+            raise ValueError(f"Cannot spawn swarm: maximum nesting depth ({MAX_DEPTH}) reached.")
+
+        base_goal = tool_call.get("goal", "")
+        start_phase = _resolve_start_phase(tool_call)
+        verifier = tool_call.get("verifier") or {
+            "type": "FLOAT_LLM_JUDGE",
+            "llm_judge_prompt": f"Evaluate whether the agent successfully completed: {base_goal}",
+        }
+        attachments = tool_call.get("attachments")
+        output_schema = tool_call.get("output_schema")
+
+        # Build per-item tool_calls shaped as spawn_agent(type=sub_agent)
+        per_item_calls: List[tuple] = []
+        for i, item in enumerate(items):
+            row_goal = _build_swarm_goal(base_goal, item)
+            item_tool_call = {
+                "type": "sub_agent",
+                "goal": row_goal,
+                "output_schema": output_schema,
+                "verifier": verifier,
+                "attachments": attachments,
+                "read_only": tool_call.get("read_only", False),
+                "start_phase": start_phase,
+            }
+            per_item_calls.append((item_tool_call, f"{tool_call_id}:{i}"))
+
+        MAX_INFLIGHT = 3  # TODO: bump to 10 for prod
+        failed_count = 0
+        spawn_semaphore = asyncio.Semaphore(MAX_INFLIGHT)
+
+        async def _spawn_one(tc: Dict, tcid: str):
+            """Spawn one child. Returns (generator, tcid) to drain later, or None on failure."""
+            nonlocal failed_count
+            async with spawn_semaphore:
+                # Hold off spawning while parent is paused
+                await workflow.wait_condition(lambda: not workflow_instance.is_paused)
+                gen = self._spawn_sub_agent(workflow_instance, tc, tcid)
+                try:
+                    # Consume the first event — either IN_PROGRESS (child created)
+                    # or ERROR (spawn failed). The generator then suspends just
+                    # before workflow.wait_condition.
+                    event = await gen.__anext__()
+                    await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")
+                    if isinstance(event, ToolEvent) and event.status == MessageStatus.ERROR:
+                        failed_count += 1
+                        return None
+                    return (gen, tcid)
+                except StopAsyncIteration:
+                    return None
+                except Exception as exc:
+                    failed_count += 1
+                    logger.warning("Swarm child spawn failed", tcid=tcid, error=str(exc))
+                    return None
+
+        async def _drain_one(gen, tcid: str):
+            """Drain remaining events (blocks on wait_condition, then yields FINISHED/ERROR)."""
+            nonlocal failed_count
+            last_status = None
+            try:
+                async for event in gen:
+                    await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")
+                    if isinstance(event, ToolEvent) and event.status:
+                        last_status = event.status
+                if last_status == MessageStatus.ERROR:
+                    failed_count += 1
+            except Exception as exc:
+                failed_count += 1
+                logger.warning("Swarm child drain failed", tcid=tcid, error=str(exc))
+
+        # Phase 1: Spawn all children (MAX_INFLIGHT concurrent spawns)
+        spawn_tasks = [asyncio.create_task(_spawn_one(tc, tcid)) for tc, tcid in per_item_calls]
+        spawn_results = await asyncio.gather(*spawn_tasks)
+        pending_gens = [r for r in spawn_results if r is not None]
+
+        # Phase 2: Wait for ALL spawned children to complete
+        if pending_gens:
+            drain_tasks = [asyncio.create_task(_drain_one(gen, tcid)) for gen, tcid in pending_gens]
+            await asyncio.gather(*drain_tasks)
+
+        # Propagate failure so DAG executor sees it
+        if failed_count > 0:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Swarm failed",
+                message=f"{failed_count}/{len(per_item_calls)} children failed",
+                status=MessageStatus.ERROR,
+            )
+            return
+
+        # All succeeded — no events to yield (already posted directly)
+        return
+        yield  # make this an async generator
 
 
 def get_manager():

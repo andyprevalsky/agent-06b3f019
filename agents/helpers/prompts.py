@@ -48,6 +48,17 @@ type="code": Ephemeral sandbox. For coding tasks: code execution, data processin
 
 type="sub_agent": Delegate complex tasks with own planning cycle. Run concurrently.
   Requires: output_schema. Use for parallel work or decomposing complex goals.
+  start_phase is REQUIRED by policy:
+  - start_phase="execute" for clear direct tasks expected to need 1-2 tool calls
+  - start_phase="plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer "plan"
+
+type="swarm": Lightweight fan-out wrapper over sub-agents (one child per item/row).
+  Requires: output_schema and either items (list) or items_csv (string).
+  The same shared goal is applied to every row/item, with row context appended per child goal.
+  Downstream this executes one spawn_sub_agent child for each row/item goal.
+  All children share the same parent bus/tree.
+  start_phase follows the same criteria as sub_agent.
 
 <bad-example>
 spawn_agent(type="browser", goal="Login to site")
@@ -621,13 +632,15 @@ TASK COUNT LIMITS
 -----------------
 - Target: 3-8 tasks per plan
 - If you're tempted to add 10+ tasks, use `spawn_sub_agent` to delegate complexity
+- For repeated work across many rows/items, use `spawn_sub_agent_for_each` to fan out one child per row
 - Long sequential chains (8+ steps) are a code smell - decompose hierarchically instead
 - NEVER plan "1 sub-agent + reasoning" — a single sub-agent with the full goal is just recursion with no decomposition. Either decompose into multiple sub-tasks or do the work directly.
 
-SPAWN_SUB_AGENT TOOL
---------------------
-Use `tool_name: "spawn_sub_agent"` when a task is too complex for a single tool call.
-The sub-agent gets its own planning and execution cycle to handle the complexity.
+SPAWN_SUB_AGENT vs SPAWN_SUB_AGENT_FOR_EACH
+--------------------------------------------
+spawn_sub_agent = ONE complex task delegated to a child agent (e.g., "research and book a venue").
+spawn_sub_agent_for_each = SAME task applied to MANY items from a list/CSV (e.g., "look up each company in this CSV").
+
 
 GOOD use of spawn_sub_agent:
   Task 0: spawn_sub_agent "Research and book a venue in Austin"  ← complex multi-step task

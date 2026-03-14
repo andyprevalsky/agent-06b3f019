@@ -15,13 +15,15 @@ from temporalio.common import RetryPolicy
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 from helpers.tool_schemas import TOOL_MODELS, PLANNER_ASSIGNABLE_TOOLS
+from helpers.attachments import FilePointer, get_cached_file
 
 # Manual descriptions for planner-facing tool names (mapped to spawn_agent via DAG aliases)
 PLANNING_TOOL_DESCRIPTIONS = {
     "spawn_explore_agent": "Research agent for information gathering (web search, web fetch, message search across iMessage/email). Returns free-form summary.",
     "spawn_browser_agent": "Web automation agent for purchases, forms, JS-heavy sites. Needs start_url.",
     "spawn_code_agent": "Coding agent in ephemeral E2B sandbox. Optional github_repo_link.",
-    "spawn_sub_agent": "Delegate complex task with own planning cycle. Supports verifier.",
+    "spawn_sub_agent": "Delegate ONE complex task to a child agent with its own planning cycle. Use for a single multi-step job (e.g., 'research and book a venue'). NOT for repeated work across a list - use spawn_sub_agent_for_each instead.",
+    "spawn_sub_agent_for_each": "Apply the SAME task to MANY items (list or CSV). Spawns one sub-agent per item/row with a shared goal. Use instead of spawn_sub_agent whenever the work is repeated across a list of inputs (e.g., 'look up each company', 'email each person', 'process each row in the CSV').",
     "reasoning": "Pure thinking/analysis step with no external tool call. Use for synthesizing results or making decisions.",
     "wait_for": "Wait until a timestamp or condition is met. Timestamp mode: provide until_timestamp (ISO 8601). Condition mode: provide condition (natural language) + check_interval_seconds + max_checks. Explore agents periodically check the condition. Use for polling/monitoring tasks (e.g., 'check every 15 min if package delivered').",
 }
@@ -223,6 +225,22 @@ class SetPlanManager(ToolManager):
         for msg in workflow_instance.context:
             role = msg.get("role", "").upper()
             text = msg.get("text", "")
+
+            # Resolve file attachments from cache (pre-populated by resolve_attachments_activity)
+            file_pointer_data = msg.get("file_pointer") or msg.get("filePointer")
+            if file_pointer_data and isinstance(file_pointer_data, dict):
+                try:
+                    fp = FilePointer.from_dict(file_pointer_data)
+                    cached = get_cached_file(fp.id)
+                    if cached:
+                        file_bytes, _ = cached
+                        file_text = file_bytes.decode("utf-8", errors="replace")
+                        text = f"{text}\n\n[File: {fp.original_filename}]\n```\n{file_text}\n```" if text else f"[File: {fp.original_filename}]\n```\n{file_text}\n```"
+                    elif not text:
+                        text = f"[File attached: {fp.original_filename} ({fp.mime_type})]"
+                except Exception:
+                    pass  # Fall through to normal text handling
+
             if not text:
                 continue
             if role == "USER":

@@ -22,7 +22,7 @@
  * Visual state (circle color, status text) derived from agent status.
  */
 
-import { useMemo, useState, memo } from 'react';
+import { useMemo, useState, useCallback, memo } from 'react';
 import { ChevronRight, FileJson, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -303,6 +303,8 @@ interface SubAgentTreeProps {
   subAgentIds: string[];
   title: string;
   onNavigate: (agentId: string) => void;
+  /** Hide the header line (used when consecutive trees are grouped) */
+  hideHeader?: boolean;
 }
 
 /**
@@ -369,6 +371,7 @@ const SubAgentTree = memo(function SubAgentTree({
   subAgentIds,
   title,
   onNavigate,
+  hideHeader = false,
 }: SubAgentTreeProps) {
   const allNodes = useAgentTree(busId);
   const [showAllIntermediaries, setShowAllIntermediaries] = useState(true);
@@ -380,8 +383,8 @@ const SubAgentTree = memo(function SubAgentTree({
     [allNodes, subAgentIds]
   );
 
-  // Get children of a node
-  const getChildren = (parentId: string): TreeNode[] => {
+  // Get children of a node (memoized to stabilize downstream useMemo deps)
+  const getChildren = useCallback((parentId: string): TreeNode[] => {
     const children: TreeNode[] = [];
     for (const node of relevantNodes.values()) {
       if (node.parentAgentId === parentId) {
@@ -389,7 +392,7 @@ const SubAgentTree = memo(function SubAgentTree({
       }
     }
     return children;
-  };
+  }, [relevantNodes]);
 
   // Build tree structure from flat nodes
   const rootNodes = useMemo(() => {
@@ -432,6 +435,7 @@ const SubAgentTree = memo(function SubAgentTree({
   const allTerminal = leafNodes.length > 0 && leafNodes.every(isTerminal);
   const anyFailed = leafNodes.some((node) => node.status === 'FAILED');
   const clusterCircle = allTerminal ? (anyFailed ? '✗' : '●') : '◑';
+  const totalAgents = relevantNodes.size;
   const clusterTitle = allTerminal
     ? (anyFailed ? 'Some tasks failed' : 'All tasks completed')
     : 'Delegating tasks';
@@ -442,7 +446,9 @@ const SubAgentTree = memo(function SubAgentTree({
       {/* Circle - filled when all sub-agents complete, half-filled otherwise */}
       <span className="w-4 text-center select-none">{clusterCircle}</span>
       {/* Title */}
-      <span className="flex-1">{clusterTitle}</span>
+      <span>{clusterTitle}</span>
+      {/* Total agent count */}
+      <span className="text-xs text-muted-foreground">— {totalAgents} agent{totalAgents !== 1 ? 's' : ''}</span>
     </div>
   );
 
@@ -474,19 +480,22 @@ const SubAgentTree = memo(function SubAgentTree({
 
     return (
       <div className="font-mono text-sm">
-        {/* Header */}
-        <div className={cn("py-0.5", allTerminal ? "text-gray-500" : "text-foreground")}>
-          <div className="flex items-center gap-1">
-            <span className="w-4 flex-shrink-0 text-center select-none">{clusterCircle}</span>
-            <span>{clusterTitle}</span>
-          </div>
-          {goalsList.map((goal, index) => (
-            <div key={index} className="flex items-center gap-1">
-              <span className="w-4 flex-shrink-0" />
-              <span className="text-xs text-muted-foreground">- {goal}</span>
+        {/* Header (hidden when grouped with preceding tree) */}
+        {!hideHeader && (
+          <div className={cn("py-0.5", allTerminal ? "text-gray-500" : "text-foreground")}>
+            <div className="flex items-center gap-1">
+              <span className="w-4 flex-shrink-0 text-center select-none">{clusterCircle}</span>
+              <span>{clusterTitle}</span>
+              <span className="text-xs text-muted-foreground">— {totalAgents} agent{totalAgents !== 1 ? 's' : ''}</span>
             </div>
-          ))}
-        </div>
+            {goalsList.map((goal, index) => (
+              <div key={index} className="flex items-center gap-1">
+                <span className="w-4 flex-shrink-0" />
+                <span className="text-xs text-muted-foreground">- {goal}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {/* Intermediary agents summary line - uses └─ since it's the only direct child */}
         {intermediaryNodes.length > 0 && (
           <IntermediaryLine
@@ -536,8 +545,8 @@ const SubAgentTree = memo(function SubAgentTree({
   // Full tree view (depth < 2 or user clicked to show all)
   return (
     <div className="font-mono text-sm">
-      {/* Header: spawn_sub_agent call */}
-      {headerLine}
+      {/* Header: spawn_sub_agent call (hidden when grouped with preceding tree) */}
+      {!hideHeader && headerLine}
       {showAllIntermediaries && intermediaryNodes.length > 0 && (
         <div
           className="flex items-center gap-1 py-0.5 cursor-pointer text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"

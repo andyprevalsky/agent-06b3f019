@@ -77,8 +77,26 @@ SPAWN TYPE: sub_agent
 - Set type="sub_agent"
 - Required: goal (str), output_schema (object with field names → types)
 - output_schema MUST be provided — define the structured data you expect back
+- Required by policy: start_phase ("plan" or "execute")
+  - "execute" for clear direct tasks expected to need 1-2 tool calls
+  - "plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer "plan"
 - Optional: read_only (bool), verifier (object), attachments (list of filenames)
 - Example output_schema: {"summary": "str", "findings": "list[str]"}""",
+        "spawn_sub_agent_for_each": """
+SPAWN TYPE: swarm
+- Set type="swarm"
+- Required: goal (str), output_schema (object with field names → types), and either:
+  - items (list), OR
+  - items_csv (string)
+- The goal is shared across all rows/items; swarm applies it once per row/item downstream
+- Downstream behavior: one spawn_sub_agent child is started per row/item goal
+- Required by policy: start_phase ("plan" or "execute")
+  - "execute" for clear direct tasks expected to need 1-2 tool calls
+  - "plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer "plan"
+- Optional: read_only (bool), verifier (object), attachments (list of filenames)
+- Keep swarm lightweight: same high-level goal + one child per item/row""",
     }
 
     if alias_hint in SPAWN_PARAM_REQUIREMENTS:

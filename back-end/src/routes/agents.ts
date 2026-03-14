@@ -377,6 +377,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           ...(body.parent_agent_id ? { parentAgentId: body.parent_agent_id } : {}),
           ...(body.depth !== undefined ? { depth: body.depth } : {}),
           ...(body.bus_id ? { busId: body.bus_id } : {}),
+          ...(body.start_phase ? { startPhase: body.start_phase } : {}),
           ...(body.max_iterations ? { maxIterations: body.max_iterations } : {}),
           priceLimitCents: agent.agent.priceLimitCents,
         });
@@ -1727,4 +1728,3 @@ router.post('/generate-response-schema', hybridAuth, async (req: HybridAuthReque
 });
 
 export default router;
-

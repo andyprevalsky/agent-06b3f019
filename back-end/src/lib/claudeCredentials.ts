@@ -107,6 +107,18 @@ export async function fetchClaudeCodeCredentials(userId: string): Promise<string
 
 const POOL_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
+function resolveRateLimitedUntil(
+  rateLimitedUntil?: string | Date | null,
+  cooldownMs: number = POOL_RATE_LIMIT_COOLDOWN_MS
+): Date {
+  if (rateLimitedUntil instanceof Date) return rateLimitedUntil;
+  if (typeof rateLimitedUntil === 'string') {
+    const parsed = new Date(rateLimitedUntil);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date(Date.now() + cooldownMs);
+}
+
 /**
  * Fetch an available pool token from Integrations with poolingEnabled=true.
  * Selects the least-recently-used token that isn't rate-limited.
@@ -181,14 +193,39 @@ export async function fetchPoolToken(excludeIds?: string[]): Promise<{ accessTok
  */
 export async function markPoolTokenRateLimited(
   poolTokenId: string,
-  cooldownMs: number = POOL_RATE_LIMIT_COOLDOWN_MS
+  options?: {
+    rateLimitedUntil?: string | Date | null;
+    cooldownMs?: number;
+  }
 ): Promise<void> {
-  const until = new Date(Date.now() + cooldownMs);
+  const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
   await prisma.integration.update({
     where: { id: poolTokenId },
     data: { rateLimitedUntil: until },
   });
   console.log(`[ClaudeCredentials] Pool token ${poolTokenId} rate-limited until ${until.toISOString()}`);
+}
+
+/**
+ * Mark a user's Claude token integration as rate-limited for a cooldown period.
+ */
+export async function markUserTokenRateLimited(
+  userId: string,
+  options?: {
+    rateLimitedUntil?: string | Date | null;
+    cooldownMs?: number;
+  }
+): Promise<void> {
+  const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
+  await prisma.integration.updateMany({
+    where: {
+      userId,
+      name: 'claude_code',
+      status: 'CONNECTED',
+    },
+    data: { rateLimitedUntil: until },
+  });
+  console.log(`[ClaudeCredentials] User token for ${userId} rate-limited until ${until.toISOString()}`);
 }
 
 // =============================================================================
@@ -207,8 +244,17 @@ export async function fetchClaudeCodeAccessToken(userId: string): Promise<string
   }
 
   try {
+    const now = new Date();
     const integration = await prisma.integration.findFirst({
-      where: { userId, name: 'claude_code', status: 'CONNECTED' },
+      where: {
+        userId,
+        name: 'claude_code',
+        status: 'CONNECTED',
+        OR: [
+          { rateLimitedUntil: null },
+          { rateLimitedUntil: { lt: now } },
+        ],
+      },
     });
 
     if (!integration) {

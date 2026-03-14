@@ -19,6 +19,7 @@ import json
 import os
 import uuid as uuid_module
 import base64
+import re
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus, AssistantEvent
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
@@ -98,23 +99,151 @@ async def fetch_claude_token(
         return None
 
 
-async def report_pool_token_rate_limited(config: Any, pool_token_id: str) -> None:
-    """Report a pool token as rate-limited to the backend."""
+def _normalize_rate_limited_until(value: Any) -> Optional[str]:
+    """Normalize a reset timestamp (epoch seconds or ISO string) to UTC ISO format."""
+    if value is None:
+        return None
+
+    # Epoch seconds (int/float or numeric string)
+    try:
+        if isinstance(value, (int, float)):
+            if value > 0:
+                dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+                return dt.isoformat().replace("+00:00", "Z")
+        elif isinstance(value, str) and value.strip().isdigit():
+            dt = datetime.fromtimestamp(float(value.strip()), tz=timezone.utc)
+            return dt.isoformat().replace("+00:00", "Z")
+    except Exception:
+        pass
+
+    # ISO string
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except Exception:
+            pass
+
+    return None
+
+
+def extract_rate_limited_until(llm_result: Dict[str, Any]) -> Optional[str]:
+    """Extract rateLimitedUntil from known fields and fallback text."""
+    if not isinstance(llm_result, dict):
+        return None
+
+    # 1) Canonical fields
+    for key in ("rateLimitedUntil", "rate_limited_until", "rateLimitedUntilIso"):
+        normalized = _normalize_rate_limited_until(llm_result.get(key))
+        if normalized:
+            return normalized
+
+    # 2) Known headers payload
+    headers = llm_result.get("rateLimitHeaders") or llm_result.get("rate_limit_headers") or {}
+    if isinstance(headers, dict):
+        for key in (
+            "unifiedReset",
+            "anthropic-ratelimit-unified-reset",
+            "anthropic-ratelimit-unified-5h-reset",
+            "anthropic-ratelimit-unified-7d-reset",
+        ):
+            normalized = _normalize_rate_limited_until(headers.get(key))
+            if normalized:
+                return normalized
+
+        retry_after = headers.get("retryAfter") or headers.get("retry-after")
+        try:
+            retry_after_s = int(str(retry_after).strip()) if retry_after is not None else None
+            if retry_after_s and retry_after_s > 0:
+                dt = datetime.now(timezone.utc).timestamp() + retry_after_s
+                return datetime.fromtimestamp(dt, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        except Exception:
+            pass
+
+    # 3) Search text fields for epoch/ISO hints
+    text_candidates = [
+        llm_result.get("message"),
+        llm_result.get("details"),
+        llm_result.get("error"),
+        llm_result.get("rateLimitMessage"),
+    ]
+    text_blob = " ".join(str(t) for t in text_candidates if t)
+    if text_blob:
+        # ISO-like date
+        iso_match = re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", text_blob)
+        if iso_match:
+            normalized = _normalize_rate_limited_until(iso_match.group(0))
+            if normalized:
+                return normalized
+
+        # Epoch seconds in anthropic reset headers (10+ digits)
+        epoch_match = re.search(r"\b(\d{10,})\b", text_blob)
+        if epoch_match:
+            normalized = _normalize_rate_limited_until(epoch_match.group(1))
+            if normalized:
+                return normalized
+
+        # retry-after style
+        retry_match = re.search(r"retry[- ]after[:=]?\s*(\d+)", text_blob, flags=re.IGNORECASE)
+        if retry_match:
+            try:
+                retry_after_s = int(retry_match.group(1))
+                if retry_after_s > 0:
+                    dt = datetime.now(timezone.utc).timestamp() + retry_after_s
+                    return datetime.fromtimestamp(dt, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
+
+    return None
+
+
+async def report_claude_token_rate_limited(
+    config: Any,
+    *,
+    user_id: str,
+    source: Optional[str],
+    pool_token_id: Optional[str] = None,
+    rate_limited_until: Optional[str] = None,
+) -> None:
+    """Report Claude token rate-limit status to backend (pool or user token)."""
     backend_url = config.backend.api_url.rstrip("/")
     backend_api_key = config.backend.api_key
-    if not backend_api_key:
+    if not backend_api_key or not source:
         return
+
+    payload: Dict[str, Any] = {
+        "source": source,
+    }
+    if source == "pool" and pool_token_id:
+        payload["poolTokenId"] = pool_token_id
+    elif source == "user":
+        payload["userId"] = user_id
+    else:
+        return
+
+    if rate_limited_until:
+        payload["rateLimitedUntil"] = rate_limited_until
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.post(
-                f"{backend_url}/api/integrations/claude-code/pool-token/rate-limited",
-                headers={"X-API-Key": backend_api_key, "Content-Type": "application/json"},
-                json={"poolTokenId": pool_token_id},
+                f"{backend_url}/api/integrations/claude-code/token/rate-limited",
+                headers={"X-API-Key": backend_api_key, "X-User-Id": user_id, "Content-Type": "application/json"},
+                json=payload,
             )
-            logger.info(f"[ClaudeAuth] Reported pool token {pool_token_id} as rate-limited")
+            logger.info(
+                f"[ClaudeAuth] Marked {source} token rate-limited",
+                source=source,
+                pool_token_id=pool_token_id,
+                rate_limited_until=rate_limited_until,
+            )
     except Exception as e:
-        logger.error(f"[ClaudeAuth] Failed to report rate limit: {e}")
+        logger.error(f"[ClaudeAuth] Failed to report token rate limit: {e}")
 
 
 # ========================================
@@ -2775,22 +2904,57 @@ async def spawn_browser_agent_activity_v3(
 
                 # Handle claude auth rate-limit fallback
                 if llm_result.get("fallback") == "racing" and browser_use_mode == "claude":
-                    # Try pool token rotation before falling back to racing
-                    retried = False
-                    if token_state.pool_token_id:
-                        # Current pool token was rate-limited
-                        await report_pool_token_rate_limited(config, token_state.pool_token_id)
-                        token_state.excluded_pool_ids.append(token_state.pool_token_id)
-                    # Try to get another pool token
-                    new_token = await fetch_claude_token(
-                        config, user_id, force_pool=True,
-                        exclude_pool_ids=token_state.excluded_pool_ids or None,
-                    )
-                    if new_token:
+                    # Before any fallback, mark the current token rate-limited and clear worker cache.
+                    # Then try rotating to another token (pool) before conceding to racing mode.
+                    max_rotations = 5
+                    rotations = 0
+
+                    while llm_result.get("fallback") == "racing" and rotations < max_rotations:
+                        rotations += 1
+
+                        rate_limited_until = extract_rate_limited_until(llm_result)
+                        current_source = token_state.source
+                        current_pool_id = token_state.pool_token_id
+
+                        await report_claude_token_rate_limited(
+                            config,
+                            user_id=user_id,
+                            source=current_source,
+                            pool_token_id=current_pool_id,
+                            rate_limited_until=rate_limited_until,
+                        )
+
+                        # Clear local token cache so this worker never reuses exhausted token.
+                        token_state.access_token = None
+                        if current_pool_id:
+                            token_state.excluded_pool_ids.append(current_pool_id)
+                            token_state.pool_token_id = None
+
+                        # Always rotate from pool after a ClaudeAuth 429.
+                        new_token = await fetch_claude_token(
+                            config,
+                            user_id,
+                            force_pool=True,
+                            exclude_pool_ids=token_state.excluded_pool_ids or None,
+                        )
+                        if not new_token:
+                            logger.warning(
+                                "[ClaudeAuth] No replacement token available after rate-limit",
+                                rotations=rotations,
+                                source=current_source,
+                            )
+                            break
+
                         token_state.access_token = new_token.get("accessToken")
                         token_state.source = new_token.get("source")
                         token_state.pool_token_id = new_token.get("poolTokenId")
-                        logger.info(f"[ClaudeAuth] Retrying with pool token (source={token_state.source})")
+                        logger.info(
+                            "[ClaudeAuth] Retrying with rotated token",
+                            source=token_state.source,
+                            pool_token_id=token_state.pool_token_id,
+                            rotations=rotations,
+                        )
+
                         llm_result = await call_rose_browser_use(
                             task=enriched_task,
                             browser_state=browser_state,
@@ -2800,12 +2964,10 @@ async def spawn_browser_agent_activity_v3(
                             user_id=user_id,
                             oauth_token=token_state.access_token,
                         )
-                        if llm_result.get("fallback") != "racing":
-                            retried = True
 
-                    if not retried and llm_result.get("fallback") == "racing":
-                        # All tokens exhausted — fall back to racing for rest of session
-                        logger.warning("[ClaudeAuth] All tokens exhausted, falling back to racing mode")
+                    if llm_result.get("fallback") == "racing":
+                        # All token rotations exhausted — fall back to racing for rest of session
+                        logger.warning("[ClaudeAuth] All Claude tokens exhausted, falling back to racing mode")
                         browser_use_mode = None
                         token_state.fallen_back_to_racing = True
                         llm_result = await call_rose_browser_use(

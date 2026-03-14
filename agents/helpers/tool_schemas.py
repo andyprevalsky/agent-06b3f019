@@ -41,6 +41,7 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "spawn_browser_agent",
     "spawn_code_agent",
     "spawn_sub_agent",
+    "spawn_sub_agent_for_each",
     "wait_for",
     "call_phone_number",
     "message_person",
@@ -54,6 +55,7 @@ class PlanToolName(str, Enum):
     spawn_browser_agent = "spawn_browser_agent"
     spawn_code_agent = "spawn_code_agent"
     spawn_sub_agent = "spawn_sub_agent"
+    spawn_sub_agent_for_each = "spawn_sub_agent_for_each"
     wait_for = "wait_for"
     call_phone_number = "call_phone_number"
     message_person = "message_person"
@@ -355,17 +357,23 @@ class SpawnAgentTool(BaseModel):
 
     type="sub_agent": Delegate complex task with own planning cycle.
       Required: goal (str), output_schema (ResponseSchemaConfig).
-      Optional: read_only (bool), verifier (VerifierConfig), attachments.
+      Optional: start_phase ("plan"|"execute"), read_only (bool), verifier (VerifierConfig), attachments.
+
+    type="swarm": Fan out one sub-agent per input row/item.
+      The same shared goal is applied to each row, then row context is appended per child.
+      Downstream this spawns one spawn_sub_agent child per row/item goal.
+      Required: goal (str), output_schema (ResponseSchemaConfig), and either items (list) or items_csv (string).
+      Optional: start_phase ("plan"|"execute"), read_only (bool), verifier, attachments.
     """
 
     tool: Literal["spawn_agent"]
-    type: Literal["browser", "code", "sub_agent", "explore"]
+    type: Literal["browser", "code", "sub_agent", "explore", "swarm"]
     goal: str = Field(description="Task/objective for the agent")
 
     output_schema: Optional[ResponseSchemaConfig] = Field(
         default=None,
         description=(
-            "REQUIRED for type=browser, type=code, type=sub_agent. "
+            "REQUIRED for type=browser, type=code, type=sub_agent, and type=swarm. "
             "MUST NOT be provided for type=explore. "
             "Defines the structured data the agent returns. "
             "Example: {\"summary\": \"str\", \"items\": \"list[str]\", \"file\": \"file_pointer\"}"
@@ -391,11 +399,34 @@ class SpawnAgentTool(BaseModel):
     # sub_agent only
     read_only: Optional[bool] = Field(
         default=None,
-        description="(sub_agent only) True if sub-agent must stay read-only (plan-phase spawn)."
+        description="(sub_agent/swarm only) True if sub-agent must stay read-only (plan-phase spawn)."
     )
     verifier: Optional[VerifierConfig] = Field(
         default=None,
-        description="(sub_agent only) Verification config for evaluating agent success."
+        description="(sub_agent/swarm only) Verification config for evaluating agent success."
+    )
+    start_phase: Optional[Literal["plan", "execute"]] = Field(
+        default=None,
+        description=(
+            "(sub_agent/swarm only) Child agent start phase. "
+            "Use 'execute' for clear direct tasks expected to need 1-2 tool calls. "
+            "Use 'plan' for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination. "
+            "When in doubt, prefer 'plan'."
+        )
+    )
+    items: Optional[List[Any]] = Field(
+        default=None,
+        description=(
+            "(swarm only) List of items/rows. The shared goal is reused for each item, "
+            "and one downstream spawn_sub_agent child is started per item."
+        )
+    )
+    items_csv: Optional[str] = Field(
+        default=None,
+        description=(
+            "(swarm only) CSV string input. The shared goal is reused for each parsed row, "
+            "and one downstream spawn_sub_agent child is started per row."
+        )
     )
 
 
@@ -988,4 +1019,3 @@ __all__ = [
     "create_agent_action_model",
     "ProgressScore",
 ]
-

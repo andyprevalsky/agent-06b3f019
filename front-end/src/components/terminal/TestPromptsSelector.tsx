@@ -184,6 +184,12 @@ We need to make sure we run this process with world class persistence, etiquette
 Since you are limited on the sub-agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.`,
     attachmentUrls: ['/test-assets/vcs-and-angels.csv'],
   },
+  {
+    title: 'Test Agent Swarm',
+    description: 'Tests sub-agent swarm processing 12 CSV entities in parallel',
+    prompt: 'Get me one interesting fact about each entity on the csv.',
+    attachmentUrls: ['/test-assets/entities-12.csv'],
+  },
 ];
 
 interface TestPromptsSelectorProps {

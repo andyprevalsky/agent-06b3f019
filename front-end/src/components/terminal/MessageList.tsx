@@ -477,7 +477,75 @@ export function MessageList({
     return deduplicateToolMessages(withoutHidden);
   }, [messages, subAgentId]);
 
-  const [filteredMessages, exploreStepMap, waitForCheckMap] = filteredMessagesAndSteps;
+  const [filteredMessagesRaw, exploreStepMap, waitForCheckMap] = filteredMessagesAndSteps;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MERGE SUB-AGENT TREES by busId into single renders
+  // Groups all spawn_sub_agent tree messages sharing the same busId,
+  // regardless of whether other messages sit between them.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const prevMergedRef = useRef<Map<string, Message>>(new Map());
+
+  const filteredMessages = useMemo(() => {
+    const isSpawnTree = (m: Message) =>
+      m.metadata?.toolName === 'spawn_sub_agent' &&
+      Array.isArray(m.metadata?.subAgentIds) &&
+      (m.metadata.subAgentIds as string[]).length > 0 &&
+      !!m.metadata?.busId;
+
+    // Pass 1: group spawn tree messages by busId
+    const groupsByBus = new Map<string, { firstIndex: number; ids: string[]; firstMsg: Message }>();
+    const skipIndices = new Set<number>();
+
+    for (let i = 0; i < filteredMessagesRaw.length; i++) {
+      const msg = filteredMessagesRaw[i];
+      if (!isSpawnTree(msg)) continue;
+      const busId = msg.metadata!.busId as string;
+      const group = groupsByBus.get(busId);
+      if (group) {
+        group.ids.push(...(msg.metadata!.subAgentIds as string[]));
+        skipIndices.add(i);
+      } else {
+        groupsByBus.set(busId, {
+          firstIndex: i,
+          ids: [...(msg.metadata!.subAgentIds as string[])],
+          firstMsg: msg,
+        });
+      }
+    }
+
+    // Pass 2: build result, replacing first occurrence per group with merged message
+    const newMergedCache = new Map<string, Message>();
+    const result: Message[] = [];
+
+    for (let i = 0; i < filteredMessagesRaw.length; i++) {
+      if (skipIndices.has(i)) continue;
+      const msg = filteredMessagesRaw[i];
+
+      if (isSpawnTree(msg)) {
+        const busId = msg.metadata!.busId as string;
+        const group = groupsByBus.get(busId)!;
+        const idsKey = group.ids.join(',');
+
+        // Reuse cached merged message if IDs haven't changed (stable reference)
+        const cached = prevMergedRef.current.get(busId);
+        if (cached && (cached.metadata?.subAgentIds as string[])?.join(',') === idsKey) {
+          result.push(cached);
+          newMergedCache.set(busId, cached);
+        } else {
+          const merged = { ...msg, metadata: { ...msg.metadata, subAgentIds: group.ids } };
+          result.push(merged);
+          newMergedCache.set(busId, merged);
+        }
+      } else {
+        result.push(msg);
+      }
+    }
+
+    prevMergedRef.current = newMergedCache;
+    return result;
+  }, [filteredMessagesRaw]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // REGISTER HANDLER to receive realtime messages

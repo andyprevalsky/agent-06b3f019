@@ -14,7 +14,12 @@ import { sendSms } from '../lib/smsQueue';
 import { prisma } from '../lib/prisma';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
-import { fetchClaudeCodeAccessToken, fetchPoolToken, markPoolTokenRateLimited } from '../lib/claudeCredentials';
+import {
+  fetchClaudeCodeAccessToken,
+  fetchPoolToken,
+  markPoolTokenRateLimited,
+  markUserTokenRateLimited,
+} from '../lib/claudeCredentials';
 import { importLinkedInData } from '../services/integrations/linkedinParser';
 
 const router = express.Router();
@@ -2779,27 +2784,48 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
       return res.status(400).json({ error: 'Missing required field: body' });
     }
 
-    // Check if user has Gmail credentials
+    // Always require from_email — no implicit credential selection
+    if (!from_email) {
+      const creds = await prisma.emailIntegrationCredential.findMany({
+        where: { userId, provider: EmailProvider.GMAIL, accessToken: { not: null } },
+        select: { email: true },
+      });
+      const available = creds.map(c => c.email).filter(Boolean);
+      if (available.length > 0) {
+        return res.status(400).json({
+          error: 'from_email required',
+          message: `from_email is required. Available connected accounts: ${available.join(', ')}`,
+        });
+      }
+      return res.status(400).json({
+        error: 'Gmail not connected',
+        message: 'No Gmail accounts connected. Connect your Gmail by clicking on the hamburger icon > Integrations > Connect Gmail',
+      });
+    }
+
+    // Look up the specific credential matching from_email
     const credential = await prisma.emailIntegrationCredential.findFirst({
       where: {
         userId,
         provider: EmailProvider.GMAIL,
         accessToken: { not: null },
-        ...(from_email ? { email: from_email } : {}),
+        email: from_email,
       },
       include: {
         integration: true,
       },
-      orderBy: {
-        updatedAt: 'desc',
-      },
     });
 
     if (!credential || !credential.accessToken) {
+      const creds = await prisma.emailIntegrationCredential.findMany({
+        where: { userId, provider: EmailProvider.GMAIL, accessToken: { not: null } },
+        select: { email: true },
+      });
+      const available = creds.map(c => c.email).filter(Boolean);
       return res.status(400).json({
         error: 'Gmail not connected',
-        message: from_email
-          ? `No connected Gmail account found for '${from_email}'. Make sure this email is connected in Integrations.`
+        message: available.length > 0
+          ? `No connected Gmail account found for '${from_email}'. Available accounts: ${available.join(', ')}`
           : 'Connect your Gmail in order to allow Rose to send emails on your behalf. To connect your Gmail click on the hamburger icon > Integrations > Connect Gmail',
       });
     }
@@ -3489,6 +3515,48 @@ router.get('/claude-code/credentials/token', authenticate, async (req: AuthReque
 });
 
 /**
+ * POST /api/integrations/claude-code/token/rate-limited
+ *
+ * Marks either a pool token or a user's token as rate-limited until a specific timestamp.
+ * Internal-only (X-API-Key auth).
+ */
+router.post('/claude-code/token/rate-limited', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.isInternal) {
+      return res.status(403).json({ error: 'Internal only' });
+    }
+
+    const body = req.body || {};
+    const source = body.source as string | undefined;
+    const rateLimitedUntil = body.rateLimitedUntil as string | undefined;
+
+    if (source === 'pool') {
+      const poolTokenId = body.poolTokenId as string | undefined;
+      if (!poolTokenId) {
+        return res.status(400).json({ error: 'Missing poolTokenId for source=pool' });
+      }
+      await markPoolTokenRateLimited(poolTokenId, { rateLimitedUntil });
+      return res.json({ ok: true, source, poolTokenId, rateLimitedUntil: rateLimitedUntil || null });
+    }
+
+    if (source === 'user') {
+      const userIdFromHeader = req.headers['x-user-id'] as string | undefined;
+      const userId = (body.userId as string | undefined) || userIdFromHeader;
+      if (!userId) {
+        return res.status(400).json({ error: 'Missing userId for source=user' });
+      }
+      await markUserTokenRateLimited(userId, { rateLimitedUntil });
+      return res.json({ ok: true, source, userId, rateLimitedUntil: rateLimitedUntil || null });
+    }
+
+    return res.status(400).json({ error: 'Invalid source. Must be "pool" or "user".' });
+  } catch (error) {
+    console.error('[Integrations] Error marking Claude token rate-limited:', error);
+    return res.status(500).json({ error: 'Failed to mark Claude token rate-limited' });
+  }
+});
+
+/**
  * POST /api/integrations/claude-code/pool-token/rate-limited
  *
  * Marks a pool token as rate-limited. Internal-only (X-API-Key auth).
@@ -3499,13 +3567,13 @@ router.post('/claude-code/pool-token/rate-limited', authenticate, async (req: Au
       return res.status(403).json({ error: 'Internal only' });
     }
 
-    const { poolTokenId } = req.body;
+    const { poolTokenId, rateLimitedUntil } = req.body || {};
     if (!poolTokenId) {
       return res.status(400).json({ error: 'Missing poolTokenId' });
     }
 
-    await markPoolTokenRateLimited(poolTokenId);
-    return res.json({ ok: true });
+    await markPoolTokenRateLimited(poolTokenId, { rateLimitedUntil });
+    return res.json({ ok: true, poolTokenId, rateLimitedUntil: rateLimitedUntil || null });
   } catch (error) {
     console.error('[Integrations] Error marking pool token rate-limited:', error);
     return res.status(500).json({ error: 'Failed to mark pool token rate-limited' });
@@ -3513,4 +3581,3 @@ router.post('/claude-code/pool-token/rate-limited', authenticate, async (req: Au
 });
 
 export default router;
-

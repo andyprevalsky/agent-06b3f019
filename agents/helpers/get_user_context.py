@@ -274,25 +274,25 @@ def _format_user_context(
 
     # Section: Connected Integrations (Gmail, etc.)
     if integrations:
-        connected = [i for i in integrations if i.get('status') == 'CONNECTED']
-        if connected:
-            integration_lines = []
-            for integ in connected:
-                name = integ.get('name', '')
-                # Extract connected email addresses from emailCredentials
-                creds = integ.get('emailCredentials', [])
-                emails = [c.get('email') for c in creds if c.get('email')]
+        integration_lines = []
+        for integ in integrations:
+            status = integ.get('status', '')
+            name = integ.get('name', '')
+            creds = integ.get('emailCredentials', [])
+            emails = [c.get('email') for c in creds if c.get('email')]
+            # Include if CONNECTED, or if it has email credentials (Gmail can send even if sync failed)
+            if status == 'CONNECTED' or emails:
                 if emails:
                     integration_lines.append(f"- {name}: {', '.join(emails)}")
                 else:
                     integration_lines.append(f"- {name}")
-            if integration_lines:
-                sections.append(
-                    "CONNECTED INTEGRATIONS\n"
-                    "These integrations are connected and available. Use the message_person tool\n"
-                    "to send emails (no SMTP credentials needed - Gmail is already connected):\n"
-                    + "\n".join(integration_lines)
-                )
+        if integration_lines:
+            sections.append(
+                "CONNECTED INTEGRATIONS\n"
+                "These integrations are connected and available. Use the message_person tool\n"
+                "to send emails (no SMTP credentials needed - Gmail is already connected):\n"
+                + "\n".join(integration_lines)
+            )
 
     # Section: Authenticated Browser Sessions
     if authenticated_sites:
