@@ -2609,8 +2609,8 @@ router.get('/email/messages', authenticate, async (req: AuthRequest, res: Respon
       return res.status(400).json({ error: 'Invalid since timestamp' });
     }
 
-    // Find user's Gmail integration and credentials
-    const integration = await prisma.integration.findFirst({
+    // Find ALL connected Gmail integrations for this user
+    const integrations = await prisma.integration.findMany({
       where: {
         userId,
         name: 'gmail',
@@ -2623,25 +2623,41 @@ router.get('/email/messages', authenticate, async (req: AuthRequest, res: Respon
       },
     });
 
-    if (!integration) {
+    if (integrations.length === 0) {
       return res.status(404).json({ error: 'Gmail not connected' });
     }
 
-    const credential = integration.emailCredentials[0];
-    if (!credential || !credential.refreshToken) {
+    // Collect all credentials with valid refresh tokens across all integrations
+    const allCredentials = integrations.flatMap(i => i.emailCredentials).filter(c => c.refreshToken);
+    if (allCredentials.length === 0) {
       return res.status(404).json({ error: 'Gmail credentials not found' });
     }
 
-    // Get valid access token (refreshes if needed)
-    const accessToken = await getValidAccessToken(credential);
-    if (!accessToken) {
-      return res.status(401).json({ error: 'Failed to get valid Gmail access token' });
-    }
+    // Fetch emails from ALL connected Gmail accounts in parallel
+    const perAccountLimit = Math.ceil(limit / allCredentials.length);
+    const emailArrays = await Promise.all(
+      allCredentials.map(async (credential) => {
+        try {
+          const accessToken = await getValidAccessToken(credential);
+          if (!accessToken) {
+            console.warn(`[Integrations] Failed to get access token for credential ${credential.id} (${credential.email})`);
+            return [];
+          }
+          return await fetchGmailMessagesSince(accessToken, since, perAccountLimit);
+        } catch (err) {
+          console.warn(`[Integrations] Failed to fetch from ${credential.email}:`, err);
+          return [];
+        }
+      })
+    );
 
-    // Fetch emails directly from Gmail API
-    const emails = await fetchGmailMessagesSince(accessToken, since, limit);
+    // Merge and sort by date descending
+    const emails = emailArrays
+      .flat()
+      .sort((a, b) => b.date.getTime() - a.date.getTime())
+      .slice(0, limit);
 
-    console.log(`[Integrations] Fetched ${emails.length} emails since ${since.toISOString()} for user ${userId}`);
+    console.log(`[Integrations] Fetched ${emails.length} emails from ${allCredentials.length} Gmail account(s) since ${since.toISOString()} for user ${userId}`);
 
     return res.json({
       emails: emails.map(email => ({

@@ -91,15 +91,32 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function fetchWithRetry(url: string, accessToken: string, init?: RequestInit): Promise<Response> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const response = await fetch(url, { ...init, headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers } });
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers } });
+    } catch (err) {
+      // Network error (DNS, timeout, connection reset) — retryable
+      const wait = Math.pow(2, attempt) * 2;
+      console.warn(`[Gmail] Network error, retrying in ${wait}s (attempt ${attempt + 1}/3):`, err);
+      await sleep(wait * 1000);
+      continue;
+    }
     if (response.status === 429 || (response.status === 403 && (await response.clone().text()).includes('rateLimitExceeded'))) {
-      const wait = Math.pow(2, attempt) * 5;
+      const retryAfter = response.headers.get('Retry-After');
+      const wait = retryAfter ? Math.min(parseInt(retryAfter), 60) : Math.pow(2, attempt) * 5;
       console.log(`[Gmail] Rate limited (${response.status}), waiting ${wait}s (attempt ${attempt + 1}/3)...`);
+      await sleep(wait * 1000);
+      continue;
+    }
+    if (response.status >= 500) {
+      const wait = Math.pow(2, attempt) * 2;
+      console.warn(`[Gmail] Server error (${response.status}), retrying in ${wait}s (attempt ${attempt + 1}/3)...`);
       await sleep(wait * 1000);
       continue;
     }
     return response;
   }
+  // Final attempt — let it throw or return whatever happens
   return fetch(url, { ...init, headers: { Authorization: `Bearer ${accessToken}`, ...init?.headers } });
 }
 
