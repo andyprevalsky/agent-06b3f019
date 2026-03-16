@@ -1318,7 +1318,6 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 status=MessageStatus.ERROR,
                 metadata={"toolName": "spawn_claude_code_agent"}
             )
-            raise
 
 
 # ========================================

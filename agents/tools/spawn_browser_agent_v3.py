@@ -2806,6 +2806,7 @@ async def spawn_browser_agent_activity_v3(
                 pending_write_lock_action = None  # Clear so we don't re-execute
 
                 # Execute the pending action with updated approvals
+                activity.heartbeat(f"Step {iteration} - executing pending write lock action")
                 result = await execute_action(
                     dom_service, action_history, unified_action, available_file_paths,
                     session_id=session_id,
@@ -2824,6 +2825,7 @@ async def spawn_browser_agent_activity_v3(
                 logger.info(f"Pending write lock action executed: {action_name}", result=result)
 
                 # Get screenshot and update browser state for next iteration
+                activity.heartbeat(f"Step {iteration} - fetching browser state")
                 browser_state = await dom_service.get_browser_state(include_screenshot=True)
                 current_url = browser_state.get("url", "")
 
@@ -2848,6 +2850,7 @@ async def spawn_browser_agent_activity_v3(
                 logger.warning("Failed to fetch OTPs", error=str(e))
 
             # 1. Get current browser state (always includes screenshot)
+            activity.heartbeat(f"Step {iteration} - fetching browser state")
             browser_state = await dom_service.get_browser_state(include_screenshot=True)
             current_url = browser_state.get("url", "")
 
@@ -2892,6 +2895,7 @@ async def spawn_browser_agent_activity_v3(
                         thinking_preview=last.get("thinking", "")[:100] if last.get("thinking") else "NONE"
                     )
 
+                activity.heartbeat(f"Step {iteration} - calling Rose API")
                 llm_result = await call_rose_browser_use(
                     task=enriched_task,
                     browser_state=browser_state,
@@ -2955,6 +2959,7 @@ async def spawn_browser_agent_activity_v3(
                             rotations=rotations,
                         )
 
+                        activity.heartbeat(f"Step {iteration} - retrying Rose API (rotation {rotations})")
                         llm_result = await call_rose_browser_use(
                             task=enriched_task,
                             browser_state=browser_state,
@@ -2970,6 +2975,7 @@ async def spawn_browser_agent_activity_v3(
                         logger.warning("[ClaudeAuth] All Claude tokens exhausted, falling back to racing mode")
                         browser_use_mode = None
                         token_state.fallen_back_to_racing = True
+                        activity.heartbeat(f"Step {iteration} - falling back to racing mode")
                         llm_result = await call_rose_browser_use(
                             task=enriched_task,
                             browser_state=browser_state,
@@ -3444,6 +3450,7 @@ Based on this feedback, I need to continue working on the task and address the i
             )
 
             # Execute action (with write lock check and humanizer)
+            activity.heartbeat(f"Step {iteration} - executing {action_name}")
             result = await execute_action(
                 dom_service, action_history, unified_action, available_file_paths,
                 session_id=session_id,
@@ -3951,11 +3958,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation failed",
-                message=str(e),
+                message=extract_error_message(e),
                 status=MessageStatus.ERROR,
                 metadata={"toolName": "spawn_browser_agent"},
             )
-            raise
 
 
 # ========================================
