@@ -4521,10 +4521,9 @@ serve(async (req) => {
     // ============================================
     const isClaudeTokenPool = poolName === 'rose-1-ultra' || poolName === 'rose-ultra' || poolName === 'rose-1-lite' || poolName === 'rose-lite';
     if (claude_token && isClaudeTokenPool) {
-      const isLitePool = poolName === 'rose-1-lite' || poolName === 'rose-lite';
-      const claudeActualModel = isLitePool ? 'claude-sonnet-4-6-claude' : 'claude-opus-4-6-claude';
-      const claudeApiModel = isLitePool ? 'claude-sonnet-4-6' : 'claude-opus-4-6';
-      const claudePassthroughModel = isLitePool ? 'anthropic/claude-sonnet-4.6' : 'anthropic/claude-opus-4.6';
+      const claudeActualModel = 'claude-sonnet-4-6-claude';
+      const claudeApiModel = 'claude-sonnet-4-6';
+      const claudePassthroughModel = 'anthropic/claude-sonnet-4.6';
       console.log(`🔑 [${requestId}] Claude token present, attempting direct Anthropic call with ${claudeApiModel} (skipping racing)`);
       // Resolve pool for stall fallback (racing needs the model pool)
       const fallbackPool = MODEL_POOLS[poolName] || MODEL_POOLS['rose-1-lite'];
