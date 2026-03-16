@@ -1628,6 +1628,7 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
     normalizedParams.value = params.value;
   }
   
+  if (params.tab_id) normalizedParams.tab_id = params.tab_id;
   if (params.message) normalizedParams.message = params.message;
   if (params.reasoning) normalizedParams.reasoning = params.reasoning;
   if (params.reason) normalizedParams.reason = params.reason;
