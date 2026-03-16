@@ -169,8 +169,8 @@ async def populate_tool_params_activity(
     # This constrains the LLM to only call the tool we need
     AgentAction = create_agent_action_model([tool_name])
 
-    # Always use rose-1-ultra for param population (higher quality context transfer)
-    model = "rose-labs/rose-1-ultra"
+    # Use rose-1-lite waterfall for param population (cheap one-shot call)
+    model = "rose-labs/rose-1-lite"
 
     # Build system prompt (full agent style, not just extraction)
     system_prompt = _build_agent_system_prompt(tool_name, goal, alias_hint)
@@ -197,8 +197,7 @@ async def populate_tool_params_activity(
             response_model=AgentAction,
             on_chunk=noop_callback,
             reasoning_max_tokens=2048,
-            claude_token=claude_token,
-            skip_cache=True,  # Unique system prompt per call — caching wastes 1.25x write cost
+            skip_cache=True,  # Unique system prompt per call — no cache reuse
         )
 
         # Extract tool calls from the Pydantic result
