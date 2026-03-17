@@ -81,7 +81,7 @@ export default function AgentSettingsDialog({ agent, onUpdate, onDelete }: Agent
   const [modalPosition, setModalPosition] = useState<{ bottom: number; right: number }>({ bottom: 80, right: 16 });
   const { toast } = useToast();
   const { models } = useAppData();
-  const { authUser } = useAuth();
+  const { user: authUser } = useAuth();
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const [showDeleteSection, setShowDeleteSection] = useState(false);
   const [confirmEnabled, setConfirmEnabled] = useState(false);
