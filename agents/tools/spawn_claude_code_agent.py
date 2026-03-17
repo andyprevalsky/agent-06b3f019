@@ -12,6 +12,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
 from datetime import timedelta, datetime
 import structlog
+import structlog.contextvars
 import httpx
 import asyncio
 import time
@@ -352,6 +353,8 @@ async def spawn_claude_code_activity(
         github_repo_url: Optional GitHub repo URL to clone before starting Claude Code
         claude_token: Optional Claude OAuth token for direct Anthropic calls
     """
+    structlog.contextvars.bind_contextvars(agent_id=agent_id)
+
     from helpers.llm import check_progress
     from helpers.prompts import build_verifier_prompt
     from helpers.model_pricing import get_model_pricing_with_fallback

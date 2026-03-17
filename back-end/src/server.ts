@@ -34,6 +34,7 @@ import feedbackRouter from './routes/feedback';
 import imessageRouter from './routes/imessage';
 import memoryRouter from './routes/memory';
 import dataRouter from './routes/data';
+import benchmarksRouter from './routes/benchmarks';
 import { prisma } from './lib/prisma';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
@@ -130,6 +131,9 @@ app.use(
 );
 
 // Request logging middleware
+// UUID pattern to extract agent_id from URL paths like /api/agents/:id
+const UUID_RE = /\/api\/(?:agents|tool-usage)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+
 app.use((req, res, next) => {
   const start = Date.now();
   const { method, path: urlPath } = req;
@@ -141,6 +145,9 @@ app.use((req, res, next) => {
     const duration = Date.now() - start;
     const logParts = [`[HTTP] ${method} ${urlPath} → ${res.statusCode} (${duration}ms)`];
     if (body) logParts.push(`body=${body}`);
+    // Extract agent_id from URL for log filtering
+    const uuidMatch = urlPath.match(UUID_RE);
+    if (uuidMatch) logParts.push(`agent_id=${uuidMatch[1]}`);
     console.log(logParts.join(' '));
   });
 
@@ -171,6 +178,7 @@ app.use('/api/auth', authRouter);  // OTP send/verify (creates user + $5 credit)
 app.use('/api/waitlist', waitlistRouter);
 app.use('/api/models', modelsRouter);  // Models list is public
 app.use('/api/tools', toolsRouter);  // Tools list is public read
+app.use('/api/benchmarks', benchmarksRouter);  // Benchmark tasks are public
 app.use('/api/vcard', vcardRouter);  // vCard for contact card (public for Twilio MMS)
 
 // x402 Payment Routes Setup
@@ -274,10 +282,12 @@ app.use('/api', authenticate, formatRouter);
 // Error handling middleware
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   // Don't crash on errors, just log and respond appropriately
+  const uuidMatch = req.path.match(UUID_RE);
   console.error('❌ Error in request:', {
     message: err.message,
     path: req.path,
     method: req.method,
+    ...(uuidMatch ? { agent_id: uuidMatch[1] } : {}),
     stack: err.stack
   });
   

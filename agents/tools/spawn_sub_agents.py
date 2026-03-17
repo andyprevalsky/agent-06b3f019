@@ -9,6 +9,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 import httpx
 import structlog
+import structlog.contextvars
 
 from tools.base import ToolManager, ToolEvent, AssistantEvent, EventType, MessageStatus
 from config import load_config
@@ -425,6 +426,8 @@ async def spawn_sub_agent_activity(
     Returns:
         Dict with summary: {"spawned": int, "completed": int, "failed": int, "agents": [...]}
     """
+    structlog.contextvars.bind_contextvars(agent_id=parent_agent_id)
+
     try:
         activity.heartbeat(f"Spawning {len(sub_agents)} sub-agents")
 

@@ -12,6 +12,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from datetime import timedelta, datetime, timezone
 import structlog
+import structlog.contextvars
 import httpx
 import time
 import asyncio
@@ -2268,6 +2269,8 @@ async def spawn_browser_agent_activity_v3(
         system_name: Custom system name for approval messages (default "Rose")
         use_claude_mode: Use Claude mode (direct Opus 4.6 via user's Claude subscription)
     """
+    structlog.contextvars.bind_contextvars(agent_id=agent_id)
+
     from helpers.llm import check_progress
     from tools.knowledge_base import query_blueprints_activity
 

@@ -70,7 +70,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     });
 
   } catch (error) {
-    console.error('Error saving tool usage:', error);
+    console.error(`Error saving tool usage (agent=${req.body?.agent_id}):`, error);
     res.status(500).json({ error: 'Failed to save tool usage' });
   }
 });
@@ -138,7 +138,7 @@ router.get('/:agentId', authenticate, async (req: AuthRequest, res: Response) =>
     });
 
   } catch (error) {
-    console.error('Error fetching tool usage:', error);
+    console.error(`Error fetching tool usage (agent=${req.params.agentId}):`, error);
     res.status(500).json({ error: 'Failed to fetch tool usage' });
   }
 });

@@ -95,14 +95,52 @@ from activities.reasoning import execute_reasoning_activity
 from activities.shared_memory import get_shared_memory, append_shared_memory
 from health_server import run_health_server, set_worker_status
 
-# Configure structured logging
-logging.basicConfig(
-    format="%(message)s",
-    stream=sys.stdout,
-    level=logging.DEBUG,
+# Configure unified structured logging
+# All log output (structlog + stdlib including Temporal's workflow.logger)
+# goes through structlog's JSON renderer for consistent, filterable output.
+#
+# Temporal's workflow.logger adds a `temporal_workflow` extra dict to each
+# LogRecord with {workflow_id, run_id, workflow_type, ...}. Since workflow_id
+# equals agent_id, this makes all workflow logs filterable by agent_id.
+# ExtraAdder captures these fields into the structured JSON output.
+
+shared_processors = [
+    structlog.contextvars.merge_contextvars,  # Injects agent_id bound via bind_contextvars()
+    structlog.processors.TimeStamper(fmt="iso"),
+    structlog.processors.add_log_level,
+]
+
+# Configure structlog pipeline (for structlog.get_logger() callers: activities, tools)
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        *shared_processors,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    wrapper_class=structlog.stdlib.BoundLogger,
+    logger_factory=structlog.stdlib.LoggerFactory(),
 )
 
-# Silence verbose browser-use CDP logging
+# Bridge stdlib logging (Temporal workflow.logger, third-party libs) through structlog
+formatter = structlog.stdlib.ProcessorFormatter(
+    processors=[
+        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.processors.JSONRenderer(),
+    ],
+    foreign_pre_chain=[
+        structlog.stdlib.ExtraAdder(),  # Captures temporal_workflow {workflow_id=agent_id, ...}
+        *shared_processors,  # shared_processors already starts with merge_contextvars
+    ],
+)
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(formatter)
+root_logger = logging.getLogger()
+root_logger.handlers.clear()
+root_logger.addHandler(handler)
+root_logger.setLevel(logging.DEBUG)
+
+# Silence verbose library logging
 logging.getLogger('browser_use').setLevel(logging.INFO)
 logging.getLogger('browser_use.browser').setLevel(logging.INFO)
 logging.getLogger('cdp_use').setLevel(logging.WARNING)
@@ -110,23 +148,14 @@ logging.getLogger('cdp_use.client').setLevel(logging.WARNING)
 logging.getLogger('cdp_use.cdp').setLevel(logging.WARNING)
 logging.getLogger('cdp_use.cdp.registry').setLevel(logging.WARNING)
 logging.getLogger('websockets.client').setLevel(logging.WARNING)
-# Silence verbose httpx connection-level traces
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
-# Silence verbose Temporal heartbeat logging
 logging.getLogger('temporalio.activity').setLevel(logging.WARNING)
 logging.getLogger('temporalio.worker').setLevel(logging.WARNING)
 
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.add_log_level,
-        structlog.processors.JSONRenderer()
-    ],
-    wrapper_class=structlog.stdlib.BoundLogger,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-)
+# Disable Temporal's default message appending (workflow details are now in structured fields)
+from temporalio import workflow as _wf
+_wf.logger.workflow_info_on_message = False
 
 logger = structlog.get_logger()
 

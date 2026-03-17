@@ -80,6 +80,7 @@ export async function handleChatMessage(config: {
   const { decision, webSearchToolCallId } = routerResponse;
 
   console.log('[ChatHandler] Router decision', {
+    agentId: config.agentId,
     action: decision.action,
     reasoning: decision.reasoning.substring(0, 100),
     webSearchDetectedEarly: !!webSearchToolCallId,
@@ -90,6 +91,7 @@ export async function handleChatMessage(config: {
   // ============================================
   if (decision.action === 'start_superintelligence') {
     console.log('[ChatHandler] Escalating to superintelligence', {
+      agentId: config.agentId,
       goal: decision.goal,
       mode: decision.mode,
     });
@@ -123,6 +125,7 @@ export async function handleChatMessage(config: {
     const toolCallId = webSearchToolCallId || uuidv4();
 
     console.log('[ChatHandler] Executing web search', {
+      agentId: config.agentId,
       query: decision.query,
       toolCallId,
       wasDetectedEarly: !!webSearchToolCallId,
@@ -187,7 +190,7 @@ export async function handleChatMessage(config: {
   // Streams reasoning as thinking, returns response for true message
   // (Called for both direct_answer and web_search)
   // ============================================
-  console.log('[ChatHandler] Generating response');
+  console.log('[ChatHandler] Generating response', { agentId: config.agentId });
 
   // Re-fetch messages to include any new TOOL message
   const updatedDbMessages = await prisma.message.findMany({
@@ -244,6 +247,7 @@ export async function handleChatMessage(config: {
   });
 
   console.log('[ChatHandler] Response complete', {
+    agentId: config.agentId,
     reasoningLength: generatorResponse.reasoning.length,
     responseLength: generatorResponse.response.length,
     messageCount,

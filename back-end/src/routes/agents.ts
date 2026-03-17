@@ -682,7 +682,7 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       },
     });
   } catch (error) {
-    console.error('Get agent error:', error);
+    console.error(`Get agent error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to fetch agent' });
   }
 });
@@ -711,7 +711,7 @@ router.get('/:id/ancestors', hybridAuth, async (req: HybridAuthRequest, res) => 
 
     res.json({ ancestors });
   } catch (error) {
-    console.error('Get ancestors error:', error);
+    console.error(`Get ancestors error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to fetch ancestors' });
   }
 });
@@ -825,7 +825,7 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
           await handle.signal('receive_user_response', body.message);
         } catch (error) {
           // Don't fail the request if signaling fails - workflow will eventually poll
-          console.error('Failed to signal workflow:', error);
+          console.error(`Failed to signal workflow (agent=${req.params.id}):`, error);
         }
       } else if (agentForChat) {
         // Chat mode: handle message with fixed LLM call sequence
@@ -854,7 +854,7 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error('Post message error:', error);
+    console.error(`Post message error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to post message' });
   }
 });
@@ -884,7 +884,7 @@ router.post('/:id/attachments', authenticate, attachmentUpload.single('file') as
       file_pointer: filePointer,
     });
   } catch (error) {
-    console.error('Upload attachment error:', error);
+    console.error(`Upload attachment error (agent=${req.params.id}):`, error);
     res.status(500).json({
       error: 'Failed to upload attachment',
       details: error instanceof Error ? error.message : 'Unknown error',
@@ -918,7 +918,7 @@ router.get('/:id/attachments/:fileId/url', authenticate, async (req: AuthRequest
       expires_in: 3600,
     });
   } catch (error) {
-    console.error('Get signed URL error:', error);
+    console.error(`Get signed URL error (agent=${req.params.id}):`, error);
     res.status(500).json({
       error: 'Failed to generate signed URL',
       details: error instanceof Error ? error.message : 'Unknown error',
@@ -952,7 +952,7 @@ router.get('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
       status: agent.status,
     });
   } catch (error) {
-    console.error('Get agent status error:', error);
+    console.error(`Get agent status error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to get agent status' });
   }
 });
@@ -1030,7 +1030,7 @@ router.post('/:id/start-agent', hybridAuth, async (req: HybridAuthRequest, res) 
       workflow_id: workflowId,
     });
   } catch (error) {
-    console.error('Start agent error:', error);
+    console.error(`Start agent error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to start agent mode' });
   }
 });
@@ -1102,7 +1102,7 @@ router.patch('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error('Update status error:', error);
+    console.error(`Update status error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to update agent status' });
   }
 });
@@ -1184,7 +1184,7 @@ router.delete('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.status(204).send();
   } catch (error) {
-    console.error('Delete agent error:', error);
+    console.error(`Delete agent error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to delete agent' });
   }
 });
@@ -1253,7 +1253,7 @@ router.post('/:id/pause', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Pause agent error:', error);
+    console.error(`Pause agent error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to pause agent' });
   }
 });
@@ -1329,7 +1329,7 @@ router.post('/:id/resume', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Resume agent error:', error);
+    console.error(`Resume agent error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to resume agent' });
   }
 });
@@ -1525,7 +1525,7 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error('Update agent error:', error);
+    console.error(`Update agent error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to update agent' });
   }
 });
@@ -1610,7 +1610,7 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
       message: 'Workflow restarted - will continue from existing context',
     });
   } catch (error) {
-    console.error('Restart agent error:', error);
+    console.error(`Restart agent error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to restart agent' });
   }
 });
@@ -1655,7 +1655,7 @@ router.post('/:id/signal/signup_completed', hybridAuth, async (req: HybridAuthRe
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Signal signup_completed error:', error);
+    console.error(`Signal signup_completed error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to signal signup completed' });
   }
 });
@@ -1696,7 +1696,7 @@ router.post('/:id/signal/signup_dismissed', hybridAuth, async (req: HybridAuthRe
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Signal signup_dismissed error:', error);
+    console.error(`Signal signup_dismissed error (agent=${req.params.id}):`, error);
     res.status(500).json({ error: 'Failed to signal signup dismissed' });
   }
 });

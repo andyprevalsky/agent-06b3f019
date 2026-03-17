@@ -16,6 +16,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, CancelledError as TemporalCancelledError
 import structlog
+import structlog.contextvars
 import httpx
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
@@ -236,6 +237,8 @@ async def spawn_explore_agent_activity(
     Returns:
         Dict with status, accumulated_usage, tokens_in, tokens_out
     """
+    structlog.contextvars.bind_contextvars(agent_id=agent_id)
+
     from loop.run_agent import run_agent
     from loop.activity_helper import call_temporal_activity_from_activity
     from helpers.handle_tool_event import handle_tool_event

@@ -15,6 +15,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 import asyncio
 import json as _json
 import structlog
+import structlog.contextvars
 
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
@@ -456,6 +457,11 @@ class AgentWorkflow:
         price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
+        # Bind agent_id to structlog context so ALL downstream structlog calls
+        # (tools, helpers, activities) automatically include agent_id in JSON output
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(agent_id=agent_id)
+
         self.agent_id = agent_id
         self.user_id = user_id
         self.goal = goal
