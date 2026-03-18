@@ -4010,6 +4010,6 @@ async def spawn_browser_agent(
             last_status = event.status
         # Track usage from final ToolEvent (AssistantEvent has no data field)
         if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
-            await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_browser_agent")
+            await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_browser_agent", call_site="browser_agent")
 
     return last_status

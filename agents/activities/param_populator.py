@@ -58,7 +58,15 @@ SPAWN TYPE: explore
 - Set type="explore"
 - Required: goal (str)
 - Do NOT provide output_schema, verifier, start_url, or github_repo_link
-- Explore agents return free-form research summaries""",
+- Explore agents return free-form research summaries
+
+CONTEXT GATES (compute optimization):
+- Optional: context_gates (object with boolean values, default all true)
+- For explore agents, two gates apply:
+  - "network": false skips injecting 500-contact network metadata into explore prompt
+  - "recent_communications": false skips local message thread summary
+- Use for pure web research tasks that don't need the user's contacts or messages
+- Example: context_gates: {"network": false, "recent_communications": false}""",
         "spawn_browser_agent": """
 SPAWN TYPE: browser
 - Set type="browser"
@@ -81,8 +89,21 @@ SPAWN TYPE: sub_agent
   - "execute" for clear direct tasks expected to need 1-2 tool calls
   - "plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
   - when in doubt, prefer "plan"
-- Optional: read_only (bool), verifier (object), attachments (list of filenames)
-- Example output_schema: {"summary": "str", "findings": "list[str]"}""",
+- Optional: read_only (bool), verifier (object), attachments (list of filenames), context_gates (object)
+- Example output_schema: {"summary": "str", "findings": "list[str]"}
+
+CONTEXT GATES (compute optimization):
+- Optional: context_gates (object with boolean values, default all true)
+- Controls which user context sections the sub-agent receives
+- Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files
+- ONLY set a gate to false when you are 100% certain the sub-agent does NOT need that context to accomplish its goal
+- Default is all true - when in doubt, leave gates open
+- Use your best judgment based on the goal. These examples are non-comprehensive:
+  - A browser purchase task probably doesn't need network or recent_communications
+  - A code/data task probably doesn't need network or recent_communications
+  - A communication task (email/SMS) likely needs everything, especially network + recent_communications
+  - shared_files controls whether file attachments are resolved into the LLM context
+- Example: context_gates: {"network": false, "recent_communications": false}""",
         "spawn_sub_agent_for_each": """
 SPAWN TYPE: swarm
 - Set type="swarm"
@@ -95,8 +116,14 @@ SPAWN TYPE: swarm
   - "execute" for clear direct tasks expected to need 1-2 tool calls
   - "plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
   - when in doubt, prefer "plan"
-- Optional: read_only (bool), verifier (object), attachments (list of filenames)
-- Keep swarm lightweight: same high-level goal + one child per item/row""",
+- Optional: read_only (bool), verifier (object), attachments (list of filenames), context_gates (object)
+- Keep swarm lightweight: same high-level goal + one child per item/row
+
+CONTEXT GATES (compute optimization):
+- Optional: context_gates (object with boolean values, default all true)
+- ONLY set a gate to false when 100% certain the swarm children do NOT need that context
+- Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files
+- Example: context_gates: {"network": false, "recent_communications": false}""",
     }
 
     if alias_hint in SPAWN_PARAM_REQUIREMENTS:
@@ -198,6 +225,7 @@ async def populate_tool_params_activity(
             on_chunk=noop_callback,
             reasoning_max_tokens=2048,
             skip_cache=True,  # Unique system prompt per call — no cache reuse
+            call_site="dag_param_populator",
         )
 
         # Extract tool calls from the Pydantic result
@@ -245,7 +273,7 @@ async def populate_tool_params_activity(
             response=pydantic_result.response[:100] if pydantic_result.response else "",
             tokens=usage.get("total_tokens", 0),
         )
-        return params
+        return {"params": params, "usage": usage}
 
     except Exception as e:
         logger.error(f"[ParamPopulator] Error: {e}", tool_name=tool_name, goal=goal)

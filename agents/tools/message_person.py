@@ -215,21 +215,25 @@ class MessagePersonManager(ToolManager):
             return
 
         # ── Step 1b: Fetch general recent messages for voice/style ────────
+        # Per-call context_gates override workflow-level gates.
+        # "recent_communications" controls whether we fetch cross-contact voice sample.
+        context_gates = tool_call.get("context_gates") or getattr(workflow_instance, "context_gates", None) or {}
         general_messages_context = ""
-        try:
-            general_result = await workflow.execute_activity(
-                fetch_recent_messages_activity,
-                args=[user_id, 100, 30],  # limit=100, days=30
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2, backoff_coefficient=2.0,
-                                         initial_interval=timedelta(seconds=1),
-                                         maximum_interval=timedelta(seconds=10)),
-            )
-            general_messages = general_result.get("messages", [])
-            general_messages_context = _format_messages_for_context(general_messages, limit=100)
-        except Exception as e:
-            logger.warning("Failed to fetch general recent messages, continuing without", error=str(e))
-            general_messages_context = ""
+        if context_gates.get("recent_communications", True):
+            try:
+                general_result = await workflow.execute_activity(
+                    fetch_recent_messages_activity,
+                    args=[user_id, 100, 30],  # limit=100, days=30
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2, backoff_coefficient=2.0,
+                                             initial_interval=timedelta(seconds=1),
+                                             maximum_interval=timedelta(seconds=10)),
+                )
+                general_messages = general_result.get("messages", [])
+                general_messages_context = _format_messages_for_context(general_messages, limit=100)
+            except Exception as e:
+                logger.warning("Failed to fetch general recent messages, continuing without", error=str(e))
+                general_messages_context = ""
 
         # ── Step 2: Exa enrichment (only if we have a name) ─────────────
         exa_context = ""
@@ -305,6 +309,7 @@ class MessagePersonManager(ToolManager):
 
         generated_message = gen_result.get("message", "")
         generated_subject = gen_result.get("subject")
+        gen_usage = gen_result.get("usage", {})
 
         if not generated_message:
             yield ToolEvent(type=EventType.POST_MESSAGE,
@@ -405,10 +410,23 @@ Reply to approve, or say "no" to cancel."""
             if generated_subject:
                 finished_parts.append(f"**Subject:** {generated_subject}")
         finished_parts.append(f"\n**Message:**\n{preview}")
+        # Attach usage to the FINISHED event so the wrapper can track cost
+        # without a separate event that would write an empty DB row
+        finished_data = None
+        if gen_usage:
+            finished_data = {"usage": {
+                "llm": [{
+                    "tokens_in": gen_usage.get("prompt_tokens", 0),
+                    "tokens_out": gen_usage.get("completion_tokens", 0),
+                    "model": gen_usage.get("actual_model", model),
+                    "provider": "message_person",
+                }]
+            }}
         yield ToolEvent(type=EventType.POST_MESSAGE,
                         title=f"{channel_label} sent to {person_display}",
                         message="\n".join(finished_parts),
-                        status=MessageStatus.FINISHED)
+                        status=MessageStatus.FINISHED,
+                        data=finished_data)
 
 
 def _build_conversation_summary(context: list) -> str:
@@ -459,6 +477,9 @@ async def message_person(
         await workflow_instance._handle_tool_event(event, tool_call_id, "message_person")
         if isinstance(event, ToolEvent) and event.status:
             last_status = event.status
+        # Track LLM usage piggy-backed on the FINISHED event
+        if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
+            await workflow_instance._track_usage(event.data["usage"], tool_name="message_person", call_site="message_person")
 
     return last_status
 
@@ -604,9 +625,11 @@ Now write the message as {system_name}. {"Include a subject line on the first li
         model=model,
         temperature=0.7,
         max_tokens=1024,
+        call_site="message_person",
     )
 
     content = result.get("content", "").strip()
+    usage = result.get("usage", {})
 
     # Parse subject from email response
     subject = None
@@ -616,4 +639,4 @@ Now write the message as {system_name}. {"Include a subject line on the first li
         subject = lines[0].replace("Subject:", "").strip()
         message_body = lines[1].strip() if len(lines) > 1 else ""
 
-    return {"message": message_body, "subject": subject}
+    return {"message": message_body, "subject": subject, "usage": usage}

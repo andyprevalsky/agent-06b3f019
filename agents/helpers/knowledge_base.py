@@ -292,7 +292,8 @@ async def save_blueprint_deprecated(
             model="rose-labs/rose-1-lite",
             temperature=0.3,  # Lower temperature for more focused compression
             max_tokens=4000,  # Allow enough tokens for compressed messages
-            response_format={"type": "json_object"}  # Request JSON output
+            response_format={"type": "json_object"},  # Request JSON output
+            call_site="save_blueprint",
         )
         
         # Parse the compressed blueprint from LLM response

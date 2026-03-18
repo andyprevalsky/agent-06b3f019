@@ -417,25 +417,40 @@ def _format_user_context(
 # Core Function (can be called from other activities)
 # ============================================================================
 
-async def fetch_user_context(user_id: str) -> str:
+async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, bool]] = None) -> str:
     """
     Fetch and format user context for the agent system prompt.
-    
+
     Uses a 5-minute TTL cache to avoid excessive backend calls.
-    This is the core implementation that can be called from other activities.
-    
+    When context_gates are provided, only fetches/includes gated-on sections.
+
     Args:
         user_id: The user's ID
-        
+        context_gates: Optional dict controlling which sections to include.
+            Keys: user_profile, authenticated_sessions, integrations,
+                  recent_communications, network, custom_system_prompt.
+            Default (None or missing key) = True (include section).
+
     Returns:
         Formatted user context string, or empty string if no context available
     """
     global _user_context_cache
-    
+    gates = context_gates or {}
+
+    def _gate_open(name: str) -> bool:
+        return gates.get(name, True)
+
+    # If ALL relevant gates are closed, skip everything
+    relevant_gates = ["user_profile", "authenticated_sessions", "integrations", "recent_communications", "network"]
+    if all(not _gate_open(g) for g in relevant_gates):
+        logger.info("All user context gates closed, skipping fetch", user_id=user_id[:8])
+        return ""
+
     try:
-        # Check cache
+        # Only use cache when no gates are specified (full context)
+        # Gated requests are cheap enough and shouldn't poison the full-context cache
         now = datetime.utcnow()
-        if user_id in _user_context_cache:
+        if not gates and user_id in _user_context_cache:
             cached = _user_context_cache[user_id]
             fetched_at = cached.get('fetched_at')
             if fetched_at and (now - fetched_at) < timedelta(minutes=CACHE_TTL_MINUTES):
@@ -445,53 +460,83 @@ async def fetch_user_context(user_id: str) -> str:
                     age_seconds=(now - fetched_at).total_seconds()
                 )
                 return cached.get('context', '')
-        
-        # Cache miss - fetch fresh data
-        logger.info("User context cache miss, fetching fresh data", user_id=user_id[:8])
-        
+
+        # Cache miss or gated request - fetch data selectively
+        skipped = [g for g in relevant_gates if not _gate_open(g)]
+        logger.info(
+            "Fetching user context",
+            user_id=user_id[:8],
+            gates_closed=skipped if skipped else "none",
+        )
+
         config = load_config()
-        
+
+        async def _noop_integrations():
+            return ([], [])
+
+        async def _noop_dict():
+            return {}
+
+        async def _noop_list():
+            return []
+
         async with httpx.AsyncClient() as client:
-            # Make all 4 calls in parallel
-            integrations_task = _fetch_integrations_and_auth_domains(client, config, user_id)
-            user_settings_task = _fetch_user_settings(client, config, user_id)
-            messages_task = _fetch_recent_messages(client, config, user_id, limit=200)
-            contacts_task = _fetch_top_contacts(client, config, user_id)
+            # Only fetch what's needed based on gates
+            integrations_future = (
+                _fetch_integrations_and_auth_domains(client, config, user_id)
+                if _gate_open("integrations") or _gate_open("authenticated_sessions")
+                else _noop_integrations()
+            )
+            user_settings_future = (
+                _fetch_user_settings(client, config, user_id)
+                if _gate_open("user_profile")
+                else _noop_dict()
+            )
+            messages_future = (
+                _fetch_recent_messages(client, config, user_id, limit=200)
+                if _gate_open("recent_communications")
+                else _noop_list()
+            )
+            contacts_future = (
+                _fetch_top_contacts(client, config, user_id)
+                if _gate_open("network")
+                else _noop_list()
+            )
 
             (integrations, authenticated_sites), user_settings, recent_messages, frequent_contacts = await asyncio.gather(
-                integrations_task,
-                user_settings_task,
-                messages_task,
-                contacts_task
+                integrations_future,
+                user_settings_future,
+                messages_future,
+                contacts_future
             )
-        
-        # Format the context string
+
+        # Apply gate filtering at format level too (belt + suspenders)
         context = _format_user_context(
-            authenticated_sites=authenticated_sites,
-            user_settings=user_settings,
-            recent_messages=recent_messages,
-            frequent_contacts=frequent_contacts,
-            integrations=integrations,
+            authenticated_sites=authenticated_sites if _gate_open("authenticated_sessions") else [],
+            user_settings=user_settings if _gate_open("user_profile") else {},
+            recent_messages=recent_messages if _gate_open("recent_communications") else [],
+            frequent_contacts=frequent_contacts if _gate_open("network") else [],
+            integrations=integrations if _gate_open("integrations") else None,
         )
-        
-        # Update cache
-        _user_context_cache[user_id] = {
-            'context': context,
-            'fetched_at': now
-        }
-        
+
+        # Only cache full (ungated) context
+        if not gates:
+            _user_context_cache[user_id] = {
+                'context': context,
+                'fetched_at': now
+            }
+
         logger.info(
-            "User context fetched and cached",
+            "User context fetched",
             user_id=user_id[:8],
-            authenticated_sites=len(authenticated_sites),
-            messages=len(recent_messages),
-            contacts=len(frequent_contacts),
+            authenticated_sites=len(authenticated_sites) if _gate_open("authenticated_sessions") else "skipped",
+            messages=len(recent_messages) if _gate_open("recent_communications") else "skipped",
+            contacts=len(frequent_contacts) if _gate_open("network") else "skipped",
             context_length=len(context),
-            context=context
         )
-        
+
         return context
-        
+
     except Exception as e:
         logger.error(
             "Failed to get user context",
@@ -632,14 +677,18 @@ def format_messages_for_simulation(messages: List[dict], user_name: str = "User"
 # ============================================================================
 
 @activity.defn
-async def get_user_context(user_id: str) -> str:
+async def get_user_context(user_id: str, context_gates: Optional[Dict[str, bool]] = None) -> str:
     """
     Temporal activity wrapper for fetch_user_context.
 
     Can be called as a standalone activity from workflows.
+
+    Args:
+        user_id: The user's ID
+        context_gates: Optional dict controlling which sections to include.
     """
     activity.heartbeat(f"Getting user context for {user_id[:8]}...")
-    return await fetch_user_context(user_id)
+    return await fetch_user_context(user_id, context_gates)
 
 
 @activity.defn

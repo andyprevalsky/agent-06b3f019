@@ -36,7 +36,7 @@ async def execute_reasoning_activity(
     model: str,
     agent_id: Optional[str] = None,
     stream_id: Optional[str] = None,
-) -> str:
+) -> Dict:
     """
     Execute a reasoning task using LLM with streaming.
 
@@ -51,7 +51,7 @@ async def execute_reasoning_activity(
         stream_id: Stream session ID for ordering (optional)
 
     Returns:
-        Reasoning output string
+        Dict with 'content' string and 'usage' dict for cost tracking
     """
     system_prompt = f"""You are an AI assistant performing a reasoning task as part of a larger plan.
 
@@ -111,6 +111,7 @@ Provide your reasoning and conclusions directly."""
             response_model=ReasoningResponse,
             on_chunk=on_chunk,
             agent_id=agent_id,
+            call_site="dag_reasoning",
         )
 
         content = result.response if result and result.response else ""
@@ -131,10 +132,10 @@ Provide your reasoning and conclusions directly."""
 
         if not content:
             logger.error("[Reasoning] Empty response from LLM")
-            return "Unable to complete reasoning task."
+            return {"content": "Unable to complete reasoning task.", "usage": usage}
 
         logger.info(f"[Reasoning] Completed task, output length: {len(content)} chars")
-        return content
+        return {"content": content, "usage": usage}
 
     except Exception as e:
         logger.error(f"[Reasoning] Error calling LLM: {e}")

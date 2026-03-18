@@ -306,13 +306,29 @@ class SetPlanManager(ToolManager):
                     parallel_elapsed = (workflow.now() - parallel_start).total_seconds()
                     workflow.logger.info(f"[TIMING] Parallel activities completed: {parallel_elapsed*1000:.1f}ms")
 
-                    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
+                    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan", call_site="planner")
                     planner_result = planner_result_raw.get("result", planner_result_raw)
 
+                    # Unpack schema result (now returns {"schema": dict, "usage": dict} or None)
+                    schema_data = None
+                    if isinstance(generated_schema, dict) and "schema" in generated_schema:
+                        schema_data = generated_schema["schema"]
+                        schema_usage = generated_schema.get("usage", {})
+                        # Track schema generation LLM cost
+                        if schema_usage:
+                            await workflow_instance._track_llm_cost(
+                                schema_usage.get("prompt_tokens", 0),
+                                schema_usage.get("completion_tokens", 0),
+                                call_site="schema_generation",
+                            )
+                    elif generated_schema:
+                        # Backwards compat: old format returned schema directly
+                        schema_data = generated_schema
+
                     # Update workflow instance with generated schema
-                    if generated_schema:
-                        workflow_instance.output_schema = generated_schema
-                        workflow.logger.info(f"✅ Generated output_schema with {len(generated_schema.get('fields', []))} fields")
+                    if schema_data:
+                        workflow_instance.output_schema = schema_data
+                        workflow.logger.info(f"✅ Generated output_schema with {len(schema_data.get('fields', []))} fields")
                 else:
                     # Retry or schema already exists - just call planner
                     workflow.logger.info(f"[TIMING] Starting planner LLM only (attempt {attempt + 1}, schema_exists={response_schema is not None})")
@@ -328,7 +344,7 @@ class SetPlanManager(ToolManager):
                     planner_only_elapsed = (workflow.now() - planner_only_start).total_seconds()
                     workflow.logger.info(f"[TIMING] Planner LLM only completed: {planner_only_elapsed*1000:.1f}ms")
 
-                    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan")
+                    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan", call_site="planner")
                     planner_result = planner_result_raw.get("result", planner_result_raw)
             except BaseException as e:
                 if isinstance(e, GeneratorExit):

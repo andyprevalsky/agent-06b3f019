@@ -94,6 +94,16 @@ const createAgentSchema = z.object({
     type: z.literal('FLOAT_LLM_JUDGE'),
     llm_judge_prompt: z.string().min(1),
   }).optional(),
+  // Context gates: control which user context sections the agent receives (default all true)
+  context_gates: z.object({
+    user_profile: z.boolean().optional(),
+    authenticated_sessions: z.boolean().optional(),
+    integrations: z.boolean().optional(),
+    recent_communications: z.boolean().optional(),
+    network: z.boolean().optional(),
+    custom_system_prompt: z.boolean().optional(),
+    shared_files: z.boolean().optional(),
+  }).optional(),
   // File attachments for the initial goal message
   attachments: z.array(filePointerSchema).optional(),
 });
@@ -380,6 +390,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           ...(body.start_phase ? { startPhase: body.start_phase } : {}),
           ...(body.max_iterations ? { maxIterations: body.max_iterations } : {}),
           priceLimitCents: agent.agent.priceLimitCents,
+          ...(body.context_gates ? { contextGates: body.context_gates } : {}),
         });
 
         // Update agent with workflow ID

@@ -108,7 +108,7 @@ async def compress_context(
     context: List[Dict],
     iteration_count: int,
     model: str = "rose-labs/rose-1-lite"
-) -> str:
+) -> Dict:
     """
     Use LLM to compress context into key learnings.
 
@@ -118,7 +118,7 @@ async def compress_context(
         model: LLM model to use for compression
 
     Returns:
-        Compressed learnings as a string (for system message)
+        Dict with 'learnings' string and 'usage' dict for cost tracking
     """
     try:
         activity.heartbeat(f"Compressing {len(context)} messages into learnings")
@@ -166,26 +166,31 @@ Format your response as:
             temperature=0.3,
             max_tokens=1000,
             skip_cache=True,  # One-shot call — no cache reuse
+            call_site="context_compression",
         )
 
         learnings = result.get("content", "")
+        usage = result.get("usage", {})
 
         logger.info(
             "Context compressed",
             original_messages=len(context),
             learnings_length=len(learnings),
-            tokens_used=result.get("usage", {}).get("total_tokens", 0)
+            tokens_used=usage.get("total_tokens", 0)
         )
 
-        return learnings
+        return {"learnings": learnings, "usage": usage}
 
     except Exception as e:
         logger.error("Failed to compress context", error=str(e))
         # Fallback: just return a simple summary
-        return f"""## Context Reset After {iteration_count} Iterations
+        return {
+            "learnings": f"""## Context Reset After {iteration_count} Iterations
 
 Previous execution had {len(context)} messages. Context has been reset to prevent memory overflow.
-Continue working toward the task with a fresh start."""
+Continue working toward the task with a fresh start.""",
+            "usage": {},
+        }
 
 
 @activity.defn
@@ -261,6 +266,7 @@ Just write plain text describing what was done."""
             temperature=0.3,
             max_tokens=200,  # Brief summary only needs ~50-100 tokens
             skip_cache=True,  # One-shot call — no cache reuse
+            call_site="completion_summary",
         )
 
         summary = result.get("content", "")

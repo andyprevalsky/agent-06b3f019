@@ -153,6 +153,14 @@ class SubAgentConfig(BaseModel):
         default=None,
         description="List of filenames to pass to this sub-agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'rs.jpeg'). Do NOT use the file's `id` field or any other format."
     )
+    context_gates: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description=(
+            "Control which user context sections the sub-agent receives. "
+            "All default to true. Set to false to exclude a section and save compute. "
+            "Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files."
+        )
+    )
 
 
 class WaitForTool(BaseModel):
@@ -176,6 +184,17 @@ class WaitForTool(BaseModel):
         default=20,
         ge=1, le=100,
         description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition."
+    )
+    context_gates: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description=(
+            "Control which user context the condition-polling explore agent receives. "
+            "Only used with condition (not until_timestamp). "
+            "Keys: 'network' (gates 500-contact network metadata), "
+            "'recent_communications' (gates local message thread summary). "
+            "All default to true. Set to false for pure web-based condition checks. "
+            "Example: {\"network\": false, \"recent_communications\": false}"
+        )
     )
 
 
@@ -336,6 +355,15 @@ class MessagePersonTool(BaseModel):
         "'Check in and make sure they feel supported after their recent job change', "
         "'Notify them about the new API features we launched this week'"
     )
+    context_gates: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description=(
+            "Control which user context is used for message generation. "
+            "Keys: 'recent_communications' (gates cross-contact voice/style sample, 1-5k tokens). "
+            "Defaults to true. Set to false if voice matching is not needed. "
+            "Other gate keys are not applicable — 1-on-1 thread and person enrichment are always fetched."
+        )
+    )
 
 
 class SpawnAgentTool(BaseModel):
@@ -426,6 +454,18 @@ class SpawnAgentTool(BaseModel):
         description=(
             "(swarm only) CSV string input. The shared goal is reused for each parsed row, "
             "and one downstream spawn_sub_agent child is started per row."
+        )
+    )
+    context_gates: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description=(
+            "Control which user context sections the child agent receives. "
+            "All default to true. Set to false to exclude a section and save compute. "
+            "Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files. "
+            "For sub_agent/swarm: all keys apply (gates user_context in system prompt). "
+            "For explore: 'network' gates the 500-contact network metadata, "
+            "'recent_communications' gates the local message thread summary. Other keys ignored. "
+            "Example: {\"network\": false, \"recent_communications\": false} for pure web research tasks."
         )
     )
 

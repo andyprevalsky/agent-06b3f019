@@ -96,7 +96,7 @@ async def run_agent(
     iteration_offset: int = 0,
     
     # Blueprint control (skip for EXECUTE phase since PLAN already queried)
-    skip_blueprint_query: bool = False,
+    skip_blueprint_query: bool = True,
     
     # Skip LLM verification call
     skip_verification: bool = False,
@@ -287,6 +287,7 @@ async def run_agent(
                 execute_activity=execute_activity,
                 context=context,
                 model=model,
+                on_tokens=on_tokens,
             )
             
             if on_context_overflow:
@@ -379,6 +380,7 @@ async def run_agent(
                             reasoning_max_tokens=reasoning_max_tokens,
                             agent_id=agent_id,
                             claude_token=current_claude_token,
+                            call_site="plan_loop" if is_plan_loop else "execute_loop",
                         )
                         break  # Success
                     except (ValueError, Exception) as e:
@@ -432,9 +434,10 @@ async def run_agent(
                 # Pass agent_id as first arg so the activity builds messages from _pending_llm_context
                 # (shared in-process memory). This avoids serializing large messages with base64 file
                 # content through Temporal's 2MB payload limit.
+                call_site_label = "plan_loop" if is_plan_loop else "execute_loop"
                 llm_result = await workflow.execute_activity(
                     call_llm_activity,
-                    args=[agent_id, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id, current_claude_token],
+                    args=[agent_id, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id, current_claude_token, call_site_label],
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=30),
@@ -488,6 +491,7 @@ async def run_agent(
                         usage.get("actual_model"),
                         cache_read_input_tokens=iter_cache_read,
                         cache_creation_input_tokens=iter_cache_write,
+                        call_site="plan_loop" if is_plan_loop else "execute_loop",
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed: {e}")
@@ -814,9 +818,25 @@ async def run_agent(
 
                 # Track verifier tokens
                 v_usage = verifier_result.get("usage", {})
-                tokens_in += v_usage.get("prompt_tokens", 0)
-                tokens_out += v_usage.get("completion_tokens", 0)
+                v_tokens_in = v_usage.get("prompt_tokens", 0)
+                v_tokens_out = v_usage.get("completion_tokens", 0)
+                tokens_in += v_tokens_in
+                tokens_out += v_tokens_out
                 token_count += v_usage.get("total_tokens", 0)
+
+                # Route verifier cost through on_tokens for proper cost tracking
+                if on_tokens and (v_tokens_in > 0 or v_tokens_out > 0):
+                    try:
+                        await on_tokens(
+                            v_tokens_in,
+                            v_tokens_out,
+                            v_usage.get("actual_model"),
+                            cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
+                            cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
+                            call_site="verifier_plan" if is_plan_loop else "verifier_execute",
+                        )
+                    except Exception as e:
+                        logger.warning(f"on_tokens callback failed for verifier: {e}")
 
                 score = verifier_result.get("score", 0.0)
                 v_reasoning = verifier_result.get("reasoning", "")
@@ -875,9 +895,25 @@ async def run_agent(
 
             # Track final verifier tokens
             v_usage = final_verifier_result.get("usage", {})
-            tokens_in += v_usage.get("prompt_tokens", 0)
-            tokens_out += v_usage.get("completion_tokens", 0)
+            v_tokens_in = v_usage.get("prompt_tokens", 0)
+            v_tokens_out = v_usage.get("completion_tokens", 0)
+            tokens_in += v_tokens_in
+            tokens_out += v_tokens_out
             token_count += v_usage.get("total_tokens", 0)
+
+            # Route final verifier cost through on_tokens for proper cost tracking
+            if on_tokens and (v_tokens_in > 0 or v_tokens_out > 0):
+                try:
+                    await on_tokens(
+                        v_tokens_in,
+                        v_tokens_out,
+                        v_usage.get("actual_model"),
+                        cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
+                        cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
+                        call_site="verifier_plan" if is_plan_loop else "verifier_execute",
+                    )
+                except Exception as e:
+                    logger.warning(f"on_tokens callback failed for final verifier: {e}")
 
             final_verifier_progress = final_verifier_result.get("score", 0.0)
             final_verifier_reasoning = final_verifier_result.get("reasoning", "")
@@ -925,15 +961,37 @@ async def _compress_context(
     execute_activity,
     context: List[Dict],
     model: str,
+    on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
 ) -> List[Dict]:
     """Compress context using LLM."""
-    learnings = await execute_activity(
+    result = await execute_activity(
         compress_context,
         args=[context, len(context), model],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
-    
+
+    # Unpack result (compress_context returns {"learnings": str, "usage": dict})
+    learnings = result.get("learnings", "") if isinstance(result, dict) else result
+    usage = result.get("usage", {}) if isinstance(result, dict) else {}
+
+    # Route cost through on_tokens for proper tracking
+    if on_tokens and usage:
+        tokens_in = usage.get("prompt_tokens", 0)
+        tokens_out = usage.get("completion_tokens", 0)
+        if tokens_in > 0 or tokens_out > 0:
+            try:
+                await on_tokens(
+                    tokens_in,
+                    tokens_out,
+                    usage.get("actual_model"),
+                    cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+                    cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+                    call_site="context_compression",
+                )
+            except Exception as e:
+                logger.warning(f"on_tokens callback failed for context_compression: {e}")
+
     return [{
         "role": "SYSTEM",
         "text": learnings,
@@ -981,7 +1039,8 @@ async def _run_verifier(
 
     result = await execute_activity(
         check_progress,
-        args=[context, verifier_prompt, model, "EXECUTE", current_response_schema, claude_token],
+        args=[context, verifier_prompt, model, "EXECUTE", current_response_schema, claude_token,
+              "verifier_plan" if is_plan_loop else "verifier_execute"],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )

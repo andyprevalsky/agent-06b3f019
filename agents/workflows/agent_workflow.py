@@ -455,6 +455,7 @@ class AgentWorkflow:
         start_phase: str = "plan",  # "plan" runs PLAN→EXECUTE, "execute" skips PLAN
         max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
         price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
+        context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
@@ -473,6 +474,7 @@ class AgentWorkflow:
         self.parent_agent_id = parent_agent_id
         self.depth = depth
         self.bus_id = bus_id
+        self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.start_time = workflow.now()  # Track start time for duration calculation
@@ -527,18 +529,25 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to send agent_started SMS notification: {e}")
 
-        # Fetch user context once (for both phases)
+        # Fetch user context once (for both phases), respecting context_gates
         user_context_section = ""
+        # Helper: gate is open unless explicitly set to False
+        def _gate_open(name: str) -> bool:
+            return self.context_gates.get(name, True)
+
         try:
             user_context_section = await workflow.execute_activity(
                 get_user_context,
-                args=[user_id],
+                args=[user_id, self.context_gates],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3)
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
         self.user_context_section = user_context_section
+
+        if self.context_gates:
+            workflow.logger.info(f"Context gates applied: {self.context_gates}")
 
         # Fetch user's custom system name (for approval messages and SMS)
         try:
@@ -553,17 +562,21 @@ class AgentWorkflow:
             workflow.logger.warning(f"Failed to fetch system name, using default 'Rose': {e}")
 
         # Fetch user's custom system prompt (for personality injection)
-        try:
-            self.custom_system_prompt = await workflow.execute_activity(
-                get_user_custom_system_prompt,
-                args=[user_id],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=2)
-            )
-            if self.custom_system_prompt:
-                workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch custom system prompt: {e}")
+        # Skip if custom_system_prompt gate is closed
+        if _gate_open("custom_system_prompt"):
+            try:
+                self.custom_system_prompt = await workflow.execute_activity(
+                    get_user_custom_system_prompt,
+                    args=[user_id],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2)
+                )
+                if self.custom_system_prompt:
+                    workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch custom system prompt: {e}")
+        else:
+            workflow.logger.info("Skipping custom system prompt (gate closed)")
 
         # Fetch Claude token for Anthropic calls via Rose endpoint
         await self._refresh_claude_token(user_id)
@@ -732,6 +745,7 @@ class AgentWorkflow:
                     handle_tool_event_fn=self._handle_tool_event,
                     poll_messages=self._poll_messages,
                     claude_token=self.claude_max_token,
+                    on_tokens=self._on_tokens,
                 )
 
                 # DAG completed or failed - both hand off to run_agent
@@ -910,6 +924,7 @@ class AgentWorkflow:
             "execute_continued",  # Skip both PLAN and DAG — go straight to LLM
             self.max_iterations,
             self.price_limit_cents,
+            self.context_gates or None,  # Preserve context gates across continue_as_new
         ])
     
     async def _check_paused(self) -> bool:
@@ -1073,6 +1088,9 @@ class AgentWorkflow:
             if not self.shared_memory_content:
                 return ""
 
+            # shared_files gate: when False, strip file references from shared memory entries
+            include_shared_files = self.context_gates.get("shared_files", True)
+
             lines = []
             for entry in self.shared_memory_content:
                 timestamp = entry.get("timestamp", "")[:19]  # Truncate to datetime
@@ -1081,7 +1099,7 @@ class AgentWorkflow:
                 files = entry.get("files", [])
 
                 line = f"[{timestamp}] {entry_type}: {content}"
-                if files:
+                if files and include_shared_files:
                     file_names = ", ".join(f.get("original_filename", "") for f in files)
                     line += f" (files: {file_names})"
                 lines.append(line)
@@ -1270,10 +1288,15 @@ class AgentWorkflow:
         # NOTE: tokens_in/out and cost tracking moved to _on_tokens callback
         # which is called after each LLM call in run_agent for real-time limit checking
 
-    async def _track_llm_cost(self, tokens_in: int, tokens_out: int) -> None:
+    async def _track_llm_cost(self, tokens_in: int, tokens_out: int, call_site: str = "unknown") -> None:
         """Track cost for LLM calls outside run_agent (e.g., completion summary).
 
         Use this for LLM calls that don't go through run_agent and thus don't trigger _on_tokens.
+
+        Args:
+            tokens_in: Input/prompt tokens
+            tokens_out: Output/completion tokens
+            call_site: Label identifying the LLM call source (e.g., completion_summary, context_compression)
         """
         # Update workflow token state
         self.tokens_in += tokens_in
@@ -1288,14 +1311,32 @@ class AgentWorkflow:
             if cost_cents > 0:
                 self.own_cost_cents += cost_cents
                 workflow.logger.info(
-                    f"💰 LLM cost (non-run_agent): +{cost_cents:.2f}c (total: {self.own_cost_cents:.1f}c, "
+                    f"💰 LLM cost ({call_site}): +{cost_cents:.2f}c (total: {self.own_cost_cents:.1f}c, "
                     f"in={tokens_in}, out={tokens_out})"
                 )
+
+                # Save to ToolUsage table for call_site tracking
+                try:
+                    await workflow.execute_activity(
+                        save_tool_usage,
+                        args=[self.agent_id, self.user_id, call_site, [{
+                            "type": "llm",
+                            "cost_cents": cost_cents,
+                            "call_site": call_site,
+                            "tokens_in": tokens_in,
+                            "tokens_out": tokens_out,
+                            "model": self.model,
+                        }]],
+                        start_to_close_timeout=timedelta(seconds=15),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                except Exception as e:
+                    workflow.logger.warning(f"Failed to save tool usage for {call_site}: {e}")
 
                 # Recalculate subtree cost and check limit
                 await self._update_cost_and_signal_parent()
 
-    async def _track_usage(self, usage: Optional[Dict] = None, tool_name: Optional[str] = None) -> None:
+    async def _track_usage(self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None) -> None:
         """
         Track usage from any activity result.
 
@@ -1308,6 +1349,8 @@ class AgentWorkflow:
         Args:
             usage: Dict with "llm" and/or "service" lists
             tool_name: Tool name for ToolUsage table (optional for internal LLM calls)
+            call_site: Label identifying the LLM call source (e.g., planner, explore_agent, browser_agent).
+                       Falls back to tool_name if not provided.
         """
         if not usage:
             return
@@ -1344,14 +1387,16 @@ class AgentWorkflow:
                 (cache_write * input_rate * cache_write_mult / 1000) +
                 (tokens_out * output_rate / 1000)
             )
+            effective_call_site = call_site or tool_name or "unknown"
             if cost_cents > 0:
                 total_cost_cents += cost_cents
                 workflow.logger.info(
-                    f"💰 LLM cost: +{cost_cents:.2f}c ({provider}, in={tokens_in}, out={tokens_out})"
+                    f"💰 LLM cost: +{cost_cents:.2f}c ({provider}, in={tokens_in}, out={tokens_out}, call_site={effective_call_site})"
                 )
                 usage_items_for_db.append({
                     "type": "llm",
                     "cost_cents": cost_cents,
+                    "call_site": effective_call_site,
                     "provider": provider,
                     "tokens_in": tokens_in,
                     "tokens_out": tokens_out,
@@ -1365,9 +1410,11 @@ class AgentWorkflow:
             if cost_cents > 0:
                 total_cost_cents += cost_cents
                 workflow.logger.info(f"💰 Service cost: +{cost_cents}c ({provider})")
+                effective_call_site = call_site or tool_name or "unknown"
                 usage_items_for_db.append({
                     "type": "service",
                     "cost_cents": cost_cents,
+                    "call_site": effective_call_site,
                     "provider": provider,
                 })
 
@@ -1377,11 +1424,12 @@ class AgentWorkflow:
             workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
 
             # Write to ToolUsage table (if tool_name provided)
+            effective_call_site = call_site or tool_name or "unknown"
             if tool_name and usage_items_for_db:
                 try:
                     await workflow.execute_activity(
                         save_tool_usage,
-                        args=[self.agent_id, self.user_id, tool_name, usage_items_for_db],
+                        args=[self.agent_id, self.user_id, effective_call_site, usage_items_for_db],
                         start_to_close_timeout=timedelta(seconds=15),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
@@ -1501,6 +1549,7 @@ class AgentWorkflow:
         actual_model: Optional[str] = None,
         cache_read_input_tokens: int = 0,
         cache_creation_input_tokens: int = 0,
+        call_site: str = "unknown",
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -1512,6 +1561,7 @@ class AgentWorkflow:
             actual_model: The model that actually served the request
             cache_read_input_tokens: Cached input tokens read (discounted pricing)
             cache_creation_input_tokens: Tokens written to cache (may cost extra for Anthropic)
+            call_site: Label identifying the LLM call source (e.g., plan_loop, execute_loop, verifier_execute)
         """
         # Update workflow token state (keep in sync with run_agent local vars)
         self.tokens_in += tokens_in_delta
@@ -1583,9 +1633,10 @@ class AgentWorkflow:
         try:
             await workflow.execute_activity(
                 save_tool_usage,
-                args=[self.agent_id, self.user_id, "llm_reasoning", [{
+                args=[self.agent_id, self.user_id, call_site, [{
                     "type": "llm",
                     "cost_cents": cost_cents,
+                    "call_site": call_site,
                     "tokens_in": tokens_in_delta,
                     "tokens_out": tokens_out_delta,
                     "model": model_for_usage,
@@ -1787,6 +1838,7 @@ class AgentWorkflow:
                 "execute",  # start_phase: skip PLAN since we already have context
                 self.max_iterations,
                 self.price_limit_cents,
+                self.context_gates or None,  # Preserve context gates across pause/resume
             ])
             return result
 
@@ -2074,7 +2126,8 @@ class AgentWorkflow:
             # Track completion summary LLM cost (doesn't go through run_agent)
             await self._track_llm_cost(
                 summary_result.get("usage", {}).get("prompt_tokens", 0),
-                summary_result.get("usage", {}).get("completion_tokens", 0)
+                summary_result.get("usage", {}).get("completion_tokens", 0),
+                call_site="completion_summary",
             )
             self.token_count += summary_result.get("usage", {}).get("total_tokens", 0)
 

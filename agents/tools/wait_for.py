@@ -121,6 +121,7 @@ async def evaluate_condition_activity(
         },
         claude_token=claude_token,
         skip_cache=True,  # Unique evidence each poll — no cache reuse
+        call_site="wait_for",
     )
     raw = result.get("content", "")
 
@@ -164,8 +165,10 @@ class WaitForManager(ToolManager):
         elif condition:
             check_interval = tool_call.get("check_interval_seconds", 900)
             max_checks = tool_call.get("max_checks", 20)
+            # Per-call context_gates override workflow-level gates
+            context_gates = tool_call.get("context_gates") or getattr(workflow_instance, "context_gates", None) or {}
             async for event in self._condition_mode(
-                workflow_instance, condition, check_interval, max_checks, tool_call_id
+                workflow_instance, condition, check_interval, max_checks, tool_call_id, context_gates
             ):
                 yield event
         else:
@@ -249,6 +252,7 @@ class WaitForManager(ToolManager):
         check_interval_seconds: int,
         max_checks: int,
         tool_call_id: str,
+        context_gates: Optional[Dict[str, bool]] = None,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Poll with explore agents until condition is satisfied.
 
@@ -277,25 +281,34 @@ class WaitForManager(ToolManager):
             },
         )
 
-        # Fetch network metadata + local data once before the loop
-        try:
-            network_metadata = await workflow.execute_activity(
-                fetch_full_network_metadata,
-                args=[workflow_instance.user_id],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-        except Exception:
+        # Fetch network metadata + local data once before the loop.
+        # context_gates passed from execute_tool (per-call override or workflow-level fallback).
+        context_gates = context_gates or {}
+
+        if context_gates.get("network", True):
+            try:
+                network_metadata = await workflow.execute_activity(
+                    fetch_full_network_metadata,
+                    args=[workflow_instance.user_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception:
+                network_metadata = ""
+        else:
             network_metadata = ""
 
-        try:
-            local_data_summary = await workflow.execute_activity(
-                fetch_local_data_summary,
-                args=[workflow_instance.user_id],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-        except Exception:
+        if context_gates.get("recent_communications", True):
+            try:
+                local_data_summary = await workflow.execute_activity(
+                    fetch_local_data_summary,
+                    args=[workflow_instance.user_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception:
+                local_data_summary = ""
+        else:
             local_data_summary = ""
 
         model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
@@ -527,7 +540,7 @@ async def wait_for(workflow_instance, tool_call: Dict[str, Any], tool_call_id: s
             last_status = event.status
         # Track usage from condition polling
         if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
-            await workflow_instance._track_usage(event.data["usage"], tool_name="wait_for")
+            await workflow_instance._track_usage(event.data["usage"], tool_name="wait_for", call_site="wait_for")
         # Capture result for context
         if isinstance(event, ToolEvent) and event.data:
             if event.data.get("condition_met") is not None:

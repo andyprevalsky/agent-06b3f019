@@ -526,6 +526,8 @@ async def spawn_sub_agent_activity(
                     }
                     if resolved_attachments:
                         payload["attachments"] = resolved_attachments
+                    if agent_cfg.get("context_gates"):
+                        payload["context_gates"] = agent_cfg["context_gates"]
 
                     last_error = "unknown error"
                     for attempt in range(1, MAX_SPAWN_ATTEMPTS + 1):

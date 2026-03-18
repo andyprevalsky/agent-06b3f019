@@ -582,6 +582,7 @@ async def call_llm_structured_streaming(
     claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache: bool = False,  # Skip prompt caching (for single-use calls like param populator)
+    call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -615,7 +616,7 @@ async def call_llm_structured_streaming(
     if is_rose_model:
         # Generate unique request ID for tracing
         request_id = str(uuid.uuid4())[:8]
-        logger.info(f"📤 [{request_id}] Streaming Rose model via Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}")
+        logger.info(f"📤 [{request_id}] [{call_site}] Streaming Rose model via Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}")
 
         # Build JSON schema from Pydantic model
         schema = prepare_schema_for_openai(response_model)
@@ -966,7 +967,7 @@ async def call_llm_structured_streaming(
                 }
             return empty_response, usage, detected_tools_ordered
         
-        logger.info(f"🏁 Rose streaming complete, received {chunk_count} chunks, reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars")
+        logger.info(f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars")
         
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
         response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
@@ -1432,34 +1433,36 @@ async def call_llm(
     response_format: Optional[Dict] = None,
     claude_token: Optional[str] = None,
     skip_cache: bool = False,
+    call_site: str = "unknown",
 ) -> Dict[str, Any]:
     """
     Call OpenRouter LLM for agent reasoning.
-    
+
     Args:
         messages: List of message dicts with 'role' and 'content'
         model: Model to use (defaults to config)
         temperature: Sampling temperature (0-2)
         max_tokens: Maximum tokens to generate
         response_format: Optional response format (e.g., {"type": "json_object"})
-        
+        call_site: Label identifying the caller (e.g., message_person, context_compression)
+
     Returns:
         Dict with 'content', 'model', 'usage', etc.
     """
     try:
         _safe_heartbeat(f"Calling LLM with {len(messages)} messages")
-        
+
         config = load_config()
         model = model or config.openrouter.model
-        
+
         # Check if this is a Rose model - route to Supabase edge function
         is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
-        
+
         if is_rose_model:
             # Generate unique request ID for tracing
             request_id = str(uuid.uuid4())[:8]
             # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
-            logger.info(f"📤 [{request_id}] Routing Rose model to Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}")
+            logger.info(f"📤 [{request_id}] [{call_site}] Routing Rose model to Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}")
 
             request_body = {
                 "model": model,
@@ -1609,6 +1612,7 @@ async def _call_llm_verifier(
     config: Any,
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
+    call_site: str = "verifier",
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Simple LLM call for verifier - no streaming UI, no tool detection.
@@ -1707,7 +1711,7 @@ async def _call_llm_verifier(
     cache_read = stream_usage.get("cache_read_input_tokens", 0) if stream_usage else 0
     cache_write = stream_usage.get("cache_creation_input_tokens", 0) if stream_usage else 0
     prompt_toks = stream_usage.get("prompt_tokens", 0) if stream_usage else 0
-    logger.info(f"🏁 Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}, cache_read={cache_read}, cache_write={cache_write}")
+    logger.info(f"🏁 [{call_site}] Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}, cache_read={cache_read}, cache_write={cache_write}")
 
     # Parse JSON - handle thinking models that put JSON in reasoning
     json_content = accumulated_json
@@ -1884,6 +1888,7 @@ async def check_progress(
     phase: str = "EXECUTE",  # Kept for backward compat but no longer used
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
+    call_site: str = "verifier",
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal.
@@ -1953,7 +1958,7 @@ async def check_progress(
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                result, usage = await _call_llm_verifier(messages, model, config, response_schema, claude_token=claude_token)
+                result, usage = await _call_llm_verifier(messages, model, config, response_schema, claude_token=claude_token, call_site=call_site)
                 break
             except Exception as e:
                 last_error = e
@@ -2017,6 +2022,7 @@ async def call_llm_activity(
     stream_id: Optional[str] = None,
     task_id: Optional[str] = None,
     claude_token: Optional[str] = None,
+    call_site: str = "unknown",
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -2116,6 +2122,7 @@ async def call_llm_activity(
             on_tool_detected=on_tool_detected_callback,
             claude_token=claude_token,
             on_model_detected=on_model_detected,
+            call_site=call_site,
         )
         
         # Send final done=True chunk
@@ -2273,7 +2280,14 @@ async def set_response_schema_activity(
 
             activity_elapsed = time.perf_counter() - activity_start
             logger.info(f"[TIMING] Total response schema activity: {activity_elapsed*1000:.1f}ms ({activity_elapsed:.2f}s)")
-            return schema
+            return {
+                "schema": schema,
+                "usage": {
+                    "prompt_tokens": tokens_in,
+                    "completion_tokens": tokens_out,
+                    "total_tokens": tokens_in + tokens_out,
+                },
+            }
 
     except httpx.HTTPStatusError as e:
         logger.error(
@@ -2413,6 +2427,7 @@ async def call_planner_llm_activity(
             on_raw_progress=on_plan_progress,
             claude_token=claude_max_token,
             skip_cache=True,  # Plan is generated once per iteration — no cache reuse
+            call_site="planner",
         )
         llm_elapsed = time.perf_counter() - llm_start
         activity_elapsed = time.perf_counter() - activity_start

@@ -265,6 +265,7 @@ async def spawn_explore_agent_activity(
         actual_model: Optional[str] = None,
         cache_read_input_tokens: int = 0,
         cache_creation_input_tokens: int = 0,
+        call_site: str = "explore_agent",
     ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append({
@@ -272,6 +273,7 @@ async def spawn_explore_agent_activity(
             "tokens_out": tokens_out_delta,
             "model": actual_model or model,
             "provider": "Explore Agent",
+            "call_site": call_site,
             "cache_read_input_tokens": cache_read_input_tokens,
             "cache_creation_input_tokens": cache_creation_input_tokens,
         })
@@ -557,6 +559,7 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
+        context_gates = tool_call.get("context_gates") or {}
 
         # IN_PROGRESS
         yield ToolEvent(
@@ -568,22 +571,30 @@ class SpawnAgentManager(ToolManager):
         )
 
         try:
-            # Fetch network metadata and local data summary if not provided
+            # Fetch network metadata and local data summary if not provided.
+            # Respect context_gates: "network" gates network_metadata,
+            # "recent_communications" gates local_data_summary.
             if network_metadata is None:
-                network_metadata = await workflow.execute_activity(
-                    fetch_full_network_metadata,
-                    args=[workflow_instance.user_id],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
+                if context_gates.get("network", True):
+                    network_metadata = await workflow.execute_activity(
+                        fetch_full_network_metadata,
+                        args=[workflow_instance.user_id],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                else:
+                    network_metadata = ""
 
             if local_data_summary is None:
-                local_data_summary = await workflow.execute_activity(
-                    fetch_local_data_summary,
-                    args=[workflow_instance.user_id],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
+                if context_gates.get("recent_communications", True):
+                    local_data_summary = await workflow.execute_activity(
+                        fetch_local_data_summary,
+                        args=[workflow_instance.user_id],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                else:
+                    local_data_summary = ""
 
             # Run explore agent activity with pause polling (like browser agent)
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
@@ -743,6 +754,8 @@ class SpawnAgentManager(ToolManager):
             "start_phase": _resolve_start_phase(tool_call),
             "attachments": tool_call.get("attachments"),
         }
+        if tool_call.get("context_gates"):
+            sub_agent_config["context_gates"] = tool_call["context_gates"]
         if tool_call.get("verifier"):
             sub_agent_config["verifier"] = tool_call["verifier"]
         else:
@@ -796,6 +809,7 @@ class SpawnAgentManager(ToolManager):
         }
         attachments = tool_call.get("attachments")
         output_schema = tool_call.get("output_schema")
+        context_gates = tool_call.get("context_gates")
 
         # Build per-item tool_calls shaped as spawn_agent(type=sub_agent)
         per_item_calls: List[tuple] = []
@@ -810,6 +824,8 @@ class SpawnAgentManager(ToolManager):
                 "read_only": tool_call.get("read_only", False),
                 "start_phase": start_phase,
             }
+            if context_gates:
+                item_tool_call["context_gates"] = context_gates
             per_item_calls.append((item_tool_call, f"{tool_call_id}:{i}"))
 
         MAX_INFLIGHT = 3  # TODO: bump to 10 for prod
@@ -911,7 +927,7 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
             last_result = event.data["result"]
         # Track usage from events (explore agent pipes accumulated usage here)
         if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
-            await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_agent")
+            await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_agent", call_site="explore_agent")
 
     workflow.logger.info(f"[spawn_agent] Finished type={agent_type}, events={event_count}, last_status={last_status}")
     return last_status, last_result

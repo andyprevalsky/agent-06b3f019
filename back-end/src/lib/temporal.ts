@@ -60,6 +60,15 @@ export async function startAgentWorkflow(params: {
   startPhase?: 'plan' | 'execute'; // Optional: 'plan' (default) runs PLAN→EXECUTE, 'execute' skips PLAN
   maxIterations?: number; // Optional: step limit for execute phase (sub-agents use 25)
   priceLimitCents?: number; // Optional: price limit in cents (default 100)
+  contextGates?: { // Optional: control which user context sections the agent receives
+    user_profile?: boolean;
+    authenticated_sessions?: boolean;
+    integrations?: boolean;
+    recent_communications?: boolean;
+    network?: boolean;
+    custom_system_prompt?: boolean;
+    shared_files?: boolean;
+  };
 }): Promise<string> {
   const client = await getTemporalClient();
   // Use provided task queue or default to environment-specific queue
@@ -92,6 +101,7 @@ export async function startAgentWorkflow(params: {
       params.startPhase || 'plan', // Starting phase: 'plan' runs PLAN→EXECUTE, 'execute' skips PLAN
       params.maxIterations || null, // Step limit for execute phase (sub-agents use 25)
       params.priceLimitCents || 100, // Price limit in cents (default $1.00)
+      params.contextGates || null, // Context gates: which user context sections to include
     ],
   });
 

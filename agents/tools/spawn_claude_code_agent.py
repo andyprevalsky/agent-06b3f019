@@ -298,6 +298,7 @@ Set attempt_completion=false when:
             on_chunk=on_chunk,
             agent_id=agent_id,
             claude_token=claude_token,
+            call_site="claude_code_agent",
         )
 
         return {
@@ -1366,6 +1367,6 @@ async def spawn_claude_code_agent(
             last_status = event.status
         # Track usage from final event (included in data field)
         if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
-            await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_claude_code_agent")
+            await workflow_instance._track_usage(event.data["usage"], tool_name="spawn_claude_code_agent", call_site="claude_code_agent")
 
     return last_status

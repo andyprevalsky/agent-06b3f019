@@ -237,6 +237,7 @@ async def execute_dag(
     handle_tool_event_fn: Callable[[ToolEvent, str, str], Awaitable[None]],
     poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,
     claude_token: Optional[str] = None,
+    on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """
     Execute DAG with maximum parallelism.
@@ -307,6 +308,7 @@ async def execute_dag(
                     execute_tool=execute_tool,
                     handle_tool_event_fn=handle_tool_event_fn,
                     claude_token=claude_token,
+                    on_tokens=on_tokens,
                 )
                 asyncio_task = asyncio.create_task(coro)
                 pending_tasks[task.index] = asyncio_task
@@ -375,6 +377,7 @@ async def _execute_single_task(
     execute_tool: Callable[[str, Dict, str], Awaitable[Dict]],
     handle_tool_event_fn: Callable[[ToolEvent, str, str], Awaitable[None]],
     claude_token: Optional[str] = None,
+    on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
 ) -> bool:
     """
     Execute a single task from the DAG.
@@ -408,9 +411,33 @@ async def _execute_single_task(
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
+            # Unpack result (reasoning activity returns {"content": str, "usage": dict})
+            if isinstance(reasoning_result, dict):
+                reasoning_content = reasoning_result.get("content", "")
+                reasoning_usage = reasoning_result.get("usage", {})
+            else:
+                reasoning_content = reasoning_result
+                reasoning_usage = {}
+
+            # Track reasoning LLM cost
+            if on_tokens and reasoning_usage:
+                r_in = reasoning_usage.get("prompt_tokens", 0)
+                r_out = reasoning_usage.get("completion_tokens", 0)
+                if r_in > 0 or r_out > 0:
+                    try:
+                        await on_tokens(
+                            r_in, r_out,
+                            reasoning_usage.get("actual_model"),
+                            cache_read_input_tokens=reasoning_usage.get("cache_read_input_tokens", 0),
+                            cache_creation_input_tokens=reasoning_usage.get("cache_creation_input_tokens", 0),
+                            call_site="dag_reasoning",
+                        )
+                    except Exception as e:
+                        workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
+
             # Post reasoning to DB as ASSISTANT message
             await post_message(
-                reasoning_result,
+                reasoning_content,
                 "ASSISTANT",
                 {"reasoning": True, "dagTaskIndex": task.index}
             )
@@ -438,12 +465,36 @@ async def _execute_single_task(
                     task.tool_name
                 )
 
-            params = await execute_activity(
+            param_result = await execute_activity(
                 populate_tool_params_activity,
                 args=[actual_tool, task.goal, context, model, task.tool_name, claude_token],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+
+            # Unpack param result (returns {"params": dict, "usage": dict})
+            if isinstance(param_result, dict) and "params" in param_result:
+                params = param_result["params"]
+                param_usage = param_result.get("usage", {})
+            else:
+                params = param_result
+                param_usage = {}
+
+            # Track param_populator LLM cost
+            if on_tokens and param_usage:
+                p_in = param_usage.get("prompt_tokens", 0)
+                p_out = param_usage.get("completion_tokens", 0)
+                if p_in > 0 or p_out > 0:
+                    try:
+                        await on_tokens(
+                            p_in, p_out,
+                            param_usage.get("actual_model"),
+                            cache_read_input_tokens=param_usage.get("cache_read_input_tokens", 0),
+                            cache_creation_input_tokens=param_usage.get("cache_creation_input_tokens", 0),
+                            call_site="dag_param_populator",
+                        )
+                    except Exception as e:
+                        workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")
 
             # Force correct type for spawn_agent aliases (LLM can't be trusted to pick the right type)
             type_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
