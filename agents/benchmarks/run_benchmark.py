@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import httpx
@@ -40,6 +41,7 @@ from benchmarks.benchmark_tasks import (
     list_all_tasks,
 )
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
+from benchmarks.logs import collect_logs, load_env_var, start_fly_log_collector, stop_fly_log_collector
 
 # Defaults
 DEFAULT_BASE_URL = os.environ.get(
@@ -50,7 +52,8 @@ STALL_THRESHOLD = 60  # seconds without new messages → warning
 TEST_ASSETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
 )
-API_KEY = os.environ.get("BACKEND_API_KEY", "")
+_AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
+API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 # Terminal agent statuses
@@ -349,6 +352,7 @@ async def run_single_task(
     print(f"  {'='*50}")
 
     start = time.time()
+    start_time = datetime.now(timezone.utc)
     agent_id = ""
 
     try:
@@ -403,6 +407,16 @@ async def run_single_task(
         # Evaluate
         passed, failure_reason = evaluate_task(task, data, approvals_triggered)
 
+        # Collect prod logs for diagnostics
+        print(f"    Collecting prod logs...")
+        logs = await collect_logs(agent_id, data, start_time)
+        log_summary = []
+        for key, label in [("backend_logs", "backend"), ("worker_logs", "worker"), ("research_logs", "research")]:
+            entries = logs.get(key, [])
+            log_summary.append(f"{label}={len(entries)}")
+        log_summary.append(f"messages={len(logs.get('messages', []))}")
+        print(f"    Logs collected: {', '.join(log_summary)}")
+
         result = TaskResult(
             name=task.name,
             passed=passed,
@@ -415,6 +429,7 @@ async def run_single_task(
             failure_reason=failure_reason,
             approvals_triggered=approvals_triggered,
             approvals_resolved=approvals_resolved,
+            logs=logs,
         )
 
         icon = "✅" if passed else "❌"
@@ -423,13 +438,25 @@ async def run_single_task(
             print(f"       Reason: {failure_reason}")
         print(f"       Duration: {duration:.1f}s | Cost: {cost_cents:.1f}c | Messages: {len(messages)}")
 
+        # Clean up: delete the agent now that we've collected all data
+        try:
+            await delete_agent(base_url, agent_id)
+            print(f"    🗑  Deleted agent {agent_id[:12]}")
+        except Exception:
+            print(f"    ⚠ Failed to delete agent {agent_id[:12]}")
+
         return result
 
     except Exception as e:
         duration = time.time() - start
         print(f"\n    ❌ {task.name}: ERROR - {e}")
-        # Clean up orphaned agent if one was created
+        # Best-effort log collection — errors are when logs matter most
+        logs = None
         if agent_id:
+            try:
+                logs = await collect_logs(agent_id, {}, start_time)
+            except Exception:
+                pass
             try:
                 await delete_agent(base_url, agent_id)
                 print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
@@ -445,6 +472,7 @@ async def run_single_task(
             cost_cents=0,
             message_count=0,
             failure_reason=str(e),
+            logs=logs,
         )
 
 
@@ -530,15 +558,27 @@ async def main_async(args):
     except Exception as e:
         print(f"  ⚠ Auth failed ({e}), falling back to API key")
 
-    # Run tasks
-    run = BenchmarkRun(suite=suite_name, base_url=base_url)
+    # Start Fly.io log streaming (captures worker logs in real-time)
+    fly_status = await start_fly_log_collector()
+    print(f"  📡 {fly_status}")
 
-    for task in tasks:
-        if args.no_retry:
-            result = await run_single_task(base_url, task)
-        else:
-            result = await run_with_retry(base_url, task)
-        run.task_results.append(result)
+    # Run tasks — finally block ensures flyctl cleanup + results are always saved
+    run = BenchmarkRun(suite=suite_name, base_url=base_url)
+    try:
+        for task in tasks:
+            if args.no_retry:
+                result = await run_single_task(base_url, task)
+            else:
+                result = await run_with_retry(base_url, task)
+            run.task_results.append(result)
+    finally:
+        fly_total = await stop_fly_log_collector()
+        print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
+
+        # Always save results — even partial results from interrupted runs are valuable
+        if run.task_results:
+            path = run.save()
+            print(f"\n  Results saved: {path}")
 
     # Print summary
     s = run.summary
@@ -548,10 +588,6 @@ async def main_async(args):
     if s["transient_failures"] > 0:
         print(f"  Transient failures: {s['transient_failures']}")
     print(f"{'='*60}")
-
-    # Save results
-    path = run.save()
-    print(f"\n  Results saved: {path}")
 
 
 def main():

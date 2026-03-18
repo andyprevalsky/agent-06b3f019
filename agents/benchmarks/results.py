@@ -23,6 +23,7 @@ class TaskResult:
     retry_agent_id: Optional[str] = None
     approvals_triggered: int = 0
     approvals_resolved: int = 0
+    logs: Optional[dict] = None  # {messages, backend_logs, worker_logs, research_logs}
 
 
 @dataclass

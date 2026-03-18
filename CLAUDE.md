@@ -39,7 +39,7 @@ cd agents && python tests/run_all_tests.py  # Agent tool tests
 cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
 ```
 
-**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`
+**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference and **prod log review instructions** (how to read Render/Fly.io/Supabase logs from benchmark runs). Quick: `cd agents && python benchmarks/run_benchmark.py --list`
 
 ## Log Files
 
@@ -51,6 +51,13 @@ Check these when errors occur:
 - **Mac App (IPC):** `mac-app/mac-app-ipc-logs.log`
 - **Research (edge functions):** `research/research-logs.log`
 - **Docs:** `docs/docs-logs.log`
+
+**Prod logs (for benchmark agents):** Benchmark runs auto-collect logs from 3 prod sources into the result JSON (`agents/benchmarks/runs/*.json`):
+- **Render (backend):** HTTP request logs filtered by `agent_id` — via `RENDER_API_KEY` in `back-end/.env`
+- **Fly.io (worker):** Agent execution logs (structlog JSON with `agent_id`) — streamed in real-time via `flyctl logs` during benchmark runs, needs `FLY_API_TOKEN` in `agents/.env`
+- **Supabase (research):** Rose API gateway logs (completions, API key validation) — via `SUPABASE_ACCESS_TOKEN` in `agents/.env`
+
+See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippets to inspect these.
 
 ## Critical Rules
 

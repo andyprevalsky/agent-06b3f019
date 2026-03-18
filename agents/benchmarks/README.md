@@ -88,14 +88,77 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 |----------|---------|-------------|
 | `BENCHMARK_BASE_URL` | `https://navi-j9a9.onrender.com` | API base URL |
 | `BACKEND_API_KEY` | **(required)** | API key for authentication |
+| `FLY_API_TOKEN` | — | Fly.io deploy token for worker log streaming (`agents/.env`) |
+| `RENDER_API_KEY` | — | Render API key for backend log fetching (`back-end/.env`) |
+| `SUPABASE_ACCESS_TOKEN` | — | Supabase management token for edge function logs (`agents/.env`) |
 
 ## API Endpoint
 
 `GET /api/benchmarks` — Returns all task definitions (no auth required).
 
-## Prod Log Filtering
+## Reviewing Benchmark Logs
 
-All agent logs are now filterable by `agent_id`:
+Each benchmark run collects production logs from three sources and stores them in the result JSON under `tasks[].logs`. This is the primary way to debug failing benchmark agents.
 
-**Backend (Render)**: Each HTTP log line includes `agent_id=<uuid>`
-**Agent worker (Fly.io)**: JSON logs include `"agent_id": "<uuid>"` via structlog contextvars + `"temporal_workflow": {"workflow_id": "<uuid>"}` via Temporal
+### Log Sources
+
+| Source | Key in JSON | What it captures | Filtered by |
+|--------|-------------|------------------|-------------|
+| **Render** (backend) | `backend_logs` | HTTP requests to/from the API (agent create, status updates, messages) | `agent_id` in URL/body |
+| **Fly.io** (worker) | `worker_logs` | Agent execution logs (workflow start, LLM calls, tool execution, errors) | `agent_id` in structlog context |
+| **Supabase** (research) | `research_logs` | Rose API gateway logs (completions calls, API key validation) | Time window (no agent_id in edge function logs) |
+| **Messages** | `messages` | Full agent conversation transcript (USER/ASSISTANT/TOOL messages) | Always available |
+
+### How to Read Logs from a Run
+
+```bash
+# Quick summary: how many logs per source
+python3 -c "
+import json
+with open('benchmarks/runs/<filename>.json') as f:
+    data = json.load(f)
+for t in data['tasks']:
+    logs = t.get('logs', {})
+    print(f\"{t['name']}: backend={len(logs.get('backend_logs',[]))}, worker={len(logs.get('worker_logs',[]))}, research={len(logs.get('research_logs',[]))}, messages={len(logs.get('messages',[]))}\")"
+
+# Detailed worker logs (most useful for debugging agent behavior)
+python3 -c "
+import json
+with open('benchmarks/runs/<filename>.json') as f:
+    data = json.load(f)
+for entry in data['tasks'][0]['logs'].get('worker_logs', []):
+    try:
+        parsed = json.loads(entry)
+        print(f\"[{parsed.get('level','')}] {parsed.get('event','')}\")
+    except json.JSONDecodeError:
+        print(entry)"
+
+# Full message transcript
+python3 -c "
+import json
+with open('benchmarks/runs/<filename>.json') as f:
+    data = json.load(f)
+for msg in data['tasks'][0]['logs'].get('messages', []):
+    print(f\"[{msg['role']}] {msg['message'][:100]}\")"
+```
+
+### How Log Collection Works
+
+- **Render**: REST API call to `api.render.com/v1/logs` with time window, filtered by agent_id
+- **Fly.io**: `flyctl logs` streams as a background process for the entire benchmark run, capturing all worker output in real-time, then filtered by agent_id after each task completes
+- **Supabase**: REST API call to `api.supabase.com/v1/projects/.../analytics/endpoints/logs.all` with time window, filtered for completions-related requests
+- **Messages**: Extracted from the agent GET response (always available, no external API needed)
+
+### Token Setup
+
+```bash
+# Fly.io (worker logs) — generate a deploy token
+flyctl tokens create deploy -a navi-whisper-lux
+# Add to agents/.env: FLY_API_TOKEN="<token>"
+
+# Supabase (research logs) — generate at dashboard
+# https://supabase.com/dashboard/account/tokens
+# Add to agents/.env: SUPABASE_ACCESS_TOKEN="<token>"
+
+# Render (backend logs) — already in back-end/.env: RENDER_API_KEY
+```

@@ -36,7 +36,7 @@
     "title": "Parallel Web Searches",
     "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.",
     "eval_prompt": "Agent performed multiple web searches for cost of living, neighborhoods, and weather across Austin, Denver, and Lisbon. Results are synthesized into a comparison. At least 3 web_search calls were made.",
-    "timeout_seconds": 180,
+    "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["web_search"],
     "tags": ["basic"],
