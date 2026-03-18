@@ -38,7 +38,7 @@ const closeSessionSchema = z.object({
   task_id: z.string().uuid(),
   user_id: z.string().uuid().optional(),
   agent_id: z.string().uuid().optional(),
-  additional_paths: z.array(z.string()).optional(), // Additional file paths to extract (e.g., from verifier)
+  additional_paths: z.array(z.string()).nullable().optional().transform(v => v ?? undefined), // Additional file paths to extract (e.g., from verifier)
 });
 
 /**

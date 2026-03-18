@@ -934,7 +934,7 @@ async def spawn_claude_code_activity(
                         "task_id": task_id,
                         "user_id": user_id,
                         "agent_id": agent_id,
-                        "additional_paths": additional_paths if additional_paths else None,
+                        "additional_paths": additional_paths,
                     }
                 )
                 if close_response.status_code == 200:

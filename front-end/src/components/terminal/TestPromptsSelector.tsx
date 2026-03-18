@@ -22,7 +22,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 interface TestPrompt {
   title: string;
@@ -190,7 +190,54 @@ Since you are limited on the sub-agents you can create, you may need to split th
     prompt: 'Get me one interesting fact about each entity on the csv.',
     attachmentUrls: ['/test-assets/entities-12.csv'],
   },
+  {
+    title: 'Get Jessie a Job',
+    description: 'Job application blitz for executive assistant and childcare roles in Harlem',
+    prompt: `Get my friend Jessie Zaruma a job as an executive assistant or in childcare.
+She is currently in Harlem.
+Her email is Jzarumita@gmail.com
+
+- Shooting for $30/hr, but will take $20/hr minimum.
+- She needs to get a job ASAP.
+- Remote is ideal but not mandatory.
+- Since she needs a job really badly, we can sacrifice specificity for throughput.
+- We don't have access to her email, so I just want you to handle doing whatever is necessary to get her foot in the door, apply to as many relevant jobs as possible and do anything else you think would be conducive to getting her a job quickly.`,
+    attachmentUrls: [
+      '/test-assets/jessie-zaruma-exec-assistant-resume.pdf',
+      '/test-assets/jessie-zaruma-childcare-resume.pdf',
+    ],
+  },
 ];
+
+// Dev default prompt — auto-loaded into QueryInput on mount in dev mode
+const DEV_DEFAULT_PROMPT_TITLE = 'Get Jessie a Job';
+
+/** Fetch attachment files for a test prompt from the public folder */
+async function fetchTestPromptFiles(attachmentUrls: string[]): Promise<File[]> {
+  const isFileProtocol = window.location.protocol === 'file:';
+  const files = await Promise.all(
+    attachmentUrls.map(async (assetPath) => {
+      const url = isFileProtocol ? assetPath.replace(/^\//, '') : assetPath;
+      const response = await fetch(url);
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        console.error(`Test asset ${url} returned HTML — file missing from public/ folder`);
+        return null;
+      }
+      const blob = await response.blob();
+      const filename = url.split('/').pop() || 'attachment';
+      const ext = filename.split('.').pop()?.toLowerCase();
+      const mimeByExt: Record<string, string> = {
+        jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png',
+        gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+        pdf: 'application/pdf', csv: 'text/csv', txt: 'text/plain',
+      };
+      const mimeType = (ext && mimeByExt[ext]) || blob.type;
+      return new File([blob], filename, { type: mimeType });
+    })
+  );
+  return files.filter((f): f is File => f !== null);
+}
 
 interface TestPromptsSelectorProps {
   onSelectPrompt: (prompt: string, files?: File[]) => void;
@@ -199,43 +246,35 @@ interface TestPromptsSelectorProps {
 export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const hasAutoLoaded = useRef(false);
+
+  // Auto-load default dev prompt on mount
+  useEffect(() => {
+    if (!import.meta.env.DEV || hasAutoLoaded.current) return;
+    hasAutoLoaded.current = true;
+
+    const defaultPrompt = TEST_PROMPTS.find(p => p.title === DEV_DEFAULT_PROMPT_TITLE);
+    if (!defaultPrompt) return;
+
+    (async () => {
+      try {
+        const files = defaultPrompt.attachmentUrls
+          ? await fetchTestPromptFiles(defaultPrompt.attachmentUrls)
+          : undefined;
+        onSelectPrompt(defaultPrompt.prompt, files);
+      } catch (error) {
+        console.error('Failed to auto-load default dev prompt:', error);
+        onSelectPrompt(defaultPrompt.prompt);
+      }
+    })();
+  }, [onSelectPrompt]);
 
   const handleSelectPrompt = async (testPrompt: TestPrompt) => {
     setIsLoading(true);
     try {
-      let files: File[] | undefined;
-
-      if (testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0) {
-        // Fetch files from the app's public folder.
-        // NOTE: test-assets must exist in EACH app's public/ dir.
-        // The mac-app symlinks to front-end/public/test-assets.
-        // In Electron prod mode (file:// protocol), absolute paths like /test-assets/...
-        // resolve to file:///test-assets/... which doesn't exist. Strip leading slash
-        // so the path resolves relative to the HTML document (works with base: './').
-        const isFileProtocol = window.location.protocol === 'file:';
-        files = (await Promise.all(
-          testPrompt.attachmentUrls.map(async (assetPath) => {
-            const url = isFileProtocol ? assetPath.replace(/^\//, '') : assetPath;
-            const response = await fetch(url);
-            // Detect Vite SPA fallback (returns index.html for missing files)
-            const contentType = response.headers.get('content-type') || '';
-            if (contentType.includes('text/html')) {
-              console.error(`Test asset ${url} returned HTML — file missing from public/ folder`);
-              return null;
-            }
-            const blob = await response.blob();
-            const filename = url.split('/').pop() || 'attachment';
-            const ext = filename.split('.').pop()?.toLowerCase();
-            const mimeByExt: Record<string, string> = {
-              jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png',
-              gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
-              pdf: 'application/pdf', csv: 'text/csv', txt: 'text/plain',
-            };
-            const mimeType = (ext && mimeByExt[ext]) || blob.type;
-            return new File([blob], filename, { type: mimeType });
-          })
-        )).filter((f): f is File => f !== null);
-      }
+      const files = testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0
+        ? await fetchTestPromptFiles(testPrompt.attachmentUrls)
+        : undefined;
 
       onSelectPrompt(testPrompt.prompt, files);
     } catch (error) {

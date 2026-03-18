@@ -378,8 +378,8 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       localStorage.removeItem('onboarding_prefill_query');
       return onboardingPrefill;
     }
-    // Fall back to DEV default if no prefill
-    return import.meta.env.DEV ? 'Hello' : '';
+    // DEV default is now auto-loaded by TestPromptsSelector
+    return '';
   });
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState('rose-labs/rose-1-lite');
