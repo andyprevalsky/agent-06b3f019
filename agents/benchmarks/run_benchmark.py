@@ -228,6 +228,18 @@ async def get_agent_tree(base_url: str, bus_id: str) -> List[dict]:
         return data.get("agents", [])
 
 
+async def post_message(base_url: str, agent_id: str, message: str) -> bool:
+    """POST /api/agents/:id/messages — send a user message (unblocks send_message_to_user waits)."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{base_url}/api/agents/{agent_id}/messages",
+            headers=headers,
+            json={"message": message, "role": "USER"},
+        )
+        return resp.status_code in (200, 201)
+
+
 async def pause_agent(base_url: str, agent_id: str) -> bool:
     """POST /api/agents/:id/pause — pause root agent (children discover via polling)."""
     headers = await _api_headers()
@@ -279,6 +291,7 @@ async def poll_agent(
     prev_message_count = 0
     approvals_triggered = 0
     approvals_resolved = 0
+    replied_waiting_msgs: set = set()  # track isWaitingForUser messages we've already replied to
 
     while True:
         elapsed = time.time() - start
@@ -315,6 +328,27 @@ async def poll_agent(
             prev_message_count = msg_count
         elif time.time() - last_message_time > STALL_THRESHOLD:
             print(f"    ⚠ Stall detected ({time.time() - last_message_time:.0f}s since last message)")
+
+        # Auto-reply to send_message_to_user questions (isWaitingForUser)
+        # These block the workflow until a user message is posted back.
+        for m in messages:
+            meta = m.get("metadata", {})
+            if not isinstance(meta, dict):
+                continue
+            msg_id = m.get("id", "")
+            if meta.get("isWaitingForUser") and msg_id and msg_id not in replied_waiting_msgs:
+                replied_waiting_msgs.add(msg_id)
+                question = (m.get("message") or "")[:200]
+                print(f"    💬 Agent asked a question: {question}")
+                print(f"    → Auto-replying to unblock workflow")
+                try:
+                    await post_message(
+                        base_url, agent_id,
+                        "Continue with the information you have. "
+                        "All files have been uploaded as attachments and should be available in your context."
+                    )
+                except Exception as e:
+                    print(f"    ⚠ Auto-reply failed: {e}")
 
         # Handle approval requests
         if task.approval_handling in ("auto_approve", "ignore", "prompt_user"):
