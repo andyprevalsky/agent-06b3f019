@@ -172,7 +172,24 @@
     "requires_browser_agent": true,
     "requires_claude_code": true,
     "attachment": "dallasmmaboxing-waivers/membership_terms_updated.pdf",
-    "approval_handling": "required",
+    "approval_handling": "prompt_user",
+    "start_phase": "plan"
+  },
+  {
+    "name": "job-applications",
+    "title": "Job Application Blitz",
+    "prompt": "Get my friend a job as an executive assistant or in childcare.\nShe is currently in Harlem, NYC.\nHer email is testapplicant+bench@example.com\n\n- Shooting for $30/hr, but will take $20/hr minimum.\n- She needs to get a job ASAP.\n- Remote is ideal but not mandatory.\n- Since she needs a job really badly, we can sacrifice specificity for throughput.\n- We don't have access to her email, so I just want you to handle doing whatever is necessary to get her foot in the door, apply to as many relevant jobs as possible and do anything else you think would be conducive to getting her a job quickly.",
+    "eval_prompt": "Agent received two resume attachments (executive assistant and childcare), researched job listings, and applied to or initiated contact for multiple relevant positions in Harlem/NYC. Agent used browser agent and/or sub-agents to maximize throughput. At least 3 job applications or outreach actions were completed.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent", "web_search"],
+    "tags": ["browser", "job-applications"],
+    "price_limit_cents": 1000,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "attachments": ["test-exec-assistant-resume.pdf", "test-childcare-resume.pdf"],
+    "approval_handling": "prompt_user",
     "start_phase": "plan"
   }
 ]

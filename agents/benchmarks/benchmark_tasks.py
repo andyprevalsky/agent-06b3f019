@@ -22,6 +22,7 @@ class BenchmarkTask:
     attachment: Optional[str]
     approval_handling: Optional[str]  # "auto_approve", "ignore", "prompt_user", or None
     start_phase: Optional[str]  # "plan", "execute", or None (chat mode)
+    attachments: List[str] = field(default_factory=list)  # Multiple attachments (alternative to single attachment)
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
@@ -57,6 +58,7 @@ def get_tasks_by_tag(tag: str) -> List[BenchmarkTask]:
 def list_all_tasks() -> None:
     for t in all_tasks():
         tags = ", ".join(t.tags)
-        attach = f" [attachment: {t.attachment}]" if t.attachment else ""
+        all_attach = t.attachments or ([t.attachment] if t.attachment else [])
+        attach = f" [attachments: {', '.join(all_attach)}]" if all_attach else ""
         approval = f" [approval: {t.approval_handling}]" if t.approval_handling else ""
         print(f"  {t.name:<25} {t.title:<35} tags=[{tags}]{attach}{approval}")

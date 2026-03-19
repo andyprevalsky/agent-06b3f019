@@ -234,9 +234,9 @@ Since you are limited on the sub-agents you can create, you may need to split th
   {
     title: 'Get Jessie a Job',
     description: 'Job application blitz for executive assistant and childcare roles in Harlem',
-    prompt: `Get my friend Jessie Zaruma a job as an executive assistant or in childcare.
-She is currently in Harlem.
-Her email is Jzarumita@gmail.com
+    prompt: `Get my friend a job as an executive assistant or in childcare.
+She is currently in Harlem, NYC.
+Her email is testapplicant+bench@example.com
 
 - Shooting for $30/hr, but will take $20/hr minimum.
 - She needs to get a job ASAP.
@@ -244,8 +244,8 @@ Her email is Jzarumita@gmail.com
 - Since she needs a job really badly, we can sacrifice specificity for throughput.
 - We don't have access to her email, so I just want you to handle doing whatever is necessary to get her foot in the door, apply to as many relevant jobs as possible and do anything else you think would be conducive to getting her a job quickly.`,
     attachmentUrls: [
-      '/test-assets/jessie-zaruma-exec-assistant-resume.pdf',
-      '/test-assets/jessie-zaruma-childcare-resume.pdf',
+      '/test-assets/test-exec-assistant-resume.pdf',
+      '/test-assets/test-childcare-resume.pdf',
     ],
   },
 ];
@@ -260,6 +260,10 @@ async function fetchTestPromptFiles(attachmentUrls: string[]): Promise<File[]> {
     attachmentUrls.map(async (assetPath) => {
       const url = isFileProtocol ? assetPath.replace(/^\//, '') : assetPath;
       const response = await fetch(url);
+      if (!response.ok) {
+        console.error(`Test asset ${url} failed: ${response.status} ${response.statusText}`);
+        return null;
+      }
       const contentType = response.headers.get('content-type') || '';
       if (contentType.includes('text/html')) {
         console.error(`Test asset ${url} returned HTML — file missing from public/ folder`);

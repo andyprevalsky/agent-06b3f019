@@ -38,7 +38,8 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 | `attachment` | image-handling, files-in-sub-agents, agent-swarm | Tasks with file attachments |
 | `swarm` | agent-swarm, family-office-angel-outreach | Multi-agent swarm tasks |
 | `outreach` | family-office-angel-outreach | Personalized outreach at scale |
-| `all` | Everything | All 10 tasks |
+| `job-applications` | job-applications | Job application blitz with resumes |
+| `all` | Everything | All 12 tasks |
 
 ## Tasks
 
@@ -54,6 +55,8 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 | 8 | files-in-sub-agents | 600s | 300c | — | rs.jpeg |
 | 9 | agent-swarm | 600s | 500c | — | entities-12.csv |
 | 10 | family-office-angel-outreach | 600s | 1000c | prompt_user | vcs-and-angels.csv |
+| 11 | build-boxing-payment | 900s | 1000c | prompt_user | waivers PDFs |
+| 12 | job-applications | 900s | 1000c | prompt_user | 2x resume PDFs |
 
 ## How It Works
 

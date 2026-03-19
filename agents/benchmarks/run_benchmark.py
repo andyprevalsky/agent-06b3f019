@@ -87,7 +87,6 @@ async def _api_headers() -> dict:
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
-    attachment_pointers: Optional[List[dict]] = None,
 ) -> str:
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
@@ -105,9 +104,6 @@ async def create_agent(
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
-
-    if attachment_pointers:
-        body["attachments"] = attachment_pointers
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(f"{base_url}/api/agents", headers=headers, json=body)
@@ -369,8 +365,9 @@ async def run_single_task(
     print(f"\n  {'='*50}")
     print(f"  📋 {task.name}: {task.title}")
     print(f"     timeout={task.timeout_seconds}s, price_limit={task.price_limit_cents}c")
-    if task.attachment:
-        print(f"     attachment={task.attachment}")
+    all_attachments = task.attachments or ([task.attachment] if task.attachment else [])
+    if all_attachments:
+        print(f"     attachments={all_attachments}")
     if task.approval_handling:
         print(f"     approval={task.approval_handling}")
     print(f"  {'='*50}")
@@ -380,31 +377,22 @@ async def run_single_task(
     agent_id = ""
 
     try:
-        # Handle attachment: create agent first, then upload
-        attachment_pointers = None
-        if task.attachment:
-            # Create agent first (no attachment yet)
+        # Handle attachments: create agent first, then upload each file
+        if all_attachments:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
 
-            # Upload attachment
-            filepath = os.path.join(TEST_ASSETS_DIR, task.attachment)
-            if not os.path.exists(filepath):
-                raise FileNotFoundError(f"Test asset not found: {filepath}")
+            for attach_filename in all_attachments:
+                filepath = os.path.join(TEST_ASSETS_DIR, attach_filename)
+                if not os.path.exists(filepath):
+                    raise FileNotFoundError(f"Test asset not found: {filepath}")
 
-            print(f"    Uploading {task.attachment}...")
-            fp = await upload_attachment(base_url, agent_id, filepath)
-            if fp:
-                print(f"    ✅ Uploaded, FilePointer received")
-            else:
-                print(f"    ⚠ Upload returned no FilePointer, continuing anyway")
-
-            # Now we need to delete and re-create with the attachment
-            # OR: the agent was already created and the attachment is posted as a message
-            # The upload endpoint posts the file as an attachment message,
-            # so the agent already has it. We just need to start it.
-            # Actually, the agent was created above and may have started.
-            # The attachment is available as a message in the agent's context.
+                print(f"    Uploading {attach_filename}...")
+                fp = await upload_attachment(base_url, agent_id, filepath)
+                if fp:
+                    print(f"    ✅ Uploaded, FilePointer received")
+                else:
+                    print(f"    ⚠ Upload returned no FilePointer, continuing anyway")
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
