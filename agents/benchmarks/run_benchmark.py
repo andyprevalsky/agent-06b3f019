@@ -77,7 +77,7 @@ from benchmarks.logs import (
     load_env_var, start_fly_log_collector, stop_fly_log_collector,
 )
 
-# Defaults
+# Defaults — benchmarks run against PROD by default (no local services needed)
 DEFAULT_BASE_URL = os.environ.get(
     "BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com"
 )
