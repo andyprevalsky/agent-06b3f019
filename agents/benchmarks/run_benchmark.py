@@ -10,6 +10,7 @@ Usage:
     python benchmarks/run_benchmark.py --list
     python benchmarks/run_benchmark.py --task chat-mode
     python benchmarks/run_benchmark.py --suite basic
+    python benchmarks/run_benchmark.py --suite smoke --parallel --ci   # PR smoke test
     python benchmarks/run_benchmark.py --suite all --url https://navi-j9a9.onrender.com
     python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 """
@@ -565,12 +566,36 @@ async def main_async(args):
     # Run tasks — finally block ensures flyctl cleanup + results are always saved
     run = BenchmarkRun(suite=suite_name, base_url=base_url)
     try:
-        for task in tasks:
-            if args.no_retry:
-                result = await run_single_task(base_url, task)
-            else:
-                result = await run_with_retry(base_url, task)
-            run.task_results.append(result)
+        if args.parallel:
+            # Run all tasks concurrently
+            print(f"\n  Running {len(tasks)} tasks in parallel...")
+            runner = run_single_task if args.no_retry else run_with_retry
+            results = await asyncio.gather(
+                *(runner(base_url, task) for task in tasks),
+                return_exceptions=True,
+            )
+            for task, result in zip(tasks, results):
+                if isinstance(result, BaseException):
+                    run.task_results.append(TaskResult(
+                        name=task.name,
+                        passed=False,
+                        agent_id="",
+                        status="ERROR",
+                        progress_score=0,
+                        duration_seconds=0,
+                        cost_cents=0,
+                        message_count=0,
+                        failure_reason=str(result),
+                    ))
+                else:
+                    run.task_results.append(result)
+        else:
+            for task in tasks:
+                if args.no_retry:
+                    result = await run_single_task(base_url, task)
+                else:
+                    result = await run_with_retry(base_url, task)
+                run.task_results.append(result)
     finally:
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
@@ -588,6 +613,10 @@ async def main_async(args):
     if s["transient_failures"] > 0:
         print(f"  Transient failures: {s['transient_failures']}")
     print(f"{'='*60}")
+
+    # CI mode: exit non-zero if any task failed
+    if args.ci and s["failed"] > 0:
+        sys.exit(1)
 
 
 def main():
@@ -615,6 +644,16 @@ def main():
         "--no-retry",
         action="store_true",
         help="Don't retry failed tasks",
+    )
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Run tasks concurrently instead of sequentially",
+    )
+    parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="CI mode: exit with non-zero status if any task fails",
     )
     args = parser.parse_args()
 
