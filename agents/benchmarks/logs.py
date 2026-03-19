@@ -29,7 +29,7 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import httpx
 
@@ -434,3 +434,147 @@ async def collect_logs(
         "worker_logs": worker_logs,
         "research_logs": research_logs,
     }
+
+
+# ---------------------------------------------------------------------------
+# Collect logs for an entire agent tree (root + all descendants)
+# ---------------------------------------------------------------------------
+
+async def collect_tree_logs(
+    root_agent_id: str,
+    tree_agents: List[dict],
+    start_time: datetime,
+    get_agent_fn=None,
+) -> Dict[str, dict]:
+    """
+    Collect logs for every agent in a tree.
+
+    Args:
+        root_agent_id: The root agent ID (also used as busId).
+        tree_agents: List of agent dicts from GET /api/agents/tree?busId=X.
+                     Each has: agent_id, parent_agent_id, goal, status.
+        start_time: When the benchmark started (for time-window log queries).
+        get_agent_fn: Async callable(agent_id) -> agent_data dict.
+                      Used to fetch full message transcripts per agent.
+
+    Returns:
+        {
+            "<agent_id>": {
+                "parent_agent_id": str | None,
+                "goal": str,
+                "status": str,
+                "logs": { messages, backend_logs, worker_logs, research_logs }
+            },
+            ...
+        }
+    """
+    async def _collect_one(agent_info: dict) -> tuple:
+        aid = agent_info.get("agent_id", "")
+        if not aid:
+            return None, None
+
+        agent_data = {}
+        if get_agent_fn:
+            try:
+                agent_data = await get_agent_fn(aid)
+            except Exception:
+                pass
+
+        logs = await collect_logs(aid, agent_data, start_time)
+        return aid, {
+            "parent_agent_id": agent_info.get("parent_agent_id"),
+            "goal": (agent_info.get("goal") or "")[:200],
+            "status": agent_info.get("status", "UNKNOWN"),
+            "logs": logs,
+        }
+
+    # Fetch all agent logs in parallel — return_exceptions so one failure doesn't kill all
+    results = await asyncio.gather(*[_collect_one(a) for a in tree_agents], return_exceptions=True)
+
+    result: Dict[str, dict] = {}
+    for r in results:
+        if isinstance(r, BaseException):
+            continue
+        aid, info = r
+        if aid is not None:
+            result[aid] = info
+
+    return result
+
+
+def format_tree_diagnostics(
+    tree_logs: Dict[str, dict],
+    root_agent_id: str,
+) -> str:
+    """
+    Format tree logs into a human-readable diagnostic string.
+    Shows agent hierarchy with status and error highlights.
+    """
+    lines = []
+    lines.append("=" * 60)
+    lines.append("  AGENT TREE DIAGNOSTICS")
+    lines.append("=" * 60)
+
+    # Build parent→children map
+    children_map: Dict[Optional[str], List[str]] = {}
+    for aid, info in tree_logs.items():
+        parent = info.get("parent_agent_id")
+        children_map.setdefault(parent, []).append(aid)
+
+    visited: set = set()
+
+    def _walk(agent_id: str, depth: int = 0):
+        if agent_id in visited:
+            indent = "  " * (depth + 1)
+            lines.append(f"{indent}⚠ cycle detected: {agent_id[:12]} already visited")
+            return
+        visited.add(agent_id)
+        info = tree_logs.get(agent_id, {})
+        status = info.get("status", "?")
+        goal = info.get("goal", "")[:80]
+        indent = "  " * (depth + 1)
+        prefix = "└─" if depth > 0 else "●"
+
+        # Status icon
+        icon = {"COMPLETED": "✅", "FAILED": "❌", "PAUSED": "⏸",
+                "COST_LIMIT_REACHED": "💸", "OUT_OF_CREDITS": "💸"}.get(status, "🔄")
+
+        lines.append(f"{indent}{prefix} {icon} {agent_id[:12]}  [{status}]  {goal}")
+
+        # Show errors from worker logs
+        logs = info.get("logs", {})
+        worker = logs.get("worker_logs", [])
+        errors = [l for l in worker if '"level":"error"' in l.lower() or '"event":"error"' in l.lower()
+                  or "traceback" in l.lower() or "exception" in l.lower()]
+        if errors:
+            lines.append(f"{indent}   ⚠ {len(errors)} error(s) in worker logs:")
+            for err in errors[:3]:
+                lines.append(f"{indent}     {err[:150]}")
+
+        # Show message count
+        msgs = logs.get("messages", [])
+        if msgs:
+            tool_msgs = [m for m in msgs if m.get("role") == "TOOL"]
+            error_tools = [m for m in tool_msgs
+                           if isinstance(m.get("metadata"), dict) and m["metadata"].get("toolStatus") == "ERROR"]
+            lines.append(f"{indent}   📨 {len(msgs)} messages ({len(tool_msgs)} tool, {len(error_tools)} errors)")
+            for et in error_tools[:2]:
+                tool_name = et.get("metadata", {}).get("toolName", "?")
+                msg_text = (et.get("message") or "")[:120]
+                lines.append(f"{indent}     ❌ {tool_name}: {msg_text}")
+
+        for child_id in children_map.get(agent_id, []):
+            _walk(child_id, depth + 1)
+
+    # Start from root
+    _walk(root_agent_id)
+
+    lines.append("")
+    lines.append(f"  Total agents in tree: {len(tree_logs)}")
+    failed = [aid for aid, info in tree_logs.items()
+              if info.get("status") in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED")]
+    if failed:
+        lines.append(f"  Failed agents: {', '.join(a[:12] for a in failed)}")
+    lines.append("=" * 60)
+
+    return "\n".join(lines)
