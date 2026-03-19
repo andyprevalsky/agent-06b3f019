@@ -4,7 +4,6 @@ import { Prisma } from '@prisma/client';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../lib/prisma';
-import { AuthRequest, authenticate } from '../middleware/auth';
 import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
 import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
@@ -899,9 +898,9 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
 
 // POST /api/agents/:id/attachments - DEPRECATED: Use POST /api/upload instead
 // Kept for backwards compatibility - redirects to new endpoint behavior
-router.post('/:id/attachments', authenticate, attachmentUpload.single('file') as any, async (req: AuthRequest, res) => {
+router.post('/:id/attachments', hybridAuth, attachmentUpload.single('file') as any, async (req: HybridAuthRequest, res) => {
   try {
-    const userId = req.user!.id;
+    const userId = req.userId!;
 
     if (!req.file) {
       res.status(400).json({ error: 'No file uploaded' });
@@ -932,9 +931,9 @@ router.post('/:id/attachments', authenticate, attachmentUpload.single('file') as
 
 // GET /api/agents/:id/attachments/:fileId/url - Get a signed URL for a file attachment
 // Verifies the storage path starts with the user's ID for security
-router.get('/:id/attachments/:fileId/url', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id/attachments/:fileId/url', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
-    const userId = req.user!.id;
+    const userId = req.userId!;
     const storagePath = req.query.storage_path as string;
 
     if (!storagePath) {
