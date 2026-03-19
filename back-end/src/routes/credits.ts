@@ -4,15 +4,17 @@
 
 import express, { Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { 
-  getUserUsage, 
-  getSubscriptionTier, 
+import {
+  getUserUsage,
+  getSubscriptionTier,
   getUpgradeOptions,
-  createInitialCredit 
+  createInitialCredit
 } from '../lib/credits';
 import { prisma } from '../lib/prisma';
 import Stripe from 'stripe';
+import { createLogger } from '../lib/logger';
 
+const log = createLogger('Credits');
 const router = express.Router();
 
 // Initialize Stripe
@@ -81,7 +83,7 @@ router.get('/usage', async (req: AuthRequest, res: Response) => {
       upgradeOptions: getUpgradeOptions(tier)
     });
   } catch (error) {
-    console.error('Error checking usage:', error);
+    log.error('Error checking usage', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to check usage' });
   }
 });
@@ -108,7 +110,7 @@ router.post('/initialize', authenticate, async (req: AuthRequest, res: Response)
       user = await prisma.user.create({
         data: { userId }
       });
-      console.log(`✅ Created user record for ${userId}`);
+      log.info('Created user record', { user_id: userId });
     }
 
     // Create initial credit
@@ -122,7 +124,7 @@ router.post('/initialize', authenticate, async (req: AuthRequest, res: Response)
       }
     });
   } catch (error) {
-    console.error('Error initializing credits:', error);
+    log.error('Error initializing credits', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to initialize credits' });
   }
 });
@@ -157,7 +159,7 @@ router.get('/subscription', authenticate, async (req: AuthRequest, res: Response
       upgradeOptions: getUpgradeOptions(subscription.subscriptionTier)
     });
   } catch (error) {
-    console.error('Error fetching subscription:', error);
+    log.error('Error fetching subscription', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch subscription' });
   }
 });
@@ -216,7 +218,7 @@ router.get('/stats', authenticate, async (req: AuthRequest, res: Response) => {
       topModels,
     });
   } catch (error) {
-    console.error('Error fetching stats:', error);
+    log.error('Error fetching stats', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });

@@ -3,8 +3,24 @@ import { createClient } from "npm:@supabase/supabase-js@~2.39.3";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-api-key",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-api-key, x-request-id, x-agent-id, x-call-site",
 };
+
+// Structured logging helper
+function slog(level: 'info' | 'warn' | 'error', message: string, extra: Record<string, unknown> = {}) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    component: 'Rose',
+    message,
+    ...extra,
+  };
+  if (level === 'error') {
+    console.error(JSON.stringify(entry));
+  } else {
+    console.log(JSON.stringify(entry));
+  }
+}
 
 // ============================================
 // ROSE COMPLETION CHUNK — canonical SSE shape
@@ -138,7 +154,7 @@ function filterPoolByFileSize(pool: string[], maxFileSizeBytes: number): string[
 
   const excluded = pool.filter(m => !filtered.includes(m));
   if (excluded.length > 0) {
-    console.log(`📁 File size ${(maxFileSizeBytes / 1024 / 1024).toFixed(2)}MB, excluded models: ${excluded.join(', ')}`);
+    slog('info', `File size ${(maxFileSizeBytes / 1024 / 1024).toFixed(2)}MB, excluded models: ${excluded.join(', ')}`);
   }
 
   return filtered;
@@ -745,7 +761,7 @@ async function callBrowserUseLLM(
 ): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   const { messages } = transformToBrowserUseFormat(req);
   
-  console.log('📤 browser-use request messages:', JSON.stringify(messages, null, 2));
+  slog('info', 'browser-use request messages:', { data: JSON.stringify(messages, null, 2) });
   
   const startTime = Date.now();
   
@@ -757,7 +773,7 @@ async function callBrowserUseLLM(
     fast: false,
   };
   
-  console.log('📤 browser-use full request:', JSON.stringify(truncateForLogging(requestBody), null, 2));
+  slog('info', 'browser-use full request:', { data: JSON.stringify(truncateForLogging(requestBody), null, 2) });
   
   const response = await fetch(BROWSER_USE_API_URL, {
     method: 'POST',
@@ -773,12 +789,12 @@ async function callBrowserUseLLM(
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error('browser-use API error:', response.status, errorText);
+    slog('error', 'browser-use API error:', { data: [response.status, errorText] });
     throw new Error(`browser-use API error: ${response.status} - ${errorText}`);
   }
   
   const data = await response.json();
-  console.log('📥 browser-use raw response:', JSON.stringify(data, null, 2));
+  slog('info', 'browser-use raw response:', { data: JSON.stringify(data, null, 2) });
   // Extract usage if available (browser-use API uses OpenAI format)
   const usage = data.usage ? {
     prompt_tokens: data.usage.prompt_tokens || 0,
@@ -825,11 +841,11 @@ function buildYutoriToolArgs(
       Math.round((entry.coordinates.x / viewport.width) * 1000),
       Math.round((entry.coordinates.y / viewport.height) * 1000)
     ];
-    console.log('📸 [YUTORI] Coordinate transform', {
+    slog('info', '[YUTORI] Coordinate transform', { data: {
       original: `${entry.coordinates.x},${entry.coordinates.y}`,
       normalized: `${args.coordinates[0]},${args.coordinates[1]}`,
       viewport: `${viewport.width}x${viewport.height}`
-    });
+    } });
   }
 
   // Tool-specific arguments
@@ -960,11 +976,11 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
   }
 
   // Tracing: log Yutori messages summary
-  console.log('🔍 [TRACE] Yutori n1-latest messages:', {
+  slog('info', '[TRACE] Yutori n1-latest messages:', { data: {
     total: messages.length,
     assistantCount: messages.filter((m: any) => m.role === 'assistant').length,
     toolCount: messages.filter((m: any) => m.role === 'tool').length
-  });
+  } });
 
   return { messages };
 }
@@ -977,8 +993,8 @@ async function callYutoriLLM(
 ): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   const { messages } = transformToYutoriFormat(req);
   
-  console.log('📤 Yutori request messages count:', messages.length);
-  console.log('📤 Yutori request messages:', JSON.stringify(messages, null, 2));
+  slog('info', 'Yutori request messages count:', { data: messages.length });
+  slog('info', 'Yutori request messages:', { data: JSON.stringify(messages, null, 2) });
   
   const requestBody = {
     model: YUTORI_MODEL,
@@ -986,7 +1002,7 @@ async function callYutoriLLM(
     temperature: 0.3
   };
   
-  console.log('📤 Yutori full request body:', JSON.stringify(truncateForLogging(requestBody), null, 2));
+  slog('info', 'Yutori full request body:', { data: JSON.stringify(truncateForLogging(requestBody), null, 2) });
   
   const startTime = Date.now();
   
@@ -1004,12 +1020,12 @@ async function callYutoriLLM(
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error('Yutori API error:', response.status, errorText);
+    slog('error', 'Yutori API error:', { data: [response.status, errorText] });
     throw new Error(`Yutori API error: ${response.status} - ${errorText}`);
   }
   
   const data = await response.json();
-  console.log('📥 Yutori raw response:', JSON.stringify(data, null, 2));
+  slog('info', 'Yutori raw response:', { data: JSON.stringify(data, null, 2) });
 
   // Yutori returns 200 with { detail: [...] } or { detail: "string" } for validation errors
   if (data.detail) {
@@ -1032,7 +1048,7 @@ async function callYutoriLLM(
 // n1-latest returns actions as native tool_calls, reasoning in content
 // Coordinates still in 1000x1000 normalized space
 function normalizeYutoriResponse(response: any, viewport: { width: number; height: number }): UnifiedAction {
-  console.log('🔍 Normalizing Yutori n1-latest response');
+  slog('info', 'Normalizing Yutori n1-latest response');
 
   const message = response.choices?.[0]?.message;
   if (!message) {
@@ -1058,7 +1074,7 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   try {
     toolArgs = JSON.parse(firstToolCall.function?.arguments || '{}');
   } catch (e) {
-    console.error('Failed to parse tool_call arguments:', firstToolCall.function?.arguments);
+    slog('error', 'Failed to parse tool_call arguments:', { data: firstToolCall.function?.arguments });
     throw new Error(`normalizeYutoriResponse: Failed to parse tool_call arguments: ${firstToolCall.function?.arguments?.slice(0, 200)}`);
   }
 
@@ -1115,7 +1131,7 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
     const percentAmount = toolArgs.amount || 50;
     normalizedParams.amount = Math.round((percentAmount / 100) * viewport.height);
     normalizedParams.amount = Math.min(Math.max(normalizedParams.amount, 100), 2000);
-    console.log(`📜 Yutori n1-latest scroll: ${percentAmount}% of ${viewport.height}px → ${normalizedParams.amount}px (direction=${normalizedParams.direction})`);
+    slog('info', `Yutori n1-latest scroll: ${percentAmount}% of ${viewport.height}px → ${normalizedParams.amount}px (direction=${normalizedParams.direction})`);
   }
 
   // Wait
@@ -1290,7 +1306,7 @@ function mapToCUAAction(action: string, params?: Record<string, any>, coordinate
       // Non-browser actions - return null to skip in CUA context
       return null;
     default:
-      console.log(`⚠️ mapToCUAAction: Unknown action "${action}" - treating as text context`);
+      slog('info', `mapToCUAAction: Unknown action "${action}" - treating as text context`);
       return null;
   }
 }
@@ -1302,7 +1318,7 @@ async function callAnthropicCUA(
 ): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
   const { messages, tools } = transformToAnthropicCUAFormat(req);
   
-  console.log('📤 Anthropic CUA request messages count:', messages.length);
+  slog('info', 'Anthropic CUA request messages count:', { data: messages.length });
   
   const requestBody = {
     model: ANTHROPIC_CUA_MODEL,
@@ -1312,7 +1328,7 @@ async function callAnthropicCUA(
     messages
   };
   
-  console.log('📤 Anthropic CUA request:', JSON.stringify(requestBody, null, 2).slice(0, 1000));
+  slog('info', 'Anthropic CUA request:', { data: JSON.stringify(requestBody, null, 2).slice(0, 1000) });
   
   const startTime = Date.now();
   
@@ -1331,12 +1347,12 @@ async function callAnthropicCUA(
   
   if (!response.ok) {
     const errorText = await response.text();
-    console.error('Anthropic CUA API error:', response.status, errorText);
+    slog('error', 'Anthropic CUA API error:', { data: [response.status, errorText] });
     throw new Error(`Anthropic CUA API error: ${response.status} - ${errorText}`);
   }
   
   const data = await response.json();
-  console.log('📥 Anthropic CUA raw response:', JSON.stringify(data, null, 2));
+  slog('info', 'Anthropic CUA raw response:', { data: JSON.stringify(data, null, 2) });
   // Extract usage from Anthropic response (uses input_tokens/output_tokens)
   const usage = data.usage ? {
     prompt_tokens: data.usage.input_tokens || 0,
@@ -1348,7 +1364,7 @@ async function callAnthropicCUA(
 
 // Normalize Anthropic CUA response to unified action format
 function normalizeAnthropicCUAResponse(response: any): UnifiedAction {
-  console.log('🔍 Normalizing Anthropic CUA response');
+  slog('info', 'Normalizing Anthropic CUA response');
   
   const content = response.content || [];
   
@@ -1436,8 +1452,8 @@ async function callGenericLLM(
   // For DOM-only models, skip screenshot to reduce tokens and improve latency
   const { messages } = transformToBrowserUseFormat(req, { includeScreenshot: !isDomOnly });
 
-  console.log(`📤 Generic LLM request to: ${model} (DOM-only: ${isDomOnly})`);
-  console.log('📤 Messages count:', messages.length);
+  slog('info', `Generic LLM request to: ${model} (DOM-only: ${isDomOnly})`);
+  slog('info', 'Messages count:', { data: messages.length });
 
   const startTime = Date.now();
 
@@ -1463,7 +1479,7 @@ async function callGenericLLM(
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error('OpenRouter API error:', response.status, errorText);
+    slog('error', 'OpenRouter API error:', { data: [response.status, errorText] });
     throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
   }
   
@@ -1471,7 +1487,7 @@ async function callGenericLLM(
   
   // Extract the content from OpenRouter response format
   const content = data.choices?.[0]?.message?.content;
-  console.log('📥 Generic LLM raw content:', content);
+  slog('info', 'Generic LLM raw content:', { data: content });
   
   // Parse JSON content and return in browser-use compatible format
   let completion: any;
@@ -1497,7 +1513,7 @@ async function callGenericLLM(
 
 // Normalize browser-use response to unified action format
 function normalizeBrowserUseResponse(response: any): UnifiedAction {
-  console.log('🔍 Normalizing response:', JSON.stringify(response, null, 2));
+  slog('info', 'Normalizing response:', { data: JSON.stringify(response, null, 2) });
   
   // browser-use returns { completion: { thinking, action: [...], ... }, usage }
   // or sometimes just the completion directly
@@ -1510,7 +1526,7 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
     if (parsed) {
       return normalizeBrowserUseResponse({ completion: parsed });
     }
-    console.log('⚠️ Could not extract JSON from completion:', completion.slice(0, 300));
+    slog('info', 'Could not extract JSON from completion:', { data: completion.slice(0, 300) });
     throw new Error(`normalizeBrowserUseResponse: Could not extract JSON from completion: ${completion.slice(0, 200)}`);
   }
   
@@ -1518,12 +1534,12 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   let actions = completion.action;
   if (!actions || actions.length === 0) {
     // Model returned no actions - throw error to trigger provider failover
-    console.log('⚠️ No actions in completion, triggering failover to next provider');
+    slog('info', 'No actions in completion, triggering failover to next provider');
     throw new Error('normalizeBrowserUseResponse: No actions returned in completion');
   }
   
   const firstAction = actions[0];
-  console.log('🎯 First action:', JSON.stringify(firstAction, null, 2));
+  slog('info', 'First action:', { data: JSON.stringify(firstAction, null, 2) });
   
   // Action can be in different formats:
   // 1. { action_name: "click", index: 5 } - flat format
@@ -1827,7 +1843,7 @@ async function getCachedLatencies(supabase: any, pool: string, poolModels: strin
   missingModels: string[];
 }> {
   const cutoff = new Date(Date.now() - LATENCY_CACHE_TTL_MS).toISOString();
-  console.log(`📊 Fetching cached latencies for ${pool} (cutoff: ${cutoff})`);
+  slog('info', `Fetching cached latencies for ${pool} (cutoff: ${cutoff})`);
   
   const { data, error } = await supabase
     .from('RoseModelLatency')
@@ -1837,7 +1853,7 @@ async function getCachedLatencies(supabase: any, pool: string, poolModels: strin
   
   const latencies = new Map<string, number>();
   if (error) {
-    console.error('❌ Error fetching latency cache:', error);
+    slog('error', 'Error fetching latency cache:', { data: error });
     return { latencies, needsRefresh: true, missingModels: poolModels };
   }
   
@@ -1850,11 +1866,11 @@ async function getCachedLatencies(supabase: any, pool: string, poolModels: strin
   const needsRefresh = missingModels.length > 0;
   
   if (latencies.size === 0) {
-    console.log(`📊 No cached latencies for ${pool} (cache empty or expired)`);
+    slog('info', `No cached latencies for ${pool} (cache empty or expired)`);
   } else {
-    console.log(`📊 Cached latencies for ${pool}:`, Object.fromEntries(latencies));
+    slog('info', `Cached latencies for ${pool}:`, { data: Object.fromEntries(latencies) });
     if (missingModels.length > 0) {
-      console.log(`📊 Missing from cache: ${missingModels.join(', ')}`);
+      slog('info', `Missing from cache: ${missingModels.join(', ')}`);
     }
   }
   
@@ -1869,7 +1885,7 @@ async function fireLatencyProbes(
   supabaseUrl: string,
   supabase: any
 ): Promise<void> {
-  console.log(`🔬 Firing latency probes for ${models.length} models: ${models.join(', ')}`);
+  slog('info', `Firing latency probes for ${models.length} models: ${models.join(', ')}`);
   
   const probePromises = models.map(async (model) => {
     const startTime = Date.now();
@@ -1882,7 +1898,7 @@ async function fireLatencyProbes(
       if (isAnthropicModel(model)) {
         const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
         if (!anthropicKey) {
-          console.error(`❌ Probe skipped for ${model}: no ANTHROPIC_API_KEY`);
+          slog('error', `Probe skipped for ${model}: no ANTHROPIC_API_KEY`);
           return;
         }
         
@@ -1923,13 +1939,13 @@ async function fireLatencyProbes(
       }
       
       if (!response.ok) {
-        console.error(`❌ Probe failed for ${model}: ${response.status}`);
+        slog('error', `Probe failed for ${model}: ${response.status}`);
         return;
       }
       
       const reader = response.body?.getReader();
       if (!reader) {
-        console.error(`❌ Probe no body for ${model}`);
+        slog('error', `Probe no body for ${model}`);
         return;
       }
       
@@ -1967,7 +1983,7 @@ async function fireLatencyProbes(
             
             if (hasContent) {
               const ttftMs = Date.now() - startTime;
-              console.log(`🔬 Probe result: ${model} = ${ttftMs}ms (first contentful token)`);
+              slog('info', `Probe result: ${model} = ${ttftMs}ms (first contentful token)`);
               
               // IMMEDIATELY kill the entire HTTP connection
               controller.abort();
@@ -1985,18 +2001,18 @@ async function fireLatencyProbes(
         buffer = lines[lines.length - 1] || '';
       }
       
-      console.error(`❌ Probe no contentful data for ${model}`);
+      slog('error', `Probe no contentful data for ${model}`);
       
     } catch (error) {
       // Ignore abort errors (expected when we kill the request)
       if (error instanceof DOMException && error.name === 'AbortError') return;
-      console.error(`❌ Probe error for ${model}:`, error);
+      slog('error', `Probe error for ${model}:`, { data: error });
     }
   });
   
   // Wait for all probes to complete
   await Promise.allSettled(probePromises);
-  console.log(`🔬 All latency probes completed for ${pool}`);
+  slog('info', `All latency probes completed for ${pool}`);
 }
 
 // Update latency cache for a model (upsert)
@@ -2005,7 +2021,7 @@ async function updateLatencyCache(supabase: any, model: string, pool: string, la
   // Pool-aware outlier threshold (browser-use completions take 2-15s normally)
   const MAX_VALID_LATENCY_MS = pool === 'rose-1-browser-use' ? 60000 : 10000;
   if (latencyMs > MAX_VALID_LATENCY_MS) {
-    console.warn(`⚠️ Ignoring outlier latency for ${model}: ${latencyMs}ms > ${MAX_VALID_LATENCY_MS}ms`);
+    slog('warn', `Ignoring outlier latency for ${model}: ${latencyMs}ms > ${MAX_VALID_LATENCY_MS}ms`);
     return;
   }
   
@@ -2025,9 +2041,9 @@ async function updateLatencyCache(supabase: any, model: string, pool: string, la
     });
   
   if (error) {
-    console.error(`❌ Error updating latency cache for ${model}:`, error);
+    slog('error', `Error updating latency cache for ${model}:`, { data: error });
   } else {
-    console.log(`⏱️ Updated latency cache: ${model} = ${latencyMs}ms`);
+    slog('info', `Updated latency cache: ${model} = ${latencyMs}ms`);
   }
 }
 
@@ -2046,7 +2062,7 @@ async function incrementLoserLatency(supabase: any, model: string, pool: string)
   
   if (error) {
     // Fallback: if RPC doesn't exist, do manual increment (less atomic but works)
-    console.warn(`⚠️ RPC increment failed for ${model}, trying manual update:`, error.message);
+    slog('warn', `RPC increment failed for ${model}, trying manual update:`, { data: error.message });
     
     // Fetch current value
     const { data } = await supabase
@@ -2063,10 +2079,10 @@ async function incrementLoserLatency(supabase: any, model: string, pool: string)
         .update({ latencyMs: newLatency, measuredAt: new Date().toISOString() })
         .eq('model', model)
         .eq('pool', pool);
-      console.log(`📉 Loser ${model}: latency incremented ${data.latencyMs} → ${newLatency}ms (less sandbagging)`);
+      slog('info', `Loser ${model}: latency incremented ${data.latencyMs} → ${newLatency}ms (less sandbagging)`);
     }
   } else {
-    console.log(`📉 Loser ${model}: latency incremented by ${LOSER_LATENCY_INCREMENT_MS}ms (atomic)`);
+    slog('info', `Loser ${model}: latency incremented by ${LOSER_LATENCY_INCREMENT_MS}ms (atomic)`);
   }
 }
 
@@ -2076,7 +2092,7 @@ async function incrementLoserLatency(supabase: any, model: string, pool: string)
 
 // Get existing model selection for a conversation
 async function getConversationModel(supabase: any, conversationId: string): Promise<string | null> {
-  console.log(`🔍 Looking up model for conversation: ${conversationId}`);
+  slog('info', `Looking up model for conversation: ${conversationId}`);
   
   const { data, error } = await supabase
     .from('RoseConversationModel')
@@ -2085,22 +2101,22 @@ async function getConversationModel(supabase: any, conversationId: string): Prom
     .maybeSingle();  // Use maybeSingle to avoid error when no rows found
   
   if (error) {
-    console.error(`❌ Error looking up conversation model:`, error);
+    slog('error', `Error looking up conversation model:`, { data: error });
     return null;
   }
   
   if (!data) {
-    console.log(`📝 No existing model for conversation ${conversationId}`);
+    slog('info', `No existing model for conversation ${conversationId}`);
     return null;
   }
   
-  console.log(`🔗 Found existing model for conversation ${conversationId}: ${data.model}`);
+  slog('info', `Found existing model for conversation ${conversationId}: ${data.model}`);
   return data.model;
 }
 
 // Save model selection for a conversation
 async function saveConversationModel(supabase: any, conversationId: string, model: string, pool: string): Promise<void> {
-  console.log(`💾 Saving model ${model} for conversation ${conversationId}`);
+  slog('info', `Saving model ${model} for conversation ${conversationId}`);
   
   // Generate a UUID for the id field
   const id = crypto.randomUUID();
@@ -2118,9 +2134,9 @@ async function saveConversationModel(supabase: any, conversationId: string, mode
     });
   
   if (error) {
-    console.error(`❌ Error saving conversation model:`, error);
+    slog('error', `Error saving conversation model:`, { data: error });
   } else {
-    console.log(`✅ Saved model for conversation ${conversationId}: ${model}`);
+    slog('info', `Saved model for conversation ${conversationId}: ${model}`);
   }
 }
 
@@ -2167,7 +2183,7 @@ async function waterfallStream(
   for (let i = 0; i < pool.length; i++) {
     const model = pool[i];
     const isLast = i === pool.length - 1;
-    console.log(`🔄 Waterfall [${i + 1}/${pool.length}]: trying ${model}`);
+    slog('info', `Waterfall [${i + 1}/${pool.length}]: trying ${model}`);
 
     try {
       const response = await withTimeout(
@@ -2196,12 +2212,12 @@ async function waterfallStream(
       if (!response.ok) {
         const errText = await response.text().catch(() => 'unknown');
         const msg = `${model} returned ${response.status}: ${errText.slice(0, 200)}`;
-        console.warn(`⚠️ Waterfall: ${msg}`);
+        slog('warn', `Waterfall: ${msg}`);
         errors.push(msg);
         continue;
       }
 
-      console.log(`✅ Waterfall winner: ${model} (attempt ${i + 1}/${pool.length})`);
+      slog('info', `Waterfall winner: ${model} (attempt ${i + 1}/${pool.length})`);
 
       // Save winning model for conversation
       if (conversation_id) {
@@ -2211,17 +2227,17 @@ async function waterfallStream(
       return response;
     } catch (err: any) {
       const msg = `${model} failed: ${err.message || err}`;
-      console.warn(`⚠️ Waterfall: ${msg}`);
+      slog('warn', `Waterfall: ${msg}`);
       errors.push(msg);
 
       if (!isLast) {
-        console.log(`🔄 Waterfall: falling through to next model`);
+        slog('info', `Waterfall: falling through to next model`);
       }
     }
   }
 
   // All models failed
-  console.error(`❌ Waterfall: all ${pool.length} models failed`, errors);
+  slog('error', `Waterfall: all ${pool.length} models failed`, { data: errors });
   return new Response(JSON.stringify({
     error: 'All waterfall models failed',
     details: errors,
@@ -2257,14 +2273,14 @@ function selectRacingTrio(
   // Filter out models exceeding hard latency cap
   const underHardCap = modelsWithLatency.filter(m => {
     if (m.latencyMs > maxLatencyCapMs) {
-      console.warn(`⚠️ Excluding ${m.model} - latency ${m.latencyMs}ms exceeds ${maxLatencyCapMs}ms cap`);
+      slog('warn', `Excluding ${m.model} - latency ${m.latencyMs}ms exceeds ${maxLatencyCapMs}ms cap`);
       return false;
     }
     return true;
   });
 
   if (underHardCap.length === 0) {
-    console.warn(`⚠️ No eligible models after ${maxLatencyCapMs}ms cap, using full pool with fastest models`);
+    slog('warn', `No eligible models after ${maxLatencyCapMs}ms cap, using full pool with fastest models`);
     const sorted = modelsWithLatency.sort((a, b) => a.latencyMs - b.latencyMs);
     return sorted.slice(0, trioSize).map(m => ({ ...m, delayMs: 0 }));
   }
@@ -2283,7 +2299,7 @@ function selectRacingTrio(
     (m.latencyMs - fastestLatency) > maxDelayCapMs
   );
   for (const m of excludedByDelay) {
-    console.warn(`⚠️ Excluding ${m.model} - latency ${m.latencyMs}ms is ${m.latencyMs - fastestLatency}ms slower than fastest (${fastestLatency}ms), exceeds ${maxDelayCapMs}ms delay cap`);
+    slog('warn', `Excluding ${m.model} - latency ${m.latencyMs}ms is ${m.latencyMs - fastestLatency}ms slower than fastest (${fastestLatency}ms), exceeds ${maxDelayCapMs}ms delay cap`);
   }
 
   // ALWAYS include the fastest model, then randomly select the rest
@@ -2296,7 +2312,7 @@ function selectRacingTrio(
   
   // Combine: fastest + random others
   const selectedModels = [fastestModel, ...randomOthers];
-  console.log(`🏁 Trio: fastest=${fastestModel.model}, others=[${randomOthers.map(m => m.model).join(', ')}]`);
+  slog('info', `Trio: fastest=${fastestModel.model}, others=[${randomOthers.map(m => m.model).join(', ')}]`);
   
   // Find the slowest model in the selected trio
   const slowestInTrio = Math.max(...selectedModels.map(m => m.latencyMs));
@@ -2308,8 +2324,7 @@ function selectRacingTrio(
     delayMs: slowestInTrio - m.latencyMs
   }));
   
-  console.log(`🏁 Racing trio (target finish ~${slowestInTrio}ms):`, 
-    racingModels.map(m => `${m.model} (${m.latencyMs}ms + ${m.delayMs}ms delay = ${m.latencyMs + m.delayMs}ms)`));
+  slog('info', `Racing trio (target finish ~${slowestInTrio}ms):`, { data: racingModels.map(m => `${m.model} (${m.latencyMs}ms + ${m.delayMs}ms delay = ${m.latencyMs + m.delayMs}ms)`) });
   
   return racingModels;
 }
@@ -2333,7 +2348,7 @@ async function raceModels(
   timings: { [key: string]: number }  // Track timing breakdown
 ): Promise<{ model: string; reader: ReadableStreamDefaultReader<Uint8Array>; ttftMs: number; firstData: string }> {
   
-  console.log(`🏁 Starting race with ${racingModels.length} models:`, racingModels.map(m => `${m.model} (delay: ${m.delayMs}ms)`));
+  slog('info', `Starting race with ${racingModels.length} models:`, { data: racingModels.map(m => `${m.model} (delay: ${m.delayMs}ms)`) });
   const raceInternalStart = Date.now();
   timings.race_internal_start = 0;
   
@@ -2347,7 +2362,7 @@ async function raceModels(
     try {
       // Apply delay to equalize finish times
       if (delayMs > 0) {
-        console.log(`⏳ ${model} waiting ${delayMs}ms before firing...`);
+        slog('info', `${model} waiting ${delayMs}ms before firing...`);
         timings[`${modelKey}_delay_start`] = Date.now() - raceInternalStart;
         await new Promise((resolve, reject) => {
           const timeoutId = setTimeout(resolve, delayMs);
@@ -2362,13 +2377,13 @@ async function raceModels(
       
       // Check if already aborted before firing
       if (controllers[index].signal.aborted) {
-        console.log(`🛑 ${model} aborted before firing`);
+        slog('info', `${model} aborted before firing`);
         return null;
       }
       
       const startTime = Date.now();
       timings[`${modelKey}_fire`] = Date.now() - raceInternalStart;
-      console.log(`🚀 ${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
+      slog('info', `${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
       
       // Get model-specific messages (transforms screenshots for vision models)
       const modelMessages = getMessagesForModel(messages, model);
@@ -2379,7 +2394,7 @@ async function raceModels(
       if (isAnthropicModel(model)) {
         const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
         if (!anthropicKey) {
-          console.error(`❌ ${model} requires ANTHROPIC_API_KEY`);
+          slog('error', `${model} requires ANTHROPIC_API_KEY`);
           return null;
         }
         
@@ -2410,8 +2425,8 @@ async function raceModels(
           };
         }
 
-        console.log(`🔮 Calling Anthropic directly for ${anthropicModel}`);
-        console.log(`[Anthropic Race] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
+        slog('info', `Calling Anthropic directly for ${anthropicModel}`);
+        slog('info', `[Anthropic Race] Request to ${anthropicModel}:`, { data: JSON.stringify(truncateForLogging(anthropicBody), null, 2) });
         response = await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
@@ -2443,7 +2458,7 @@ async function raceModels(
           body.reasoning = reasoning;
         }
 
-        console.log(`[OpenRouter Race] Request to ${model}:`, JSON.stringify(truncateForLogging(body), null, 2));
+        slog('info', `[OpenRouter Race] Request to ${model}:`, { data: JSON.stringify(truncateForLogging(body), null, 2) });
 
         response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
@@ -2460,11 +2475,11 @@ async function raceModels(
       
       const headersTime = Date.now() - startTime;
       timings[`${modelKey}_headers`] = Date.now() - raceInternalStart;
-      console.log(`📨 ${model} headers in ${headersTime}ms at t=${timings[`${modelKey}_headers`]}ms (status: ${response.status})`);
+      slog('info', `${model} headers in ${headersTime}ms at t=${timings[`${modelKey}_headers`]}ms (status: ${response.status})`);
       
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ ${model} failed: ${response.status} - ${errorText}`);
+        slog('error', `${model} failed: ${response.status} - ${errorText}`);
         return null;
       }
       
@@ -2472,7 +2487,7 @@ async function raceModels(
       // This prevents slow models from winning just because their headers arrive first
       const reader = response.body?.getReader();
       if (!reader) {
-        console.error(`❌ ${model} no response body`);
+        slog('error', `${model} no response body`);
         return null;
       }
       
@@ -2484,14 +2499,14 @@ async function raceModels(
       while (true) {
         // Check if aborted while waiting for content
         if (controllers[index].signal.aborted) {
-          console.log(`🛑 ${model} aborted while waiting for content`);
+          slog('info', `${model} aborted while waiting for content`);
           reader.cancel();
           return null;
         }
 
         const { done, value } = await reader.read();
         if (done) {
-          console.error(`❌ ${model} stream ended before data`);
+          slog('error', `${model} stream ended before data`);
           return null;
         }
 
@@ -2523,13 +2538,13 @@ async function raceModels(
                   const ttftMs = Date.now() - startTime;
                   timings[`${modelKey}_ttft`] = ttftMs;
                   timings[`${modelKey}_first_data`] = Date.now() - raceInternalStart;
-                  console.log(`✅ ${model} FIRST CONTENTFUL TOKEN in ${ttftMs}ms at t=${timings[`${modelKey}_first_data`]}ms`);
+                  slog('info', `${model} FIRST CONTENTFUL TOKEN in ${ttftMs}ms at t=${timings[`${modelKey}_first_data`]}ms`);
 
                   // IMMEDIATELY abort all other racing models to save API costs
                   // Don't wait for promise resolution - kill them NOW
                   controllers.forEach((controller, i) => {
                     if (i !== index) {
-                      console.log(`🛑 Immediately aborting loser: ${racingModels[i].model}`);
+                      slog('info', `Immediately aborting loser: ${racingModels[i].model}`);
                       controller.abort();
                     }
                   });
@@ -2551,10 +2566,10 @@ async function raceModels(
     } catch (error) {
       // Don't log abort errors - they're expected for losers
       if (error instanceof DOMException && error.name === 'AbortError') {
-        console.log(`🛑 ${model} aborted (race lost)`);
+        slog('info', `${model} aborted (race lost)`);
         return null;
       }
-      console.error(`❌ ${model} error:`, error);
+      slog('error', `${model} error:`, { data: error });
       return null;
     }
   });
@@ -2573,7 +2588,7 @@ async function raceModels(
         if (result && !resolved) {
           resolved = true;
           winnerIndex = result.index;
-          console.log(`🏆 Winner: ${result.model} (TTFT: ${result.ttftMs}ms)`);
+          slog('info', `Winner: ${result.model} (TTFT: ${result.ttftMs}ms)`);
           
           // Losers already aborted inline when winner found contentful token
           // Just update loser latencies (fire-and-forget)
@@ -2581,14 +2596,14 @@ async function raceModels(
             if (i !== winnerIndex) {
               // Increment loser's latency by 10ms (reduces sandbagging, gives them better chance next race)
               incrementLoserLatency(supabase, racingModels[i].model, pool)
-                .catch(e => console.error(`⚠️ Failed to increment loser latency:`, e));
+                .catch(e => slog('error', `Failed to increment loser latency:`, { data: e }));
             }
           });
-          
+
           // Update cache for winning model with actual race TTFT (keeps cache fresh)
           updateLatencyCache(supabase, result.model, pool, result.ttftMs)
-            .then(() => console.log(`📝 Cache updated for winner: ${result.model} = ${result.ttftMs}ms`))
-            .catch(e => console.error(`⚠️ Failed to update winner cache:`, e));
+            .then(() => slog('info', `Cache updated for winner: ${result.model} = ${result.ttftMs}ms`))
+            .catch(e => slog('error', `Failed to update winner cache:`, { data: e }));
           
           resolve({ model: result.model, reader: result.reader, ttftMs: result.ttftMs, firstData: result.firstData });
         } else if (completed === racePromises.length && !resolved) {
@@ -2634,7 +2649,7 @@ async function raceBrowserUseModels(
   racingModels: RacingModel[];
 }> {
 
-  console.log(`🏁 Starting completion race with ${racingModels.length} models:`, racingModels.map(m => `${m.model} (delay: ${m.delayMs}ms)`));
+  slog('info', `Starting completion race with ${racingModels.length} models:`, { data: racingModels.map(m => `${m.model} (delay: ${m.delayMs}ms)`) });
   const raceInternalStart = Date.now();
   timings.race_internal_start = 0;
 
@@ -2655,7 +2670,7 @@ async function raceBrowserUseModels(
     try {
       // Apply delay to equalize finish times
       if (delayMs > 0) {
-        console.log(`⏳ ${model} waiting ${delayMs}ms before firing...`);
+        slog('info', `${model} waiting ${delayMs}ms before firing...`);
         timings[`${modelKey}_delay_start`] = Date.now() - raceInternalStart;
         await new Promise((resolve, reject) => {
           const timeoutId = setTimeout(resolve, delayMs);
@@ -2670,13 +2685,13 @@ async function raceBrowserUseModels(
 
       // Check if already aborted before firing
       if (controllers[index].signal.aborted) {
-        console.log(`🛑 ${model} aborted before firing`);
+        slog('info', `${model} aborted before firing`);
         return null;
       }
 
       const startTime = Date.now();
       timings[`${modelKey}_fire`] = Date.now() - raceInternalStart;
-      console.log(`🚀 ${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
+      slog('info', `${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
 
       const poolIndex = browserPool.indexOf(model);
       const result = await callProviderFn(model, poolIndex, controllers[index].signal);
@@ -2684,13 +2699,13 @@ async function raceBrowserUseModels(
       const completionMs = Date.now() - startTime;
       timings[`${modelKey}_complete`] = Date.now() - raceInternalStart;
       timings[`${modelKey}_latency`] = completionMs;
-      console.log(`✅ ${model} COMPLETED in ${completionMs}ms at t=${timings[`${modelKey}_complete`]}ms`);
+      slog('info', `${model} COMPLETED in ${completionMs}ms at t=${timings[`${modelKey}_complete`]}ms`);
 
       // IMMEDIATELY abort all other racing models to save API costs
       // Don't wait for promise resolution - kill them NOW
       controllers.forEach((controller, i) => {
         if (i !== index) {
-          console.log(`🛑 Immediately aborting loser: ${racingModels[i].model}`);
+          slog('info', `Immediately aborting loser: ${racingModels[i].model}`);
           controller.abort();
         }
       });
@@ -2699,10 +2714,10 @@ async function raceBrowserUseModels(
     } catch (error) {
       // Don't log abort errors - they're expected for losers
       if (error instanceof DOMException && error.name === 'AbortError') {
-        console.log(`🛑 ${model} aborted (race lost)`);
+        slog('info', `${model} aborted (race lost)`);
         return null;
       }
-      console.error(`❌ ${model} error:`, error);
+      slog('error', `${model} error:`, { data: error });
       return null;
     }
   });
@@ -2728,7 +2743,7 @@ async function raceBrowserUseModels(
         if (result && !resolved) {
           resolved = true;
           winnerIndex = result.index;
-          console.log(`🏆 Winner: ${result.actualModel} (${result.completionMs}ms)`);
+          slog('info', `Winner: ${result.actualModel} (${result.completionMs}ms)`);
 
           // Losers already aborted inline when winner completed
           // Just update loser latencies (fire-and-forget)
@@ -2736,14 +2751,14 @@ async function raceBrowserUseModels(
             if (i !== winnerIndex) {
               // Increment loser's latency by 10ms (reduces sandbagging, gives them better chance next race)
               incrementLoserLatency(supabase, racingModels[i].model, pool)
-                .catch(e => console.error(`⚠️ Failed to increment loser latency:`, e));
+                .catch(e => slog('error', `Failed to increment loser latency:`, { data: e }));
             }
           });
 
           // Update cache for winning model with actual completion time (keeps cache fresh)
           updateLatencyCache(supabase, result.actualModel, pool, result.completionMs)
-            .then(() => console.log(`📝 Cache updated for winner: ${result.actualModel} = ${result.completionMs}ms`))
-            .catch(e => console.error(`⚠️ Failed to update winner cache:`, e));
+            .then(() => slog('info', `Cache updated for winner: ${result.actualModel} = ${result.completionMs}ms`))
+            .catch(e => slog('error', `Failed to update winner cache:`, { data: e }));
 
           resolve(result);
         } else if (completed === racePromises.length && !resolved) {
@@ -3145,7 +3160,7 @@ function selectModel(
     if (!preference) {
       throw new Error(`Invalid model_preference: ${modelPreference}. Use 'SMART', 'FAST', or 'CHEAP'`);
     }
-    console.log(`⚡ Model selection (preference=${modelPreference}): ${requestedModel} → ${preference.model} (Cerebras: ${preference.isCerebras})`);
+    slog('info', `Model selection (preference=${modelPreference}): ${requestedModel} → ${preference.model} (Cerebras: ${preference.isCerebras})`);
     return { model: preference.model, isCerebras: preference.isCerebras, poolName: normalized, poolSize: pool.length };
   }
   
@@ -3155,19 +3170,19 @@ function selectModel(
       throw new Error(`model_seed ${modelSeed} out of range. Pool '${normalized}' has ${pool.length} models (valid range: 0-${pool.length - 1})`);
     }
     const selectedModel = pool[modelSeed];
-    console.log(`🎯 Model selection (seed=${modelSeed}): ${requestedModel} → ${selectedModel} (Cerebras: false)`);
+    slog('info', `Model selection (seed=${modelSeed}): ${requestedModel} → ${selectedModel} (Cerebras: false)`);
     return { model: selectedModel, isCerebras: false, poolName: normalized, poolSize: pool.length };
   }
   
   // Random selection from pool
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
-  console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel} (Cerebras: false)`);
+  slog('info', `Model selection: ${requestedModel} → ${selectedModel} (Cerebras: false)`);
   return { model: selectedModel, isCerebras: false, poolName: normalized, poolSize: pool.length };
 }
 
 // Validate API key and return user info
 async function validateApiKey(apiKey: string, supabase: any): Promise<{ apiKeyId: string, userId: string } | null> {
-  console.log('🔍 Validating API key:', apiKey.substring(0, 8) + '...');
+  slog('info', 'Validating API key:', { data: apiKey.substring(0, 8) + '...' });
   
   const { data, error } = await supabase
     .from('RoseApiKey')
@@ -3176,12 +3191,12 @@ async function validateApiKey(apiKey: string, supabase: any): Promise<{ apiKeyId
     .single();
   
   if (error || !data) {
-    console.error('❌ API key validation failed:', error?.message || 'No data found');
-    console.error('   Error details:', error);
+    slog('error', 'API key validation failed:', { data: error?.message || 'No data found' });
+    slog('error', '   Error details:', { data: error });
     return null;
   }
   
-  console.log('✓ API key validated for userId:', data.userId);
+  slog('info', 'API key validated for userId:', { data: data.userId });
   return { apiKeyId: data.id, userId: data.userId };
 }
 
@@ -3215,7 +3230,7 @@ async function logUsage(supabase: any, apiKeyId: string, userId: string, input: 
     });
   
   if (error) {
-    console.error('Failed to log usage:', error);
+    slog('error', 'Failed to log usage:', { data: error });
   }
 }
 
@@ -3260,7 +3275,7 @@ async function handleStreaming(
   if (isCerebras) {
     // Call Cerebras API directly for rose-hyper
     const cerebrasKey = Deno.env.get('CEREBRAS_API_KEY');
-    console.log(`⚡ Streaming from Cerebras API with model: ${actualModel}`);
+    slog('info', `Streaming from Cerebras API with model: ${actualModel}`);
 
     // Build Cerebras streaming request - supports tools with gpt-oss-120b
     const cerebrasStreamBody: any = {
@@ -3351,11 +3366,11 @@ async function handleStreaming(
         placed++;
       }
       if (placed > 0) {
-        console.log(`💾 Placed ${placed} message cache breakpoints across ${anthropicBody.messages.length} messages`);
+        slog('info', `Placed ${placed} message cache breakpoints across ${anthropicBody.messages.length} messages`);
       }
     }
 
-    console.log(`🔮 Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}${skipCache ? ' (skip_cache)' : ''}`);
+    slog('info', `Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}${skipCache ? ' (skip_cache)' : ''}`);
 
     // Use Claude OAuth token (user's subscription) or Rose's API key
     const anthropicHeaders: Record<string, string> = {
@@ -3376,7 +3391,7 @@ async function handleStreaming(
       anthropicHeaders['anthropic-beta'] = ANTHROPIC_BETA_HEADER;
     }
 
-    console.log(`[Anthropic Stream] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
+    slog('info', `[Anthropic Stream] Request to ${anthropicModel}:`, { data: JSON.stringify(truncateForLogging(anthropicBody), null, 2) });
 
     fetchResponse = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
@@ -3404,10 +3419,10 @@ async function handleStreaming(
     // Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
     if (reasoning) {
       openRouterBody.reasoning = reasoning;
-      console.log(`🧠 Streaming with reasoning config:`, reasoning);
+      slog('info', `Streaming with reasoning config:`, { data: reasoning });
     }
 
-    console.log(`[OpenRouter Stream] Request to ${actualModel}:`, JSON.stringify(truncateForLogging(openRouterBody), null, 2));
+    slog('info', `[OpenRouter Stream] Request to ${actualModel}:`, { data: JSON.stringify(truncateForLogging(openRouterBody), null, 2) });
 
     fetchResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -3424,7 +3439,7 @@ async function handleStreaming(
   if (!fetchResponse.ok) {
     const provider = isCerebras ? 'Cerebras' : (isAnthropicModel(actualModel) || claudeAuth) ? 'Anthropic' : 'OpenRouter';
     const errorText = await fetchResponse.text();
-    console.error(`${provider} streaming error:`, fetchResponse.status, errorText);
+    slog('error', `${provider} streaming error:`, { data: [fetchResponse.status, errorText] });
     throw new Error(`${provider} API error: ${fetchResponse.status} - ${errorText.slice(0, 200)}`);
   }
 
@@ -3497,7 +3512,7 @@ async function handleStreaming(
           } catch (timeoutError) {
             if (!hasReceivedContent && currentStallConfig?.onFallback) {
               // Never got content - seamlessly switch to racing
-              console.warn('[Stall] No content from Claude in 20s, switching to racing');
+              slog('warn', '[Stall] No content from Claude in 20s, switching to racing');
               currentReader.cancel();
               try {
                 const fallback = await currentStallConfig.onFallback();
@@ -3510,7 +3525,7 @@ async function handleStreaming(
                 lastContentTime = Date.now();
                 continue;
               } catch (fallbackError) {
-                console.error('[Stall] Fallback racing also failed, closing stream:', fallbackError);
+                slog('error', '[Stall] Fallback racing also failed, closing stream:', { data: fallbackError });
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: 'All model providers failed', type: 'server_error' } })}\n\n`));
                 controller.enqueue(encoder.encode('data: [DONE]\n\n'));
                 controller.close();
@@ -3518,7 +3533,7 @@ async function handleStreaming(
               }
             }
             // Had content but stalled - close gracefully
-            console.warn('[Stall] Claude stalled mid-content after 20s, closing');
+            slog('warn', '[Stall] Claude stalled mid-content after 20s, closing');
             currentReader.cancel();
             controller.enqueue(encoder.encode('data: [DONE]\n\n'));
             controller.close();
@@ -3535,7 +3550,7 @@ async function handleStreaming(
               } else if (ntState === 'in_tool_calls') {
                 emitDelta(']}');
               }
-              console.log(`🔧 Native tool mode complete: ${ntToolCount} tool(s), final state: ${ntState}`);
+              slog('info', `Native tool mode complete: ${ntToolCount} tool(s), final state: ${ntState}`);
             }
 
             // For Anthropic models, emit final usage chunk before [DONE]
@@ -3561,7 +3576,7 @@ async function handleStreaming(
               const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
               controller.enqueue(encoder.encode(payload));
               const cacheHitPct = anthropicInputTokens > 0 ? Math.round(anthropicCacheReadTokens / (anthropicInputTokens + anthropicCacheCreationTokens + anthropicCacheReadTokens) * 100) : 0;
-              console.log(`📊 Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}, cache_hit=${cacheHitPct}%`);
+              slog('info', `Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}, cache_hit=${cacheHitPct}%`);
             }
             const donePayload = 'data: [DONE]\n\n';
             controller.enqueue(encoder.encode(donePayload));
@@ -3591,14 +3606,14 @@ async function handleStreaming(
                     anthropicInputTokens = msgUsage.input_tokens || 0;
                     anthropicCacheCreationTokens = msgUsage.cache_creation_input_tokens || 0;
                     anthropicCacheReadTokens = msgUsage.cache_read_input_tokens || 0;
-                    console.log(`📊 Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`);
+                    slog('info', `Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`);
                     continue;
                   }
 
                   // Capture output tokens from message_delta
                   if (parsed.type === 'message_delta' && parsed.usage?.output_tokens) {
                     anthropicOutputTokens = parsed.usage.output_tokens;
-                    console.log(`📊 Anthropic output_tokens captured: ${anthropicOutputTokens}`);
+                    slog('info', `Anthropic output_tokens captured: ${anthropicOutputTokens}`);
                     continue;
                   }
 
@@ -3703,7 +3718,7 @@ async function handleStreaming(
                   controller.enqueue(encoder.encode(payload));
                 }
               } catch (e) {
-                console.error('Error parsing streaming data:', e);
+                slog('error', 'Error parsing streaming data:', { data: e });
               }
             } else if (line.startsWith('event: ')) {
               // Anthropic uses separate event lines - skip them (data follows)
@@ -3712,7 +3727,7 @@ async function handleStreaming(
           }
         }
       } catch (error) {
-        console.error('Streaming error:', error);
+        slog('error', 'Streaming error:', { data: error });
         controller.error(error);
       }
     }
@@ -3736,13 +3751,15 @@ serve(async (req) => {
 
   // Extract request ID from header (sent by agent) or generate one
   const requestId = req.headers.get('x-request-id') || crypto.randomUUID().slice(0, 8);
-  console.log(`\n🔷 [${requestId}] ========== REQUEST START ==========`);
+  const agentId = req.headers.get('x-agent-id') || undefined;
+  const callSite = req.headers.get('x-call-site') || undefined;
+  slog('info', 'REQUEST START', { request_id: requestId, agent_id: agentId, call_site: callSite });
 
   try {
     // Extract API key from header
     const apiKey = req.headers.get('x-api-key');
     if (!apiKey) {
-      console.log(`❌ [${requestId}] Missing x-api-key header`);
+      slog('info', `[${requestId}] Missing x-api-key header`, { request_id: requestId, agent_id: agentId, call_site: callSite });
       return new Response(JSON.stringify({ error: 'Missing x-api-key header' }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 401,
@@ -3757,16 +3774,16 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Validate API key
-    console.log(`🔍 [${requestId}] Validating API key...`);
+    slog('info', `[${requestId}] Validating API key...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
     const authInfo = await validateApiKey(apiKey, supabase);
     if (!authInfo) {
-      console.log(`❌ [${requestId}] Invalid API key`);
+      slog('info', `[${requestId}] Invalid API key`, { request_id: requestId, agent_id: agentId, call_site: callSite });
       return new Response(JSON.stringify({ error: 'Invalid API key' }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
         status: 401,
       });
     }
-    console.log(`✅ [${requestId}] API key validated for userId: ${authInfo.userId}`);
+    slog('info', `[${requestId}] API key validated for userId: ${authInfo.userId}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
     // Parse request body (raw first for browser-use detection)
     const rawBody = await req.json();
@@ -3776,34 +3793,34 @@ serve(async (req) => {
     // Browser-use has different format: task + browser_state instead of messages
     // ============================================
     if (isBrowserUseRequest(rawBody)) {
-      console.log(`🌐 [${requestId}] Browser-use request detected for model: ${rawBody.model}`);
+      slog('info', `[${requestId}] Browser-use request detected for model: ${rawBody.model}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
       const browserUseReq = rawBody as BrowserUseRequest;
 
       // Tracing: log action_history details
-      console.log(`🔍 [${requestId}] action_history count: ${browserUseReq.action_history.length}`);
+      slog('info', `[${requestId}] action_history count: ${browserUseReq.action_history.length}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
       if (browserUseReq.action_history.length > 0) {
         const lastAction = browserUseReq.action_history[browserUseReq.action_history.length - 1];
-        console.log(`🔍 [${requestId}] Last action:`, {
+        slog('info', `[${requestId}] Last action:`, { data: {
           action: lastAction.action,
           hasThinking: !!lastAction.thinking,
           hasScreenshot: !!lastAction.screenshot,
           thinkingPreview: lastAction.thinking?.slice(0, 100)
-        });
+        } , request_id: requestId, agent_id: agentId, call_site: callSite });
       }
 
       // Tracing: log screenshot metadata
       if (browserUseReq.browser_state.screenshot) {
-        console.log(`📸 [${requestId}] Screenshot received:`, {
+        slog('info', `[${requestId}] Screenshot received:`, { data: {
           viewport: `${browserUseReq.browser_state.viewport.width}x${browserUseReq.browser_state.viewport.height}`,
           screenshotChars: browserUseReq.browser_state.screenshot.length,
           isBase64: !browserUseReq.browser_state.screenshot.startsWith('http')
-        });
+        } , request_id: requestId, agent_id: agentId, call_site: callSite });
       }
 
       // Get the browser-use pool
       const browserPool = MODEL_POOLS['rose-1-browser-use'];
       if (!browserPool) {
-        console.log(`❌ [${requestId}] Browser-use pool not configured`);
+        slog('info', `[${requestId}] Browser-use pool not configured`, { request_id: requestId, agent_id: agentId, call_site: callSite });
         return new Response(JSON.stringify({
           error: 'Browser-use pool not configured'
         }), {
@@ -3819,8 +3836,8 @@ serve(async (req) => {
         signal?: AbortSignal
       ): Promise<{ action: UnifiedAction; ttftMs: number; actualModel: string; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
         // Log the full request (with truncated screenshots)
-        console.log(`\n📤 [${requestId}] [${provider}] FULL REQUEST:`);
-        console.log(JSON.stringify(truncateForLogging({
+        slog('info', `📤 [${requestId}] [${provider}] FULL REQUEST:`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog('info', `[${requestId}] [${provider}] FULL REQUEST body`, { request_id: requestId, agent_id: agentId, call_site: callSite, data: JSON.stringify(truncateForLogging({
           requestId,
           provider,
           providerIndex,
@@ -3828,7 +3845,7 @@ serve(async (req) => {
           browser_state: browserUseReq.browser_state,
           action_history: browserUseReq.action_history,
           model_seed: browserUseReq.model_seed,
-        }), null, 2));
+        }), null, 2) });
 
         let result: { response?: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } };
         let normalizedAction: UnifiedAction;
@@ -3838,7 +3855,7 @@ serve(async (req) => {
           const browserUseApiKey = Deno.env.get('BROWSER_USE_API_KEY');
           if (!browserUseApiKey) throw new Error('BROWSER_USE_API_KEY not configured');
 
-          console.log(`🚀 [${requestId}] [${provider}] Calling browser-use API...`);
+          slog('info', `[${requestId}] [${provider}] Calling browser-use API...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
           result = await callBrowserUseLLM(browserUseReq, browserUseApiKey, signal);
           normalizedAction = normalizeBrowserUseResponse(result.response);
           actualModel = 'browser-use/bu-1-0';
@@ -3850,7 +3867,7 @@ serve(async (req) => {
             throw new Error('Yutori requires screenshot');
           }
 
-          console.log(`🚀 [${requestId}] [${provider}] Calling Yutori API...`);
+          slog('info', `[${requestId}] [${provider}] Calling Yutori API...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
           result = await callYutoriLLM(browserUseReq, yutoriApiKey, signal);
           normalizedAction = normalizeYutoriResponse(result.response, browserUseReq.browser_state.viewport);
           actualModel = 'yutori/n1';
@@ -3862,7 +3879,7 @@ serve(async (req) => {
             throw new Error('Anthropic CUA requires base64 screenshot');
           }
 
-          console.log(`🚀 [${requestId}] [${provider}] Calling Anthropic CUA API...`);
+          slog('info', `[${requestId}] [${provider}] Calling Anthropic CUA API...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
           result = await callAnthropicCUA(browserUseReq, anthropicApiKey);
           normalizedAction = normalizeAnthropicCUAResponse(result.response);
           actualModel = 'anthropic/claude-sonnet-4-cua';
@@ -3877,7 +3894,7 @@ serve(async (req) => {
           const { system, messages: anthropicMessages } = transformMessagesForAnthropic(messages);
           const anthropicModel = getAnthropicModelName(provider);
 
-          console.log(`🚀 [${requestId}] [${provider}] Calling Anthropic API directly (model: ${anthropicModel})...`);
+          slog('info', `[${requestId}] [${provider}] Calling Anthropic API directly (model: ${anthropicModel})...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
           const anthropicBody: any = {
             model: anthropicModel,
@@ -3889,7 +3906,7 @@ serve(async (req) => {
           // No output_format — system prompt instructs JSON format,
           // same approach as browser-use and yutori providers
 
-          console.log(`[Anthropic BU] Request to ${anthropicModel}:`, JSON.stringify(truncateForLogging(anthropicBody), null, 2));
+          slog('info', `[Anthropic BU] Request to ${anthropicModel}:`, { data: JSON.stringify(truncateForLogging(anthropicBody), null, 2) });
 
           const startTime = Date.now();
           const response = await fetch(ANTHROPIC_API_URL, {
@@ -3907,12 +3924,12 @@ serve(async (req) => {
 
           if (!response.ok) {
             const errorText = await response.text();
-            console.error(`Anthropic BU API error:`, response.status, errorText);
+            slog('error', `Anthropic BU API error:`, { data: [response.status, errorText] });
             throw new Error(`Anthropic BU API error: ${response.status} - ${errorText}`);
           }
 
           const data = await response.json();
-          console.log('📥 Anthropic BU raw response:', JSON.stringify(truncateForLogging(data), null, 2));
+          slog('info', 'Anthropic BU raw response:', { data: JSON.stringify(truncateForLogging(data), null, 2) });
 
           // Extract text content from Anthropic response format
           const textContent = data.content?.find((c: any) => c.type === 'text')?.text || '';
@@ -3940,16 +3957,14 @@ serve(async (req) => {
           const openRouterKey = Deno.env.get('OPENROUTER_API_KEY');
           if (!openRouterKey) throw new Error('OPENROUTER_API_KEY not configured');
 
-          console.log(`🚀 [${requestId}] [${provider}] Calling OpenRouter API...`);
+          slog('info', `[${requestId}] [${provider}] Calling OpenRouter API...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
           result = await callGenericLLM(browserUseReq, provider, openRouterKey, supabaseUrl, signal);
           normalizedAction = normalizeBrowserUseResponse(result.response);
           actualModel = provider;
         }
 
-        console.log(`\n📥 [${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms):`);
-        console.log(JSON.stringify(truncateForLogging(result.response), null, 2));
-        console.log(`\n🔄 [${requestId}] [${provider}] NORMALIZED ACTION:`);
-        console.log(JSON.stringify(normalizedAction, null, 2));
+        slog('info', `[${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms)`, { request_id: requestId, agent_id: agentId, call_site: callSite, data: JSON.stringify(truncateForLogging(result.response), null, 2) });
+        slog('info', `[${requestId}] [${provider}] NORMALIZED ACTION`, { request_id: requestId, agent_id: agentId, call_site: callSite, data: JSON.stringify(normalizedAction, null, 2) });
 
         return { action: normalizedAction, ttftMs: result.ttftMs, actualModel, usage: result.usage };
       }
@@ -3961,7 +3976,7 @@ serve(async (req) => {
         // TEMPORARILY DISABLED: Every 3rd step, route to Yutori via the existing model_seed path (index 1 in pool)
         // const stepNumber = browserUseReq.action_history.length;
         // if (stepNumber > 0 && stepNumber % 3 === 0 && browserUseReq.browser_state.screenshot) {
-        //   console.log(`🔶 [${requestId}] Claude mode: routing step ${stepNumber} to Yutori via model_seed=1`);
+        //   slog('info', `[${requestId}] Claude mode: routing step ${stepNumber} to Yutori via model_seed=1`, { request_id: requestId, agent_id: agentId, call_site: callSite });
         //   browserUseReq.model_seed = 1; // yutori/n1 is index 1 in rose-1-browser-use pool
         //   // Fall through to model_seed handler below
         // } else
@@ -3969,7 +3984,7 @@ serve(async (req) => {
         // For claude-mode, use user_id from request body if provided (the API key may map to a shared
         // worker user, but the real user who owns the agent/credentials is passed via user_id)
         const claudeUserId = browserUseReq.user_id || authInfo.userId;
-        console.log(`🔷 [${requestId}] Claude mode: direct Opus 4.6 with cache controls (userId: ${claudeUserId})`);
+        slog('info', `[${requestId}] Claude mode: direct Opus 4.6 with cache controls (userId: ${claudeUserId})`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
         // Fetch Claude Code OAuth token from backend
         const backendUrl = Deno.env.get('BACKEND_API_URL') || 'https://navi-j9a9.onrender.com';
@@ -3984,7 +3999,7 @@ serve(async (req) => {
         if (browserUseReq.oauth_token) {
           // Token provided by caller (agent worker handles token management)
           oauthToken = browserUseReq.oauth_token;
-          console.log(`🔷 [${requestId}] Using caller-provided OAuth token`);
+          slog('info', `[${requestId}] Using caller-provided OAuth token`, { request_id: requestId, agent_id: agentId, call_site: callSite });
         } else {
           // Fallback: fetch from backend (backwards compat)
           try {
@@ -3997,7 +4012,7 @@ serve(async (req) => {
             if (!tokenResp.ok) {
               const errData = await tokenResp.json().catch(() => null);
               const errMsg = errData?.error || `Backend token fetch failed: ${tokenResp.status}`;
-              console.error(`❌ [${requestId}] Claude Code token fetch failed:`, errMsg);
+              slog('error', `[${requestId}] Claude Code token fetch failed:`, { data: errMsg , request_id: requestId, agent_id: agentId, call_site: callSite });
               return new Response(JSON.stringify({
                 error: errMsg,
                 request_id: requestId,
@@ -4009,7 +4024,7 @@ serve(async (req) => {
             const tokenData = await tokenResp.json();
             oauthToken = tokenData.accessToken;
           } catch (tokenErr) {
-            console.error(`❌ [${requestId}] Failed to fetch Claude Code token:`, tokenErr);
+            slog('error', `[${requestId}] Failed to fetch Claude Code token:`, { data: tokenErr , request_id: requestId, agent_id: agentId, call_site: callSite });
             return new Response(JSON.stringify({
               error: 'Failed to fetch Claude Code credentials',
               details: tokenErr instanceof Error ? tokenErr.message : 'Unknown error',
@@ -4099,8 +4114,8 @@ serve(async (req) => {
           temperature: 0.3,
         };
 
-        console.log(`🚀 [${requestId}] Claude mode: calling Anthropic with cache controls`);
-        console.log(`[Claude Mode] System blocks: ${systemBlocks.length}, Messages: ${anthropicMessages.length}`);
+        slog('info', `[${requestId}] Claude mode: calling Anthropic with cache controls`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog('info', `[Claude Mode] System blocks: ${systemBlocks.length}, Messages: ${anthropicMessages.length}`);
 
         const startTime = Date.now();
         const response = await fetch(ANTHROPIC_API_URL, {
@@ -4120,7 +4135,7 @@ serve(async (req) => {
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error(`❌ [${requestId}] Claude mode API error:`, response.status, errorText);
+          slog('error', `[${requestId}] Claude mode API error:`, { data: [response.status, errorText] , request_id: requestId, agent_id: agentId, call_site: callSite });
 
           // Rate limited — signal caller to fall back to racing
           if (response.status === 429) {
@@ -4155,7 +4170,7 @@ serve(async (req) => {
               rateLimitMessage = errorText.slice(0, 300);
             }
 
-            console.warn(`⚠️ [${requestId}] Claude mode rate limited, signaling fallback to racing`);
+            slog('warn', `[${requestId}] Claude mode rate limited, signaling fallback to racing`, { request_id: requestId, agent_id: agentId, call_site: callSite });
             return new Response(JSON.stringify({
               error: 'CLAUDE_RATE_LIMITED',
               fallback: 'racing',
@@ -4186,7 +4201,7 @@ serve(async (req) => {
         }
 
         const data = await response.json();
-        console.log('📥 Claude mode raw response:', JSON.stringify(truncateForLogging(data), null, 2));
+        slog('info', 'Claude mode raw response:', { data: JSON.stringify(truncateForLogging(data), null, 2) });
 
         // Extract text content from Anthropic response
         const textContent = data.content?.find((c: any) => c.type === 'text')?.text || '';
@@ -4207,7 +4222,7 @@ serve(async (req) => {
         };
 
         const normalizedAction = normalizeBrowserUseResponse({ completion });
-        console.log(`✅ [${requestId}] Claude mode: action=${normalizedAction.action}, ttft=${ttftMs}ms, cache_read=${usage.cache_read_input_tokens}, cache_write=${usage.cache_creation_input_tokens}`);
+        slog('info', `[${requestId}] Claude mode: action=${normalizedAction.action}, ttft=${ttftMs}ms, cache_read=${usage.cache_read_input_tokens}, cache_write=${usage.cache_creation_input_tokens}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
         // Log usage with $0 cost (billed to user's Claude subscription)
         const claudeModeResponse = {
@@ -4246,7 +4261,7 @@ serve(async (req) => {
         const providerIndex = browserUseReq.model_seed;
 
         if (providerIndex < 0 || providerIndex >= browserPool.length) {
-          console.log(`❌ [${requestId}] model_seed ${providerIndex} out of range`);
+          slog('info', `[${requestId}] model_seed ${providerIndex} out of range`, { request_id: requestId, agent_id: agentId, call_site: callSite });
           return new Response(JSON.stringify({
             error: `model_seed ${providerIndex} out of range. Pool has ${browserPool.length} providers (0-${browserPool.length - 1})`
           }), {
@@ -4256,13 +4271,13 @@ serve(async (req) => {
         }
 
         const selectedProvider = browserPool[providerIndex];
-        console.log(`🎯 [${requestId}] Browser-use provider (seeded): ${selectedProvider} (index: ${providerIndex})`);
+        slog('info', `[${requestId}] Browser-use provider (seeded): ${selectedProvider} (index: ${providerIndex})`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
         try {
           const result = await callProvider(selectedProvider, providerIndex);
 
-          console.log(`✅ [${requestId}] Browser-use response: action=${result.action.action}, index=${result.action.index}`);
-          console.log(`🔷 [${requestId}] ========== REQUEST END (success) ==========\n`);
+          slog('info', `[${requestId}] Browser-use response: action=${result.action.action}, index=${result.action.index}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog('info', `[${requestId}] ========== REQUEST END (success) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
           return new Response(JSON.stringify({
             action: result.action,
@@ -4280,8 +4295,8 @@ serve(async (req) => {
           });
 
         } catch (error) {
-          console.error(`❌ [${requestId}] Browser-use (seeded) failed:`, error);
-          console.log(`🔷 [${requestId}] ========== REQUEST END (error) ==========\n`);
+          slog('error', `[${requestId}] Browser-use (seeded) failed:`, { data: error , request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog('info', `[${requestId}] ========== REQUEST END (error) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
           return new Response(JSON.stringify({
             error: 'Browser-use request failed',
             details: error instanceof Error ? error.message : 'Unknown error',
@@ -4307,9 +4322,9 @@ serve(async (req) => {
         ? [...browserPool]
         : browserPool.filter(m => !VISION_REQUIRED.has(m));
 
-      console.log(`🏁 [${requestId}] Eligible pool (${eligiblePool.length}/${browserPool.length}): ${eligiblePool.join(', ')}`);
+      slog('info', `[${requestId}] Eligible pool (${eligiblePool.length}/${browserPool.length}): ${eligiblePool.join(', ')}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
       if (!hasScreenshot && eligiblePool.length < browserPool.length) {
-        console.log(`📸 [${requestId}] No screenshot - filtered out vision-only models`);
+        slog('info', `[${requestId}] No screenshot - filtered out vision-only models`, { request_id: requestId, agent_id: agentId, call_site: callSite });
       }
 
       if (eligiblePool.length === 0) {
@@ -4349,7 +4364,7 @@ serve(async (req) => {
       if (racingTrio.length === 1) {
         const singleModel = racingTrio[0].model;
         const poolIndex = browserPool.indexOf(singleModel);
-        console.log(`🎯 [${requestId}] Single model eligible, direct call: ${singleModel}`);
+        slog('info', `[${requestId}] Single model eligible, direct call: ${singleModel}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
         try {
           const result = await withTimeout(
@@ -4358,8 +4373,8 @@ serve(async (req) => {
             singleModel
           );
 
-          console.log(`✅ [${requestId}] Browser-use response: action=${result.action.action}`);
-          console.log(`🔷 [${requestId}] ========== REQUEST END (success, single) ==========\n`);
+          slog('info', `[${requestId}] Browser-use response: action=${result.action.action}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog('info', `[${requestId}] ========== REQUEST END (success, single) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
           return new Response(JSON.stringify({
             action: result.action,
@@ -4376,7 +4391,7 @@ serve(async (req) => {
             status: 200,
           });
         } catch (error) {
-          console.error(`❌ [${requestId}] Single model failed:`, error);
+          slog('error', `[${requestId}] Single model failed:`, { data: error , request_id: requestId, agent_id: agentId, call_site: callSite });
           return new Response(JSON.stringify({
             error: 'Browser-use request failed',
             details: error instanceof Error ? error.message : 'Unknown error',
@@ -4405,8 +4420,8 @@ serve(async (req) => {
         );
 
         buTimings.race_total_ms = Date.now() - raceStartTime;
-        console.log(`✅ [${requestId}] Race complete: winner=${raceResult.actualModel}, time=${raceResult.ttftMs}ms`);
-        console.log(`🔷 [${requestId}] ========== REQUEST END (success, race) ==========\n`);
+        slog('info', `[${requestId}] Race complete: winner=${raceResult.actualModel}, time=${raceResult.ttftMs}ms`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog('info', `[${requestId}] ========== REQUEST END (success, race) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
         // Adjust usage for racing cost (all models consumed input tokens)
         let adjustedUsage = raceResult.usage;
@@ -4443,8 +4458,8 @@ serve(async (req) => {
         });
 
       } catch (error) {
-        console.error(`❌ [${requestId}] Browser-use race failed:`, error);
-        console.log(`🔷 [${requestId}] ========== REQUEST END (race failed) ==========\n`);
+        slog('error', `[${requestId}] Browser-use race failed:`, { data: error , request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog('info', `[${requestId}] ========== REQUEST END (race failed) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
         return new Response(JSON.stringify({
           error: 'Browser-use race failed',
@@ -4485,15 +4500,15 @@ serve(async (req) => {
     let messages = originalMessages;
 
     // Log incoming messages for debugging
-    console.log(`🌐 [${requestId}] Chat completion request for model: ${model}${skip_cache ? ' (skip_cache)' : ''}`);
-    console.log(`📝 [${requestId}] Received ${messages?.length || 0} messages:`, JSON.stringify(truncateForLogging(messages), null, 2));
+    slog('info', `[${requestId}] Chat completion request for model: ${model}${skip_cache ? ' (skip_cache)' : ''}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+    slog('info', `[${requestId}] Received ${messages?.length || 0} messages:`, { data: JSON.stringify(truncateForLogging(messages), null, 2) , request_id: requestId, agent_id: agentId, call_site: callSite });
 
     // Default reasoning tokens to 256 if reasoning is enabled but no max_tokens specified
     const DEFAULT_REASONING_TOKENS = 256;
     let cappedReasoning = reasoning;
     if (reasoning && !reasoning.max_tokens) {
       cappedReasoning = { ...reasoning, max_tokens: DEFAULT_REASONING_TOKENS };
-      console.log(`🧠 Setting default reasoning tokens: ${DEFAULT_REASONING_TOKENS}`);
+      slog('info', `Setting default reasoning tokens: ${DEFAULT_REASONING_TOKENS}`);
     }
 
     if (!model) {
@@ -4524,7 +4539,7 @@ serve(async (req) => {
       const claudeActualModel = 'claude-sonnet-4-6-claude';
       const claudeApiModel = 'claude-sonnet-4-6';
       const claudePassthroughModel = 'anthropic/claude-sonnet-4.6';
-      console.log(`🔑 [${requestId}] Claude token present, attempting direct Anthropic call with ${claudeApiModel} (skipping racing)`);
+      slog('info', `[${requestId}] Claude token present, attempting direct Anthropic call with ${claudeApiModel} (skipping racing)`, { request_id: requestId, agent_id: agentId, call_site: callSite });
       // Resolve pool for stall fallback (racing needs the model pool)
       const fallbackPool = MODEL_POOLS[poolName] || MODEL_POOLS['rose-1-lite'];
       try {
@@ -4550,7 +4565,7 @@ serve(async (req) => {
             {
               timeoutMs: 20000,
               onFallback: async () => {
-                console.log(`🔄 [${requestId}] Stall fallback: starting model racing`);
+                slog('info', `[${requestId}] Stall fallback: starting model racing`, { request_id: requestId, agent_id: agentId, call_site: callSite });
                 const openRouterKey = Deno.env.get('OPENROUTER_API_KEY')!;
                 const { latencies } = await getCachedLatencies(supabase, poolName, fallbackPool);
                 const racingTrio = selectRacingTrio(fallbackPool, latencies);
@@ -4560,7 +4575,7 @@ serve(async (req) => {
                   tools, tool_choice, response_format, cappedReasoning,
                   openRouterKey, supabaseUrl, supabase, poolName, timings
                 );
-                console.log(`🔄 [${requestId}] Stall fallback: racing winner is ${winningModel}`);
+                slog('info', `[${requestId}] Stall fallback: racing winner is ${winningModel}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
                 return { reader, firstData, actualModel: winningModel, poolName, poolSize: fallbackPool.length };
               }
             }
@@ -4589,7 +4604,7 @@ serve(async (req) => {
 
           const nativeToolMode = applyAnthropicToolConfig(anthropicBody, response_format, true, tools, tool_choice);
 
-          console.log(`🔑 [${requestId}] Non-streaming claude token${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`);
+          slog('info', `[${requestId}] Non-streaming claude token${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
           const response = await fetch(ANTHROPIC_API_URL, {
             method: 'POST',
@@ -4637,14 +4652,14 @@ serve(async (req) => {
                 } else {
                   reconstructedJson = textContent;
                 }
-                console.log(`🔧 [${requestId}] Native tool JSON passthrough: ${toolUseBlocks.length} native tool(s), response length: ${textContent.length}`);
+                slog('info', `[${requestId}] Native tool JSON passthrough: ${toolUseBlocks.length} native tool(s), response length: ${textContent.length}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
               } else {
                 reconstructedJson = reconstructAgentResponse(textContent, toolUseBlocks);
-                console.log(`🔧 [${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`);
+                slog('info', `[${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
               }
             } catch {
               reconstructedJson = reconstructAgentResponse(textContent, toolUseBlocks);
-              console.log(`🔧 [${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`);
+              slog('info', `[${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
             }
 
             const finalResponse = {
@@ -4662,7 +4677,7 @@ serve(async (req) => {
               pool_size: 1,
             };
 
-            console.log(`📊 [${requestId}] Non-streaming cache metrics: cache_read=${apiUsage.cache_read_input_tokens || 0}, cache_write=${apiUsage.cache_creation_input_tokens || 0}`);
+            slog('info', `[${requestId}] Non-streaming cache metrics: cache_read=${apiUsage.cache_read_input_tokens || 0}, cache_write=${apiUsage.cache_creation_input_tokens || 0}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
             return new Response(JSON.stringify(finalResponse), {
               headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -4701,7 +4716,7 @@ serve(async (req) => {
             pool_size: 1,
           };
 
-          console.log(`📊 [${requestId}] Non-streaming cache metrics: cache_read=${apiUsage.cache_read_input_tokens || 0}, cache_write=${apiUsage.cache_creation_input_tokens || 0}`);
+          slog('info', `[${requestId}] Non-streaming cache metrics: cache_read=${apiUsage.cache_read_input_tokens || 0}, cache_write=${apiUsage.cache_creation_input_tokens || 0}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
           return new Response(JSON.stringify(finalResponse), {
             headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -4710,7 +4725,7 @@ serve(async (req) => {
         }
       } catch (error) {
         const isStall = String(error).includes('timed out');
-        console.warn(`⚠️ [${requestId}] Claude token call failed${isStall ? ' (stall detected)' : ''}, falling back to racing: ${error}`);
+        slog('warn', `[${requestId}] Claude token call failed${isStall ? ' (stall detected)' : ''}, falling back to racing: ${error}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
         // Fall through to normal racing path
       }
     }
@@ -4731,7 +4746,7 @@ serve(async (req) => {
     
     // Handle direct model passthrough (bypass racing)
     if (isDirectModel) {
-      console.log(`🔧 Direct model passthrough: ${model}`);
+      slog('info', `Direct model passthrough: ${model}`);
       if (stream) {
         return await handleStreaming(
           model,
@@ -4782,7 +4797,7 @@ serve(async (req) => {
       
       if (!response.ok) {
         const errorText = await response.text();
-        console.error('OpenRouter API error:', response.status, errorText);
+        slog('error', 'OpenRouter API error:', { data: [response.status, errorText] });
         return new Response(JSON.stringify({ 
           error: 'OpenRouter API error',
           status: response.status,
@@ -4857,7 +4872,7 @@ serve(async (req) => {
     if (conversation_id && !selectedModel) {
       const existingModel = await getConversationModel(supabase, conversation_id);
       if (existingModel) {
-        console.log(`🔗 Using existing model for conversation: ${existingModel}`);
+        slog('info', `Using existing model for conversation: ${existingModel}`);
         
         if (stream) {
           return await handleStreaming(
@@ -4898,7 +4913,7 @@ serve(async (req) => {
         if (toolCount >= ANTHROPIC_MAX_ANYOF_BRANCHES + 1) {
           const anthropicModels = pool.filter(m => isAnthropicModel(m));
           if (anthropicModels.length > 0) {
-            console.log(`⚠️ Schema has ${toolCount} tool types (limit: ${ANTHROPIC_MAX_ANYOF_BRANCHES}), excluding Anthropic models: ${anthropicModels.join(', ')}`);
+            slog('info', `Schema has ${toolCount} tool types (limit: ${ANTHROPIC_MAX_ANYOF_BRANCHES}), excluding Anthropic models: ${anthropicModels.join(', ')}`);
             effectivePool = pool.filter(m => !isAnthropicModel(m));
           }
         }
@@ -4921,7 +4936,7 @@ serve(async (req) => {
       // For pools configured for waterfall (sequential fallback), skip trio racing entirely.
       // This sends input tokens to only ONE model per request (saves cost vs racing 3 models).
       if (WATERFALL_POOLS.has(poolName)) {
-        console.log(`🔄 Waterfall mode for pool: ${poolName} (${effectivePool.length} models)`);
+        slog('info', `Waterfall mode for pool: ${poolName} (${effectivePool.length} models)`);
         return await waterfallStream(
           effectivePool,
           messages,
@@ -4953,13 +4968,13 @@ serve(async (req) => {
       const cacheStartTime = Date.now();
       const { latencies: cachedLatencies, needsRefresh, missingModels } = await getCachedLatencies(supabase, poolName, pool);
       timings.cache_lookup_ms = Date.now() - cacheStartTime;
-      console.log(`⏱️ TIMING: cache_lookup=${timings.cache_lookup_ms}ms`);
+      slog('info', `TIMING: cache_lookup=${timings.cache_lookup_ms}ms`);
 
       // If cache is stale/missing, fire latency probes in PARALLEL with the race
       // Probes use a standard test prompt, not the user's messages
       let probePromise: Promise<void> | null = null;
       if (needsRefresh && missingModels.length > 0) {
-        console.log(`🔬 Cache needs refresh, firing probes in parallel for: ${missingModels.join(', ')}`);
+        slog('info', `Cache needs refresh, firing probes in parallel for: ${missingModels.join(', ')}`);
         // Fire probes in background - don't await, let them run alongside the race
         probePromise = fireLatencyProbes(missingModels, poolName, openRouterKey, supabaseUrl, supabase);
         timings.probes_fired = missingModels.length;
@@ -4971,7 +4986,7 @@ serve(async (req) => {
       const trioSelectStart = Date.now();
       const racingTrio = selectRacingTrio(effectivePool, cachedLatencies);
       timings.trio_select_ms = Date.now() - trioSelectStart;
-      console.log(`⏱️ TIMING: trio_select=${timings.trio_select_ms}ms`);
+      slog('info', `TIMING: trio_select=${timings.trio_select_ms}ms`);
       
       if (racingTrio.length === 0) {
         return new Response(JSON.stringify({ error: 'No eligible models in pool' }), {
@@ -4983,7 +4998,7 @@ serve(async (req) => {
       // If only one model eligible, skip racing
       if (racingTrio.length === 1) {
         const singleModel = racingTrio[0].model;
-        console.log(`🎯 Single model eligible, skipping race: ${singleModel}`);
+        slog('info', `Single model eligible, skipping race: ${singleModel}`);
         
         if (conversation_id) {
           await saveConversationModel(supabase, conversation_id, singleModel, poolName);
@@ -5012,7 +5027,7 @@ serve(async (req) => {
       try {
         const raceCallStart = Date.now();
         timings.race_call_start_ms = raceCallStart - raceStartTime;
-        console.log(`⏱️ TIMING: race_call_start=${timings.race_call_start_ms}ms (time before raceModels)`);
+        slog('info', `TIMING: race_call_start=${timings.race_call_start_ms}ms (time before raceModels)`);
         
         const { model: winningModel, reader: winningReader, ttftMs, firstData } = await raceModels(
           racingTrio,
@@ -5033,7 +5048,7 @@ serve(async (req) => {
         
         timings.race_complete_ms = Date.now() - raceStartTime;
         timings.race_duration_ms = Date.now() - raceCallStart;
-        console.log(`⏱️ TIMING: race_complete=${timings.race_complete_ms}ms, race_duration=${timings.race_duration_ms}ms`);
+        slog('info', `TIMING: race_complete=${timings.race_complete_ms}ms, race_duration=${timings.race_duration_ms}ms`);
         
         // Save winning model for conversation
         if (conversation_id) {
@@ -5045,7 +5060,7 @@ serve(async (req) => {
         const modelsRaced = racingTrio.length;
         const streamStartTime = Date.now();
         timings.stream_start_ms = streamStartTime - raceStartTime;
-        console.log(`⏱️ TIMING: stream_start=${timings.stream_start_ms}ms`);
+        slog('info', `TIMING: stream_start=${timings.stream_start_ms}ms`);
         
         const stream = new ReadableStream({
           async start(controller) {
@@ -5064,7 +5079,7 @@ serve(async (req) => {
               let anthropicCacheReadTokens = 0;
 
               // Process the firstData buffer immediately
-              console.log(`⏱️ TIMING: processing firstData buffer (${firstData.length} chars)`);
+              slog('info', `TIMING: processing firstData buffer (${firstData.length} chars)`);
 
               // Helper to process buffer lines
               const processBuffer = () => {
@@ -5095,7 +5110,7 @@ serve(async (req) => {
                           anthropicInputTokens = msgUsage.input_tokens || 0;
                           anthropicCacheCreationTokens = msgUsage.cache_creation_input_tokens || 0;
                           anthropicCacheReadTokens = msgUsage.cache_read_input_tokens || 0;
-                          console.log(`📊 Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`);
+                          slog('info', `Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`);
                         }
                         return;
                       }
@@ -5103,7 +5118,7 @@ serve(async (req) => {
                       // Capture output tokens from message_delta
                       if (parsed.type === 'message_delta' && parsed.usage?.output_tokens) {
                         anthropicOutputTokens = parsed.usage.output_tokens;
-                        console.log(`📊 Anthropic output_tokens captured: ${anthropicOutputTokens}`);
+                        slog('info', `Anthropic output_tokens captured: ${anthropicOutputTokens}`);
                         return;
                       }
 
@@ -5132,7 +5147,7 @@ serve(async (req) => {
                       if (firstEnqueueTime === null) {
                         firstEnqueueTime = Date.now() - streamStartTime;
                         timings.first_enqueue_to_client_ms = firstEnqueueTime;
-                        console.log(`⏱️ TIMING: first_enqueue_to_client=${firstEnqueueTime}ms`);
+                        slog('info', `TIMING: first_enqueue_to_client=${firstEnqueueTime}ms`);
                       }
                       openAIFormat.timings = timings;
 
@@ -5157,7 +5172,7 @@ serve(async (req) => {
                     if (firstEnqueueTime === null) {
                       firstEnqueueTime = Date.now() - streamStartTime;
                       timings.first_enqueue_to_client_ms = firstEnqueueTime;
-                      console.log(`⏱️ TIMING: first_enqueue_to_client=${firstEnqueueTime}ms`);
+                      slog('info', `TIMING: first_enqueue_to_client=${firstEnqueueTime}ms`);
                     }
                     parsed.timings = timings;
 
@@ -5175,7 +5190,7 @@ serve(async (req) => {
                       // OpenRouter prompt_tokens is total (incl cached); Anthropic is non-cached only
                       parsed.usage.prompt_tokens = Math.max(0, parsed.usage.prompt_tokens - cachedTokens - cacheWriteTokens);
 
-                      console.log(`📊 Cache translated: read=${cachedTokens}, write=${cacheWriteTokens}, uncached=${parsed.usage.prompt_tokens}`);
+                      slog('info', `Cache translated: read=${cachedTokens}, write=${cacheWriteTokens}, uncached=${parsed.usage.prompt_tokens}`);
                     }
 
                     // Adjust usage to reflect TRUE cost (all racing models consumed input tokens)
@@ -5186,7 +5201,7 @@ serve(async (req) => {
                       parsed.usage.total_tokens = parsed.usage.prompt_tokens + winnerCompletionTokens;
                       // Preserve cache fields (NOT multiplied — only winner had cache hits)
                       // cache_read_input_tokens and cache_creation_input_tokens stay as-is
-                      console.log(`📊 Usage adjusted: ${winnerPromptTokens} input × ${modelsRaced} models = ${parsed.usage.prompt_tokens} total input tokens`);
+                      slog('info', `Usage adjusted: ${winnerPromptTokens} input × ${modelsRaced} models = ${parsed.usage.prompt_tokens} total input tokens`);
                     }
 
                     const payload = `data: ${JSON.stringify(parsed)}\n\n`;
@@ -5235,7 +5250,7 @@ serve(async (req) => {
                     };
                     const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
                     controller.enqueue(encoder.encode(payload));
-                    console.log(`📊 Anthropic usage adjusted: ${anthropicInputTokens} input × ${modelsRaced} models = ${adjustedInputTokens} total input tokens`);
+                    slog('info', `Anthropic usage adjusted: ${anthropicInputTokens} input × ${modelsRaced} models = ${adjustedInputTokens} total input tokens`);
                   }
                   const donePayload = 'data: [DONE]\n\n';
                   controller.enqueue(encoder.encode(donePayload));
@@ -5251,7 +5266,7 @@ serve(async (req) => {
                 }
               }
             } catch (error) {
-              console.error('Streaming race winner error:', error);
+              slog('error', 'Streaming race winner error:', { data: error });
               controller.error(error);
             }
           }
@@ -5267,11 +5282,11 @@ serve(async (req) => {
         });
         
       } catch (error) {
-        console.error('❌ Trio racing failed:', error);
+        slog('error', 'Trio racing failed:', { data: error });
         
         // Fallback to random model
         const fallbackModel = pool[Math.floor(Math.random() * pool.length)];
-        console.log(`🔄 Falling back to random model: ${fallbackModel}`);
+        slog('info', `Falling back to random model: ${fallbackModel}`);
         
         return await handleStreaming(
           fallbackModel,
@@ -5305,7 +5320,7 @@ serve(async (req) => {
     // Helper function to make API call to appropriate provider
     async function makeApiCall(body: any): Promise<globalThis.Response> {
       if (isCerebras) {
-        console.log(`⚡ Calling Cerebras API with model: ${actualModel}`);
+        slog('info', `Calling Cerebras API with model: ${actualModel}`);
         
         // Build Cerebras request body - Cerebras is OpenAI-compatible but doesn't support some params
         // See: https://inference-docs.cerebras.ai/resources/openai
@@ -5347,7 +5362,7 @@ serve(async (req) => {
           }
         }
         
-        console.log(`📤 Cerebras request body:`, JSON.stringify(truncateForLogging(cerebrasBody), null, 2));
+        slog('info', `Cerebras request body:`, { data: JSON.stringify(truncateForLogging(cerebrasBody), null, 2) });
         
         return await fetch(CEREBRAS_API_URL, {
           method: 'POST',
@@ -5401,15 +5416,15 @@ serve(async (req) => {
       if (!apiResponse.ok) {
         const errorText = await apiResponse.text();
         const provider = isCerebras ? 'Cerebras' : 'OpenRouter';
-        console.error(`${provider} API error:`, apiResponse.status, errorText);
-        console.error(`Request body was:`, JSON.stringify(requestBody, null, 2));
+        slog('error', `${provider} API error:`, { data: [apiResponse.status, errorText] });
+        slog('error', `Request body was:`, { data: JSON.stringify(requestBody, null, 2) });
         
         // Try to parse error for more details
         let errorDetails = errorText;
         try {
           const errorJson = JSON.parse(errorText);
           errorDetails = JSON.stringify(errorJson, null, 2);
-          console.error(`${provider} error details:`, errorJson);
+          slog('error', `${provider} error details:`, { data: errorJson });
         } catch (e) {
           // errorText is not JSON, keep as-is
         }
@@ -5455,7 +5470,7 @@ serve(async (req) => {
 
         if (!stepResponse.ok) {
           const errorText = await stepResponse.text();
-          console.error(`${provider} API error in CoT step:`, stepResponse.status, errorText);
+          slog('error', `${provider} API error in CoT step:`, { data: [stepResponse.status, errorText] });
           return new Response(JSON.stringify({ 
             error: `${provider} API error in CoT step`,
             details: errorText 
@@ -5494,7 +5509,7 @@ serve(async (req) => {
 
       if (!finalApiResponse.ok) {
         const errorText = await finalApiResponse.text();
-        console.error(`${provider} API error in final step:`, finalApiResponse.status, errorText);
+        slog('error', `${provider} API error in final step:`, { data: [finalApiResponse.status, errorText] });
         return new Response(JSON.stringify({ 
           error: `${provider} API error in final step`,
           details: errorText 
@@ -5533,16 +5548,16 @@ serve(async (req) => {
     }, finalResponse, costCents, cotSteps);
 
     // Return response
-    console.log(`✅ [${requestId}] Chat completion success: model=${actualModel}, tokens=${totalPromptTokens + totalCompletionTokens}`);
-    console.log(`🔷 [${requestId}] ========== REQUEST END (success) ==========\n`);
+    slog('info', `[${requestId}] Chat completion success: model=${actualModel}, tokens=${totalPromptTokens + totalCompletionTokens}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+    slog('info', `[${requestId}] ========== REQUEST END (success) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
     return new Response(JSON.stringify(finalResponse), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
       status: 200,
     });
 
   } catch (error) {
-    console.error(`❌ [${requestId}] Rose completions endpoint error:`, error);
-    console.log(`🔷 [${requestId}] ========== REQUEST END (error) ==========\n`);
+    slog('error', `[${requestId}] Rose completions endpoint error:`, { data: error , request_id: requestId, agent_id: agentId, call_site: callSite });
+    slog('info', `[${requestId}] ========== REQUEST END (error) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return new Response(JSON.stringify({
       error: 'Internal server error',

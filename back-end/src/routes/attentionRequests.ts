@@ -4,7 +4,9 @@ import { prisma } from '../lib/prisma';
 import { logJson } from '../lib/log';
 import { AuthRequest, authenticate } from '../middleware/auth';
 import { hybridAuth, HybridAuthRequest } from '../middleware/hybridAuth';
+import { createLogger } from '../lib/logger';
 
+const log = createLogger('Attention');
 const router = Router();
 
 // Validation schemas
@@ -26,7 +28,7 @@ const respondSchema = z.object({
 // POST /api/attention-requests - Create an attention request (called by agent)
 router.post('/', async (req, res) => {
   try {
-    console.log('📥 Received attention request:', logJson(req.body));
+    log.info('Received attention request', { agent_id: req.body.agentId, body: logJson(req.body) });
     const data = createAttentionRequestSchema.parse(req.body);
     
     const request = await prisma.agentAttentionRequest.create({
@@ -40,7 +42,7 @@ router.post('/', async (req, res) => {
       },
     });
     
-    console.log('✅ Attention request created:', request.id);
+    log.info('Attention request created', { request_id: request.id, agent_id: data.agentId });
     
     res.json({
       id: request.id,
@@ -49,11 +51,10 @@ router.post('/', async (req, res) => {
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      console.error('❌ Validation error:', logJson(error.errors));
-      console.error('Request body was:', logJson(req.body));
+      log.error('Validation error', { errors: logJson(error.errors), body: logJson(req.body) });
       return res.status(400).json({ error: 'Invalid request data', details: error.errors });
     }
-    console.error('Failed to create attention request:', error);
+    log.error('Failed to create attention request', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to create attention request' });
   }
 });
@@ -87,7 +88,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
       })),
     });
   } catch (error) {
-    console.error('Failed to fetch attention requests:', error);
+    log.error('Failed to fetch attention requests', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch attention requests' });
   }
 });
@@ -106,7 +107,7 @@ router.get('/count', authenticate, async (req: AuthRequest, res) => {
 
     res.json({ count });
   } catch (error) {
-    console.error('Failed to count attention requests:', error);
+    log.error('Failed to count attention requests', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to count attention requests' });
   }
 });
@@ -143,7 +144,7 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       updatedAt: request.updatedAt,
     });
   } catch (error) {
-    console.error('Failed to fetch attention request:', error);
+    log.error('Failed to fetch attention request', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch attention request' });
   }
 });
@@ -184,7 +185,7 @@ router.post('/:id/respond', authenticate, async (req: AuthRequest, res) => {
       const handle = client.workflow.getHandle(request.workflowId);
       await handle.signal('receive_user_response', JSON.stringify({ request_id: id, response: data.response }));
     } catch (error) {
-      console.error(`Failed to send signal to workflow ${request.workflowId}:`, error);
+      log.error('Failed to send signal to workflow', { workflow_id: request.workflowId, agent_id: request.agentId, error: error instanceof Error ? error.message : String(error) });
       // Don't fail the request - DB is updated, workflow will eventually check
     }
     
@@ -196,7 +197,7 @@ router.post('/:id/respond', authenticate, async (req: AuthRequest, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Invalid response data', details: error.errors });
     }
-    console.error('Failed to respond to attention request:', error);
+    log.error('Failed to respond to attention request', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to respond to attention request' });
   }
 });
@@ -234,7 +235,7 @@ router.post('/:id/skip', authenticate, async (req: AuthRequest, res) => {
       request_id: id,
     });
   } catch (error) {
-    console.error('Failed to skip attention request:', error);
+    log.error('Failed to skip attention request', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to skip attention request' });
   }
 });
@@ -274,7 +275,7 @@ router.post('/:id/reject', authenticate, async (req: AuthRequest, res) => {
       const handle = client.workflow.getHandle(request.workflowId);
       await handle.signal('receive_user_response', JSON.stringify({ request_id: id, response: '__REJECTED__' }));
     } catch (error) {
-      console.error(`Failed to send rejection signal to workflow ${request.workflowId}:`, error);
+      log.error('Failed to send rejection signal to workflow', { workflow_id: request.workflowId, agent_id: request.agentId, error: error instanceof Error ? error.message : String(error) });
       // Don't fail the request - DB is updated, workflow will eventually check
     }
 
@@ -283,7 +284,7 @@ router.post('/:id/reject', authenticate, async (req: AuthRequest, res) => {
       request_id: id,
     });
   } catch (error) {
-    console.error('Failed to reject attention request:', error);
+    log.error('Failed to reject attention request', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to reject attention request' });
   }
 });

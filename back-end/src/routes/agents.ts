@@ -15,6 +15,7 @@ import { createMessage } from '../lib/messages';
 import { getClientIP, getGeoFromIP, DEFAULT_GEOLOCATION } from '../lib/geoip';
 import { cleanupAgentSessions } from '../lib/agentCleanup';
 import { createGithubRepo } from '../lib/github';
+import { createLogger } from '../lib/logger';
 import {
   processUploadedFile,
   validateTotalSize,
@@ -23,6 +24,8 @@ import {
   MAX_TOTAL_SIZE,
   FilePointer,
 } from '../lib/storage';
+
+const log = createLogger('Agents');
 
 const router = Router();
 
@@ -189,7 +192,7 @@ router.get('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       })),
     });
   } catch (error) {
-    console.error('Get agents error:', error);
+    log.error('Get agents error', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch agents' });
   }
 });
@@ -239,7 +242,7 @@ router.get('/tree', hybridAuth, async (req: HybridAuthRequest, res) => {
       })),
     });
   } catch (error) {
-    console.error('Get agent tree error:', error);
+    log.error('Get agent tree error', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch agent tree' });
   }
 });
@@ -276,9 +279,9 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
     if (pricing) {
       tokenInPriceMicrodollars = dollarsToMicrodollars(pricing.prompt);
       tokenOutPriceMicrodollars = dollarsToMicrodollars(pricing.completion);
-      console.log(`💰 Fetched pricing for ${body.model}: in=${tokenInPriceMicrodollars} µ$/token, out=${tokenOutPriceMicrodollars} µ$/token`);
+      log.info(`Fetched pricing for ${body.model}`, { token_in_microdollars: tokenInPriceMicrodollars, token_out_microdollars: tokenOutPriceMicrodollars });
     } else {
-      console.warn(`⚠️  Could not fetch pricing for ${body.model}, agent will have no pricing data`);
+      log.warn(`Could not fetch pricing for ${body.model}, agent will have no pricing data`);
     }
 
     // Look up geolocation from client IP for proxy location
@@ -290,7 +293,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         proxyGeo = geo;
       }
     }
-    console.log(`🌍 Proxy geolocation: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country} (IP: ${clientIP || 'unknown'})`);
+    log.info(`Proxy geolocation: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`, { ip: clientIP || 'unknown' });
 
     // Determine if this is a sub-agent and generate ID upfront
     const isSubAgent = !!body.parent_agent_id;
@@ -399,14 +402,14 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           data: { temporalWorkflowId: workflowId },
         });
 
-        console.log('✅ Sub-agent workflow started', {
-          agentId: agent.agent.id,
-          workflowId,
-          parentAgentId: body.parent_agent_id,
+        log.info('Sub-agent workflow started', {
+          agent_id: agent.agent.id,
+          workflow_id: workflowId,
+          parent_agent_id: body.parent_agent_id,
         });
       } catch (error) {
-        console.error('❌ Failed to start sub-agent workflow', {
-          agentId: agent.agent.id,
+        log.error('Failed to start sub-agent workflow', {
+          agent_id: agent.agent.id,
           error: error instanceof Error ? error.message : String(error),
         });
 
@@ -427,15 +430,15 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       // Used for testing — goes straight into plan/execute phase
       // ============================================
       const startPhase = body.start_phase;
-      console.log(`🚀 Starting root agent directly in ${startPhase} phase (bypass chat)`, {
-        agentId: agent.agent.id,
+      log.info(`Starting root agent directly in ${startPhase} phase (bypass chat)`, {
+        agent_id: agent.agent.id,
         goal: body.goal.substring(0, 100),
       });
 
       if (startPhase === 'execute') {
         setResponseSchema(agent.agent.id).catch((err) => {
-          console.error('❌ Failed to set response schema (background)', {
-            agentId: agent.agent.id,
+          log.error('Failed to set response schema (background)', {
+            agent_id: agent.agent.id,
             error: err instanceof Error ? err.message : String(err),
           });
         });
@@ -466,8 +469,8 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       // ROOT AGENT: Start in Chat Mode
       // Run chat handler, may escalate to agent mode automatically
       // ============================================
-      console.log('💬 Starting root agent in chat mode', {
-        agentId: agent.agent.id,
+      log.info('Starting root agent in chat mode', {
+        agent_id: agent.agent.id,
         goal: body.goal.substring(0, 100),
       });
 
@@ -482,11 +485,11 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       // - Root agents: schema is generated during set_plan tool execution (not at creation)
       // This defers expensive LLM call until planning phase when goal context is richer
       if (body.parent_agent_id && body.response_schema) {
-        console.log('✅ Sub-agent has schema from parent', { agentId: agent.agent.id });
+        log.info('Sub-agent has schema from parent', { agent_id: agent.agent.id });
       } else if (body.parent_agent_id) {
-        console.log('⚠️ Sub-agent spawned without schema', { agentId: agent.agent.id });
+        log.warn('Sub-agent spawned without schema', { agent_id: agent.agent.id });
       } else {
-        console.log('⏳ Root agent - schema will be generated during set_plan', { agentId: agent.agent.id });
+        log.info('Root agent - schema will be generated during set_plan', { agent_id: agent.agent.id });
       }
 
       // Fire-and-forget: create GitHub repo for root agent
@@ -501,13 +504,13 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
             await prisma.githubRepoAccess.create({
               data: { userId, repoUrl },
             });
-            console.log(`[GitHub] Repo ${repoUrl} linked to agent ${agent.agent.id}`);
+            log.info(`Repo ${repoUrl} linked to agent`, { agent_id: agent.agent.id });
           } catch (err) {
-            console.error(`[GitHub] Failed to persist repo URL for agent ${agent.agent.id}:`, err);
+            log.error('Failed to persist repo URL', { agent_id: agent.agent.id, error: err instanceof Error ? err.message : String(err) });
           }
         }
       }).catch((err) => {
-        console.error(`[GitHub] Repo creation failed for agent ${agent.agent.id}:`, err);
+        log.error('Repo creation failed', { agent_id: agent.agent.id, error: err instanceof Error ? err.message : String(err) });
       });
 
       // Handle chat message (non-blocking for response)
@@ -517,8 +520,8 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         userId,
         model: body.model,
       }).catch((err) => {
-        console.error('❌ Chat handler error', {
-          agentId: agent.agent.id,
+        log.error('Chat handler error', {
+          agent_id: agent.agent.id,
           error: err instanceof Error ? err.message : String(err),
         });
         // Update agent status to failed
@@ -528,7 +531,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
             status: 'FAILED',
             statusMessage: 'Chat handler error: ' + (err instanceof Error ? err.message : String(err)),
           },
-        }).catch(console.error);
+        }).catch((err) => log.error('Failed to update agent status', { agent_id: agent.agent.id, error: err instanceof Error ? err.message : String(err) }));
       });
 
       // Note: workflowId remains null for chat mode agents
@@ -555,7 +558,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error('Create agent error:', error);
+    log.error('Create agent error', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to create agent' });
   }
 });
@@ -693,7 +696,7 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       },
     });
   } catch (error) {
-    console.error(`Get agent error (agent=${req.params.id}):`, error);
+    log.error('Get agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch agent' });
   }
 });
@@ -722,7 +725,7 @@ router.get('/:id/ancestors', hybridAuth, async (req: HybridAuthRequest, res) => 
 
     res.json({ ancestors });
   } catch (error) {
-    console.error(`Get ancestors error (agent=${req.params.id}):`, error);
+    log.error('Get ancestors error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch ancestors' });
   }
 });
@@ -836,7 +839,7 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
           await handle.signal('receive_user_response', body.message);
         } catch (error) {
           // Don't fail the request if signaling fails - workflow will eventually poll
-          console.error(`Failed to signal workflow (agent=${req.params.id}):`, error);
+          log.error('Failed to signal workflow', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
         }
       } else if (agentForChat) {
         // Chat mode: handle message with fixed LLM call sequence
@@ -846,8 +849,8 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
           userId: agentForChat.userId,
           model: agentForChat.model,
         }).catch((err) => {
-          console.error('❌ Chat handler error in message route', {
-            agentId,
+          log.error('Chat handler error in message route', {
+            agent_id: agentId,
             error: err instanceof Error ? err.message : String(err),
           });
         });
@@ -865,7 +868,7 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error(`Post message error (agent=${req.params.id}):`, error);
+    log.error('Post message error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to post message' });
   }
 });
@@ -889,13 +892,13 @@ router.post('/:id/attachments', authenticate, attachmentUpload.single('file') as
       req.file.mimetype
     );
 
-    console.log(`[Attachments] Uploaded file for user ${userId}: ${filePointer.original_filename} (${filePointer.size_bytes} bytes)`);
+    log.info('Uploaded file', { user_id: userId, filename: filePointer.original_filename, size_bytes: filePointer.size_bytes, agent_id: req.params.id });
 
     res.status(201).json({
       file_pointer: filePointer,
     });
   } catch (error) {
-    console.error(`Upload attachment error (agent=${req.params.id}):`, error);
+    log.error('Upload attachment error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({
       error: 'Failed to upload attachment',
       details: error instanceof Error ? error.message : 'Unknown error',
@@ -929,7 +932,7 @@ router.get('/:id/attachments/:fileId/url', authenticate, async (req: AuthRequest
       expires_in: 3600,
     });
   } catch (error) {
-    console.error(`Get signed URL error (agent=${req.params.id}):`, error);
+    log.error('Get signed URL error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({
       error: 'Failed to generate signed URL',
       details: error instanceof Error ? error.message : 'Unknown error',
@@ -963,7 +966,7 @@ router.get('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
       status: agent.status,
     });
   } catch (error) {
-    console.error(`Get agent status error (agent=${req.params.id}):`, error);
+    log.error('Get agent status error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to get agent status' });
   }
 });
@@ -1002,8 +1005,8 @@ router.post('/:id/start-agent', hybridAuth, async (req: HybridAuthRequest, res) 
       return;
     }
 
-    console.log('🚀 Manual escalation to agent mode', {
-      agentId,
+    log.info('Manual escalation to agent mode', {
+      agent_id: agentId,
       goal: agent.goal.substring(0, 100),
     });
 
@@ -1030,9 +1033,9 @@ router.post('/:id/start-agent', hybridAuth, async (req: HybridAuthRequest, res) 
     // Broadcast that agent mode started
     await broadcastAgentModeStarted(agentId);
 
-    console.log('✅ Escalated to agent mode', {
-      agentId,
-      workflowId,
+    log.info('Escalated to agent mode', {
+      agent_id: agentId,
+      workflow_id: workflowId,
     });
 
     res.json({
@@ -1041,7 +1044,7 @@ router.post('/:id/start-agent', hybridAuth, async (req: HybridAuthRequest, res) 
       workflow_id: workflowId,
     });
   } catch (error) {
-    console.error(`Start agent error (agent=${req.params.id}):`, error);
+    log.error('Start agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to start agent mode' });
   }
 });
@@ -1113,7 +1116,7 @@ router.patch('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error(`Update status error (agent=${req.params.id}):`, error);
+    log.error('Update status error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to update agent status' });
   }
 });
@@ -1149,14 +1152,14 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
   // Terminate Temporal workflow if it exists
   if (agent.temporalWorkflowId) {
     try {
-      console.log(`🔄 Terminating workflow ${agent.temporalWorkflowId} for agent ${agentId}`);
+      log.info('Terminating workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
       const { getTemporalClient } = await import('../lib/temporal');
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.terminate('Agent deleted by user');
-      console.log(`✅ Terminated workflow ${agent.temporalWorkflowId}`);
+      log.info('Terminated workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
     } catch (error) {
-      console.warn(`⚠️ Failed to terminate workflow ${agent.temporalWorkflowId}: ${error instanceof Error ? error.message : String(error)}`);
+      log.warn(`Failed to terminate workflow`, { workflow_id: agent.temporalWorkflowId, agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
       // Continue with deletion even if termination fails
     }
   }
@@ -1167,7 +1170,7 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
     data: { deletedAt: new Date() },
   });
 
-  console.log(`🗑️ Deleted agent ${agentId}`);
+  log.info('Deleted agent', { agent_id: agentId });
 }
 
 // DELETE /api/agents/:id - Soft delete an agent and all its children, cancel workflows
@@ -1195,7 +1198,7 @@ router.delete('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.status(204).send();
   } catch (error) {
-    console.error(`Delete agent error (agent=${req.params.id}):`, error);
+    log.error('Delete agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to delete agent' });
   }
 });
@@ -1216,7 +1219,7 @@ async function pauseAgent(agentId: string): Promise<void> {
 
   // Skip agents that are already in a terminal state
   if (agent.status === 'COMPLETED' || agent.status === 'FAILED') {
-    console.log(`⏭️ Skipping pause for ${agentId} - already ${agent.status}`);
+    log.info('Skipping pause - already terminal', { agent_id: agentId, status: agent.status });
     return;
   }
 
@@ -1234,7 +1237,7 @@ async function pauseAgent(agentId: string): Promise<void> {
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.signal('pause');
     } catch (error) {
-      console.warn(`Pause signal failed for agent ${agentId}, but DB updated. Workflow will sync next iteration:`, error);
+      log.warn('Pause signal failed, DB updated. Workflow will sync next iteration', { agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
     }
   }
 }
@@ -1264,7 +1267,7 @@ router.post('/:id/pause', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error(`Pause agent error (agent=${req.params.id}):`, error);
+    log.error('Pause agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to pause agent' });
   }
 });
@@ -1296,7 +1299,7 @@ async function resumeAgent(agentId: string): Promise<void> {
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.signal('resume');
     } catch (error) {
-      console.warn(`Resume signal failed for agent ${agentId}, but DB updated. Workflow will sync next iteration:`, error);
+      log.warn('Resume signal failed, DB updated. Workflow will sync next iteration', { agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
     }
   }
 }
@@ -1340,7 +1343,7 @@ router.post('/:id/resume', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error(`Resume agent error (agent=${req.params.id}):`, error);
+    log.error('Resume agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to resume agent' });
   }
 });
@@ -1436,9 +1439,9 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
           await handle.signal('price_limit_increased', {
             new_limit_cents: body.price_limit_cents,
           });
-          console.log(`💰 Signaled price_limit_increased to workflow ${agent.temporalWorkflowId}`);
+          log.info('Signaled price_limit_increased to workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
         } catch (error) {
-          console.error(`Failed to signal price_limit_increased to workflow ${agent.temporalWorkflowId}:`, error);
+          log.error('Failed to signal price_limit_increased', { workflow_id: agent.temporalWorkflowId, agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
           // Continue with update even if signal fails - workflow will poll DB
         }
       }
@@ -1536,7 +1539,7 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error(`Update agent error (agent=${req.params.id}):`, error);
+    log.error('Update agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to update agent' });
   }
 });
@@ -1575,10 +1578,10 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
     try {
       const handle = client.workflow.getHandle(agentId);
       await handle.terminate('Restarting with new worker code');
-      console.log(`✅ Terminated workflow ${agentId}`);
+      log.info('Terminated workflow for restart', { agent_id: agentId });
     } catch (e: any) {
       // Workflow might already be completed/terminated - that's fine
-      console.log(`⚠️ Could not terminate workflow ${agentId}: ${e.message}`);
+      log.warn('Could not terminate workflow for restart', { agent_id: agentId, error: e.message });
     }
 
     // Small delay to ensure termination is processed
@@ -1612,7 +1615,7 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
       data: { temporalWorkflowId: workflowId },
     });
 
-    console.log(`✅ Restarted agent ${agentId}, workflow: ${workflowId}`);
+    log.info('Restarted agent', { agent_id: agentId, workflow_id: workflowId });
 
     res.json({
       success: true,
@@ -1621,7 +1624,7 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
       message: 'Workflow restarted - will continue from existing context',
     });
   } catch (error) {
-    console.error(`Restart agent error (agent=${req.params.id}):`, error);
+    log.error('Restart agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to restart agent' });
   }
 });
@@ -1656,9 +1659,9 @@ router.post('/:id/signal/signup_completed', hybridAuth, async (req: HybridAuthRe
         const client = await getTemporalClient();
         const handle = client.workflow.getHandle(agent.temporalWorkflowId);
         await handle.signal('signup_completed');
-        console.log(`✅ Sent signup_completed signal to workflow ${agent.temporalWorkflowId}`);
+        log.info('Sent signup_completed signal', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
       } catch (error) {
-        console.error(`Failed to signal workflow ${agent.temporalWorkflowId}:`, error);
+        log.error('Failed to signal workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
         res.status(500).json({ error: 'Failed to signal workflow' });
         return;
       }
@@ -1666,7 +1669,7 @@ router.post('/:id/signal/signup_completed', hybridAuth, async (req: HybridAuthRe
 
     res.json({ success: true });
   } catch (error) {
-    console.error(`Signal signup_completed error (agent=${req.params.id}):`, error);
+    log.error('Signal signup_completed error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to signal signup completed' });
   }
 });
@@ -1697,9 +1700,9 @@ router.post('/:id/signal/signup_dismissed', hybridAuth, async (req: HybridAuthRe
         const client = await getTemporalClient();
         const handle = client.workflow.getHandle(agent.temporalWorkflowId);
         await handle.signal('signup_dismissed');
-        console.log(`✅ Sent signup_dismissed signal to workflow ${agent.temporalWorkflowId}`);
+        log.info('Sent signup_dismissed signal', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
       } catch (error) {
-        console.error(`Failed to signal workflow ${agent.temporalWorkflowId}:`, error);
+        log.error('Failed to signal workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
         res.status(500).json({ error: 'Failed to signal workflow' });
         return;
       }
@@ -1707,7 +1710,7 @@ router.post('/:id/signal/signup_dismissed', hybridAuth, async (req: HybridAuthRe
 
     res.json({ success: true });
   } catch (error) {
-    console.error(`Signal signup_dismissed error (agent=${req.params.id}):`, error);
+    log.error('Signal signup_dismissed error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to signal signup dismissed' });
   }
 });
@@ -1733,7 +1736,7 @@ router.post('/generate-response-schema', hybridAuth, async (req: HybridAuthReque
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    console.error('Generate response schema error:', error);
+    log.error('Generate response schema error', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to generate response schema' });
   }
 });

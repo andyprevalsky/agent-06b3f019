@@ -36,6 +36,7 @@ import memoryRouter from './routes/memory';
 import dataRouter from './routes/data';
 import benchmarksRouter from './routes/benchmarks';
 import { prisma } from './lib/prisma';
+import { createLogger } from './lib/logger';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
 const SYSTEM_TOOLS = [
@@ -66,12 +67,14 @@ import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
 
+const log = createLogger('Server');
+const httpLog = createLogger('HTTP');
+
 // Verify critical env vars
 if (!process.env.BACKEND_API_KEY) {
-  console.warn('⚠️  WARNING: BACKEND_API_KEY not found in environment');
-  console.warn('   Internal API calls from workers will fail');
+  log.warn('BACKEND_API_KEY not found in environment - internal API calls from workers will fail');
 } else {
-  console.log('✓ BACKEND_API_KEY loaded:', process.env.BACKEND_API_KEY.substring(0, 20) + '...');
+  log.info('BACKEND_API_KEY loaded', { key_prefix: process.env.BACKEND_API_KEY.substring(0, 20) + '...' });
 }
 
 const app = express();
@@ -100,8 +103,7 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
   : defaultOrigins;
 
-console.log('🔧 CORS Configuration:');
-console.log('   Allowed origins:', allowedOrigins);
+log.info('CORS Configuration', { allowed_origins: allowedOrigins.join(', ') });
 
 app.use(
   cors({
@@ -116,12 +118,12 @@ app.use(
       
       // Allow Vercel preview URLs (*.vercel.app)
       if (origin.endsWith('.vercel.app')) {
-        console.log('✅ Allowed Vercel preview origin:', origin);
+        log.info('Allowed Vercel preview origin', { origin });
         return callback(null, true);
       }
       
       // Reject other origins (don't throw error, just return false)
-      console.warn(`⚠️  CORS rejected origin: ${origin}`);
+      log.warn('CORS rejected origin', { origin });
       callback(null, false);
     },
     credentials: true,
@@ -142,13 +144,17 @@ app.use((req, res, next) => {
     : undefined;
 
   res.on('finish', () => {
-    const duration = Date.now() - start;
-    const logParts = [`[HTTP] ${method} ${urlPath} → ${res.statusCode} (${duration}ms)`];
-    if (body) logParts.push(`body=${body}`);
-    // Extract agent_id from URL for log filtering
+    const duration_ms = Date.now() - start;
     const uuidMatch = urlPath.match(UUID_RE);
-    if (uuidMatch) logParts.push(`agent_id=${uuidMatch[1]}`);
-    console.log(logParts.join(' '));
+    const extra: Record<string, unknown> = {
+      method,
+      path: urlPath,
+      status: res.statusCode,
+      duration_ms,
+    };
+    if (body) extra.body = body;
+    if (uuidMatch) extra.agent_id = uuidMatch[1];
+    httpLog.info(`${method} ${urlPath} -> ${res.statusCode}`, extra);
   });
 
   next();
@@ -184,7 +190,7 @@ app.use('/api/vcard', vcardRouter);  // vCard for contact card (public for Twili
 // x402 Payment Routes Setup
 const x402ReceivingWallet = process.env.X402_RECEIVING_WALLET;
 if (x402ReceivingWallet) {
-  console.log('💰 x402 payments enabled, receiving wallet:', x402ReceivingWallet.substring(0, 10) + '...');
+  log.info('x402 payments enabled', { receiving_wallet: x402ReceivingWallet.substring(0, 10) + '...' });
 
   // Create payment middleware instance for /api/agents
   const agentsPaymentMiddleware = paymentMiddleware(
@@ -250,7 +256,7 @@ if (x402ReceivingWallet) {
   ));
   app.use('/api/x402', x402Router);
 } else {
-  console.log('⚠️  X402_RECEIVING_WALLET not set, x402 payments disabled');
+  log.warn('X402_RECEIVING_WALLET not set, x402 payments disabled');
 }
 
 // Routes with authentication
@@ -283,12 +289,12 @@ app.use('/api', authenticate, formatRouter);
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   // Don't crash on errors, just log and respond appropriately
   const uuidMatch = req.path.match(UUID_RE);
-  console.error('❌ Error in request:', {
-    message: err.message,
+  log.error('Error in request', {
+    error: err.message,
     path: req.path,
     method: req.method,
     ...(uuidMatch ? { agent_id: uuidMatch[1] } : {}),
-    stack: err.stack
+    stack: err.stack,
   });
   
   // Return appropriate status code
@@ -302,31 +308,32 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 // Start server
 app.listen(PORT, () => {
   const isProduction = process.env.NODE_ENV === 'production';
-  console.log(`🚀 [Backend] Mode: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
-  console.log(`✅ Server running on port ${PORT}`);
-  console.log(`📡 REST API: http://localhost:${PORT}`);
-  console.log(`🔐 Auth: JWKS (Supabase)`);
-  console.log(`🗄️  Database: Supabase PostgreSQL (RLS enabled)`);
-  console.log(`💬 Real-time: Use Supabase Realtime from frontend`);
-  if (x402ReceivingWallet) {
-    console.log(`💰 x402 Bazaar: POST /api/x402/spawn-agent (min $0.05 USDC)`);
-  }
+  log.info('Server started', {
+    mode: isProduction ? 'PRODUCTION' : 'DEVELOPMENT',
+    port: PORT,
+    api_url: `http://localhost:${PORT}`,
+    auth: 'JWKS (Supabase)',
+    database: 'Supabase PostgreSQL (RLS enabled)',
+    realtime: 'Supabase Realtime',
+    ...(x402ReceivingWallet ? { x402: 'POST /api/x402/spawn-agent (min $0.05 USDC)' } : {}),
+  });
 
   // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
+  const cronLog = createLogger('Cron');
   const runSync = () => {
-    console.log('[Cron] Running Gmail sync job...');
+    cronLog.info('Running Gmail sync job...');
     runGmailSyncJob().catch(err => {
-      console.error('[Cron] Gmail sync job error:', err);
+      cronLog.error('Gmail sync job error', { error: err instanceof Error ? err.message : String(err) });
     });
   };
   runSync();
   cron.schedule('*/5 * * * *', runSync);
-  console.log(`⏰ Cron: Gmail sync scheduled (every 5 minutes)`);
+  cronLog.info('Gmail sync scheduled (every 5 minutes)');
 });
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {
-  console.log(`\n${signal} received, closing server...`);
+  log.info(`${signal} received, closing server...`);
   await prisma.$disconnect();
   process.exit(0);
 };

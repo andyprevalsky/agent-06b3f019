@@ -738,6 +738,8 @@ async def call_llm_structured_streaming(
                         "Authorization": f"Bearer {config.rose.supabase_anon_key}",
                         "x-api-key": config.rose.api_key,
                         "x-request-id": request_id,
+                        "x-agent-id": agent_id or "",
+                        "x-call-site": call_site,
                     }
                 ) as stream_response:
                     stream_response.raise_for_status()
@@ -1434,6 +1436,7 @@ async def call_llm(
     claude_token: Optional[str] = None,
     skip_cache: bool = False,
     call_site: str = "unknown",
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call OpenRouter LLM for agent reasoning.
@@ -1522,6 +1525,8 @@ async def call_llm(
                         "Authorization": f"Bearer {config.rose.supabase_anon_key}",
                         "x-api-key": config.rose.api_key,
                         "x-request-id": request_id,
+                        "x-agent-id": agent_id or "",
+                        "x-call-site": call_site,
                     }
                 )
                 http_response.raise_for_status()

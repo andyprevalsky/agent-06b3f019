@@ -14,6 +14,9 @@ import { createSignupBonusCredit, createInitialCredit } from '../lib/credits';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { sendSms, sendMms } from '../lib/smsQueue';
 import { SMS_TEMPLATES, getPersonalizedVcardUrl } from '../lib/smsTemplates';
+import { createLogger } from '../lib/logger';
+
+const log = createLogger('Auth');
 
 // Twilio Verify response types
 interface TwilioVerifyResponse {
@@ -54,7 +57,7 @@ const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET;
  */
 async function sendTwilioVerifyOTP(phone: string): Promise<{ success: boolean; error?: string }> {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SERVICE_SID) {
-    console.error('[Auth] Missing Twilio Verify configuration');
+    log.error('Missing Twilio Verify configuration');
     return { success: false, error: 'Server configuration error' };
   }
 
@@ -77,16 +80,16 @@ async function sendTwilioVerifyOTP(phone: string): Promise<{ success: boolean; e
     const data = await response.json() as TwilioVerifyResponse;
 
     if (!response.ok) {
-      console.error('[Auth] Twilio Verify send error:', {
+      log.error('Twilio Verify send error', {
         status: response.status,
         code: data.code,
-        message: data.message,
+        twilio_message: data.message,
         phone: phone.slice(0, -4) + '****',
       });
       return { success: false, error: data.message || 'Failed to send OTP' };
     }
 
-    console.log('[Auth] Twilio Verify OTP sent:', {
+    log.info('Twilio Verify OTP sent', {
       sid: data.sid,
       status: data.status,
       phone: phone.slice(0, -4) + '****',
@@ -94,7 +97,7 @@ async function sendTwilioVerifyOTP(phone: string): Promise<{ success: boolean; e
 
     return { success: true };
   } catch (error) {
-    console.error('[Auth] Twilio Verify send exception:', error);
+    log.error('Twilio Verify send exception', { error: error instanceof Error ? error.message : String(error) });
     return { success: false, error: 'Failed to send OTP' };
   }
 }
@@ -104,7 +107,7 @@ async function sendTwilioVerifyOTP(phone: string): Promise<{ success: boolean; e
  */
 async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ approved: boolean; error?: string }> {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SERVICE_SID) {
-    console.error('[Auth] Missing Twilio Verify configuration');
+    log.error('Missing Twilio Verify configuration');
     return { approved: false, error: 'Server configuration error' };
   }
 
@@ -127,10 +130,10 @@ async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ appr
     const data = await response.json() as TwilioVerifyResponse;
 
     if (!response.ok) {
-      console.error('[Auth] Twilio Verify check error:', {
+      log.error('Twilio Verify check error', {
         status: response.status,
         code: data.code,
-        message: data.message,
+        twilio_message: data.message,
         phone: phone.slice(0, -4) + '****',
       });
 
@@ -146,7 +149,7 @@ async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ appr
     }
 
     const approved = data.status === 'approved';
-    console.log('[Auth] Twilio Verify check result:', {
+    log.info('Twilio Verify check result', {
       status: data.status,
       valid: data.valid,
       approved,
@@ -155,7 +158,7 @@ async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ appr
 
     return { approved, error: approved ? undefined : 'Invalid OTP' };
   } catch (error) {
-    console.error('[Auth] Twilio Verify check exception:', error);
+    log.error('Twilio Verify check exception', { error: error instanceof Error ? error.message : String(error) });
     return { approved: false, error: 'Failed to verify OTP' };
   }
 }
@@ -166,7 +169,7 @@ async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ appr
  */
 async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string; isNew: boolean } | null> {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    console.error('[Auth] Missing Supabase configuration');
+    log.error('Missing Supabase configuration');
     return null;
   }
 
@@ -187,15 +190,15 @@ async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string
     });
 
     if (existingDbUser) {
-      console.log('[Auth] Found existing user in our DB:', {
-        userId: existingDbUser.userId,
+      log.info('Found existing user in our DB', {
+        user_id: existingDbUser.userId,
         phone: phone.slice(0, -4) + '****',
       });
       return { userId: existingDbUser.userId, isNew: false };
     }
 
     // Step 2: Not in our DB - create new user in Supabase
-    console.log('[Auth] User not in our DB, creating in Supabase...');
+    log.info('User not in our DB, creating in Supabase...');
     const createUrl = `${SUPABASE_URL}/auth/v1/admin/users`;
     const createResponse = await fetch(createUrl, {
       method: 'POST',
@@ -214,13 +217,13 @@ async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string
 
     if (createResponse.ok) {
       const newUser = createData as SupabaseAdminUserResponse;
-      console.log('[Auth] Created new Supabase user:', { userId: newUser.id, phone: phone.slice(0, -4) + '****' });
+      log.info('Created new Supabase user', { user_id: newUser.id, phone: phone.slice(0, -4) + '****' });
       return { userId: newUser.id, isNew: true };
     }
 
     // Handle phone_exists error (user in Supabase but not our DB - edge case)
     const errorData = createData as { error_code?: string; msg?: string };
-    console.error('[Auth] Supabase create failed:', {
+    log.error('Supabase create failed', {
       status: createResponse.status,
       error_code: errorData.error_code,
       msg: errorData.msg,
@@ -228,12 +231,12 @@ async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string
 
     if (createResponse.status === 422 && errorData.error_code === 'phone_exists') {
       // User exists in Supabase but not in our DB - edge case, shouldn't happen
-      console.error('[Auth] User exists in Supabase but not in our DB. Phone:', phone.slice(0, -4) + '****');
+      log.error('User exists in Supabase but not in our DB', { phone: phone.slice(0, -4) + '****' });
     }
 
     return null;
   } catch (error) {
-    console.error('[Auth] Supabase user lookup/create exception:', error);
+    log.error('Supabase user lookup/create exception', { error: error instanceof Error ? error.message : String(error) });
     return null;
   }
 }
@@ -420,13 +423,13 @@ async function mergeAnonymousUserResources(anonymousUserId: string, authenticate
     }
 
     if (merged.length > 0) {
-      console.log(`✅ Merged from anonymous ${anonymousUserId} to ${authenticatedUserId}: ${merged.join(', ')}`);
+      log.info(`Merged anonymous to authenticated: ${merged.join(', ')}`, { anonymous_user_id: anonymousUserId, user_id: authenticatedUserId });
     } else {
-      console.log(`No resources to merge from anonymous user ${anonymousUserId}`);
+      log.info('No resources to merge from anonymous user', { anonymous_user_id: anonymousUserId });
     }
   } catch (error) {
     // Log but don't fail the auth flow - merge is best-effort
-    console.error(`Failed to merge resources from ${anonymousUserId} to ${authenticatedUserId}:`, error);
+    log.error('Failed to merge resources', { anonymous_user_id: anonymousUserId, user_id: authenticatedUserId, error: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -450,7 +453,7 @@ router.post('/anonymous', async (req: Request, res: Response) => {
     // Give anonymous users $1 initial credit so they can try the service
     await createInitialCredit(user.id);
 
-    console.log(`✅ Created anonymous user ${user.id} with $1 initial credit`);
+    log.info('Created anonymous user with $1 initial credit', { user_id: user.id });
 
     res.json({
       success: true,
@@ -458,7 +461,7 @@ router.post('/anonymous', async (req: Request, res: Response) => {
       session,
     });
   } catch (error) {
-    console.error('[Auth] Anonymous session error:', error);
+    log.error('Anonymous session error', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to create anonymous session' });
   }
 });
@@ -484,7 +487,7 @@ router.post('/send-otp', async (req: Request, res: Response) => {
 
     res.json({ success: true, message: 'OTP sent' });
   } catch (error) {
-    console.error('[Auth] Send OTP error:', error);
+    log.error('Send OTP error', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to send OTP' });
   }
 });
@@ -511,7 +514,7 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     const verifyResult = await checkTwilioVerifyOTP(phone, token);
 
     if (!verifyResult.approved) {
-      console.error('[Auth] OTP verification failed:', {
+      log.error('OTP verification failed', {
         phone: phone.slice(0, -4) + '****',
         error: verifyResult.error,
       });
@@ -522,7 +525,7 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     const supabaseUser = await findOrCreateSupabaseUser(phone);
 
     if (!supabaseUser) {
-      console.error('[Auth] Failed to find/create Supabase user');
+      log.error('Failed to find/create Supabase user');
       return res.status(500).json({ error: 'Failed to create user session' });
     }
 
@@ -549,11 +552,11 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
           isAnonymous: false,
         },
       });
-      console.log(`✅ Created user record for ${userId} with phone ${phone.slice(0, -4)}****${fullName ? ` and name ${fullName}` : ''}`);
+      log.info('Created user record', { user_id: userId, phone: phone.slice(0, -4) + '****', name: fullName || undefined });
 
       // Give signup bonus credit for completing phone verification
       await createSignupBonusCredit(userId);
-      console.log(`✅ Created signup bonus credit for user ${userId}`);
+      log.info('Created signup bonus credit', { user_id: userId });
 
       // Merge agents from anonymous user if provided
       if (anonymousUserId && anonymousUserId !== userId) {
@@ -586,15 +589,15 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 
         // Give signup bonus for converting from anonymous to authenticated
         await createSignupBonusCredit(userId);
-        console.log(`✅ Converted anonymous user ${userId} to authenticated, gave signup bonus`);
+        log.info('Converted anonymous user to authenticated, gave signup bonus', { user_id: userId });
       } else if (Object.keys(updates).length > 0) {
         await prisma.user.update({
           where: { userId },
           data: updates,
         });
-        console.log(`✅ Updated user ${userId}:`, updates);
+        log.info('Updated user', { user_id: userId, updates: JSON.stringify(updates) });
       } else {
-        console.log(`User ${userId} already exists and is authenticated`);
+        log.info('User already exists and is authenticated', { user_id: userId });
       }
 
       // Merge agents from anonymous user if provided (returning user who had an anon session)
@@ -614,7 +617,7 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       session,
     });
   } catch (error) {
-    console.error('[Auth] Verify OTP error:', error);
+    log.error('Verify OTP error', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to verify OTP' });
   }
 });
@@ -645,7 +648,7 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
 
     // Check if already onboarded
     if (user.onboardingCompletedAt) {
-      console.log(`User ${userId} already completed onboarding at ${user.onboardingCompletedAt}`);
+      log.info('User already completed onboarding', { user_id: userId });
       return res.json({
         success: true,
         alreadyCompleted: true,
@@ -659,7 +662,7 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
       data: { onboardingCompletedAt: new Date() },
     });
 
-    console.log(`✅ Marked onboarding complete for user ${userId}`);
+    log.info('Marked onboarding complete', { user_id: userId });
 
     // Send welcome SMS + vCard as separate messages so the card appears below the text
     if (user.phone) {
@@ -668,9 +671,9 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
       sendSms(user.phone, SMS_TEMPLATES.onboardingWelcome(firstName))
         .then(() => sendMms(user.phone!, '', personalizedVcardUrl))
         .catch((error) => {
-          console.error(`⚠️ Failed to send welcome messages to user ${userId}:`, error);
+          log.error('Failed to send welcome messages', { user_id: userId, error: error instanceof Error ? error.message : String(error) });
         });
-      console.log(`✅ Sending welcome SMS + vCard to user ${userId}`);
+      log.info('Sending welcome SMS + vCard', { user_id: userId });
     }
 
     res.json({
@@ -679,7 +682,7 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
       onboardingCompletedAt: updatedUser.onboardingCompletedAt,
     });
   } catch (error) {
-    console.error('Complete onboarding error:', error);
+    log.error('Complete onboarding error', { error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to complete onboarding' });
   }
 });

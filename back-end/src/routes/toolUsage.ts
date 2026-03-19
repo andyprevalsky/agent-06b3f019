@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import { createLogger } from '../lib/logger';
 
+const log = createLogger('ToolUsage');
 const router = Router();
 
 /**
@@ -59,7 +61,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
       }
     });
 
-    console.log(`✅ Saved tool usage: ${tool_name} for agent ${agent_id} - $${(total_cost_cents / 100).toFixed(2)}`);
+    log.info(`Saved tool usage: ${tool_name} - $${(total_cost_cents / 100).toFixed(2)}`, { agent_id, tool_name });
 
     res.status(201).json({
       id: toolUsage.id,
@@ -70,7 +72,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     });
 
   } catch (error) {
-    console.error(`Error saving tool usage (agent=${req.body?.agent_id}):`, error);
+    log.error('Error saving tool usage', { agent_id: req.body?.agent_id, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to save tool usage' });
   }
 });
@@ -138,7 +140,7 @@ router.get('/:agentId', authenticate, async (req: AuthRequest, res: Response) =>
     });
 
   } catch (error) {
-    console.error(`Error fetching tool usage (agent=${req.params.agentId}):`, error);
+    log.error('Error fetching tool usage', { agent_id: req.params.agentId, error: error instanceof Error ? error.message : String(error) });
     res.status(500).json({ error: 'Failed to fetch tool usage' });
   }
 });

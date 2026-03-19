@@ -5,7 +5,9 @@ import { ROSE_MODEL_POOLS, normalizeRoseAlias, isCerebrasPool } from '../lib/ros
 // import { MMLUProHarness } from '../benchmarks/harnesses/mmlu-pro';
 // import { TerminalBenchHarness, TerminalBenchTask } from '../benchmarks/harnesses/terminal-bench';
 import { prisma } from '../lib/prisma';
+import { createLogger } from '../lib/logger';
 
+const log = createLogger('Rose');
 const router = Router();
 
 // Cerebras API base URL (OpenAI-compatible)
@@ -27,7 +29,7 @@ function selectModel(requestedModel: string): { model: string; isCerebras: boole
   
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
   const isCerebras = isCerebrasPool(normalized);
-  console.log(`🎲 Model selection: ${requestedModel} → ${selectedModel} (Cerebras: ${isCerebras})`);
+  log.info(`Model selection: ${requestedModel} -> ${selectedModel}`, { cerebras: isCerebras });
   return { model: selectedModel, isCerebras };
 }
 
@@ -70,7 +72,7 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
         // Cerebras doesn't support provider sorting, but is already optimized
       };
 
-      console.log(`⚡ Calling Cerebras API with model: ${selection.model}`);
+      log.info(`Calling Cerebras API`, { model: selection.model });
       
       const cerebrasResponse = await fetch(CEREBRAS_API_URL, {
         method: 'POST',
@@ -83,7 +85,7 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
 
       if (!cerebrasResponse.ok) {
         const errorText = await cerebrasResponse.text();
-        console.error('Cerebras API error:', cerebrasResponse.status, logTruncate(errorText));
+        log.error('Cerebras API error', { status: cerebrasResponse.status, details: logTruncate(errorText) });
         return res.status(cerebrasResponse.status).json({
           error: 'Cerebras API error',
           details: logTruncate(errorText)
@@ -117,7 +119,7 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
 
       if (!openrouterResponse.ok) {
         const errorText = await openrouterResponse.text();
-        console.error('OpenRouter API error:', openrouterResponse.status, logTruncate(errorText));
+        log.error('OpenRouter API error', { status: openrouterResponse.status, details: logTruncate(errorText) });
         return res.status(openrouterResponse.status).json({
           error: 'OpenRouter API error',
           details: logTruncate(errorText)
@@ -135,7 +137,7 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
     // Return the response (with masked model)
     res.json(data);
   } catch (error) {
-    console.error('Rose endpoint error:', error);
+    log.error('Rose endpoint error', { error: error instanceof Error ? error.message : String(error) });
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     res.status(500).json({ 
       error: 'Internal server error',
@@ -240,7 +242,7 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
       }
     });
   } catch (error) {
-    console.error('Cost calculation error:', error);
+    log.error('Cost calculation error', { error: error instanceof Error ? error.message : String(error) });
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     res.status(500).json({ 
       error: 'Failed to calculate cost',
