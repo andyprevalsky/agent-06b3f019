@@ -252,21 +252,44 @@ async def poll_agent(
             print(f"    ⚠ Stall detected ({time.time() - last_message_time:.0f}s since last message)")
 
         # Handle approval requests
-        if task.approval_handling in ("auto_approve", "ignore"):
+        if task.approval_handling in ("auto_approve", "ignore", "prompt_user"):
             try:
                 pending = await get_attention_requests(base_url)
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
                     if req_agent_id == agent_id and not req.get("response"):
                         approvals_triggered += 1
+                        req_id = req.get("id")
                         if task.approval_handling == "auto_approve":
-                            req_id = req.get("id")
                             if req_id:
                                 await respond_to_attention_request(
                                     base_url, req_id, "approved"
                                 )
                                 approvals_resolved += 1
                                 print(f"    ✅ Auto-approved attention request {req_id[:8]}")
+                        elif task.approval_handling == "prompt_user":
+                            if req_id:
+                                question = req.get("question", req.get("message", "(no details)"))
+                                print(f"\n    🔔 APPROVAL REQUIRED: {question[:200]}")
+                                if not sys.stdin.isatty():
+                                    print(f"    ⚠ Non-interactive environment — auto-denying {req_id[:8]}")
+                                    await respond_to_attention_request(
+                                        base_url, req_id, "denied"
+                                    )
+                                    continue
+                                loop = asyncio.get_event_loop()
+                                answer = (await loop.run_in_executor(None, input, "    Approve? [y/n]: ")).strip().lower()
+                                if answer in ("y", "yes"):
+                                    await respond_to_attention_request(
+                                        base_url, req_id, "approved"
+                                    )
+                                    approvals_resolved += 1
+                                    print(f"    ✅ User approved {req_id[:8]}")
+                                else:
+                                    await respond_to_attention_request(
+                                        base_url, req_id, "denied"
+                                    )
+                                    print(f"    ❌ User denied {req_id[:8]}")
             except Exception as e:
                 print(f"    ⚠ Approval check error: {e}")
 
@@ -324,7 +347,7 @@ def evaluate_task(
             return False, f"Expected tool '{tool}' not found in messages"
 
     # Check approval expectations
-    if task.approval_handling == "auto_approve" and approvals_triggered == 0:
+    if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
         return False, "Expected approval requests but none were triggered"
 
     # Progress score check (verifier gave a score)
@@ -626,7 +649,7 @@ def main():
     parser.add_argument(
         "--suite",
         type=str,
-        help="Run tasks matching a tag (basic, browser, claude-code, attachment, swarm, all)",
+        help="Run tasks matching a tag (basic, browser, claude-code, attachment, swarm, outreach, all)",
     )
     parser.add_argument(
         "--url",

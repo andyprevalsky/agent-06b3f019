@@ -32,12 +32,13 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 |-----|-------|-------------|
 | `basic` | chat-mode, spawn-sub-agents, parallel-tool-calls, message-person | Core agent capabilities |
 | `chat` | chat-mode | Chat mode only |
-| `approval` | message-person | Tasks requiring approval handling |
+| `approval` | message-person, family-office-angel-outreach | Tasks requiring approval handling |
 | `browser` | browser-agent | Browser agent tasks |
 | `claude-code` | claude-code-agent, files-in-sub-agents | Claude Code sandbox tasks |
 | `attachment` | image-handling, files-in-sub-agents, agent-swarm | Tasks with file attachments |
-| `swarm` | agent-swarm | Multi-agent swarm tasks |
-| `all` | Everything | All 9 tasks |
+| `swarm` | agent-swarm, family-office-angel-outreach | Multi-agent swarm tasks |
+| `outreach` | family-office-angel-outreach | Personalized outreach at scale |
+| `all` | Everything | All 10 tasks |
 
 ## Tasks
 
@@ -52,6 +53,7 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 | 7 | image-handling | 300s | 100c | — | rs.jpeg |
 | 8 | files-in-sub-agents | 600s | 300c | — | rs.jpeg |
 | 9 | agent-swarm | 600s | 500c | — | entities-12.csv |
+| 10 | family-office-angel-outreach | 600s | 1000c | prompt_user | vcs-and-angels.csv |
 
 ## How It Works
 

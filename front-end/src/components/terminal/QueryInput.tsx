@@ -291,6 +291,7 @@ export default function QueryInput({
     }
   }, [attachments, toast]);
 
+
   // Remove attachment (revokes blob URL to prevent memory leak)
   const removeAttachment = useCallback((id: string) => {
     setAttachments(prev => {

@@ -20,7 +20,7 @@ class BenchmarkTask:
     requires_browser_agent: bool
     requires_claude_code: bool
     attachment: Optional[str]
-    approval_handling: Optional[str]  # "auto_approve", "ignore", or None
+    approval_handling: Optional[str]  # "auto_approve", "ignore", "prompt_user", or None
     start_phase: Optional[str]  # "plan", "execute", or None (chat mode)
 
 

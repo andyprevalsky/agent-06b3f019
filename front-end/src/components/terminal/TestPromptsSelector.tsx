@@ -251,7 +251,7 @@ Her email is Jzarumita@gmail.com
 ];
 
 // Dev default prompt — auto-loaded into QueryInput on mount in dev mode
-const DEV_DEFAULT_PROMPT_TITLE = 'Get Jessie a Job';
+const DEV_DEFAULT_PROMPT_TITLE = 'Family Office & Angel Outreach';
 
 /** Fetch attachment files for a test prompt from the public folder */
 async function fetchTestPromptFiles(attachmentUrls: string[]): Promise<File[]> {

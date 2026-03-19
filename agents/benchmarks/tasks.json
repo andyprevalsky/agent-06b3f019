@@ -144,6 +144,22 @@
     "start_phase": "plan"
   },
   {
+    "name": "family-office-angel-outreach",
+    "title": "Family Office & Angel Outreach",
+    "prompt": "I've attached a CSV of ~700 angels. Get me on a call to chat with as many of the people on this list as possible.\n\nEach message should be personalized, sent from andy@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent manage each individual relationship, and be responsible for follow-ups, responses, getting them on a call via generating a calendly link on a browser agent etc.\n\nSince you are limited on the sub-agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.",
+    "eval_prompt": "Agent read the CSV attachment of ~700 angels, spawned sub-agents to research and manage outreach per person or chunk, and called message_person to send personalized emails from andy@roselabs.ai. Approval requests were triggered for outreach messages. Agent demonstrated recursive chunking of the contact list across sub-agents.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent", "explore", "message_person"],
+    "tags": ["attachment", "swarm", "approval", "outreach"],
+    "price_limit_cents": 1000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": "vcs-and-angels.csv",
+    "approval_handling": "prompt_user",
+    "start_phase": "plan"
+  },
+  {
     "name": "build-boxing-payment",
     "title": "Build New Boxing Payment Flow",
     "prompt": "My Dad, George Prevalsky, needs a new site that is exclusively used for signing new clients. His existing billing solution is archaic and is causing him to be unable to take a vacation.\nWe need to create and host a site that can be accessed via QR code or direct link.\n\nThe site should include:\n- There are 4 waivers on dallasmmaboxing.com that you need to include. Signing is required for all waivers. The sparring waivers don't need to be included.\n- I've attached the billing & payment terms and the membership terms as PDFs. Before paying, users must check a required opt-in checkbox agreeing to these terms (you can include this as part of the waiver signing step). The full text of the terms should be viewable on the site.\n- The classes are:\n  Boxing $225/month\n  Muay Thai $225/month\n  MMA $245/month\n  Jiujitsu $185/month\n  Kids Program $185/month\n  Unlimited classes $285/month\n- We need to support discount codes for Boxing & Muay Thai\n\nThe flow will be:\n1. Pick your classes\n2. Sign your waivers and agree to the billing & membership terms (required checkboxes)\n3. Pay for the classes\n4. Get a confirmation email\n5. Send a confirmation email to georgeprevalsky@gmail.com that includes all relevant details of the payment & attachments of the signed waivers\n\nHere are the Stripe API keys:\\nSTRIPE_SECRET_KEY_TEST={{STRIPE_SECRET_KEY_TEST}}\\nSTRIPE_PUBLISHABLE_KEY_TEST={{STRIPE_PUBLISHABLE_KEY_TEST}}\\nSTRIPE_SECRET_KEY_PRODUCTION={{STRIPE_SECRET_KEY_PRODUCTION}}\\nSTRIPE_PUBLISHABLE_KEY_PRODUCTION={{STRIPE_PUBLISHABLE_KEY_PRODUCTION}}\n\nYou can test the flow on Stripe test mode, and send confirmation emails to andy@roselabs.ai (since you have access to that email via the browser agent).\n\nMake sure the payment site includes all necessary information, is styled exceptionally well, and architecturally, is as simple as possible - we do NOT want to have to worry about maintenance.\n\nReturn to me:\n- A link to the hosted site\n- A QR Code for the hosted site\n- A discount code that can be used exclusively for Boxing & Muay Thai purchases",
