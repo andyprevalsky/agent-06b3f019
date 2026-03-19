@@ -314,7 +314,7 @@ Every PR must pass a Claude Code Review before merging. The review runs automati
 ```
 1. Push branch + create PR
 2. Poll check status via `gh pr checks <N> --json name,state,conclusion`
-   - Wait for the "Claude Code Review" check to reach COMPLETED (max 60s, poll every 30s)
+   - Wait for the "Claude Code Review" check to reach COMPLETED (poll every 30s, no timeout — keep waiting)
 3. Read the review:
    - `gh api repos/<owner/repo>/pulls/<N>/reviews` → bot reviews
    - `gh api repos/<owner/repo>/pulls/<N>/comments` → inline comments
@@ -322,7 +322,6 @@ Every PR must pass a Claude Code Review before merging. The review runs automati
    - APPROVED → PASS, proceed to merge
    - CHANGES_REQUESTED → fix critical issues, push (triggers new review), go to step 2
    - COMMENTED / no review → ask user whether to fix or skip
-5. If review doesn't complete within 60s, proceed with a note that review is pending
 ```
 
 **Passing criteria:** Review state is APPROVED, or user explicitly skips. Fix critical issues. Skip menial/style nits.
