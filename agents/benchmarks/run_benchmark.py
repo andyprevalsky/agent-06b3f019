@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Benchmark harness v2 — auto mode with Claude Code Review integration
 """
 Agent Benchmark Harness
 
