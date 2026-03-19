@@ -191,6 +191,56 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         attachment_url="/test-assets/entities-12.csv",
         expected_tools=["spawn_sub_agents"],
     ),
+    "build-boxing-payment": TestPrompt(
+        name="build-boxing-payment",
+        title="Build New Boxing Payment Flow",
+        description="Tests building and hosting a full payment site with waivers, Stripe, and email confirmations",
+        prompt=(
+            "My Dad, George Prevalsky, needs a new site that is exclusively used for signing new clients. "
+            "His existing billing solution is archaic and is causing him to be unable to take a vacation.\n"
+            "We need to create and host a site that can be accessed via QR code or direct link.\n\n"
+            "The site should include:\n"
+            "- There are 4 waivers on dallasmmaboxing.com that you need to include. "
+            "Signing is required for all waivers. The sparring waivers don't need to be included.\n"
+            "- I've attached the billing & payment terms and the membership terms as PDFs. "
+            "Before paying, users must check a required opt-in checkbox agreeing to these terms "
+            "(you can include this as part of the waiver signing step). The full text of the terms "
+            "should be viewable on the site.\n"
+            "- The classes are:\n"
+            "  Boxing $225/month\n"
+            "  Muay Thai $225/month\n"
+            "  MMA $245/month\n"
+            "  Jiujitsu $185/month\n"
+            "  Kids Program $185/month\n"
+            "  Unlimited classes $285/month\n"
+            "- We need to support discount codes for Boxing & Muay Thai\n\n"
+            "The flow will be:\n"
+            "1. Pick your classes\n"
+            "2. Sign your waivers and agree to the billing & membership terms (required checkboxes)\n"
+            "3. Pay for the classes\n"
+            "4. Get a confirmation email\n"
+            "5. Send a confirmation email to georgeprevalsky@gmail.com that includes all relevant details "
+            "of the payment & attachments of the signed waivers\n\n"
+            "Here are the Stripe API keys:\n"
+            "STRIPE_SECRET_KEY_TEST={{STRIPE_SECRET_KEY_TEST}}\n"
+            "STRIPE_PUBLISHABLE_KEY_TEST={{STRIPE_PUBLISHABLE_KEY_TEST}}\n"
+            "STRIPE_SECRET_KEY_PRODUCTION={{STRIPE_SECRET_KEY_PRODUCTION}}\n"
+            "STRIPE_PUBLISHABLE_KEY_PRODUCTION={{STRIPE_PUBLISHABLE_KEY_PRODUCTION}}\n\n"
+            "You can test the flow on Stripe test mode, and send confirmation emails to andy@roselabs.ai "
+            "(since you have access to that email via the browser agent).\n\n"
+            "Make sure the payment site includes all necessary information, is styled exceptionally well, "
+            "and architecturally, is as simple as possible - we do NOT want to have to worry about maintenance.\n\n"
+            "Return to me:\n"
+            "- A link to the hosted site\n"
+            "- A QR Code for the hosted site\n"
+            "- A discount code that can be used exclusively for Boxing & Muay Thai purchases"
+        ),
+        timeout=900,
+        attachment_url="/test-assets/dallasmmaboxing-waivers/membership_terms_updated.pdf",
+        requires_browser_agent=True,
+        requires_claude_code=True,
+        expected_tools=["spawn_browser_agent", "spawn_claude_code_agent", "spawn_sub_agents"],
+    ),
 }
 
 

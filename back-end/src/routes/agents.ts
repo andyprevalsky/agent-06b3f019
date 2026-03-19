@@ -48,6 +48,24 @@ const filePointerSchema = z.object({
 });
 
 /**
+ * Resolve {{VAR_NAME}} placeholders in a string from PROMPT_SECRET_* env vars.
+ * Only env vars prefixed with PROMPT_SECRET_ are resolvable (prevents exfiltration).
+ * e.g. {{STRIPE_SECRET_KEY_TEST}} reads process.env.PROMPT_SECRET_STRIPE_SECRET_KEY_TEST
+ */
+function resolvePromptSecrets(text: string): string {
+  return text.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g, (_match, varName) => {
+    const envKey = `PROMPT_SECRET_${varName}`;
+    const value = process.env[envKey];
+    if (value) {
+      console.log(`🔑 Resolved prompt secret: {{${varName}}}`);
+      return value;
+    }
+    console.warn(`⚠️ Unresolved prompt secret: {{${varName}}} (env var ${envKey} not set)`);
+    return `{{${varName}}}`;
+  });
+}
+
+/**
  * Auto-generate verifier prompt from goal
  */
 function generateVerifierPrompt(goal: string): string {
@@ -252,7 +270,13 @@ router.get('/tree', hybridAuth, async (req: HybridAuthRequest, res) => {
 router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
   try {
     const body = createAgentSchema.parse(req.body);
-    
+
+    // Resolve {{SECRET}} placeholders in goal from PROMPT_SECRET_* env vars.
+    // Only for internal auth (API key) — prevents public users from exfiltrating secrets.
+    if (req.isInternal) {
+      body.goal = resolvePromptSecrets(body.goal);
+    }
+
     // Get userId from hybrid auth middleware
     // - JWT: req.userId from token
     // - Internal: req.userId from body.user_id or X-User-Id header

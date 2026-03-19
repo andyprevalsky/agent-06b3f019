@@ -33,6 +33,47 @@ interface TestPrompt {
 
 const TEST_PROMPTS: TestPrompt[] = [
   {
+    title: 'Build New Boxing Payment Flow',
+    description: 'Tests building and hosting a full payment site with waivers, Stripe, and email confirmations',
+    prompt: `My Dad, George Prevalsky, needs a new site that is exclusively used for signing new clients. His existing billing solution is archaic and is causing him to be unable to take a vacation.
+We need to create and host a site that can be accessed via QR code or direct link.
+
+The site should include:
+- There are 4 waivers on dallasmmaboxing.com that you need to include. Signing is required for all waivers. The sparring waivers don't need to be included.
+- I've attached the billing & payment terms and the membership terms as PDFs. Before paying, users must check a required opt-in checkbox agreeing to these terms (you can include this as part of the waiver signing step). The full text of the terms should be viewable on the site.
+- The classes are:
+  Boxing $225/month
+  Muay Thai $225/month
+  MMA $245/month
+  Jiujitsu $185/month
+  Kids Program $185/month
+  Unlimited classes $285/month
+- We need to support discount codes for Boxing & Muay Thai
+
+The flow will be:
+1. Pick your classes
+2. Sign your waivers and agree to the billing & membership terms (required checkboxes)
+3. Pay for the classes
+4. Get a confirmation email
+5. Send a confirmation email to georgeprevalsky@gmail.com that includes all relevant details of the payment & attachments of the signed waivers
+
+Stripe API keys (test and production, secret and publishable) are injected server-side via PROMPT_SECRET env vars when run through the E2E/benchmark harness.
+
+You can test the flow on Stripe test mode, and send confirmation emails to andy@roselabs.ai (since you have access to that email via the browser agent).
+
+Make sure the payment site includes all necessary information, is styled exceptionally well, and architecturally, is as simple as possible - we do NOT want to have to worry about maintenance.
+
+Return to me:
+- A link to the hosted site
+- A QR Code for the hosted site
+- A discount code that can be used exclusively for Boxing & Muay Thai purchases`,
+    attachmentUrls: [
+      '/test-assets/dallasmmaboxing-waivers/billing_payment_terms_final.pdf',
+      '/test-assets/dallasmmaboxing-waivers/membership_terms_updated.pdf',
+      '/test-assets/dallasmmaboxing-waivers/membership_terms.pdf',
+    ],
+  },
+  {
     title: 'Test Automatic LinkedIn Connection',
     description: 'Tests browser agent with LinkedIn data download',
     prompt: 'go to linkedin.com and trigger a download for my data',
