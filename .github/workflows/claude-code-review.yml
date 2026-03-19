@@ -55,6 +55,7 @@ jobs:
 
             Read and follow the project's CLAUDE.md for all project-specific rules and patterns.
           claude_args: "--model opus --effort max"
+          show_full_output: true
 
   # Fast review on subsequent pushes — diff-only
   incremental-review:
@@ -95,3 +96,4 @@ jobs:
 
             Read and follow the project's CLAUDE.md for all project-specific rules and patterns.
           claude_args: "--model opus --effort medium"
+          show_full_output: true
