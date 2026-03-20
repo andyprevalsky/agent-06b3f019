@@ -91,17 +91,38 @@ def _print_logs(label: str, logs: list, agent_id: str = ""):
             # Message transcript entry
             role = entry.get("role", "?")
             text = entry.get("message", "")
+            ts = entry.get("created_at", "")
             meta = entry.get("metadata", {})
-            tool = ""
+            fp = entry.get("file_pointer")
+            tool_info = ""
+            extra = ""
             if isinstance(meta, dict):
                 tool = meta.get("toolName", "")
                 status = meta.get("toolStatus", "")
                 if tool:
-                    tool = f" [{tool}/{status}]" if status else f" [{tool}]"
+                    tool_info = f" [{tool}/{status}]" if status else f" [{tool}]"
+                # Show error flag
+                if meta.get("error"):
+                    tool_info += " ⚠ERROR"
+                # Show sub-agent ID if present (for spawn_agent, browser, claude_code)
+                sub_id = meta.get("subAgentId", "")
+                if sub_id:
+                    extra += f" sub={sub_id[:12]}"
+                # Show action_type for browser/claude_code
+                action = meta.get("action_type", "")
+                if action:
+                    extra += f" action={action}"
+                # Show isWaitingForUser
+                if meta.get("isWaitingForUser") or (isinstance(meta.get("sendMessageToUser"), dict) and meta["sendMessageToUser"].get("isWaitingForUser")):
+                    extra += " 🔔WAITING_FOR_USER"
+            if fp:
+                fname = fp.get("original_filename", "file")
+                extra += f" 📎{fname}"
             # Truncate very long messages but not aggressively
-            if len(text) > 500:
+            if text and len(text) > 500:
                 text = text[:500] + f"... (+{len(text)-500} chars)"
-            print(f"  {role}{tool}: {text}")
+            time_str = f" ({ts[11:19]})" if ts and len(ts) > 19 else ""
+            print(f"  {role}{tool_info}{extra}{time_str}: {text}")
         else:
             print(f"  {entry}")
 

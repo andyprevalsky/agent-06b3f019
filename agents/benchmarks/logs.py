@@ -431,6 +431,9 @@ def extract_message_transcript(agent_data: dict) -> List[dict]:
                 except Exception:
                     pass
             entry["metadata"] = metadata
+        file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+        if file_pointer:
+            entry["file_pointer"] = file_pointer
         transcript.append(entry)
     return transcript
 
@@ -533,10 +536,24 @@ async def collect_tree_logs(
                 pass
 
         logs = await collect_logs(aid, agent_data, start_time)
+
+        # Extract agent state from the full agent response
+        agent_obj = agent_data.get("agent", agent_data) if isinstance(agent_data, dict) else {}
+        agent_state = {
+            "tokens_in": agent_obj.get("tokens_in") or agent_obj.get("tokensIn", 0),
+            "tokens_out": agent_obj.get("tokens_out") or agent_obj.get("tokensOut", 0),
+            "token_count": agent_obj.get("token_count") or agent_obj.get("tokenCount", 0),
+            "context_size": agent_obj.get("context_size") or agent_obj.get("contextSize", 0),
+            "tree_cost_cents": agent_info.get("tree_cost_cents", 0),
+            "status_message": agent_obj.get("status_message") or agent_obj.get("statusMessage", ""),
+            "tools_in_use": agent_info.get("tools_in_use", []),
+        }
+
         return aid, {
             "parent_agent_id": agent_info.get("parent_agent_id"),
             "goal": (agent_info.get("goal") or "")[:200],
             "status": agent_info.get("status", "UNKNOWN"),
+            "agent_state": agent_state,
             "logs": logs,
         }
 
@@ -554,13 +571,49 @@ async def collect_tree_logs(
     return result
 
 
+def _detect_anomalies(msgs: List[dict]) -> List[str]:
+    """Detect message patterns that indicate bugs (infinite loops, repeated content, etc.)."""
+    anomalies = []
+
+    # Detect repeated identical messages (infinite loop)
+    if len(msgs) >= 5:
+        recent_texts = [m.get("message", "") for m in msgs[-20:] if m.get("message")]
+        if recent_texts:
+            from collections import Counter
+            counts = Counter(recent_texts)
+            for text, count in counts.most_common(3):
+                if count >= 4:
+                    anomalies.append(
+                        f"INFINITE LOOP: message repeated {count}x in last 20: {text[:80]}"
+                    )
+
+    # Detect tools stuck IN_PROGRESS without FINISHED
+    in_progress = {}  # tool_call_id → metadata
+    for m in msgs:
+        meta = m.get("metadata", {})
+        if not isinstance(meta, dict):
+            continue
+        tcid = meta.get("toolCallId") or meta.get("tool_call_id", "")
+        status = meta.get("toolStatus", "")
+        if status == "IN_PROGRESS" and tcid:
+            in_progress[tcid] = meta
+        elif status in ("FINISHED", "ERROR") and tcid:
+            in_progress.pop(tcid, None)
+    if in_progress:
+        for tcid, meta in list(in_progress.items())[:3]:
+            tool = meta.get("toolName", "?")
+            anomalies.append(f"STUCK: {tool} (call {tcid[:12]}) still IN_PROGRESS")
+
+    return anomalies
+
+
 def format_tree_diagnostics(
     tree_logs: Dict[str, dict],
     root_agent_id: str,
 ) -> str:
     """
     Format tree logs into a human-readable diagnostic string.
-    Shows agent hierarchy with status and error highlights.
+    Shows agent hierarchy with status, errors, anomalies, and agent state.
     """
     lines = []
     lines.append("=" * 60)
@@ -591,7 +644,23 @@ def format_tree_diagnostics(
         icon = {"COMPLETED": "✅", "FAILED": "❌", "PAUSED": "⏸",
                 "COST_LIMIT_REACHED": "💸", "OUT_OF_CREDITS": "💸"}.get(status, "🔄")
 
+        # Agent state line (tokens, cost)
+        state = info.get("agent_state", {})
+        tokens_in = state.get("tokens_in", 0)
+        tokens_out = state.get("tokens_out", 0)
+        cost = state.get("tree_cost_cents", 0)
+        status_msg = state.get("status_message", "")
+
         lines.append(f"{indent}{prefix} {icon} {agent_id[:12]}  [{status}]  {goal}")
+        state_parts = []
+        if tokens_in or tokens_out:
+            state_parts.append(f"tokens={tokens_in}in/{tokens_out}out")
+        if cost:
+            state_parts.append(f"cost={cost}c")
+        if status_msg:
+            state_parts.append(f"status_msg={status_msg[:80]}")
+        if state_parts:
+            lines.append(f"{indent}   📊 {', '.join(state_parts)}")
 
         # Show errors from worker logs
         logs = info.get("logs", {})
@@ -601,19 +670,42 @@ def format_tree_diagnostics(
         if errors:
             lines.append(f"{indent}   ⚠ {len(errors)} error(s) in worker logs:")
             for err in errors[:3]:
-                lines.append(f"{indent}     {err[:150]}")
+                lines.append(f"{indent}     {err[:200]}")
 
-        # Show message count
+        # Show message breakdown
         msgs = logs.get("messages", [])
         if msgs:
             tool_msgs = [m for m in msgs if m.get("role") == "TOOL"]
             error_tools = [m for m in tool_msgs
                            if isinstance(m.get("metadata"), dict) and m["metadata"].get("toolStatus") == "ERROR"]
-            lines.append(f"{indent}   📨 {len(msgs)} messages ({len(tool_msgs)} tool, {len(error_tools)} errors)")
-            for et in error_tools[:2]:
+            assistant_msgs = [m for m in msgs if m.get("role") == "ASSISTANT"]
+            file_msgs = [m for m in msgs if m.get("file_pointer")]
+
+            parts = [f"{len(msgs)} messages"]
+            parts.append(f"{len(tool_msgs)} tool")
+            parts.append(f"{len(error_tools)} errors")
+            if assistant_msgs:
+                parts.append(f"{len(assistant_msgs)} assistant")
+            if file_msgs:
+                parts.append(f"{len(file_msgs)} files")
+            lines.append(f"{indent}   📨 {', '.join(parts)}")
+
+            # Show ALL tool errors with full text
+            for et in error_tools:
                 tool_name = et.get("metadata", {}).get("toolName", "?")
-                msg_text = (et.get("message") or "")[:120]
+                msg_text = (et.get("message") or "")[:200]
                 lines.append(f"{indent}     ❌ {tool_name}: {msg_text}")
+
+            # Show last assistant message (often contains the agent's reasoning/status)
+            if assistant_msgs:
+                last_asst = assistant_msgs[-1].get("message", "")
+                if last_asst:
+                    lines.append(f"{indent}   💬 Last assistant: {last_asst[:200]}")
+
+            # Detect anomalies (infinite loops, stuck tools)
+            anomalies = _detect_anomalies(msgs)
+            for a in anomalies:
+                lines.append(f"{indent}   🚨 {a}")
 
         for child_id in children_map.get(agent_id, []):
             _walk(child_id, depth + 1)
