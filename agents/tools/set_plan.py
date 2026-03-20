@@ -349,10 +349,11 @@ class SetPlanManager(ToolManager):
             except BaseException as e:
                 if isinstance(e, GeneratorExit):
                     raise
+                from helpers.error_utils import extract_error_message
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Planner Error",
-                    message=f"Failed to generate plan: {str(e)}",
+                    message=f"Failed to generate plan: {extract_error_message(e)}",
                     status=MessageStatus.ERROR
                 )
                 return

@@ -313,10 +313,13 @@ Set attempt_completion=false when:
             agent_id=agent_id,
             error=extract_error_message(e)
         )
-        # Default to not completing and sending error response
+        # Return empty response so the loop doesn't send anything to stdin.
+        # Previously this returned "continue" which created infinite loops:
+        # the error kept firing, "continue" was sent to stdin each time,
+        # and the same unchanged terminal output triggered another failed LLM call.
         return {
             "attempt_completion": False,
-            "response": "continue",
+            "response": "",
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 
@@ -490,6 +493,9 @@ async def spawn_claude_code_activity(
         conversation_history: List[Dict[str, str]] = []  # Track back-and-forth
         attempt_completion = False
         ws_connected = True  # Track WebSocket connection state
+        last_filtered_output = ""  # Track previous output to detect unchanged terminal
+        unchanged_output_count = 0  # Count consecutive times output hasn't changed
+        MAX_UNCHANGED_OUTPUTS = 3  # After this many, stop calling LLM (output is stale)
 
         async def on_output(data: str, is_buffer: bool):
             """Handle output from Claude Code WebSocket."""
@@ -654,6 +660,23 @@ async def spawn_claude_code_activity(
                     pending_output = False
 
                     if filtered_output:
+                        # Detect unchanged terminal output — if the display hasn't
+                        # changed since last check, Claude Code is idle. Don't keep
+                        # calling the parent LLM with the same stale output.
+                        if filtered_output == last_filtered_output:
+                            unchanged_output_count += 1
+                            if unchanged_output_count >= MAX_UNCHANGED_OUTPUTS:
+                                logger.info(
+                                    "[ClaudeCode] Terminal output unchanged for %d checks, skipping LLM call",
+                                    unchanged_output_count,
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                )
+                                continue
+                        else:
+                            unchanged_output_count = 0
+                            last_filtered_output = filtered_output
+
                         # Check for fatal errors before calling parent LLM.
                         # These errors (e.g., 401 auth failures) cannot be resolved
                         # inside a headless sandbox and would cause the parent agent
