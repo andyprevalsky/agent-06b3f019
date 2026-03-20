@@ -55,6 +55,9 @@ Auto mode (for Claude Code to execute — NOT a script):
       - Only the last message sent is visible to the user, so always include all
         relevant diagnostics, solution proposals, and status in your final message.
         Don't spread critical information across multiple messages.
+      - Only 1 agent per benchmark task should be alive at a time. Before starting
+        a new agent for a task, delete any existing agent for that task — even if
+        the old one is paused.
       - Regularly output total cost & time elapsed
       - Never auto-approve approval requests — always ask user
       - If log collection is broken (e.g. Fly.io collector returns 0 lines, Render
