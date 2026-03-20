@@ -547,6 +547,7 @@ async def collect_tree_logs(
             "tree_cost_cents": agent_info.get("tree_cost_cents", 0),
             "status_message": agent_obj.get("status_message") or agent_obj.get("statusMessage", ""),
             "tools_in_use": agent_info.get("tools_in_use", []),
+            "structured_output": agent_info.get("structured_output"),
         }
 
         return aid, {
@@ -572,22 +573,21 @@ async def collect_tree_logs(
 
 
 def _detect_anomalies(msgs: List[dict]) -> List[str]:
-    """Detect message patterns that indicate bugs (infinite loops, repeated content, etc.)."""
+    """Detect message patterns that indicate bugs (infinite loops, repeated content, stalls, etc.)."""
+    from collections import Counter
     anomalies = []
 
-    # Detect repeated identical messages (infinite loop)
-    if len(msgs) >= 5:
-        recent_texts = [m.get("message", "") for m in msgs[-20:] if m.get("message")]
-        if recent_texts:
-            from collections import Counter
-            counts = Counter(recent_texts)
-            for text, count in counts.most_common(3):
-                if count >= 4:
-                    anomalies.append(
-                        f"INFINITE LOOP: message repeated {count}x in last 20: {text[:80]}"
-                    )
+    # 1. Detect repeated identical messages (infinite loop) — scan ALL messages, not just last 20
+    all_texts = [m.get("message", "") for m in msgs if m.get("message")]
+    if len(all_texts) >= 5:
+        counts = Counter(all_texts)
+        for text, count in counts.most_common(3):
+            if count >= 4:
+                anomalies.append(
+                    f"INFINITE LOOP: message repeated {count}x (total): {text[:80]}"
+                )
 
-    # Detect tools stuck IN_PROGRESS without FINISHED
+    # 2. Detect tools stuck IN_PROGRESS without FINISHED
     in_progress = {}  # tool_call_id → metadata
     for m in msgs:
         meta = m.get("metadata", {})
@@ -600,9 +600,41 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
         elif status in ("FINISHED", "ERROR") and tcid:
             in_progress.pop(tcid, None)
     if in_progress:
-        for tcid, meta in list(in_progress.items())[:3]:
+        for tcid, meta in list(in_progress.items())[:5]:
             tool = meta.get("toolName", "?")
             anomalies.append(f"STUCK: {tool} (call {tcid[:12]}) still IN_PROGRESS")
+
+    # 3. Detect large time gaps between messages (stalled LLM calls, hung activities)
+    timestamps = []
+    for m in msgs:
+        ts = m.get("created_at", "")
+        if ts:
+            try:
+                from datetime import datetime, timezone
+                # Handle both "2026-03-20T20:28:51.907Z" and other ISO formats
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                timestamps.append(dt)
+            except (ValueError, TypeError):
+                pass
+    if len(timestamps) >= 2:
+        for i in range(1, len(timestamps)):
+            gap = (timestamps[i] - timestamps[i - 1]).total_seconds()
+            if gap > 180:  # 3+ minute gap
+                anomalies.append(
+                    f"TIME GAP: {gap:.0f}s ({gap/60:.1f}min) between messages {i-1} and {i}"
+                )
+
+    # 4. Detect abnormal tool distribution (one tool called way too many times)
+    tool_names = []
+    for m in msgs:
+        meta = m.get("metadata", {})
+        if isinstance(meta, dict) and meta.get("toolStatus") == "FINISHED":
+            tool_names.append(meta.get("toolName", "?"))
+    if tool_names:
+        tool_counts = Counter(tool_names)
+        for tool, count in tool_counts.most_common(3):
+            if count >= 15:
+                anomalies.append(f"HIGH TOOL COUNT: {tool} called {count}x")
 
     return anomalies
 
@@ -659,22 +691,44 @@ def format_tree_diagnostics(
             state_parts.append(f"cost={cost}c")
         if status_msg:
             state_parts.append(f"status_msg={status_msg[:80]}")
+        tools_in_use = state.get("tools_in_use", [])
+        if tools_in_use:
+            state_parts.append(f"active_tools=[{', '.join(tools_in_use)}]")
         if state_parts:
             lines.append(f"{indent}   📊 {', '.join(state_parts)}")
 
-        # Show errors from worker logs
         logs = info.get("logs", {})
+
+        # Scan ALL log sources for errors (worker, backend, research)
+        def _scan_log_errors(log_list: List, source_name: str) -> List[str]:
+            found = []
+            for l in log_list:
+                ls = l.lower() if isinstance(l, str) else ""
+                if any(kw in ls for kw in (
+                    '"level":"error"', '"event":"error"', 'traceback',
+                    'exception', 'error:', 'failed', '500 ', '502 ', '503 ',
+                )):
+                    found.append(f"[{source_name}] {l[:200]}")
+            return found
+
         worker = logs.get("worker_logs", [])
-        errors = [l for l in worker if '"level":"error"' in l.lower() or '"event":"error"' in l.lower()
-                  or "traceback" in l.lower() or "exception" in l.lower()]
-        if errors:
-            lines.append(f"{indent}   ⚠ {len(errors)} error(s) in worker logs:")
-            for err in errors[:3]:
-                lines.append(f"{indent}     {err[:200]}")
+        backend = logs.get("backend_logs", [])
+        research = logs.get("research_logs", [])
+
+        all_log_errors = (
+            _scan_log_errors(worker, "worker")
+            + _scan_log_errors(backend, "backend")
+            + _scan_log_errors(research, "research")
+        )
+        if all_log_errors:
+            lines.append(f"{indent}   ⚠ {len(all_log_errors)} error(s) in prod logs:")
+            for err in all_log_errors[:5]:
+                lines.append(f"{indent}     {err}")
 
         # Show message breakdown
         msgs = logs.get("messages", [])
         if msgs:
+            from collections import Counter
             tool_msgs = [m for m in msgs if m.get("role") == "TOOL"]
             error_tools = [m for m in tool_msgs
                            if isinstance(m.get("metadata"), dict) and m["metadata"].get("toolStatus") == "ERROR"]
@@ -690,19 +744,42 @@ def format_tree_diagnostics(
                 parts.append(f"{len(file_msgs)} files")
             lines.append(f"{indent}   📨 {', '.join(parts)}")
 
+            # Tool distribution breakdown (spot abnormal patterns)
+            tool_names = [m.get("metadata", {}).get("toolName", "?")
+                          for m in tool_msgs if isinstance(m.get("metadata"), dict)]
+            if tool_names:
+                tool_dist = Counter(tool_names).most_common()
+                dist_str = ", ".join(f"{name}={cnt}" for name, cnt in tool_dist)
+                lines.append(f"{indent}   🔧 Tools: {dist_str}")
+
             # Show ALL tool errors with full text
             for et in error_tools:
                 tool_name = et.get("metadata", {}).get("toolName", "?")
                 msg_text = (et.get("message") or "")[:200]
                 lines.append(f"{indent}     ❌ {tool_name}: {msg_text}")
 
-            # Show last assistant message (often contains the agent's reasoning/status)
+            # Show last assistant message (agent's reasoning/status)
             if assistant_msgs:
                 last_asst = assistant_msgs[-1].get("message", "")
                 if last_asst:
                     lines.append(f"{indent}   💬 Last assistant: {last_asst[:200]}")
 
-            # Detect anomalies (infinite loops, stuck tools)
+            # Show recent activity tail (last 5 messages for live context)
+            recent = msgs[-5:]
+            lines.append(f"{indent}   📋 Recent activity:")
+            for m in recent:
+                role = m.get("role", "?")
+                text = (m.get("message") or "")[:120]
+                meta = m.get("metadata", {})
+                tool_tag = ""
+                if isinstance(meta, dict):
+                    tn = meta.get("toolName", "")
+                    ts = meta.get("toolStatus", "")
+                    if tn:
+                        tool_tag = f" [{tn}/{ts}]"
+                lines.append(f"{indent}     {role}{tool_tag}: {text}")
+
+            # Detect anomalies (infinite loops, stuck tools, time gaps, high tool counts)
             anomalies = _detect_anomalies(msgs)
             for a in anomalies:
                 lines.append(f"{indent}   🚨 {a}")
