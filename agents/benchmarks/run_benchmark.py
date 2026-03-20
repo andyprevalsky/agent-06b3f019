@@ -60,18 +60,24 @@ Auto mode (for Claude Code to execute — NOT a script):
         the old one is paused.
       - Regularly output total cost & time elapsed
       - Never auto-approve approval requests — always ask user
+      - `progress` is a dead variable — do not use it for monitoring. Track
+        progress by message count, token count, and agent status instead.
       - If log collection is broken (e.g. Fly.io collector returns 0 lines, Render
         logs missing), fix the log pipeline FIRST — diagnose the collector in
         benchmarks/logs.py, push the fix through the PR review loop (steps 7–9),
         wait for deploy, then rerun the benchmark. You cannot diagnose agent issues
         without working logs.
 
-    Descendant log collection:
-      Uses GET /api/agents/tree?busId=<root_id> to discover all agents in the
-      tree (root + sub-agents + explore agents + browser agents). Collects
-      worker logs (Fly.io), backend logs (Render), and message transcripts
-      for every agent in the hierarchy, not just the root. Errors are surfaced
-      per-agent with tool names and failure messages.
+    Checking agent progress (use this instead of raw API polling):
+      python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
+        → Formatted tree with status, errors, message counts per agent.
+      python benchmarks/agent_logs.py <agent_id> --tree
+        → Full logs from all sources for every agent in tree.
+      python benchmarks/agent_logs.py <agent_id> --tree --source worker
+        → Only Fly.io worker logs (filter: worker, backend, research, messages).
+      python benchmarks/agent_logs.py <agent_id> --source messages
+        → Message transcript only for a single agent.
+      See benchmarks/agent_logs.py for full usage.
 """
 
 import argparse

@@ -168,7 +168,7 @@
     "is_chat_mode": false,
     "expected_tools": ["spawn_browser_agent", "spawn_claude_code_agent", "spawn_sub_agents"],
     "tags": ["browser", "claude-code", "attachment"],
-    "price_limit_cents": 1000,
+    "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": true,
     "attachment": "dallasmmaboxing-waivers/membership_terms_updated.pdf",
