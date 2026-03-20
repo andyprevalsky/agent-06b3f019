@@ -285,6 +285,44 @@ async def start_fly_log_collector() -> str:
     return await _fly_collector.start()
 
 
+async def fetch_flyio_logs_snapshot(agent_id: str) -> List[str]:
+    """
+    Fetch a one-shot snapshot of Fly.io logs via `flyctl logs --no-tail`.
+
+    This supplements the streaming collector by capturing any logs still in
+    the Fly buffer after a task completes. The streaming collector can miss
+    logs if the connection goes idle or drops during long runs.
+    """
+    if not FLY_API_TOKEN:
+        return []
+    try:
+        env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
+        proc = await asyncio.create_subprocess_exec(
+            "flyctl", "logs", "-a", FLY_APP_NAME, "--no-tail",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        lines = stdout.decode().strip().splitlines()
+        filtered = []
+        for raw_line in lines:
+            if agent_id in raw_line or agent_id[:12] in raw_line:
+                json_start = raw_line.find("{")
+                if json_start >= 0:
+                    json_part = raw_line[json_start:]
+                    try:
+                        parsed = json.loads(json_part)
+                        filtered.append(json.dumps(parsed))
+                    except (json.JSONDecodeError, TypeError):
+                        filtered.append(raw_line)
+                else:
+                    filtered.append(raw_line)
+        return filtered
+    except Exception:
+        return []
+
+
 def get_flyio_logs_for_agent(agent_id: str) -> List[str]:
     """Get Fly.io logs for an agent from the streaming collector."""
     if _fly_collector is None:
@@ -419,8 +457,22 @@ async def collect_logs(
     """
     messages = extract_message_transcript(agent_data)
 
-    # Fly.io logs come from the streaming collector (sync call)
-    worker_logs = get_flyio_logs_for_agent(agent_id)
+    # Fly.io logs: merge streaming collector + one-shot snapshot (deduped)
+    stream_logs = get_flyio_logs_for_agent(agent_id)
+    snapshot_logs = await fetch_flyio_logs_snapshot(agent_id)
+    # Deduplicate: use set of raw strings, preserving order from stream first
+    seen = set()
+    worker_logs = []
+    # Skip the "[fly.io] 0 logs..." placeholder messages
+    for log in stream_logs + snapshot_logs:
+        if log.startswith("[fly.io]"):
+            continue
+        if log not in seen:
+            seen.add(log)
+            worker_logs.append(log)
+    if not worker_logs:
+        stream_total = _fly_collector.total_lines if _fly_collector else 0
+        worker_logs = [f"[fly.io] 0 logs for agent {agent_id[:12]} ({stream_total} streamed + {len(snapshot_logs)} snapshot)"]
 
     # Render and Supabase logs fetched via HTTP
     backend_logs, research_logs = await asyncio.gather(

@@ -50,6 +50,11 @@ Auto mode (for Claude Code to execute — NOT a script):
       - No waits longer than 60 seconds (poll in 30s intervals)
       - Regularly output total cost & time elapsed
       - Never auto-approve approval requests — always ask user
+      - If log collection is broken (e.g. Fly.io collector returns 0 lines, Render
+        logs missing), fix the log pipeline FIRST — diagnose the collector in
+        benchmarks/logs.py, push the fix through the PR review loop (steps 7–9),
+        wait for deploy, then rerun the benchmark. You cannot diagnose agent issues
+        without working logs.
 
     Descendant log collection:
       Uses GET /api/agents/tree?busId=<root_id> to discover all agents in the
