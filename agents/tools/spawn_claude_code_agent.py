@@ -1210,8 +1210,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             activity_handle = workflow.start_activity(
                 spawn_claude_code_activity,
                 args=[user_id, agent_id, goal, tool_call_id, output_schema, attachments if attachments else None, model, github_repo_url, claude_token],
-                start_to_close_timeout=timedelta(minutes=35),  # 30 min sandbox + 5 min headroom for verifier/close
-                heartbeat_timeout=timedelta(seconds=60),
+                start_to_close_timeout=timedelta(minutes=50),  # 30 min sandbox + headroom for verifier retries
+                heartbeat_timeout=timedelta(minutes=5),  # E2B can go silent for minutes during long builds
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
