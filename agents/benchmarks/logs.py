@@ -420,8 +420,8 @@ def extract_message_transcript(agent_data: dict) -> List[dict]:
     for msg in messages:
         entry = {
             "role": msg.get("role", "UNKNOWN"),
-            "message": msg.get("message", ""),
-            "created_at": msg.get("createdAt") or msg.get("created_at", ""),
+            "message": msg.get("text") or msg.get("message", ""),
+            "created_at": msg.get("timestamp") or msg.get("createdAt") or msg.get("created_at", ""),
         }
         metadata = msg.get("metadata")
         if metadata:
