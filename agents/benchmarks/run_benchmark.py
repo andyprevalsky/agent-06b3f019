@@ -47,7 +47,14 @@ Auto mode (for Claude Code to execute — NOT a script):
     12. On COMPLETED → CELEBRATE with cumulative cost & time stats.
 
     Guidelines:
-      - No waits longer than 60 seconds (poll in 30s intervals)
+      - No waits longer than 60 seconds (poll in 30s intervals). You must monitor
+        the benchmark output every 60s while it's running — never fire-and-forget.
+      - If any sub-agent doesn't make progress (no new messages) within a 120s
+        interval, treat that as an error for purposes of the auto-debug loop.
+        Don't wait for the full timeout — stalled sub-agents are actionable.
+      - Only the last message sent is visible to the user, so always include all
+        relevant diagnostics, solution proposals, and status in your final message.
+        Don't spread critical information across multiple messages.
       - Regularly output total cost & time elapsed
       - Never auto-approve approval requests — always ask user
       - If log collection is broken (e.g. Fly.io collector returns 0 lines, Render
