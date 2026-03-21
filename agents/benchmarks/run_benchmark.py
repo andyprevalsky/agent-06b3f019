@@ -62,6 +62,9 @@ Auto mode (for Claude Code to execute — NOT a script):
       - Never auto-approve approval requests — always ask user
       - `progress` is a dead variable — do not use it for monitoring. Track
         progress by message count, token count, and agent status instead.
+      - Never stop or pause in the auto-debug loop unless it's for an explicitly
+        stated purpose (e.g., waiting for user approval, waiting for deploy).
+        If diagnostics show issues, immediately proceed to the next step.
       - If log collection is broken (e.g. Fly.io collector returns 0 lines, Render
         logs missing), fix the log pipeline FIRST — diagnose the collector in
         benchmarks/logs.py, push the fix through the PR review loop (steps 7–9),
