@@ -15,71 +15,13 @@ Usage:
     python benchmarks/run_benchmark.py --suite all --url https://navi-j9a9.onrender.com
     python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 
-Auto mode (for Claude Code to execute — NOT a script):
-    These are instructions for Claude Code to follow manually when asked to run
-    a benchmark in auto-debug mode. Do NOT run `python run_benchmark.py --auto`.
-    Instead, Claude Code executes each step using its own tools (Bash, Read, Edit, etc.).
+Auto-debug mode:
+    Use the `/benchmark <task-name>` skill in Claude Code. It contains the full
+    12-step auto-debug loop with monitoring, diagnosis, fix, PR, deploy, and rerun.
 
-    Steps:
-    1.  Run benchmark task: `cd agents && python benchmarks/run_benchmark.py --task <name>`
-    2.  Wait for a non-transient error across the agent tree (or COMPLETED).
-        Read the result JSON in agents/benchmarks/runs/ — check task status, error messages,
-        and logs (worker_logs, backend_logs, messages).
-    3.  Pause root agent (propagates to all sub-agents).
-        Use: POST /api/agents/:id/pause (see pause_agent() in this file)
-    4.  Diagnose: collect tree-wide logs, print structured diagnostics.
-        Use: get_agent_tree(base_url, bus_id) to discover all agents in the tree.
-        Use: collect_tree_logs() and format_tree_diagnostics() from benchmarks/logs.py.
-    5.  Propose fix — present diagnosis and proposed solution to user for approval.
-    6.  Delete root agent (cascades to descendants), apply approved solution.
-        Use: DELETE /api/agents/:id (see delete_agent() in this file)
-    7.  Create a PR via gh CLI.
-    8.  Code review loop (Claude Code Review GitHub Action):
-        - Wait for review check to complete (poll via `gh pr checks`)
-        - If CHANGES_REQUESTED → fix critical issues, push, re-wait
-        - Skip menial/P3+ comments
-    9.  Merge the PR (squash via `gh pr merge --squash --delete-branch`).
-    10. Wait for deployment Actions (deploy-agents.yml, deploy-research.yml) to pass.
-        Poll via `gh run list --workflow <name> --branch main`.
-        If any fail → new fix PR, review loop, merge, restart step 10.
-    11. Rerun benchmark — if fixed → back to step 2 (sees COMPLETED);
-        if still broken → back to step 4.
-    12. On COMPLETED → CELEBRATE with cumulative cost & time stats.
-
-    Guidelines:
-      - No waits longer than 60 seconds (poll in 30s intervals). You must monitor
-        the benchmark output every 60s while it's running — never fire-and-forget.
-      - If any sub-agent doesn't make progress (no new messages) within a 120s
-        interval, treat that as an error for purposes of the auto-debug loop.
-        Don't wait for the full timeout — stalled sub-agents are actionable.
-      - Only the last message sent is visible to the user, so always include all
-        relevant diagnostics, solution proposals, and status in your final message.
-        Don't spread critical information across multiple messages.
-      - Only 1 agent per benchmark task should be alive at a time. Before starting
-        a new agent for a task, delete any existing agent for that task — even if
-        the old one is paused.
-      - Regularly output total cost & time elapsed
-      - Never auto-approve approval requests — always ask user
-      - `progress` is a dead variable — do not use it for monitoring. Track
-        progress by message count, token count, and agent status instead.
-      - Never stop or pause in the auto-debug loop unless it's for an explicitly
-        stated purpose (e.g., waiting for user approval, waiting for deploy).
-        If diagnostics show issues, immediately proceed to the next step.
-      - If log collection is broken (e.g. Fly.io collector returns 0 lines, Render
-        logs missing), fix the log pipeline FIRST — diagnose the collector in
-        benchmarks/logs.py, push the fix through the PR review loop (steps 7–9),
-        wait for deploy, then rerun the benchmark. You cannot diagnose agent issues
-        without working logs.
-
-    Checking agent progress (use this instead of raw API polling):
+    Log inspection CLI:
       python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
-        → Formatted tree with status, errors, message counts per agent.
-      python benchmarks/agent_logs.py <agent_id> --tree
-        → Full logs from all sources for every agent in tree.
-      python benchmarks/agent_logs.py <agent_id> --tree --source worker
-        → Only Fly.io worker logs (filter: worker, backend, research, messages).
-      python benchmarks/agent_logs.py <agent_id> --source messages
-        → Message transcript only for a single agent.
+      python benchmarks/agent_logs.py <agent_id> --tree --source worker|backend|research|messages
       See benchmarks/agent_logs.py for full usage.
 """
 
