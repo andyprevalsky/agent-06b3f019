@@ -1,11 +1,20 @@
 ---
 description: "Run a benchmark task in auto-debug mode. Spawns agent against prod, monitors, diagnoses failures, fixes code, deploys, and reruns until COMPLETED."
-argument-hint: "<task-name>"
+argument-hint: "<task-name> | list"
 ---
 
 # Benchmark Auto-Debug Loop
 
 Run a benchmark task against prod, monitor it, and iteratively fix any issues until it passes.
+
+## If `$ARGUMENTS` is `list`
+
+Run this and show the output to the user, then stop:
+```bash
+cd agents && python benchmarks/run_benchmark.py --list
+```
+
+## Otherwise: Auto-Debug Loop
 
 **This is a loop. You MUST NOT stop or pause unless explicitly waiting for: user approval, deploy completion, or benchmark completion. If diagnostics show issues, immediately proceed to the next step.**
 
