@@ -16,7 +16,7 @@ cd agents && python benchmarks/run_benchmark.py --list
 
 ## Otherwise: Auto-Debug Loop
 
-**This is a loop. You MUST NOT stop or pause unless explicitly waiting for: user approval, deploy completion, or benchmark completion. If diagnostics show issues, immediately proceed to the next step.**
+**This is a loop. You MUST NOT stop or pause unless explicitly waiting for user approval. If diagnostics show issues, immediately proceed to the next step.**
 
 ## Setup
 
@@ -178,7 +178,7 @@ On `COMPLETED`:
 
 ## CRITICAL RULES
 
-1. **NEVER stop the loop** unless waiting for user approval, deploy, or benchmark completion.
+1. **NEVER stop the loop** unless waiting for user approval.
 2. **NEVER fire-and-forget** — monitor every 60s while the benchmark runs.
 3. **120s stall = error** — if any sub-agent has no new messages for 120s, treat as actionable.
 4. **Only 1 agent alive** — delete old agents before starting new ones.
