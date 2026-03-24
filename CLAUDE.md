@@ -143,6 +143,8 @@ Public API for agents and completions. Docs: https://docs.roselabs.ai (localhost
 **Test files:**
 - `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite
 - `research/supabase/functions/completions/test-browser-use-usage.mjs` - rose-1-browser-use test
+- `research/supabase/functions/completions/test-exact-payload-replay.mjs` - replays a real captured structured-streaming request body from `test-prod-request-body.json`
+- `research/supabase/functions/completions/test-prod-request-body.json` - real captured request-body fixture used by `test-exact-payload-replay.mjs`
 
 ## Production Logs (Render)
 

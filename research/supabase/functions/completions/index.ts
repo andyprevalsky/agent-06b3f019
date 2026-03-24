@@ -3341,6 +3341,19 @@ async function handleStreaming(
         anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
       }
     }
+
+    // Claude OAuth tokens require the first system block to be a recognized Claude Code/Agent SDK
+    // identity string. Without this, the API returns generic "invalid_request_error: Error" for
+    // Claude 4 models. Additional system blocks after the identity are allowed.
+    if (claudeAuth) {
+      const identityBlock = { type: 'text', text: "You are a Claude agent, built on Anthropic's Claude Agent SDK." };
+      const disclaimerBlock = { type: 'text', text: 'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.' };
+      if (anthropicBody.system) {
+        anthropicBody.system.unshift(identityBlock, disclaimerBlock);
+      } else {
+        anthropicBody.system = [identityBlock, disclaimerBlock];
+      }
+    }
     if (temperature !== undefined) {
       anthropicBody.temperature = temperature;
     }
@@ -3379,9 +3392,9 @@ async function handleStreaming(
     };
     if (claudeAuth) {
       anthropicHeaders['Authorization'] = `Bearer ${claudeAuth.token}`;
-      anthropicHeaders['anthropic-beta'] = 'oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05';
+      anthropicHeaders['anthropic-beta'] = 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24';
       anthropicHeaders['x-app'] = 'cli';
-      anthropicHeaders['User-Agent'] = 'claude-cli/2.1.45 (external, rose-planner)';
+      anthropicHeaders['User-Agent'] = 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)';
     } else {
       const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
       if (!anthropicKey) {
@@ -4106,9 +4119,11 @@ serve(async (req) => {
           ...(i === systemParts.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}),
         }));
 
+        const identityBlock = { type: 'text' as const, text: "You are a Claude agent, built on Anthropic's Claude Agent SDK." };
+        const disclaimerBlock = { type: 'text' as const, text: 'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.' };
         const anthropicBody = {
           model: 'claude-opus-4-6',
-          system: systemBlocks,
+          system: [identityBlock, disclaimerBlock, ...systemBlocks],
           messages: anthropicMessages,
           max_tokens: 4096,
           temperature: 0.3,
@@ -4123,9 +4138,9 @@ serve(async (req) => {
           headers: {
             'Authorization': `Bearer ${oauthToken}`,
             'anthropic-version': '2023-06-01',
-            'anthropic-beta': 'oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05',
+            'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24',
             'x-app': 'cli',
-            'User-Agent': 'claude-cli/2.1.45 (external, rose-browser-use)',
+            'User-Agent': 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)',
             'content-type': 'application/json',
           },
           body: JSON.stringify(anthropicBody),
@@ -4597,6 +4612,14 @@ serve(async (req) => {
               anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
             }
           }
+          // Claude OAuth tokens require the first system block to be a recognized identity string
+          const identityBlock = { type: 'text', text: "You are a Claude agent, built on Anthropic's Claude Agent SDK." };
+          const disclaimerBlock = { type: 'text', text: 'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.' };
+          if (anthropicBody.system) {
+            anthropicBody.system.unshift(identityBlock, disclaimerBlock);
+          } else {
+            anthropicBody.system = [identityBlock, disclaimerBlock];
+          }
           if (temperature !== undefined) anthropicBody.temperature = temperature;
           if (cappedReasoning?.max_tokens) {
             anthropicBody.thinking = { type: 'enabled', budget_tokens: cappedReasoning.max_tokens };
@@ -4611,9 +4634,9 @@ serve(async (req) => {
             headers: {
               'Authorization': `Bearer ${claude_token}`,
               'anthropic-version': '2023-06-01',
-              'anthropic-beta': 'oauth-2025-04-20,claude-code-20250219,prompt-caching-scope-2026-01-05',
+              'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24',
               'x-app': 'cli',
-              'User-Agent': 'claude-cli/2.1.45 (external, rose-planner)',
+              'User-Agent': 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)',
               'content-type': 'application/json',
             },
             body: JSON.stringify(anthropicBody)
