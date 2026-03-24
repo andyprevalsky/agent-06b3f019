@@ -643,9 +643,9 @@ spawn_sub_agent_for_each = SAME task applied to MANY items from a list/CSV (e.g.
 
 
 GOOD use of spawn_sub_agent:
-  Task 0: spawn_sub_agent "Research and book a venue in Austin"  ← complex multi-step task
-  Task 1: spawn_sub_agent "Plan team activities"                 ← needs research + decisions
-  Task 2: reasoning "Compile final itinerary"                    ← synthesis
+  Task 0: spawn_sub_agent "Research and book a venue in Austin for 20 people, March 28-30. Budget: $5k max. Prefer downtown locations with AV equipment. Contact: Andy, andy@example.com"  ← complex multi-step task with ALL context embedded
+  Task 1: spawn_sub_agent "Plan team activities for 20 people in Austin, March 28-30. Team is mostly engineers, ages 25-40. Mix of indoor/outdoor preferred. Budget: $2k."  ← needs research + decisions, self-contained
+  Task 2: reasoning "Compile final itinerary"  ← synthesis
 
 BAD (too granular, should use spawn_sub_agent):
   Task 0: web_search "venues in Austin"
@@ -653,6 +653,19 @@ BAD (too granular, should use spawn_sub_agent):
   Task 2: web_search "venue B reviews"
   Task 3: reasoning "compare venues"
   Task 4: spawn_browser_agent "book venue"  ← should be one spawn_sub_agent task
+
+SELF-CONTAINED GOALS (CRITICAL)
+-------------------------------
+Sub-agents have NO access to your conversation, user messages, or prior context.
+The goal field is their ONLY source of information. You MUST embed ALL relevant
+details directly in each task's goal:
+- User preferences, constraints, addresses, names, budget, deadlines
+- Prior research findings from earlier tasks (via depends_on)
+- Any user context (from USER CONTEXT section above) that the sub-agent needs
+- Specific instructions, not vague references like "the item discussed earlier"
+
+BAD: "Book the boxing class"  ← sub-agent has no idea which class, where, for whom
+GOOD: "Book the 6pm Tuesday boxing class at Dallas MMA Boxing (2000 Main St, Dallas TX). Member name: Andy Prevalsky, phone: 555-1234. Pay for monthly membership ($150/mo), prefer card on file."
 
 SPAWN_CLAUDE_CODE_AGENT GRANULARITY
 -----------------------------------

@@ -60,6 +60,11 @@ SPAWN TYPE: explore
 - Do NOT provide output_schema, verifier, start_url, or github_repo_link
 - Explore agents return free-form research summaries
 
+SELF-CONTAINED GOAL (CRITICAL):
+The explore agent has NO access to your conversation or prior context.
+The goal string is its ONLY source of information. Embed ALL relevant details:
+specifics of what to research, constraints, and any prior findings it should build on.
+
 CONTEXT GATES (compute optimization):
 - Optional: context_gates (object with boolean values, default all true)
 - For explore agents, two gates apply:
@@ -72,14 +77,24 @@ SPAWN TYPE: browser
 - Set type="browser"
 - Required: goal (str), start_url (str), output_schema (object with field names → types)
 - output_schema MUST be provided — define the structured data you expect back
-- Example output_schema: {"order_confirmation": "str", "total_price": "str"}""",
+- Example output_schema: {"order_confirmation": "str", "total_price": "str"}
+
+SELF-CONTAINED GOAL (CRITICAL):
+The browser agent has NO access to your conversation or prior context.
+The goal string is its ONLY source of information. Include ALL details needed to
+complete the web task: what to click, what to fill in, names, addresses, selections, etc.""",
         "spawn_code_agent": """
 SPAWN TYPE: code
 - Set type="code"
 - Required: goal (str), output_schema (object with field names → types)
 - output_schema MUST be provided — define the structured data you expect back
 - Optional: github_repo_link (str), attachments (list of filenames)
-- Example output_schema: {"result": "str", "generated_file": "file_pointer"}""",
+- Example output_schema: {"result": "str", "generated_file": "file_pointer"}
+
+SELF-CONTAINED GOAL (CRITICAL):
+The code agent has NO access to your conversation or prior context.
+The goal string is its ONLY source of information. Include ALL specs, requirements,
+and technical details needed to complete the coding task.""",
         "spawn_sub_agent": """
 SPAWN TYPE: sub_agent
 - Set type="sub_agent"
@@ -91,6 +106,15 @@ SPAWN TYPE: sub_agent
   - when in doubt, prefer "plan"
 - Optional: read_only (bool), verifier (object), attachments (list of filenames), context_gates (object)
 - Example output_schema: {"summary": "str", "findings": "list[str]"}
+
+SELF-CONTAINED GOAL (CRITICAL):
+The sub-agent has NO access to your conversation, user messages, or any prior context.
+The goal string is its ONLY source of information. You MUST embed ALL relevant details:
+- User preferences, constraints, addresses, names, budget, deadlines
+- Prior research findings or results from earlier tasks
+- Any specific instructions the user provided that apply to this sub-task
+BAD: "Book the boxing class" — sub-agent has no idea which class, where, or for whom
+GOOD: "Book the 6pm Tuesday boxing class at Dallas MMA (2000 Main St). Name: Andy, phone: 555-1234. Monthly membership, $150/mo."
 
 CONTEXT GATES (compute optimization):
 - Optional: context_gates (object with boolean values, default all true)
@@ -118,6 +142,11 @@ SPAWN TYPE: swarm
   - when in doubt, prefer "plan"
 - Optional: read_only (bool), verifier (object), attachments (list of filenames), context_gates (object)
 - Keep swarm lightweight: same high-level goal + one child per item/row
+
+SELF-CONTAINED GOAL (CRITICAL):
+Each swarm child has NO access to your conversation or prior context.
+The goal string (combined with the per-item context) is their ONLY information.
+Embed ALL relevant user preferences, constraints, and instructions in the goal.
 
 CONTEXT GATES (compute optimization):
 - Optional: context_gates (object with boolean values, default all true)

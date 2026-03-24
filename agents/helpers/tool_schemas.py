@@ -79,7 +79,12 @@ assert _plan_tool_values == _expected_tools, (
 
 class PlannerTask(BaseModel):
     """A single task in the planner output."""
-    goal: str = Field(description="Brief description of task objective")
+    goal: str = Field(description=(
+        "Self-contained task brief. Sub-agents have NO access to your conversation, user messages, or context — "
+        "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
+        "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion. "
+        "Be specific and explicit — if the sub-agent needs it, put it here."
+    ))
     tool_name: PlanToolName
     depends_on: List[int] = Field(default_factory=list, description="Indices of tasks this depends on (empty = no deps)")
 
@@ -141,7 +146,11 @@ class ResponseSchemaConfig(BaseModel):
 class SubAgentConfig(BaseModel):
     """Configuration for a single sub-agent."""
 
-    goal: str = Field(description="Goal/task for this sub-agent")
+    goal: str = Field(description=(
+        "Self-contained task brief. Sub-agents have NO access to your conversation, user messages, or context — "
+        "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
+        "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion."
+    ))
     # model removed - always inherits from parent agent
     read_only: bool = Field(
         default=False,
@@ -396,7 +405,12 @@ class SpawnAgentTool(BaseModel):
 
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "sub_agent", "explore", "swarm"]
-    goal: str = Field(description="Task/objective for the agent")
+    goal: str = Field(description=(
+        "Self-contained task brief. Spawned agents have NO access to your conversation, user messages, or context — "
+        "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
+        "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion. "
+        "Be specific and explicit — if the agent needs it, put it here."
+    ))
 
     output_schema: Optional[ResponseSchemaConfig] = Field(
         default=None,

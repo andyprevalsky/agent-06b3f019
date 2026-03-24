@@ -1021,7 +1021,15 @@ class AgentWorkflow:
             return []
 
     async def _append_user_messages_to_shared_memory(self, messages: List[Dict]) -> None:
-        """Append new USER messages to shared memory for cross-agent visibility."""
+        """Append new USER messages to shared memory for cross-agent visibility.
+
+        TEMPORARILY DISABLED: Broadcasting all USER messages (including agent goals)
+        to shared memory causes sub-agents to see parent instructions, leading to
+        re-delegation instead of focused execution (low CX scores).
+        Context is now passed explicitly via spawn_sub_agent goal fields instead.
+        """
+        return  # Disabled — explicit context passing via goal field replaces this
+
         if not self.bus_id:
             return  # No bus_id means no shared memory scope
 
