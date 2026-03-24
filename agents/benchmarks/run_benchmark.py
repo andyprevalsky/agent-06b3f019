@@ -214,6 +214,20 @@ async def pause_agent(base_url: str, agent_id: str) -> bool:
         return resp.status_code in (200, 204)
 
 
+async def post_attachment_message(
+    base_url: str, agent_id: str, file_pointers: List[dict]
+) -> bool:
+    """POST /api/agents/:id/messages with file attachments so the agent can see them."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{base_url}/api/agents/{agent_id}/messages",
+            headers=headers,
+            json={"message": "", "role": "USER", "attachments": file_pointers},
+        )
+        return resp.status_code in (200, 201)
+
+
 async def upload_attachment(
     base_url: str, agent_id: str, filepath: str
 ) -> Optional[dict]:
@@ -446,11 +460,12 @@ async def run_single_task(
     agent_id = ""
 
     try:
-        # Handle attachments: create agent first, then upload each file
+        # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
 
+            file_pointers = []
             for attach_filename in all_attachments:
                 filepath = os.path.join(TEST_ASSETS_DIR, attach_filename)
                 if not os.path.exists(filepath):
@@ -459,9 +474,15 @@ async def run_single_task(
                 print(f"    Uploading {attach_filename}...")
                 fp = await upload_attachment(base_url, agent_id, filepath)
                 if fp:
+                    file_pointers.append(fp)
                     print(f"    ✅ Uploaded, FilePointer received")
                 else:
                     print(f"    ⚠ Upload returned no FilePointer, continuing anyway")
+
+            # Post a message with all file pointers so the agent can see them
+            if file_pointers:
+                await post_attachment_message(base_url, agent_id, file_pointers)
+                print(f"    📎 Posted {len(file_pointers)} file(s) as agent message")
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
