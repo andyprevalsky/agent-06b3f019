@@ -63,13 +63,20 @@ DEFAULT_BASE_URL = os.environ.get(
     "BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com"
 )
 POLL_INTERVAL = 5  # seconds
-STALL_THRESHOLD = 60  # seconds without new messages → warning
+STALL_THRESHOLD = 180  # seconds without new messages/agents across ENTIRE tree → warning
+# Note: Activities (set_plan, spawn_browser_agent, LLM calls) can take 30-120s without
+# producing messages. Only flag stalls after 3 minutes of zero activity across ALL agents.
+TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 TEST_ASSETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
 )
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+
+class AgentNotFoundError(Exception):
+    """Raised when an agent returns 404 (deleted or expired)."""
+    pass
 
 # Terminal agent statuses
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}
@@ -79,18 +86,37 @@ TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHE
 # API helpers
 # ============================================================
 
+_cached_headers: Optional[dict] = None
+_auth_mode: Optional[str] = None  # "jwt" or "api_key"
+
 async def _api_headers() -> dict:
-    """Get auth headers — JWT for prod, API key fallback."""
+    """Get auth headers — JWT for prod, API key fallback. Caches after first success."""
+    global _cached_headers, _auth_mode
+
+    # If we already know API key is the only option, skip JWT attempts
+    if _auth_mode == "api_key":
+        return {
+            "X-API-Key": API_KEY,
+            "X-User-Id": USER_ID,
+            "Content-Type": "application/json",
+        }
+
+    if _cached_headers and _auth_mode == "jwt":
+        return dict(_cached_headers)
+
     try:
         auth = await authenticate()
-        return {
+        _cached_headers = {
             "Authorization": f"Bearer {auth['access_token']}",
             "Content-Type": "application/json",
         }
+        _auth_mode = "jwt"
+        return dict(_cached_headers)
     except Exception:
-        # Fallback to API key auth
+        # Fallback to API key auth — cache this decision
         if not API_KEY:
             raise RuntimeError("BACKEND_API_KEY env var is required when JWT auth is unavailable.")
+        _auth_mode = "api_key"
         return {
             "X-API-Key": API_KEY,
             "X-User-Id": USER_ID,
@@ -128,10 +154,12 @@ async def create_agent(
 
 
 async def get_agent(base_url: str, agent_id: str) -> dict:
-    """GET /api/agents/:id"""
+    """GET /api/agents/:id. Raises AgentNotFoundError on 404."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(f"{base_url}/api/agents/{agent_id}", headers=headers)
+        if resp.status_code == 404:
+            raise AgentNotFoundError(f"Agent {agent_id[:12]} not found (404)")
         if resp.status_code != 200:
             raise Exception(f"Failed to get agent: {resp.status_code}")
         return resp.json()
@@ -256,6 +284,64 @@ async def upload_attachment(
 # Polling loop
 # ============================================================
 
+async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
+    """
+    Fetch tree-level aggregate stats for stall detection and progress reporting.
+
+    Returns dict with:
+        agent_count, total_messages, total_cost_cents, active_count, failed_count,
+        error_agents (list of dicts with agent_id, status, error details),
+        all_agents (list of raw agent dicts from tree API)
+    """
+    try:
+        agents = await get_agent_tree(base_url, agent_id)
+        if not agents:
+            return {"agent_count": 0, "total_messages": 0, "total_cost_cents": 0,
+                    "active_count": 0, "failed_count": 0, "error_agents": [], "all_agents": []}
+
+        total_msgs = sum(a.get("message_count", 0) for a in agents)
+        total_cost = sum(a.get("tree_cost_cents", 0) for a in agents)
+        active = [a for a in agents if a.get("status") == "ACTIVE"]
+        failed = [a for a in agents if a.get("status") in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED")]
+
+        return {
+            "agent_count": len(agents),
+            "total_messages": total_msgs,
+            "total_cost_cents": total_cost,
+            "active_count": len(active),
+            "failed_count": len(failed),
+            "error_agents": [{"agent_id": a.get("agent_id", "")[:12], "status": a.get("status")}
+                             for a in failed],
+            "all_agents": agents,
+        }
+    except Exception:
+        return {"agent_count": 0, "total_messages": 0, "total_cost_cents": 0,
+                "active_count": 0, "failed_count": 0, "error_agents": [], "all_agents": []}
+
+
+def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
+    """
+    Scan Fly.io streaming logs for infrastructure-level errors across all agents.
+    Returns list of error descriptions.
+    """
+    from benchmarks.logs import _fly_collector
+    if not _fly_collector:
+        return []
+
+    errors = []
+    for aid in agent_ids:
+        logs = _fly_collector.get_logs_for_agent(aid)
+        for log_line in logs:
+            ll = log_line.lower()
+            if any(kw in ll for kw in (
+                "session limit reached", "429", "too many requests",
+                "connection refused", "all reconnection attempts failed",
+                "oom", "out of memory", "killed",
+            )):
+                errors.append(log_line[:200])
+    return errors
+
+
 async def poll_agent(
     base_url: str,
     agent_id: str,
@@ -263,15 +349,22 @@ async def poll_agent(
 ) -> Tuple[dict, int, int]:
     """
     Poll agent until terminal state or timeout.
+    Monitors the ENTIRE agent tree for stall detection, not just the root.
 
     Returns: (final_agent_data, approvals_triggered, approvals_resolved)
     """
     start = time.time()
-    last_message_time = start
-    prev_message_count = 0
+    last_activity_time = start  # tracks ANY activity across the entire tree
+    prev_tree_message_count = 0
+    prev_tree_agent_count = 0
+    prev_tree_cost = 0
+    prev_root_message_count = 0
     approvals_triggered = 0
     approvals_resolved = 0
     replied_waiting_msgs: set = set()  # track isWaitingForUser messages we've already replied to
+    last_tree_poll = 0.0  # timestamp of last tree-level poll
+    last_progress_print = 0.0  # timestamp of last progress log
+    last_tree_stats: dict = {}  # cached tree stats
 
     while True:
         elapsed = time.time() - start
@@ -282,6 +375,9 @@ async def poll_agent(
 
         try:
             data = await get_agent(base_url, agent_id)
+        except AgentNotFoundError:
+            print(f"    ⚠ Agent {agent_id[:12]} returned 404 — deleted or expired")
+            return {"agent": {"status": "DELETED"}, "messages": []}, approvals_triggered, approvals_resolved
         except Exception as e:
             print(f"    ⚠ Poll error: {e}")
             await asyncio.sleep(POLL_INTERVAL)
@@ -290,7 +386,7 @@ async def poll_agent(
         agent = data.get("agent", {})
         status = agent.get("status", "UNKNOWN")
         messages = data.get("messages", [])
-        msg_count = len(messages)
+        root_msg_count = len(messages)
 
         # Chat mode: done when we have ASSISTANT responses
         if task.is_chat_mode:
@@ -302,29 +398,86 @@ async def poll_agent(
         if status in TERMINAL_STATUSES:
             return data, approvals_triggered, approvals_resolved
 
-        # Stall detection
-        if msg_count > prev_message_count:
-            last_message_time = time.time()
-            prev_message_count = msg_count
-        elif time.time() - last_message_time > STALL_THRESHOLD:
-            print(f"    ⚠ Stall detected ({time.time() - last_message_time:.0f}s since last message)")
+        # ── Tree-level stall detection ──────────────────────────────
+        # Periodically fetch tree stats (every TREE_POLL_INTERVAL seconds)
+        now = time.time()
+        if now - last_tree_poll >= TREE_POLL_INTERVAL:
+            last_tree_poll = now
+            tree_stats = await _fetch_tree_stats(base_url, agent_id)
+            last_tree_stats = tree_stats
+
+            tree_total_msgs = tree_stats["total_messages"]
+            tree_agent_count = tree_stats["agent_count"]
+            tree_cost = tree_stats["total_cost_cents"]
+
+            # Activity check: tree API message_count lags behind reality,
+            # so we use MULTIPLE signals: tree message count, root real message count,
+            # tree agent count (new agents appearing), and tree cost (LLM calls happening)
+            activity_detected = False
+            if tree_total_msgs > prev_tree_message_count:
+                activity_detected = True
+                prev_tree_message_count = tree_total_msgs
+            if root_msg_count > prev_root_message_count:
+                activity_detected = True
+            if tree_agent_count > prev_tree_agent_count:
+                activity_detected = True
+                prev_tree_agent_count = tree_agent_count
+            if tree_cost > prev_tree_cost:
+                activity_detected = True
+                prev_tree_cost = tree_cost
+
+            if activity_detected:
+                last_activity_time = now
+            prev_root_message_count = root_msg_count
+
+            stall_seconds = now - last_activity_time
+            if stall_seconds > STALL_THRESHOLD:
+                print(f"    ⚠ TREE STALL: {stall_seconds:.0f}s since last message across "
+                      f"{tree_stats['agent_count']} agents ({tree_total_msgs} total msgs)")
+
+            # Check for infrastructure errors in Fly.io logs
+            all_agent_ids = [a.get("agent_id", "") for a in tree_stats.get("all_agents", [])]
+            if all_agent_ids:
+                infra_errors = _detect_infra_errors_from_fly(all_agent_ids)
+                if infra_errors:
+                    unique_errors = list(set(infra_errors))[:5]
+                    print(f"    🔥 INFRA ERRORS ({len(infra_errors)} total across tree):")
+                    for err in unique_errors:
+                        print(f"       {err}")
+
+            # Report failed agents
+            if tree_stats["failed_count"] > 0:
+                for ea in tree_stats["error_agents"][:3]:
+                    print(f"    ❌ Agent {ea['agent_id']} → {ea['status']}")
+        else:
+            # Between tree polls, still track root message activity
+            if root_msg_count > prev_root_message_count:
+                last_activity_time = now
+                prev_root_message_count = root_msg_count
 
         # Auto-reply to send_message_to_user questions (isWaitingForUser)
         # These block the workflow until a user message is posted back.
+        # The flag can be at metadata.isWaitingForUser OR metadata.sendMessageToUser.isWaitingForUser
         for m in messages:
             meta = m.get("metadata", {})
             if not isinstance(meta, dict):
                 continue
-            msg_id = m.get("id", "")
-            if meta.get("isWaitingForUser") and msg_id and msg_id not in replied_waiting_msgs:
+            msg_id = m.get("message_id") or m.get("id", "")
+            is_waiting = (
+                meta.get("isWaitingForUser")
+                or (isinstance(meta.get("sendMessageToUser"), dict)
+                    and meta["sendMessageToUser"].get("isWaitingForUser"))
+            )
+            if is_waiting and msg_id and msg_id not in replied_waiting_msgs:
                 replied_waiting_msgs.add(msg_id)
-                question = (m.get("message") or "")[:200]
+                question = (m.get("text") or m.get("message") or "")[:200]
                 print(f"    💬 Agent asked a question: {question}")
                 print(f"    → Auto-replying to unblock workflow")
                 try:
                     await post_message(
                         base_url, agent_id,
-                        "Continue with the information you have. "
+                        "Please do not ask me anymore questions. I trust your judgment, intuition, "
+                        "and ability to make reasonable assumptions. Please proceed with the task. "
                         "All files have been uploaded as attachments and should be available in your context."
                     )
                 except Exception as e:
@@ -372,10 +525,19 @@ async def poll_agent(
             except Exception as e:
                 print(f"    ⚠ Approval check error: {e}")
 
-        # Progress log
-        progress = agent.get("progress", 0)
-        if int(elapsed) % 15 == 0 and elapsed > 0:
-            print(f"    ... {status} {progress:.0%} ({msg_count} msgs, {elapsed:.0f}s)")
+        # Progress log — show tree-level stats every 30s
+        if now - last_progress_print >= 30:
+            last_progress_print = now
+            ts = last_tree_stats
+            if ts:
+                tree_cost = ts.get("total_cost_cents", 0)
+                tree_agents = ts.get("agent_count", 0)
+                tree_active = ts.get("active_count", 0)
+                tree_failed = ts.get("failed_count", 0)
+                print(f"    ... {status} | {tree_agents} agents ({tree_active} active, {tree_failed} failed) | "
+                      f"{root_msg_count} root msgs | {tree_cost}c | {elapsed:.0f}s")
+            else:
+                print(f"    ... {status} ({root_msg_count} root msgs, {elapsed:.0f}s)")
 
         await asyncio.sleep(POLL_INTERVAL)
 
