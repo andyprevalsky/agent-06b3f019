@@ -288,15 +288,53 @@ fly ssh console
 ### Scaling
 
 ```bash
-# Scale vertically (more CPU/RAM per instance)
-fly scale vm shared-cpu-2x --memory 4096
+# Manual overrides
+fly scale vm performance-1x --memory 2048
+fly scale count 2
+```
 
-# Scale horizontally (more instances)
-fly scale count 3
+CPU-based autoscaling via `fly-autoscaler` (`navi-whisper-lux-autoscaler`):
 
-# Auto-scaling is configured in fly.toml
-# min_count = 1
-# max_count = 10
+- Minimum machines: `2`, maximum: `10`
+- Target utilization: 70% CPU per machine
+- Metric: `sum(rate(fly_instance_cpu{..., mode=~"user|system|..."}[5m]))` — total busy CPU across all instances (centiseconds/sec)
+- Formula: `max(2, min(10, ceil(cpu_busy_total / 70)))` — derives desired count from total CPU demand
+- Stability: total CPU demand doesn't change when machines are added/removed (work redistributes), so the formula doesn't oscillate
+- Smoothing: 5-minute rate window prevents spiky behavior
+
+Autoscaler secrets (already configured):
+
+```bash
+FAS_APP_NAME=navi-whisper-lux
+FAS_PROMETHEUS_ADDRESS=https://api.fly.io/prometheus/personal
+FAS_PROMETHEUS_METRIC_NAME=cpu_busy_total
+FAS_PROMETHEUS_QUERY='sum(rate(fly_instance_cpu{app="navi-whisper-lux",mode=~"user|system|iowait|softirq|irq|nice"}[5m]))'
+FAS_CREATED_MACHINE_COUNT='max(2, min(10, ceil(cpu_busy_total / 70)))'
+FAS_STARTED_MACHINE_COUNT='max(2, min(10, ceil(cpu_busy_total / 70)))'
+FAS_API_TOKEN=<deploy token>
+FAS_PROMETHEUS_TOKEN=<readonly token>
+```
+
+One-time setup (already done):
+
+```bash
+fly apps create navi-whisper-lux-autoscaler
+fly launch --from https://github.com/superfly/fly-autoscaler --name navi-whisper-lux-autoscaler
+
+DEPLOY_TOKEN=$(fly tokens create deploy -a navi-whisper-lux --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+READONLY_TOKEN=$(fly tokens create readonly personal --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+
+fly secrets set -a navi-whisper-lux-autoscaler \
+  FAS_APP_NAME=navi-whisper-lux \
+  FAS_PROMETHEUS_ADDRESS="https://api.fly.io/prometheus/personal" \
+  FAS_PROMETHEUS_METRIC_NAME=cpu_busy_total \
+  FAS_PROMETHEUS_QUERY='sum(rate(fly_instance_cpu{app="navi-whisper-lux",mode=~"user|system|iowait|softirq|irq|nice"}[5m]))' \
+  FAS_CREATED_MACHINE_COUNT='max(2, min(10, ceil(cpu_busy_total / 70)))' \
+  FAS_STARTED_MACHINE_COUNT='max(2, min(10, ceil(cpu_busy_total / 70)))' \
+  FAS_API_TOKEN="$DEPLOY_TOKEN" \
+  FAS_PROMETHEUS_TOKEN="$READONLY_TOKEN"
+
+fly deploy -a navi-whisper-lux-autoscaler
 ```
 
 ### Monitor
@@ -637,4 +675,3 @@ Common issues:
 - **Temporal Docs**: https://docs.temporal.io
 - **fly.io Docs**: https://fly.io/docs
 - **GitHub Issues**: [Link to your repo]
-

@@ -1172,18 +1172,25 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
   // Clean up E2B sandboxes and Steel browser sessions before terminating workflow
   await cleanupAgentSessions(agentId);
 
-  // Terminate Temporal workflow if it exists
-  if (agent.temporalWorkflowId) {
-    try {
-      log.info('Terminating workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
-      const { getTemporalClient } = await import('../lib/temporal');
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.terminate('Agent deleted by user');
-      log.info('Terminated workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
-    } catch (error) {
-      log.warn(`Failed to terminate workflow`, { workflow_id: agent.temporalWorkflowId, agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
-      // Continue with deletion even if termination fails
+  // Always terminate Temporal workflow by agent ID.
+  // Workflow ID === agent ID (set in startAgentWorkflow), so we don't rely on
+  // the temporalWorkflowId DB field which can be null (race during creation,
+  // or cleared by chat-mode transition). Best-effort: if no workflow exists,
+  // the terminate call throws and we catch it.
+  try {
+    log.info('Terminating workflow', { agent_id: agentId });
+    const { getTemporalClient } = await import('../lib/temporal');
+    const client = await getTemporalClient();
+    const handle = client.workflow.getHandle(agentId);
+    await handle.terminate('Agent deleted by user');
+    log.info('Terminated workflow', { agent_id: agentId });
+  } catch (error) {
+    // Expected if agent was chat-only (no workflow ever started) or already terminated
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes('not found') || msg.includes('already completed') || msg.includes('terminated')) {
+      log.info('No active workflow to terminate', { agent_id: agentId, reason: msg });
+    } else {
+      log.warn('Failed to terminate workflow', { agent_id: agentId, error: msg });
     }
   }
 

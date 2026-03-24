@@ -4,6 +4,7 @@ from flask import Flask, jsonify
 import threading
 from datetime import datetime
 import structlog
+import psutil
 
 logger = structlog.get_logger()
 
@@ -15,6 +16,10 @@ worker_status = {
     "started_at": datetime.utcnow().isoformat(),
     "last_heartbeat": datetime.utcnow().isoformat()
 }
+
+# Reuse process handle so CPU deltas are computed between scrapes.
+_process = psutil.Process()
+_process.cpu_percent(interval=None)
 
 
 @app.route('/health')
@@ -40,6 +45,7 @@ def health():
 def metrics():
     """Metrics endpoint (basic Prometheus format)."""
     uptime = (datetime.utcnow() - datetime.fromisoformat(worker_status["started_at"])).total_seconds()
+    process_cpu_percent = _process.cpu_percent(interval=None)
     
     metrics_text = f"""# HELP worker_healthy Worker health status (1=healthy, 0=unhealthy)
 # TYPE worker_healthy gauge
@@ -48,6 +54,10 @@ worker_healthy {1 if worker_status["healthy"] else 0}
 # HELP worker_uptime_seconds Worker uptime in seconds
 # TYPE worker_uptime_seconds counter
 worker_uptime_seconds {uptime}
+
+# HELP worker_process_cpu_percent Process CPU usage percent since last scrape
+# TYPE worker_process_cpu_percent gauge
+worker_process_cpu_percent {process_cpu_percent}
 """
     
     return metrics_text, 200, {'Content-Type': 'text/plain; charset=utf-8'}
@@ -80,4 +90,3 @@ if __name__ == "__main__":
     run_health_server()
     import time
     time.sleep(60)
-

@@ -310,6 +310,8 @@ async def main():
         max_concurrent_activities=config.temporal.max_concurrent_activities,
         max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,
         max_cached_workflows=config.temporal.max_cached_workflows,
+        max_concurrent_activity_task_pollers=config.temporal.max_concurrent_activity_task_pollers,
+        max_concurrent_workflow_task_pollers=config.temporal.max_concurrent_workflow_task_pollers,
         workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
     )
     
