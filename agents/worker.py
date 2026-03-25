@@ -187,6 +187,7 @@ SCALE_UP_COOLDOWN_SECS = 10     # Seconds to wait after a scale-up before allowi
 POLL_INTERVAL_SECS = 1          # 3 Temporal API calls/s — well within 1000 req/s limit
 LOG_INTERVAL_SECS = 30          # Periodic summary log (avoid 86k lines/day at 1s polls)
 SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
+DEFAULT_CAPACITY = 50  # Fallback when SDK metrics not yet available (matches max_concurrent_activities)
 
 FLY_MACHINES_API = "https://api.machines.dev/v1"
 
@@ -371,8 +372,7 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                 # Get real capacity from SDK's resource-based tuner (no magic number)
                 observed_capacity = await _get_observed_capacity(http)
                 if observed_capacity is None:
-                    await asyncio.sleep(POLL_INTERVAL_SECS)
-                    continue  # SDK metrics not ready yet, skip this cycle
+                    observed_capacity = DEFAULT_CAPACITY  # SDK metrics not ready yet, use fallback
 
                 current_machines = _count_fly_peers()
                 is_leader = _am_i_leader()
