@@ -814,6 +814,7 @@ async def run_agent(
                     response_schema=response_schema,
                     get_response_schema=get_response_schema,
                     claude_token=verifier_claude_token,
+                    is_plan_loop=is_plan_loop,
                 )
 
                 # Track verifier tokens
@@ -891,6 +892,7 @@ async def run_agent(
                 response_schema=response_schema,
                 get_response_schema=get_response_schema,
                 claude_token=final_verifier_claude_token,
+                is_plan_loop=is_plan_loop,
             )
 
             # Track final verifier tokens
@@ -1010,6 +1012,7 @@ async def _run_verifier(
     response_schema: Optional[Dict] = None,
     get_response_schema: Optional[Callable[[], Awaitable[Optional[Dict]]]] = None,
     claude_token: Optional[str] = None,
+    is_plan_loop: bool = False,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = str(uuid.uuid4())
