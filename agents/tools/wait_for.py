@@ -328,7 +328,7 @@ class WaitForManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title=f"Polling paused (check {check_num}/{max_checks})",
                     message="Agent paused or cost limit reached",
-                    status=MessageStatus.FINISHED,
+                    status=MessageStatus.ERROR,
                     metadata={
                         "waitForMode": "condition",
                         "condition": condition,
@@ -395,7 +395,7 @@ class WaitForManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title=f"Polling cancelled (check {check_num}/{max_checks})",
                     message="Explore agent cancelled due to pause",
-                    status=MessageStatus.FINISHED,
+                    status=MessageStatus.ERROR,
                     metadata={
                         "waitForMode": "condition",
                         "condition": condition,

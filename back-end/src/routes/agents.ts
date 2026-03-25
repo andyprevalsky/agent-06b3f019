@@ -1194,6 +1194,11 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
     }
   }
 
+  // Delete all attention requests (approval chips) for this agent
+  await prisma.agentAttentionRequest.deleteMany({
+    where: { agentId },
+  });
+
   // Soft delete this agent
   await prisma.agent.update({
     where: { id: agentId },

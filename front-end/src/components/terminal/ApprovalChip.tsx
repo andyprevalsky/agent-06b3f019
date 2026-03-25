@@ -140,7 +140,7 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
           )}
 
           {/* Question */}
-          <div className="mb-3 text-sm text-foreground">
+          <div className="mb-3 text-sm text-foreground max-h-[160px] overflow-y-auto">
             <MarkdownText text={pendingApproval.question} />
           </div>
 

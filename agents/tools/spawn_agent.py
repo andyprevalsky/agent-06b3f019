@@ -644,7 +644,7 @@ class SpawnAgentManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title="Research cancelled",
                     message="Explore agent cancelled by user",
-                    status=MessageStatus.FINISHED,
+                    status=MessageStatus.ERROR,
                     metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
                 )
                 return

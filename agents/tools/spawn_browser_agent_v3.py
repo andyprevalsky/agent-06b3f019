@@ -3821,7 +3821,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         type=EventType.POST_MESSAGE,
                         title="Browser Session Paused",
                         message="User paused the browser agent",
-                        status=MessageStatus.FINISHED,
+                        status=MessageStatus.ERROR,
                         metadata={"toolName": "spawn_browser_agent", "action_type": "session_paused"}
                     )
                     return

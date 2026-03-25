@@ -1340,7 +1340,7 @@ function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefOb
       );
       const lastMessage = taskMessages[taskMessages.length - 1];
       
-      const isComplete = lastMessage?.metadata?.action_type === 'task_complete';
+      const isComplete = lastMessage?.metadata?.action_type === 'task_complete' || lastMessage?.metadata?.action_type === 'session_paused';
       
       // Log errors but don't hide chip
       if (lastMessage?.metadata?.action_type === 'error') {

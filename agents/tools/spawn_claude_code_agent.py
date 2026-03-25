@@ -1274,7 +1274,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title="Claude Code Session Cancelled",
                     message="User paused the agent",
-                    status=MessageStatus.FINISHED,
+                    status=MessageStatus.ERROR,
                     metadata={"action_type": "session_cancelled", "toolName": "spawn_claude_code_agent"}
                 )
                 return

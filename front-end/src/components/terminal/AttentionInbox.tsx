@@ -555,7 +555,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
                       )}
 
                       {/* Question rendered as markdown */}
-                      <div>
+                      <div className="max-h-[300px] overflow-y-auto">
                         <MarkdownText text={currentRequest.question} />
                       </div>
 
