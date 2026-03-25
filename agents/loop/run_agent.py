@@ -136,7 +136,7 @@ async def run_agent(
     tokens_in = 0
     tokens_out = 0
     token_count = 0
-    context_size = 0  # Current context window usage (prompt_tokens from last LLM call)
+    context_size = 0  # Current context window usage (uncached + cached tokens from last LLM call)
     cache_read_total = 0  # Cumulative cache read tokens (prompt caching hits)
     cache_write_total = 0  # Cumulative cache creation tokens (prompt caching misses)
     iteration = iteration_offset
@@ -469,11 +469,13 @@ async def run_agent(
             tokens_in += llm_tokens_in
             tokens_out += llm_tokens_out
             token_count += llm_total
-            context_size = llm_tokens_in  # Current context = prompt tokens of last LLM call
 
             # Track cache metrics
             iter_cache_read = usage.get("cache_read_input_tokens", 0)
             iter_cache_write = usage.get("cache_creation_input_tokens", 0)
+
+            # Context size = full prompt (uncached + cached) to reflect actual context window usage
+            context_size = llm_tokens_in + iter_cache_read + iter_cache_write
             cache_read_total += iter_cache_read
             cache_write_total += iter_cache_write
             if iter_cache_read > 0 or iter_cache_write > 0:

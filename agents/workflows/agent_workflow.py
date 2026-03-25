@@ -1575,7 +1575,7 @@ class AgentWorkflow:
         self.tokens_in += tokens_in_delta
         self.tokens_out += tokens_out_delta
         self.token_count += tokens_in_delta + tokens_out_delta
-        self.context_size = tokens_in_delta  # Current context = prompt tokens of last LLM call
+        self.context_size = tokens_in_delta + cache_read_input_tokens + cache_creation_input_tokens
 
         # Track actual_model for credit billing
         if actual_model:
