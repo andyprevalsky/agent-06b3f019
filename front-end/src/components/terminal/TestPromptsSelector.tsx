@@ -214,6 +214,58 @@ For any services that require a API Key or Credential, mock the service for now 
     ],
   },
   {
+    title: 'Outreach In Batch',
+    description: 'Batch outreach to 0-10 angels for ML research feedback with resume attached',
+    prompt: `I've attached a CSV of ~700 angels.
+Reach out to 0-10
+
+Each message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer
+
+We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent per row.
+
+REFERENCE MATERIALS FOR INFORMATION ABOUT ME
+===
+I've attached my resume for reference.
+
+Pitchdeck text:
+
+Rose Labs — Personal Superintelligence
+Andy Prevalsky, Founder, andy@roselabs.ai, San Francisco
+
+Problem: Users want their AI assistant to solve complex, real-world problems but no existing harness:
+1. Integrates with the necessary tools + context pipelines
+2. Is built to scale the number of agents necessary to accomplish these tasks in a generalizable and cost-efficient way
+
+Solution (Live at roselabs.ai):
+- Real users completing real tasks. Autonomous agents running in production daily.
+- Computer-to-Cloud Sync: Seamless state sync between local and cloud execution environments.
+- SOTA Browser Agent: Custom prompt-braiding algorithm for escaping single-model-provider minima.
+- Live Integrations: SMS, phone calling, and Claude Code.
+- SOTA Task Decomposer: Rose-Decompose outperforms every frontier model at breaking complex goals into parallelizable sub-tasks. 45x higher success rate than Opus 4.6 on deep recursive plans.
+
+Rose-Decompose: a fine-tuned model that recursively breaks complex goals into parallelizable sub-tasks.
+Trained on 500 real user tasks collected via roselabs.ai.
+Rose-Decompose ELO 1251, All-3 Pass 85.6%, Tree Pass (d=3) 13.25% vs Opus 4.6 ELO 1000, All-3 Pass 63.8%, Tree Pass 0.29%
+
+The Founder:
+Andy Prevalsky, CEO
+- Founded Hotplate (YC S20), led engineering, product & strategy from zero to PMF. Now 7-figure ARR and profitable.
+- 10 years ML experience. HFT models (LSTMs, RNNs, Markov Chains), custom pipelines at Hotplate that found 90% of users, voice pipelines as Staff Eng @ Vapi.
+- Ex Google, Ex Meta AI.
+- Backed by Michael Seibel, Connie Chan (A16Z), YC. Mentored by Seibel for 6 years.
+
+LinkedIn:
+- Rose Labs: Founder, CEO (Oct 2025 - Present) — Pioneering Mass Agent Networks
+- Vapi: Staff Software Engineer (2024-2025)
+- Hotplate: Co-Founder, CTO (2019-2023) — $50M+ total transactions, backed by Connie Chan (A16Z), Michael Seibel, YC
+- Meta: ML/AI Intern (2020) — Accepted, declined to start YC backed company
+- Google: Software Engineer Intern (2020) — Built Flutter & iOS SDK for Google's ML libraries`,
+    attachmentUrls: [
+      '/test-assets/vcs-and-angels.csv',
+      '/test-assets/andy-prevalsky-resume-2026.pdf',
+    ],
+  },
+  {
     title: 'Family Office & Angel Outreach',
     description: 'Personalized outreach to 700 angels for ML research feedback calls',
     prompt: `I've attached a CSV of ~700 angels. Get me on a call to chat with as many of the people on this list as possible.
