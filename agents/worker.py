@@ -329,11 +329,11 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
       The 20% threshold absorbs transient blips; ceil() ensures we add enough
       machines once the threshold is crossed (0.2→+1, 1.2→+2).
 
-    Scale-down (gradual probe):
-      When backlog stays at 0 for 60 consecutive seconds, remove 1 machine and reset
-      the timer. If removing the machine causes backlog to reappear, we detect it
-      within 1s and immediately scale back up. If not, we probe again after 60s.
-      This converges to the minimum fleet size without predicting capacity.
+    Scale-down (adaptive):
+      When backlog stays at 0 for 60 consecutive seconds:
+      - If no workflows running → go straight to MIN_MACHINES (fast drain)
+      - If workflows still running → remove 1 machine and probe again after 60s
+      If removing a machine causes backlog, we detect it within 1s and scale back up.
 
     No separate autoscaler machine needed — the navi-whisper-lux-autoscaler app
     can be decommissioned.
@@ -390,12 +390,17 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                     else:
                         _desired_machines = current_machines  # Transient blip or in cooldown
                 else:
-                    # Backlog is 0 — probe downward after cooldown
+                    # Backlog is 0 — scale down after cooldown
                     if _backlog_zero_since is None:
                         _backlog_zero_since = now
 
                     if now - _backlog_zero_since >= SCALE_DOWN_COOLDOWN_SECS:
-                        _desired_machines = current_machines - 1
+                        if workflow_count == 0:
+                            # No work at all — go straight to minimum
+                            _desired_machines = MIN_MACHINES
+                        else:
+                            # Workflows running but no backlog — probe -1
+                            _desired_machines = current_machines - 1
                         _backlog_zero_since = now  # Reset timer for next probe
                     else:
                         _desired_machines = current_machines  # Hold steady

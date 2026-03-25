@@ -64,9 +64,10 @@ primary_region = "iad"  # Ashburn, Virginia
 [http_service]
   internal_port = 8080
   force_https = true
-  # Keep workers warm to avoid cold starts; CPU autoscaler controls count.
+  # Custom autoscaler (poll_queue_metrics in worker.py) manages machine lifecycle.
+  # Both must be false — auto_start fights the autoscaler by restarting stopped machines.
   auto_stop_machines = false
-  auto_start_machines = true
+  auto_start_machines = false
   min_machines_running = 2
   processes = ["app"]
 
