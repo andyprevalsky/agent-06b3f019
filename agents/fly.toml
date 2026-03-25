@@ -50,6 +50,7 @@ primary_region = "iad"  # Ashburn, Virginia
 # TEMPORAL_API_KEY
 # TEMPORAL_NAMESPACE
 # TEMPORAL_ADDRESS
+# FLY_API_TOKEN (for built-in autoscaler to start/stop machines via Fly Machines API)
 # OPENROUTER_API_KEY (for LLM capabilities - replaces OPENAI_API_KEY)
 # SERPER_API_KEY (for web search)
 # SUPABASE_URL
@@ -89,7 +90,8 @@ primary_region = "iad"  # Ashburn, Virginia
   memory_mb = 2048
 
 # Note: Built-in proxy autoscaling is intentionally not configured.
-# We scale workers based on CPU via fly-autoscaler (see README).
+# Workers self-scale via built-in adaptive controller (see poll_queue_metrics in worker.py).
+# Leader election via Fly DNS; leader actuates via Fly Machines API. No separate autoscaler app needed.
 
 [metrics]
   port = 8080

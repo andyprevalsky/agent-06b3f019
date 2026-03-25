@@ -293,48 +293,51 @@ fly scale vm performance-1x --memory 2048
 fly scale count 2
 ```
 
-CPU-based autoscaling via `fly-autoscaler` (`navi-whisper-lux-autoscaler`):
+Built-in adaptive autoscaling (no separate autoscaler machine needed):
 
 - Minimum machines: `2`, maximum: `10`
-- Target utilization: 70% CPU per machine
-- Metric: `sum(rate(fly_instance_cpu{..., mode=~"user|system|..."}[5m]))` — total busy CPU across all instances (centiseconds/sec)
-- Formula: `max(2, min(10, ceil(cpu_busy_total / 70)))` — derives desired count from total CPU demand
-- Stability: total CPU demand doesn't change when machines are added/removed (work redistributes), so the formula doesn't oscillate
-- Smoothing: 5-minute rate window prevents spiky behavior
+- Signal: Temporal task queue backlog (real-time demand)
+- Actuation: Fly Machines API (start/stop pre-provisioned machines)
+- Leader election: lowest IPv6 via Fly internal DNS — only the leader actuates
+- Why not CPU? CPU is a terrible proxy for Temporal worker load. A worker can be at 0% CPU but saturated with paused workflows, and a transient LLM retry storm can spike CPU without needing more machines.
 
-Autoscaler secrets (already configured):
+**How the adaptive controller works** (see `poll_queue_metrics` in `worker.py`):
+
+Every worker polls Temporal every **1 second** and computes `desired_machine_count`:
+
+- **Scale up (eager):** When `task_queue_backlog / observed_capacity >= 0.2`, add `ceil(backlog / observed_capacity)` machines. `observed_capacity` is read in real-time from the SDK's resource-based tuner (`slots_used + slots_available`) — no hardcoded magic number. The tuner dynamically adjusts available slots based on actual CPU/memory pressure, so capacity reflects what this machine can truly handle. Transient blips below 20% are absorbed by the threshold; `ceil()` ensures we add enough machines once crossed (0.2→+1, 1.2→+2, 2.2→+3).
+- **Scale down (gradual probe):** When backlog stays at 0 for 60 consecutive seconds, remove 1 machine and reset the timer. This probes downward — if removing the machine causes backlog to reappear, we detect it within 1s and immediately scale back up. If not, we probe again after 60s. This converges to the minimum fleet size without predicting capacity.
+- **Machine count:** Observed in real-time via Fly internal DNS (`<app>.internal` AAAA records), no API tokens needed.
+- **Leader election:** All workers compute `desired_machine_count` (exposed via `/metrics`), but only the leader (lowest IPv6 from DNS) calls the Fly Machines API to start/stop machines. If the leader dies, the next-lowest IP takes over within 1 poll cycle.
+- **Resource-based tuner:** The Temporal SDK's `WorkerTuner.create_resource_based(target_cpu=0.8, target_memory=0.8)` dynamically manages slot counts. Instead of hardcoded `max_concurrent_activities`, the tuner expands slots when idle and contracts under load. The autoscaler reads `worker_task_slots_used` + `worker_task_slots_available` from the SDK's Prometheus endpoint (port 9090) to derive real capacity.
+
+Scaling examples (assuming observed_capacity=80 under moderate load):
+| Current machines | Backlog | additional | Decision |
+|---|---|---|---|
+| 2 | 0 | 0 | Hold (or -1 after 60s cooldown) |
+| 2 | 10 | 0.12 | Absorb (below 20% threshold) |
+| 2 | 16 | 0.20 | Scale to 3 (+1, ceil) |
+| 2 | 96 | 1.20 | Scale to 4 (+2, ceil) |
+| 3 | 160 | 2.00 | Scale to 5 (+2, ceil) |
+| 5 | 0 for 60s | — | Scale to 4 (-1 probe) |
+| 5 | 0 for 120s | — | Scale to 3 (-1, -1 probes) |
+
+Tuning knobs:
+- **`SCALE_UP_THRESHOLD` (0.2):** Fraction of one machine's capacity that triggers scale-up. Lower = more eager.
+- **`SCALE_DOWN_COOLDOWN_SECS` (60):** Seconds of zero backlog before probing downward. Higher = more conservative on scale-down.
+- **`target_cpu_usage` / `target_memory_usage` (0.8):** Resource-based tuner targets. Controls when the tuner contracts available slots. Not recommended above 0.8 to avoid OOM.
+- **`POLL_INTERVAL_SECS` (1):** How often each worker polls Temporal. 3 API calls/s, well within Temporal Cloud's 1000 req/s limit.
+
+Required secret on the worker app:
 
 ```bash
-FAS_APP_NAME=navi-whisper-lux
-FAS_PROMETHEUS_ADDRESS=https://api.fly.io/prometheus/personal
-FAS_PROMETHEUS_METRIC_NAME=cpu_busy_total
-FAS_PROMETHEUS_QUERY='sum(rate(fly_instance_cpu{app="navi-whisper-lux",mode=~"user|system|iowait|softirq|irq|nice"}[5m]))'
-FAS_CREATED_MACHINE_COUNT='max(2, min(10, ceil(cpu_busy_total / 70)))'
-FAS_STARTED_MACHINE_COUNT='max(2, min(10, ceil(cpu_busy_total / 70)))'
-FAS_API_TOKEN=<deploy token>
-FAS_PROMETHEUS_TOKEN=<readonly token>
+fly secrets set FLY_API_TOKEN="<your-fly-api-token>"
 ```
 
-One-time setup (already done):
+The `navi-whisper-lux-autoscaler` app is no longer needed and can be decommissioned. Pre-provision machines up to MAX_MACHINES:
 
 ```bash
-fly apps create navi-whisper-lux-autoscaler
-fly launch --from https://github.com/superfly/fly-autoscaler --name navi-whisper-lux-autoscaler
-
-DEPLOY_TOKEN=$(fly tokens create deploy -a navi-whisper-lux --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
-READONLY_TOKEN=$(fly tokens create readonly personal --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
-
-fly secrets set -a navi-whisper-lux-autoscaler \
-  FAS_APP_NAME=navi-whisper-lux \
-  FAS_PROMETHEUS_ADDRESS="https://api.fly.io/prometheus/personal" \
-  FAS_PROMETHEUS_METRIC_NAME=cpu_busy_total \
-  FAS_PROMETHEUS_QUERY='sum(rate(fly_instance_cpu{app="navi-whisper-lux",mode=~"user|system|iowait|softirq|irq|nice"}[5m]))' \
-  FAS_CREATED_MACHINE_COUNT='max(2, min(10, ceil(cpu_busy_total / 70)))' \
-  FAS_STARTED_MACHINE_COUNT='max(2, min(10, ceil(cpu_busy_total / 70)))' \
-  FAS_API_TOKEN="$DEPLOY_TOKEN" \
-  FAS_PROMETHEUS_TOKEN="$READONLY_TOKEN"
-
-fly deploy -a navi-whisper-lux-autoscaler
+fly scale count 10 -a navi-whisper-lux
 ```
 
 ### Monitor

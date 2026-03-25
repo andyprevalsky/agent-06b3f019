@@ -7,7 +7,8 @@ import os
 import logging
 from dotenv import load_dotenv
 from temporalio.client import Client, TLSConfig
-from temporalio.worker import Worker
+from temporalio.runtime import Runtime, TelemetryConfig, PrometheusConfig
+from temporalio.worker import Worker, WorkerTuner, ResourceBasedSlotConfig
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 import structlog
 
@@ -93,7 +94,7 @@ from activities.param_populator import populate_tool_params_activity
 from activities.reasoning import execute_reasoning_activity
 # Shared memory activities
 from activities.shared_memory import get_shared_memory, append_shared_memory
-from health_server import run_health_server, set_worker_status
+from health_server import run_health_server, set_worker_status, set_queue_metrics
 
 # Configure unified structured logging
 # All log output (structlog + stdlib including Temporal's workflow.logger)
@@ -160,6 +161,277 @@ _wf.logger.workflow_info_on_message = False
 logger = structlog.get_logger()
 
 
+import httpx
+import math
+import socket
+import time
+
+# ── Adaptive autoscaler ──────────────────────────────────────────────────
+# Built-in controller: no separate autoscaler machine needed.
+# Every worker polls Temporal (1s), computes desired fleet size.
+# Only the leader (lowest-IP via Fly DNS) actuates via Fly Machines API.
+#
+# Capacity is observed in real-time from the SDK's resource-based tuner
+# (worker_task_slots_used + worker_task_slots_available on localhost:9090).
+# No hardcoded magic numbers — the tuner adjusts slots based on CPU/memory.
+#
+# Scale-up (eager):   backlog >= 20% of observed capacity → add machines
+# Scale-down (probe): 60s of zero backlog → remove 1 machine, watch for backlog
+# ─────────────────────────────────────────────────────────────────────────
+
+MIN_MACHINES = 2
+MAX_MACHINES = 10
+SCALE_DOWN_COOLDOWN_SECS = 60   # Seconds of zero backlog before probing downward
+SCALE_UP_THRESHOLD = 0.2        # Fraction of machine capacity that triggers scale-up
+SCALE_UP_COOLDOWN_SECS = 10     # Seconds to wait after a scale-up before allowing another
+POLL_INTERVAL_SECS = 1          # 3 Temporal API calls/s — well within 1000 req/s limit
+LOG_INTERVAL_SECS = 30          # Periodic summary log (avoid 86k lines/day at 1s polls)
+SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
+
+FLY_MACHINES_API = "https://api.machines.dev/v1"
+
+# Mutable state (single writer in poll loop)
+_backlog_zero_since: float | None = None
+_desired_machines: int = MIN_MACHINES
+_last_log_time: float = 0
+_last_scale_up_time: float = 0
+_prev_desired: int = MIN_MACHINES
+
+
+def _get_peer_ips(app_name: str) -> list[str]:
+    """Get sorted list of all peer IPv6 addresses via Fly internal DNS."""
+    try:
+        addrs = socket.getaddrinfo(f"{app_name}.internal", None, socket.AF_INET6)
+        return sorted(set(a[4][0] for a in addrs))
+    except socket.gaierror:
+        return []
+
+
+def _count_fly_peers() -> int:
+    """Count running Fly machines via internal AAAA DNS."""
+    fly_app = os.getenv("FLY_APP_NAME")
+    if not fly_app:
+        return 1  # Local development
+    return max(len(_get_peer_ips(fly_app)), 1)
+
+
+def _am_i_leader() -> bool:
+    """Leader election via DNS: lowest IPv6 address is the leader.
+
+    All workers compute desired_machine_count, but only the leader
+    actuates by calling the Fly Machines API to start/stop machines.
+    If the leader dies, it disappears from DNS and the next-lowest
+    IP takes over automatically within 1 poll cycle.
+    """
+    fly_app = os.getenv("FLY_APP_NAME")
+    if not fly_app:
+        return True  # Local dev — only worker
+    my_ip = os.getenv("FLY_PRIVATE_IP")
+    if not my_ip:
+        return True
+    peers = _get_peer_ips(fly_app)
+    if not peers:
+        return True
+    return my_ip == peers[0]
+
+
+async def _get_observed_capacity(http: httpx.AsyncClient) -> int | None:
+    """Read actual activity slot capacity from the SDK's resource-based tuner.
+
+    The tuner dynamically adjusts available slots based on CPU/memory pressure.
+    effective_capacity = slots_used + slots_available = what this machine can
+    actually handle right now. No hardcoded magic number needed.
+
+    Returns None if SDK metrics aren't ready yet (e.g., during startup).
+    """
+    try:
+        resp = await http.get(f"http://localhost:{SDK_METRICS_PORT}/metrics", timeout=2.0)
+
+        slots_used = None
+        slots_available = None
+        for line in resp.text.splitlines():
+            if line.startswith("#"):
+                continue
+            if "task_slots_used" in line and "ActivityTask" in line:
+                slots_used = int(float(line.split()[-1]))
+            elif "task_slots_available" in line and "ActivityTask" in line:
+                slots_available = int(float(line.split()[-1]))
+
+        if slots_used is not None and slots_available is not None:
+            return max(slots_used + slots_available, 1)
+        return None
+    except Exception as e:
+        logger.warning("Failed to read SDK metrics", error=str(e))
+        return None
+
+
+async def _scale_fleet(desired: int, http: httpx.AsyncClient):
+    """Start/stop Fly machines to reach desired count. Called by leader only.
+
+    Machines must be pre-provisioned up to MAX_MACHINES (e.g. `fly scale count 10`).
+    This function starts/stops existing machines — it does not create or destroy them.
+    """
+    fly_app = os.getenv("FLY_APP_NAME")
+    fly_token = os.getenv("FLY_API_TOKEN")
+    if not fly_app or not fly_token:
+        return
+
+    my_machine_id = os.getenv("FLY_MACHINE_ID")
+    headers = {"Authorization": f"Bearer {fly_token}"}
+
+    try:
+        resp = await http.get(
+            f"{FLY_MACHINES_API}/apps/{fly_app}/machines",
+            headers=headers,
+        )
+        resp.raise_for_status()
+        machines = resp.json()
+
+        started = [m for m in machines if m["state"] == "started"]
+        stopped = [m for m in machines if m["state"] == "stopped"]
+        current = len(started)
+
+        if desired > current and stopped:
+            to_start = min(desired - current, len(stopped))
+            for m in stopped[:to_start]:
+                await http.post(
+                    f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/start",
+                    headers=headers,
+                )
+                logger.info("Autoscaler: started machine", machine_id=m["id"])
+
+        elif desired < current:
+            to_stop = current - desired
+            candidates = [m for m in started if m["id"] != my_machine_id]
+            for m in candidates[:to_stop]:
+                await http.post(
+                    f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/stop",
+                    headers=headers,
+                )
+                logger.info("Autoscaler: stopped machine", machine_id=m["id"])
+    except Exception as e:
+        logger.warning("Autoscaler: fleet scale failed", error=str(e))
+
+
+async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
+    """Adaptive autoscaler: poll Temporal, compute desired machines, actuate via Fly API.
+
+    Runs on every worker at 1s intervals. All workers observe and compute
+    desired_machine_count (exposed via /metrics for monitoring). Only the leader
+    (lowest-IP machine via Fly internal DNS) actuates by calling the Fly Machines
+    API to start/stop machines.
+
+    Scale-up (eager):
+      Capacity is observed in real-time from the SDK's resource-based tuner
+      (worker_task_slots_used + worker_task_slots_available on localhost:9090).
+      When backlog >= 20% of observed capacity, add ceil(backlog / capacity) machines.
+      The 20% threshold absorbs transient blips; ceil() ensures we add enough
+      machines once the threshold is crossed (0.2→+1, 1.2→+2).
+
+    Scale-down (gradual probe):
+      When backlog stays at 0 for 60 consecutive seconds, remove 1 machine and reset
+      the timer. If removing the machine causes backlog to reappear, we detect it
+      within 1s and immediately scale back up. If not, we probe again after 60s.
+      This converges to the minimum fleet size without predicting capacity.
+
+    No separate autoscaler machine needed — the navi-whisper-lux-autoscaler app
+    can be decommissioned.
+    """
+    global _backlog_zero_since, _desired_machines, _last_log_time, _last_scale_up_time, _prev_desired
+
+    from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+    from temporalio.api.taskqueue.v1 import TaskQueue as TaskQueueProto
+    from temporalio.api.enums.v1 import TaskQueueType
+
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        while True:
+            try:
+                # ── Observe current state ─────────────────────────────────
+                count_result = await client.count_workflows(
+                    f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"'
+                )
+                workflow_count = count_result.count
+
+                backlog = 0
+                for task_type in [TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
+                                  TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW]:
+                    try:
+                        resp = await client.workflow_service.describe_task_queue(
+                            DescribeTaskQueueRequest(
+                                namespace=namespace,
+                                task_queue=TaskQueueProto(name=task_queue),
+                                task_queue_type=task_type,
+                            )
+                        )
+                        if resp.task_queue_status:
+                            backlog += resp.task_queue_status.backlog_count_hint
+                    except Exception as e:
+                        logger.warning("Failed to describe task queue", error=str(e), task_queue_type=str(task_type))
+
+                # Get real capacity from SDK's resource-based tuner (no magic number)
+                observed_capacity = await _get_observed_capacity(http)
+                if observed_capacity is None:
+                    await asyncio.sleep(POLL_INTERVAL_SECS)
+                    continue  # SDK metrics not ready yet, skip this cycle
+
+                current_machines = _count_fly_peers()
+                is_leader = _am_i_leader()
+
+                # ── Adaptive scaling decision ─────────────────────────────
+                now = time.monotonic()
+                if backlog > 0:
+                    _backlog_zero_since = None
+                    additional = backlog / observed_capacity
+                    # Cooldown: after a scale-up, wait for DNS to propagate
+                    # before allowing another (prevents overshoot)
+                    in_cooldown = (now - _last_scale_up_time) < SCALE_UP_COOLDOWN_SECS
+                    if additional >= SCALE_UP_THRESHOLD and not in_cooldown:
+                        _desired_machines = current_machines + math.ceil(additional)
+                    else:
+                        _desired_machines = current_machines  # Transient blip or in cooldown
+                else:
+                    # Backlog is 0 — probe downward after cooldown
+                    if _backlog_zero_since is None:
+                        _backlog_zero_since = now
+
+                    if now - _backlog_zero_since >= SCALE_DOWN_COOLDOWN_SECS:
+                        _desired_machines = current_machines - 1
+                        _backlog_zero_since = now  # Reset timer for next probe
+                    else:
+                        _desired_machines = current_machines  # Hold steady
+
+                _desired_machines = max(MIN_MACHINES, min(MAX_MACHINES, _desired_machines))
+
+                set_queue_metrics(backlog, workflow_count, _desired_machines, current_machines, is_leader, observed_capacity)
+
+                # ── Leader actuates ───────────────────────────────────────
+                if is_leader and _desired_machines != current_machines:
+                    if _desired_machines > current_machines:
+                        _last_scale_up_time = time.monotonic()
+                    await _scale_fleet(_desired_machines, http)
+
+                # ── Smart logging (every 30s or on state change) ──────────
+                now_mono = time.monotonic()
+                if (_desired_machines != _prev_desired or
+                        now_mono - _last_log_time >= LOG_INTERVAL_SECS):
+                    logger.info(
+                        "Autoscaler poll",
+                        backlog=backlog,
+                        workflow_count=workflow_count,
+                        current_machines=current_machines,
+                        desired_machines=_desired_machines,
+                        observed_capacity=observed_capacity,
+                        is_leader=is_leader,
+                    )
+                    _last_log_time = now_mono
+                _prev_desired = _desired_machines
+
+            except Exception as e:
+                logger.warning("Failed to poll queue metrics", error=str(e))
+
+            await asyncio.sleep(POLL_INTERVAL_SECS)
+
+
 async def main():
     """Main worker entry point."""
 
@@ -171,6 +443,13 @@ async def main():
     print(f"🚀 [Agents] Mode: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
     print(f"   Rose API URL: {config.rose.api_url}")
 
+    # Set up Temporal SDK runtime with Prometheus metrics exporter.
+    # Exposes worker_task_slots_used/available from the resource-based tuner
+    # on a local port. The autoscaler scrapes these to get real capacity.
+    runtime = Runtime(telemetry=TelemetryConfig(
+        metrics=PrometheusConfig(bind_address=f"0.0.0.0:{SDK_METRICS_PORT}")
+    ))
+
     # Start health check server
     health_thread = run_health_server(config.health_check_port)
     set_worker_status(True)
@@ -181,7 +460,7 @@ async def main():
         task_queue=config.temporal.task_queue,
         environment=config.environment
     )
-    
+
     # Connect to Temporal Cloud
     client = await Client.connect(
         config.temporal.address,
@@ -193,10 +472,16 @@ async def main():
         rpc_metadata={
             "temporal-namespace": config.temporal.namespace,
             "Authorization": f"Bearer {config.temporal.api_key}"
-        }
+        },
+        runtime=runtime,
     )
     
     logger.info("Connected to Temporal Cloud")
+
+    # Start background queue metrics poller (feeds /metrics for fly-autoscaler)
+    asyncio.create_task(poll_queue_metrics(
+        client, config.temporal.namespace, config.temporal.task_queue
+    ))
 
     # Make client available to query_parent_state_activity
     set_temporal_client(client)
@@ -220,6 +505,21 @@ async def main():
         "helpers.attachments",
     )
     
+    # Resource-based tuner: dynamically adjusts slot counts based on actual
+    # CPU/memory pressure. No hardcoded concurrency limits — the tuner determines
+    # how many concurrent activities/workflows this machine can handle in real-time.
+    # The autoscaler reads the resulting slots via SDK Prometheus metrics.
+    tuner = WorkerTuner.create_resource_based(
+        target_memory_usage=0.8,
+        target_cpu_usage=0.8,
+        activity_config=ResourceBasedSlotConfig(
+            maximum_slots=config.temporal.max_concurrent_activities,
+        ),
+        workflow_config=ResourceBasedSlotConfig(
+            maximum_slots=config.temporal.max_concurrent_workflows,
+        ),
+    )
+
     # Create worker with all workflows and activities
     worker = Worker(
         client,
@@ -307,8 +607,7 @@ async def main():
             # Parent state query (for sub-agent → parent communication)
             query_parent_state_activity,
         ],
-        max_concurrent_activities=config.temporal.max_concurrent_activities,
-        max_concurrent_workflow_tasks=config.temporal.max_concurrent_workflows,
+        tuner=tuner,
         max_cached_workflows=config.temporal.max_cached_workflows,
         max_concurrent_activity_task_polls=config.temporal.max_concurrent_activity_task_polls,
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
@@ -316,9 +615,11 @@ async def main():
     )
     
     logger.info(
-        "Worker configured",
-        max_concurrent_activities=config.temporal.max_concurrent_activities,
-        max_concurrent_workflows=config.temporal.max_concurrent_workflows
+        "Worker configured with resource-based tuner",
+        max_activity_slots=config.temporal.max_concurrent_activities,
+        max_workflow_slots=config.temporal.max_concurrent_workflows,
+        target_cpu=0.8,
+        target_memory=0.8,
     )
     
     # Handle shutdown gracefully using asyncio signal handlers
