@@ -22,3 +22,20 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
+      - name: Stop excess machines (deploy starts all, scale back to minimum)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          MIN=2
+          APP="navi-whisper-lux"
+          STARTED=$(flyctl machines list -a "$APP" --json | jq -r '[.[] | select(.state == "started")] | sort_by(.id) | .[].id')
+          COUNT=0
+          for ID in $STARTED; do
+            COUNT=$((COUNT + 1))
+            if [ "$COUNT" -gt "$MIN" ]; then
+              echo "Stopping excess machine $ID"
+              flyctl machines stop "$ID" -a "$APP" || true
+            fi
+          done
+          echo "Fleet: kept $MIN running, stopped $((COUNT > MIN ? COUNT - MIN : 0)) excess"
+

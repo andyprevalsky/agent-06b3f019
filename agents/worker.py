@@ -295,23 +295,29 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
         if desired > current and stopped:
             to_start = min(desired - current, len(stopped))
             for m in stopped[:to_start]:
-                await http.post(
-                    f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/start",
-                    headers=headers,
-                )
-                logger.info("Autoscaler: started machine", machine_id=m["id"])
+                try:
+                    await http.post(
+                        f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/start",
+                        headers=headers,
+                    )
+                    logger.info("Autoscaler: started machine", machine_id=m["id"])
+                except Exception as e:
+                    logger.warning("Autoscaler: failed to start machine", machine_id=m["id"], error=str(e))
 
         elif desired < current:
             to_stop = current - desired
             candidates = [m for m in started if m["id"] != my_machine_id]
             for m in candidates[:to_stop]:
-                await http.post(
-                    f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/stop",
-                    headers=headers,
-                )
-                logger.info("Autoscaler: stopped machine", machine_id=m["id"])
+                try:
+                    await http.post(
+                        f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/stop",
+                        headers=headers,
+                    )
+                    logger.info("Autoscaler: stopped machine", machine_id=m["id"])
+                except Exception as e:
+                    logger.warning("Autoscaler: failed to stop machine", machine_id=m["id"], error=str(e))
     except Exception as e:
-        logger.warning("Autoscaler: fleet scale failed", error=str(e))
+        logger.warning("Autoscaler: fleet list failed", error=str(e))
 
 
 async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
