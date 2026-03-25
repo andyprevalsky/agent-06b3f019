@@ -3793,16 +3793,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 
-                # Poll for pause while activity runs
+                # Wait for activity completion or pause signal (zero history events)
                 was_cancelled = False
-                while not activity_handle.done():
-                    await workflow_instance._check_parent_state()
-                    if workflow_instance.is_paused:
-                        logger.info("🔴 Cancelling browser agent due to pause")
-                        activity_handle.cancel()
-                        was_cancelled = True
-                        break
-                    await workflow.sleep(1)  # Use workflow.sleep for determinism
+                await workflow.wait_condition(
+                    lambda: activity_handle.done() or workflow_instance.is_paused
+                )
+                if workflow_instance.is_paused and not activity_handle.done():
+                    logger.info("🔴 Cancelling browser agent due to pause")
+                    activity_handle.cancel()
+                    was_cancelled = True
 
                 # Get result
                 try:
