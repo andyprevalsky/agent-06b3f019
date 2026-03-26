@@ -33,6 +33,7 @@ class ClaudeCodeWsClient:
         on_output: Callable[[str, bool], Awaitable[None]],  # (data, is_buffer) -> None
         on_exit: Callable[[int], Awaitable[None]],  # (exit_code) -> None
         on_connection_change: Optional[Callable[[bool], Awaitable[None]]] = None,  # (is_connected) -> None
+        on_stdin_error: Optional[Callable[[str], Awaitable[None]]] = None,  # (error_msg) -> None
         heartbeat_fn: Optional[Callable[[str], None]] = None,
         max_reconnects: int = 5,
         reconnect_delay: float = 1.0,
@@ -46,6 +47,7 @@ class ClaudeCodeWsClient:
                        is_buffer=True means this is the full buffer from reconnect.
             on_exit: Callback when process exits. Called with exit code.
             on_connection_change: Callback when connection state changes. Called with True on connect, False on disconnect.
+            on_stdin_error: Callback when server reports stdin delivery failure. Called with error message.
             heartbeat_fn: Optional Temporal activity heartbeat function.
             max_reconnects: Maximum reconnection attempts.
             reconnect_delay: Base delay for exponential backoff (seconds).
@@ -54,6 +56,7 @@ class ClaudeCodeWsClient:
         self.on_output = on_output
         self.on_exit = on_exit
         self.on_connection_change = on_connection_change
+        self.on_stdin_error = on_stdin_error
         self.heartbeat_fn = heartbeat_fn
         self.max_reconnects = max_reconnects
         self.reconnect_delay = reconnect_delay
@@ -224,7 +227,10 @@ class ClaudeCodeWsClient:
                 logger.debug("[ClaudeCodeWs] stdin ack", bytes=msg.get("bytes"))
 
             elif msg_type == "stdin_error":
-                logger.error("[ClaudeCodeWs] stdin error", error=msg.get("error"))
+                error_msg = msg.get("error", "unknown")
+                logger.error("[ClaudeCodeWs] stdin error — message did NOT reach Claude Code", error=error_msg)
+                if self.on_stdin_error:
+                    await self.on_stdin_error(error_msg)
 
             else:
                 logger.warning("[ClaudeCodeWs] Unknown message type", msg_type=msg_type)

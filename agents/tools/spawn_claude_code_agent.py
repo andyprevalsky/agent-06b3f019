@@ -537,12 +537,25 @@ async def spawn_claude_code_activity(
                     task_id=task_id
                 )
 
+        async def on_stdin_error(error_msg: str):
+            """Handle stdin delivery failure from server — re-enable silence detection so parent retries."""
+            nonlocal pending_output
+            logger.error(
+                "[ClaudeCode] Server reported stdin error — re-enabling silence detection for retry",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=error_msg,
+            )
+            # Re-set pending_output so silence detection fires again and parent LLM re-evaluates
+            pending_output = True
+
         # Connect to WebSocket
         ws_client = ClaudeCodeWsClient(
             ws_url=ws_url,
             on_output=on_output,
             on_exit=on_exit,
             on_connection_change=on_connection_change,
+            on_stdin_error=on_stdin_error,
             heartbeat_fn=lambda msg: activity.heartbeat(msg),
         )
 
@@ -736,7 +749,20 @@ async def spawn_claude_code_activity(
                         elif llm_response.get("response"):
                             # Send response to Claude Code stdin
                             response_text = llm_response["response"]
-                            await ws_client.send_stdin(response_text)
+                            sent_ok = await ws_client.send_stdin(response_text)
+
+                            if not sent_ok:
+                                logger.error(
+                                    "[ClaudeCode] stdin send FAILED — message did not reach terminal",
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    response=response_text[:100],
+                                )
+                                action_summary.append(f"STDIN SEND FAILED: '{response_text[:50]}'")
+                                # Re-set pending_output so we retry on next silence
+                                pending_output = True
+                                continue
+
                             interaction_count += 1
 
                             # Track in conversation history
@@ -1079,6 +1105,29 @@ async def spawn_claude_code_activity(
 
         if task_id:
             try:
+                # Persist terminal output before closing so we can debug cancelled sessions
+                try:
+                    cancelled_output = terminal.get_display() if terminal else ""
+                    if cancelled_output:
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            await client.post(
+                                f"{config.backend.api_url}/api/claude-code-session/{task_id}/output",
+                                headers={"x-api-key": config.backend.api_key or ""},
+                                json={"output": cancelled_output}
+                            )
+                        logger.info(
+                            "[ClaudeCode] Persisted terminal output on cancel",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            output_len=len(cancelled_output),
+                        )
+                except Exception as output_error:
+                    logger.warning(
+                        "[ClaudeCode] Failed to persist output on cancel",
+                        agent_id=agent_id,
+                        error=str(output_error),
+                    )
+
                 await save_claude_code_message(
                     agent_id=agent_id,
                     title="Session Cancelled",
