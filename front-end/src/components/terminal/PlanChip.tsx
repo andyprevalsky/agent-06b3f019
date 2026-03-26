@@ -12,15 +12,18 @@
  *     v
  * [COLLAPSED]
  *
+ * ERROR STATE:
+ * [EXPANDED] <-- auto-expanded, red border, AlertCircle icon, error message as content
+ *
  * Props determine visual state:
- * - plan.status: 'planning' | 'ready' | 'executing' | 'complete'
- * - toolStatus: 'IN_PROGRESS' | 'FINISHED' (shimmer effect)
+ * - plan.status: 'planning' | 'ready' | 'executing' | 'complete' | 'error'
+ * - toolStatus: 'IN_PROGRESS' | 'FINISHED' | 'ERROR' (shimmer effect / error state)
  * - charCount: number (animated char counter shown during streaming)
  */
 
 import { memo, useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronDown, FileText, ArrowDown } from 'lucide-react';
+import { ChevronDown, FileText, ArrowDown, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MarkdownText } from './MarkdownText';
 import { PlanTask } from '@/lib/realtime-types';
@@ -32,14 +35,14 @@ interface PlanData {
   tasks: PlanTask[];
   dependencies: Record<string, string[]> | null;
   join: 'all' | 'any';
-  status: 'planning' | 'ready' | 'executing' | 'complete';
+  status: 'planning' | 'ready' | 'executing' | 'complete' | 'error';
 }
 
 interface PlanChipProps {
   plan: PlanData;
   className?: string;
-  /** Tool status - IN_PROGRESS shows shimmer effect on title */
-  toolStatus?: 'IN_PROGRESS' | 'FINISHED';
+  /** Tool status - IN_PROGRESS shows shimmer effect on title, ERROR shows error state */
+  toolStatus?: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
   /** Character count to display with spring animation when streaming */
   charCount?: number;
 }
@@ -207,7 +210,8 @@ function formatToolName(toolName: string): string {
  * Displays tasks as a flat numbered list in topological order with inline dependency notation.
  */
 export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = 'FINISHED', charCount = 0 }: PlanChipProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const isError = toolStatus === 'ERROR';
+  const [isExpanded, setIsExpanded] = useState(isError); // Auto-expand on error to show message
   const isStreaming = toolStatus === 'IN_PROGRESS';
   const animatedCharCount = useAnimatedCounter(charCount, 0.3);
 
@@ -250,8 +254,10 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
         layout
         className={cn(
           'rounded-lg border overflow-hidden transition-colors backdrop-blur-[12px]',
-          'bg-[#EEEFF2]/60 dark:bg-[#1a1a1a]/60 border-border/60',
-          'hover:bg-[#EEEFF2]/80 dark:hover:bg-[#1a1a1a]/80 hover:border-border'
+          isError
+            ? 'bg-destructive/10 dark:bg-destructive/10 border-destructive/40'
+            : 'bg-[#EEEFF2]/60 dark:bg-[#1a1a1a]/60 border-border/60',
+          !isError && 'hover:bg-[#EEEFF2]/80 dark:hover:bg-[#1a1a1a]/80 hover:border-border'
         )}
         style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
       >
@@ -264,14 +270,18 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
           )}
         >
           <div className="flex items-center gap-2 min-w-0">
-            {/* Plan icon */}
-            <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+            {/* Plan icon (error icon when failed) */}
+            {isError
+              ? <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
+              : <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+            }
 
             {/* Title - shimmer effect when streaming */}
             <span className={cn(
               "text-sm font-medium truncate",
+              isError && "text-destructive",
               isStreaming && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
-              !isStreaming && "text-foreground"
+              !isStreaming && !isError && "text-foreground"
             )}>
               {plan.title}
             </span>

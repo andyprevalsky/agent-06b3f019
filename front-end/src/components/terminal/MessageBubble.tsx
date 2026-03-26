@@ -1073,25 +1073,40 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // The message queue in Terminal.tsx blocks on isAnimating until callback is called.
   // IN_PROGRESS messages show shimmer effect, FINISHED shows final state.
   if (isSetPlanTool) {
-    const toolStatus = message.metadata?.toolStatus as 'IN_PROGRESS' | 'FINISHED' | undefined;
+    const toolStatus = message.metadata?.toolStatus as 'IN_PROGRESS' | 'FINISHED' | 'ERROR' | undefined;
     const planData = message.metadata?.data;
-    
-    // Only call onTypingComplete for FINISHED status
-    if (toolStatus === 'FINISHED' && shouldType && onTypingComplete) {
+
+    // Call onTypingComplete for all terminal statuses to not block the queue
+    if ((toolStatus === 'FINISHED' || toolStatus === 'IN_PROGRESS' || toolStatus === 'ERROR') && shouldType && onTypingComplete) {
       requestAnimationFrame(() => {
         onTypingComplete();
       });
     }
-    // Also call for IN_PROGRESS to not block the queue
-    if (toolStatus === 'IN_PROGRESS' && shouldType && onTypingComplete) {
-      requestAnimationFrame(() => {
-        onTypingComplete();
-      });
+
+    // For ERROR status, show error PlanChip with the error message as content
+    if (toolStatus === 'ERROR') {
+      return (
+        <div className="flex gap-3 animate-in fade-in duration-300">
+          <div className="flex-1">
+            <PlanChip
+              plan={{
+                title: message.metadata?.title || 'Plan Failed',
+                content: message.message || '',
+                tasks: [],
+                dependencies: null,
+                join: 'all',
+                status: 'error',
+              }}
+              toolStatus="ERROR"
+            />
+          </div>
+        </div>
+      );
     }
-    
+
     // For IN_PROGRESS without data, use title from metadata
     const title = planData?.title || message.metadata?.title || 'Plan';
-    
+
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
           <div className="flex-1">

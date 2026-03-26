@@ -142,6 +142,7 @@ async def run_agent(
     iteration = iteration_offset
     blueprint_queried = False
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
+    set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
 
     # Track last_checked timestamp FOR THIS RUN - start with epoch if no context
     # This ensures we get ALL messages on first poll, not just recent ones
@@ -707,13 +708,17 @@ async def run_agent(
                     context_len=len(context),
                 )
 
+                # Track set_plan success (only if no error)
+                if tool_name == "set_plan" and not is_error:
+                    set_plan_succeeded = True
+
         # Handle attempt_completion separately (should be alone due to llm.py filtering)
         if attempt_completion_tool:
             tool_name, tool_args, tool_call_id = attempt_completion_tool
 
-            # PLAN phase: require set_plan to have been called
-            if is_plan_loop and not set_plan_called:
-                error_msg = "You must call set_plan before attempt_completion in PLAN phase"
+            # PLAN phase: require set_plan to have succeeded (not just called)
+            if is_plan_loop and not set_plan_succeeded:
+                error_msg = "set_plan must succeed before attempt_completion in PLAN phase. If set_plan failed, retry it." if set_plan_called else "You must call set_plan before attempt_completion in PLAN phase"
                 logger.warning(error_msg)
 
                 # Emit error via handle_tool_event (poll_messages will pick it up next iteration)

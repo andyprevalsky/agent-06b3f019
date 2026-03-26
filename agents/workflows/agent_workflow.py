@@ -1206,7 +1206,9 @@ class AgentWorkflow:
                 else:
                     last_status, result_text = executor_result, ""
                 failed = last_status == MessageStatus.ERROR
-                return {"success": not failed, "message": result_text or f"{tool_name} completed"}
+                if failed:
+                    return {"error": True, "message": result_text or f"{tool_name} failed"}
+                return {"success": True, "message": result_text or f"{tool_name} completed"}
 
         except asyncio.CancelledError:
             # User paused the agent - don't show as error
