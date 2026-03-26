@@ -586,11 +586,17 @@ async def test_execute_phase_spawn_sub_agent(claude_token: str) -> List[str]:
             print(f"  goal: {tc.goal[:80]}")
         else:
             failures.append("[claude/execute/sub_agent] missing 'goal'")
-        if hasattr(tc, "verifier") and tc.verifier:
+        if not hasattr(tc, "verifier") or not tc.verifier:
+            failures.append("[claude/execute/sub_agent] missing 'verifier'")
+        else:
             print(f"  verifier: {tc.verifier.type}")
             if tc.verifier.type != "FLOAT_LLM_JUDGE":
                 failures.append(f"[claude/execute/sub_agent] verifier.type={tc.verifier.type}, expected FLOAT_LLM_JUDGE")
-        if hasattr(tc, "output_schema") and tc.output_schema:
+        if not hasattr(tc, "output_schema") or not tc.output_schema:
+            failures.append("[claude/execute/sub_agent] missing 'output_schema'")
+        elif not getattr(tc.output_schema, "fields", None):
+            failures.append("[claude/execute/sub_agent] output_schema.fields is empty")
+        else:
             print(f"  output_schema.fields: {[f.name for f in tc.output_schema.fields]}")
 
     if failures:
