@@ -67,6 +67,8 @@ class ClaudeCodeWsClient:
         self._reconnect_count = 0
         self._exited = False  # Process has exited, don't reconnect
         self._reconnects_exhausted = False  # All reconnect attempts failed
+        self._stdin_ack_event: Optional[asyncio.Event] = None
+        self._stdin_ack_result: Optional[bool] = None
 
     async def connect(self) -> bool:
         """
@@ -114,23 +116,39 @@ class ClaudeCodeWsClient:
 
     async def send_stdin(self, data: str) -> bool:
         """
-        Send data to Claude Code's stdin.
+        Send data to Claude Code's stdin and wait for server acknowledgment.
+
+        Blocks until the ws-server confirms the stdin write to the PTY succeeded
+        (stdin_ack) or failed (stdin_error), with a 5s timeout.
 
         Args:
-            data: Text to send to stdin. Newline will be added if not present.
+            data: Text to send to stdin.
 
         Returns:
-            True if sent successfully, False otherwise.
+            True if stdin was delivered to the process, False otherwise.
         """
         if not self._ws or self._ws.closed:
             logger.warning("[ClaudeCodeWs] Cannot send stdin - not connected")
             return False
 
         try:
+            self._stdin_ack_event = asyncio.Event()
+            self._stdin_ack_result = None
+
             msg = json.dumps({"type": "stdin", "data": data})
             await self._ws.send_str(msg)
-            logger.info("[ClaudeCodeWs] Sent stdin", bytes=len(data))
-            return True
+            logger.info("[ClaudeCodeWs] Sent stdin, waiting for ack", bytes=len(data))
+
+            # Wait for stdin_ack or stdin_error from server
+            try:
+                await asyncio.wait_for(self._stdin_ack_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.error("[ClaudeCodeWs] stdin ack timeout (5s)")
+                return False
+            finally:
+                self._stdin_ack_event = None
+
+            return self._stdin_ack_result or False
         except Exception as e:
             logger.error("[ClaudeCodeWs] stdin send failed", error=str(e))
             return False
@@ -225,10 +243,16 @@ class ClaudeCodeWsClient:
 
             elif msg_type == "stdin_ack":
                 logger.debug("[ClaudeCodeWs] stdin ack", bytes=msg.get("bytes"))
+                if self._stdin_ack_event:
+                    self._stdin_ack_result = True
+                    self._stdin_ack_event.set()
 
             elif msg_type == "stdin_error":
                 error_msg = msg.get("error", "unknown")
                 logger.error("[ClaudeCodeWs] stdin error — message did NOT reach Claude Code", error=error_msg)
+                if self._stdin_ack_event:
+                    self._stdin_ack_result = False
+                    self._stdin_ack_event.set()
                 if self.on_stdin_error:
                     await self.on_stdin_error(error_msg)
 

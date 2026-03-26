@@ -510,9 +510,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
             terminalInstance.current?.write(msg.data);
             break;
           case 'stdin_echo':
-            // Echo of input sent by parent agent - display in terminal
-            outputBuffer.current += msg.data;
-            terminalInstance.current?.write(msg.data);
+            // PTY already echoes stdin via stdout — don't double-display
             break;
           case 'exit':
             isCompletedRef.current = true;

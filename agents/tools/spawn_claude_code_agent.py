@@ -496,6 +496,8 @@ async def spawn_claude_code_activity(
         last_filtered_output = ""  # Track previous output to detect unchanged terminal
         unchanged_output_count = 0  # Count consecutive times output hasn't changed
         MAX_UNCHANGED_OUTPUTS = 3  # After this many, stop calling LLM (output is stale)
+        last_stdin_send_time: float = 0.0  # Track when we last sent stdin for echo suppression
+        ECHO_SUPPRESS_S = 1.0  # Suppress PTY echo from triggering silence detection for this window
 
         async def on_output(data: str, is_buffer: bool):
             """Handle output from Claude Code WebSocket."""
@@ -505,6 +507,12 @@ async def spawn_claude_code_activity(
                 terminal.reset()
             terminal.feed(data)
             last_output_time = _safe_time()
+            # Suppress pending_output for PTY echo of our own stdin.
+            # The PTY echoes input back as stdout within ~100ms of our write.
+            # Without this, the echo triggers silence detection → parent LLM call
+            # → same response → another stdin send → infinite loop.
+            if last_stdin_send_time and (_safe_time() - last_stdin_send_time) < ECHO_SUPPRESS_S:
+                return
             pending_output = True
 
         async def on_exit(code: int):
@@ -762,6 +770,11 @@ async def spawn_claude_code_activity(
                                 # Re-set pending_output so we retry on next silence
                                 pending_output = True
                                 continue
+
+                            # Record send time for echo suppression — PTY echoes
+                            # our input back as stdout within ~100ms, which would
+                            # trigger another silence detection cycle without this.
+                            last_stdin_send_time = _safe_time()
 
                             interaction_count += 1
 
