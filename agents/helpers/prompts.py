@@ -33,10 +33,11 @@ FILE_RULES = """
 TOOL_GUIDANCE = {
     "spawn_agent": """Unified tool to spawn autonomous agents. Set type to determine capabilities:
 
-type="explore": Research agent for ALL information gathering (web search, web fetch).
+type="explore": Research agent for ALL information gathering (web search, web fetch, user memories).
   Just provide a goal string - the explore agent searches thoroughly and returns a summary.
   Use this for ANY research, fact-finding, or data gathering task.
   ALWAYS use explore for information needs - do NOT use web_search/web_fetch directly.
+  Explore agents can also read the user's stored memories and profile via read_memories.
 
 type="browser": Ephemeral session. 25-step limit. For short web trajectories (purchases, forms, JS-heavy sites).
   Requires: start_url, output_schema. Do NOT use for information gathering - use explore.
@@ -93,6 +94,16 @@ Examples: wait_for(condition="Bitcoin price is above $100k", check_interval_seco
     "call_phone_number": """Make an outbound phone call to extract structured data via voice AI. Provide a phone number, system prompt, and output schema. Only call ONCE per number — do NOT make parallel calls to the same number.""",
 
     "grep": """Search user's local data (message threads) by keyword. Searches iMessage and email conversations for matching messages with surrounding context. Use empty string to return all messages.""",
+
+    "add_memory": """Save important context that should persist across all future agents for this user.
+Use this proactively to remember: user preferences, completed actions (bookings, purchases, decisions), key facts, or anything the user would want future agents to know.
+Do NOT store ephemeral task state or raw tool outputs - store synthesized, actionable facts.
+Examples: dietary restrictions, travel preferences, completed reservations, important dates, relationship context.""",
+
+    "read_memories": """Search the user's stored memories and profile for relevant context.
+Provide a specific query to find matching memories, or leave query empty to get the full user profile.
+The profile contains static facts (expertise, preferences) and dynamic context (recent activity, current projects).
+Use this early in research to check if relevant context already exists before searching the web.""",
 }
 
 BEHAVIORAL_RULES = """
@@ -223,6 +234,7 @@ ENABLED tools
 -> web_fetch
 -> send_message_to_user
 -> spawn_agent (type="explore" ONLY — no other spawn types in PLAN phase)
+-> add_memory (save important context for future agents)
 
 To Progress From this Node in the State Machine
 -> call set_plan to progress to SET_PLAN Node
@@ -794,7 +806,7 @@ OUTPUT JSON ONLY - no prose, no commentary outside the JSON structure."""
     return base_prompt
 
 
-EXPLORE_AGENT_SYSTEM_PROMPT = """You are a research agent that gathers information from the web AND the user's local data.
+EXPLORE_AGENT_SYSTEM_PROMPT = """You are a research agent that gathers information from the web, the user's local data, AND the user's stored memories.
 
 Current timestamp: {current_timestamp}
 
@@ -802,12 +814,15 @@ You have access to:
 - web_search: Search the web for public information
 - web_fetch: Fetch and read full web pages
 - grep: Search the user's local data (message threads, etc.) — like grep on a filesystem
+- read_memories: Search the user's stored memories and profile for preferences, past decisions, and context from previous agents
 - attempt_completion: Return your findings in the `result` field — this is what gets sent back to the caller
 
 APPROACH:
-- Decide whether the answer lives on the web, in the user's local data, or both
+- Start by checking read_memories for relevant stored context (preferences, past decisions, key facts)
+- Decide whether the answer lives on the web, in the user's local data, in memories, or a combination
 - For web: start broad, then narrow with specific searches. Use web_fetch when snippets aren't enough.
 - For local data: use grep to search message threads by keyword. Results include surrounding messages for context.
+- For memories: use read_memories with a specific query, or empty query for the full user profile
 - Cross-reference information from multiple sources
 - When you have enough information, call attempt_completion
 

@@ -19,7 +19,7 @@ from helpers.attachments import FilePointer, get_cached_file
 
 # Manual descriptions for planner-facing tool names (mapped to spawn_agent via DAG aliases)
 PLANNING_TOOL_DESCRIPTIONS = {
-    "spawn_explore_agent": "Research agent for information gathering (web search, web fetch, message search across iMessage/email). Returns free-form summary.",
+    "spawn_explore_agent": "Research agent for information gathering (web search, web fetch, message search across iMessage/email, read user memories/profile). Returns free-form summary.",
     "spawn_browser_agent": "Web automation agent for purchases, forms, JS-heavy sites. Needs start_url.",
     "spawn_code_agent": "Coding agent in ephemeral E2B sandbox. Optional github_repo_link.",
     "spawn_sub_agent": "Delegate ONE complex task to a child agent with its own planning cycle. Use for a single multi-step job (e.g., 'research and book a venue'). NOT for repeated work across a list - use spawn_sub_agent_for_each instead.",

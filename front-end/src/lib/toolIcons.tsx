@@ -179,6 +179,10 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'code_bash': Terminal,
   'code_thinking': Brain,
 
+  // Memory tools (SuperMemory)
+  'add_memory': Save,
+  'read_memories': BookOpen,
+
   // Context management
   'context_reset': RefreshCw,
 };
@@ -211,6 +215,8 @@ const DISPLAY_PREFIX_ICONS: [string, LucideIcon][] = [
   ['Paying for', CheckCircle],
   ['Requesting signup', AlertCircle],
   ['Uploading', Upload],
+  ['Saving memory', Save],
+  ['Reading memories', BookOpen],
 ];
 
 /**

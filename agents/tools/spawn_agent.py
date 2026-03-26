@@ -345,6 +345,16 @@ async def spawn_explore_agent_activity(
                 agent_id=agent_id,
                 user_id=user_id,
             )
+        elif tool_name == "read_memories":
+            from tools.read_memories import ReadMemoriesManager
+            manager = ReadMemoriesManager()
+            result = await manager.execute_tool(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
         elif tool_name == "attempt_completion":
             return {"success": True, "message": "Completion accepted"}
         else:
@@ -386,7 +396,7 @@ async def spawn_explore_agent_activity(
         system_prompt=explore_system_prompt,
         verifier_prompt_generator=explore_verifier_prompt,
         model=model,
-        tools=["web_search", "web_fetch", "grep", "attempt_completion"],
+        tools=["web_search", "web_fetch", "grep", "read_memories", "attempt_completion"],
         initial_context=[{"role": "USER", "text": goal}],
         task_id=task_id,
         is_inside_temporal_activity=True,

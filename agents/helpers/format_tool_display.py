@@ -39,6 +39,8 @@ def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
         "pay_for_x402_bazaar_service": lambda args: f"Paying for {_truncate(args.get('service', '...'), 30)}",
         "request_user_signup": lambda args: "Requesting signup",
         "grep": lambda args: f"Searching messages for {_truncate(args.get('pattern', '...'), 40)}",
+        "add_memory": lambda args: f"Saving memory: {_truncate(args.get('content', '...'), 40)}",
+        "read_memories": lambda args: f"Reading memories: {_truncate(args.get('query', 'profile'), 40)}",
     }
 
     formatter = formatters.get(tool_name)

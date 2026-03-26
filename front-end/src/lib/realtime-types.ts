@@ -183,7 +183,9 @@ export type ToolName =
   | 'search_x402_bazaar'
   | 'pay_for_x402_bazaar_service'
   | 'wait_for'
-  | 'wait_seconds';
+  | 'wait_seconds'
+  | 'add_memory'
+  | 'read_memories';
 
 /**
  * Base metadata present on all TOOL messages.
@@ -424,7 +426,9 @@ export interface SimpleToolMetadata extends BaseToolMetadata {
     | 'web_search'
     | 'search_x402_bazaar'
     | 'pay_for_x402_bazaar_service'
-    | 'wait_seconds';
+    | 'wait_seconds'
+    | 'add_memory'
+    | 'read_memories';
 }
 
 /**

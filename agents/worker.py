@@ -37,6 +37,8 @@ from tools.knowledge_base import query_blueprints_activity, save_blueprint_activ
 from tools.web_search import web_search_activity
 from tools.web_fetch import web_fetch_activity
 from tools.people_search import people_search_activity
+from tools.add_memory import add_memory_activity
+from tools.read_memories import read_memories_activity
 from tools.find_all import (
     find_all_ingest_activity,
     find_all_create_run_activity,
@@ -550,6 +552,9 @@ async def main():
             web_search_activity,
             web_fetch_activity,
             people_search_activity,
+            # Memory tools (SuperMemory)
+            add_memory_activity,
+            read_memories_activity,
             # Find All activities (split into sub-activities)
             find_all_ingest_activity,
             find_all_create_run_activity,

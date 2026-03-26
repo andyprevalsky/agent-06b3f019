@@ -21,6 +21,7 @@ PLAN_PHASE_TOOLS = [
     "send_message_to_user",
     "set_plan",
     "attempt_completion",
+    "add_memory",
 ]
 
 # Tools available during EXECUTE phase (run the plan)
@@ -31,6 +32,7 @@ EXECUTE_PHASE_TOOLS = [
     "call_phone_number",
     "message_person",
     "attempt_completion",
+    "add_memory",
 ]
 
 # Tools the planner can assign to tasks (what shows up in task.tool_name)
@@ -926,6 +928,43 @@ class CallPhoneNumberTool(BaseModel):
     )
 
 
+class AddMemoryTool(BaseModel):
+    """Save a memory that persists across all agents for this user.
+
+    Use this to store important context, preferences, facts, or decisions
+    that should be available to future agents. Memories are automatically
+    organized and retrievable via the explore agent's read_memories tool."""
+
+    tool: Literal["add_memory"]
+    content: str = Field(
+        description=(
+            "The memory content to save. Write clear, self-contained text that will be useful "
+            "in future conversations. Include relevant context - who, what, why. "
+            "Examples: 'User prefers window seats on flights and is allergic to shellfish', "
+            "'Booked reservation at Carbone NYC for March 28 at 7pm under Andy Prevalsky, party of 4', "
+            "'User's company Rose Labs raised Series A in January 2026'"
+        )
+    )
+
+
+class ReadMemoriesTool(BaseModel):
+    """Search the user's stored memories and profile for relevant context.
+
+    Retrieves memories saved by previous agents and the user's profile
+    (preferences, facts, behavioral patterns). Use a specific query to
+    find relevant memories, or omit the query to get the full user profile."""
+
+    tool: Literal["read_memories"]
+    query: str = Field(
+        default="",
+        description=(
+            "Search query to find specific memories. Use descriptive keywords. "
+            "Leave empty to retrieve the full user profile (preferences, facts, patterns). "
+            "Examples: 'travel preferences', 'restaurant reservations', 'work schedule'"
+        )
+    )
+
+
 # Map tool names to their Pydantic models
 TOOL_MODELS = {
     "wait_for": WaitForTool,
@@ -954,10 +993,13 @@ TOOL_MODELS = {
     "call_phone_number": CallPhoneNumberTool,
     # Local data search
     "grep": GrepTool,
+    # Memory tools (SuperMemory)
+    "add_memory": AddMemoryTool,
+    "read_memories": ReadMemoriesTool,
 }
 
 # Tools available inside the explore agent (subset of read-only tools)
-EXPLORE_AGENT_TOOLS = ["web_search", "web_fetch", "grep", "attempt_completion"]
+EXPLORE_AGENT_TOOLS = ["web_search", "web_fetch", "grep", "read_memories", "attempt_completion"]
 
 # ============================================================================
 # Dynamic AgentAction Model Generation
@@ -1069,6 +1111,8 @@ __all__ = [
     "PayForX402BazaarServiceTool",
     "CallPhoneNumberTool",
     "GrepTool",
+    "AddMemoryTool",
+    "ReadMemoriesTool",
     "TOOL_MODELS",
     "create_agent_action_model",
     "ProgressScore",

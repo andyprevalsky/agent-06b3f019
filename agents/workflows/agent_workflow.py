@@ -70,6 +70,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.request_user_signup import request_user_signup
     from tools.call_phone_number import call_phone_number, get_manager as get_call_phone_manager
     from tools.people_search import people_search
+    from tools.add_memory import add_memory
     from loop.run_agent import run_agent
     from loop.dag_executor import extract_plan_from_context, TaskDAG, execute_dag
     from helpers.format_tool_display import format_tool_display
@@ -105,6 +106,7 @@ TOOL_EXECUTORS = {
     "call_phone_number": call_phone_number,
     "people_search": people_search,
     "grep": grep,
+    "add_memory": add_memory,
 }
 
 # Tools requiring user approval before execution
@@ -1163,6 +1165,7 @@ class AgentWorkflow:
                 "call_phone_number",
                 "people_search",
                 "grep",
+                "add_memory",
             }
 
             if tool_name in NEW_SIGNATURE_TOOLS:
