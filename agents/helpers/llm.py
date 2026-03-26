@@ -668,6 +668,7 @@ async def call_llm_structured_streaming(
         actual_model_logged = False
         pool_name = "unknown"
         pool_size = 0
+        claude_token_error = None  # Set when claude_token call failed (auth_error, rate_limit, stall, server_error)
         was_cancelled = False
         chunk_count = 0
         stream_usage = None  # Captured from final chunk with stream_options
@@ -782,6 +783,9 @@ async def call_llm_structured_streaming(
                                 pool_name = chunk_data["pool_name"]
                             if chunk_data.get("pool_size"):
                                 pool_size = chunk_data["pool_size"]
+                            if chunk_data.get("claude_token_error") and not claude_token_error:
+                                claude_token_error = chunk_data["claude_token_error"]
+                                logger.warning(f"⚠️ Claude token error from Rose: {claude_token_error}")
 
                             # Capture usage from final chunk (sent when stream_options.include_usage=true)
                             if chunk_data.get("usage"):
@@ -955,6 +959,7 @@ async def call_llm_structured_streaming(
                     "actual_model": actual_model,
                     "pool_name": pool_name,
                     "pool_size": pool_size,
+                    "claude_token_error": claude_token_error,
                     "cancelled": True
                 }
             else:
@@ -965,6 +970,7 @@ async def call_llm_structured_streaming(
                     "actual_model": actual_model,
                     "pool_name": pool_name,
                     "pool_size": pool_size,
+                    "claude_token_error": claude_token_error,
                     "cancelled": True
                 }
             return empty_response, usage, detected_tools_ordered
@@ -1108,6 +1114,7 @@ async def call_llm_structured_streaming(
                 "actual_model": actual_model,
                 "pool_name": pool_name,
                 "pool_size": pool_size,
+                "claude_token_error": claude_token_error,
                 "cancelled": False,
                 # Include racing-adjusted values if present
                 "winner_prompt_tokens": stream_usage.get("winner_prompt_tokens"),
@@ -1124,6 +1131,7 @@ async def call_llm_structured_streaming(
                 "actual_model": actual_model,
                 "pool_name": pool_name,
                 "pool_size": pool_size,
+                "claude_token_error": claude_token_error,
                 "cancelled": False,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
@@ -1648,6 +1656,7 @@ async def _call_llm_verifier(
     accumulated_json = ""
     actual_model = "unknown"
     pool_name = "unknown"
+    claude_token_error = None
     chunk_count = 0
     stream_usage = None
 
@@ -1686,6 +1695,9 @@ async def _call_llm_verifier(
                             actual_model = chunk_data["actual_model"]
                         if chunk_data.get("pool_name"):
                             pool_name = chunk_data["pool_name"]
+                        if chunk_data.get("claude_token_error") and not claude_token_error:
+                            claude_token_error = chunk_data["claude_token_error"]
+                            logger.warning(f"⚠️ Verifier claude token error: {claude_token_error}")
 
                         # Capture usage from final chunk (includes cache metrics)
                         if chunk_data.get("usage"):
@@ -1739,6 +1751,7 @@ async def _call_llm_verifier(
         "total_tokens": stream_usage.get("total_tokens", chunk_count) if stream_usage else chunk_count,
         "actual_model": actual_model,
         "pool_name": pool_name,
+        "claude_token_error": claude_token_error,
         "cache_creation_input_tokens": cache_write,
         "cache_read_input_tokens": cache_read,
     }

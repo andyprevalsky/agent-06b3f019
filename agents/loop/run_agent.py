@@ -495,6 +495,7 @@ async def run_agent(
                         cache_read_input_tokens=iter_cache_read,
                         cache_creation_input_tokens=iter_cache_write,
                         call_site="plan_loop" if is_plan_loop else "execute_loop",
+                        claude_token_error=usage.get("claude_token_error"),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed: {e}")
@@ -842,6 +843,7 @@ async def run_agent(
                             cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
                             cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
                             call_site="verifier_plan" if is_plan_loop else "verifier_execute",
+                            claude_token_error=v_usage.get("claude_token_error"),
                         )
                     except Exception as e:
                         logger.warning(f"on_tokens callback failed for verifier: {e}")
@@ -920,6 +922,7 @@ async def run_agent(
                         cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
                         cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
                         call_site="verifier_plan" if is_plan_loop else "verifier_execute",
+                        claude_token_error=v_usage.get("claude_token_error"),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")
@@ -997,6 +1000,7 @@ async def _compress_context(
                     cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
                     cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
                     call_site="context_compression",
+                    claude_token_error=usage.get("claude_token_error"),
                 )
             except Exception as e:
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")

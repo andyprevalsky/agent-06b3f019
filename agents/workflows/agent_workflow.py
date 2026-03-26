@@ -1560,6 +1560,7 @@ class AgentWorkflow:
         cache_read_input_tokens: int = 0,
         cache_creation_input_tokens: int = 0,
         call_site: str = "unknown",
+        claude_token_error: Optional[str] = None,
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -1572,6 +1573,7 @@ class AgentWorkflow:
             cache_read_input_tokens: Cached input tokens read (discounted pricing)
             cache_creation_input_tokens: Tokens written to cache (may cost extra for Anthropic)
             call_site: Label identifying the LLM call source (e.g., plan_loop, execute_loop, verifier_execute)
+            claude_token_error: Why the claude token call failed (auth_error, rate_limit, stall, server_error)
         """
         # Update workflow token state (keep in sync with run_agent local vars)
         self.tokens_in += tokens_in_delta
@@ -1584,15 +1586,23 @@ class AgentWorkflow:
             self.actual_model = actual_model
 
             # Detect Claude token fallback: we had a token but Rose used racing instead
+            # Only invalidate the token for permanent failures (auth errors, rate limits).
+            # Transient failures (stalls, server errors) keep the token for retry on next call.
             if (self.claude_max_token
                     and actual_model != "unknown"
                     and not actual_model.endswith("-claude")):
-                workflow.logger.warning(
-                    f"⚠️ Claude token fallback detected: actual_model={actual_model}, "
-                    f"invalidating cached token"
-                )
-                self.claude_max_token = None
-                self.claude_max_token_fetched_at = None
+                if claude_token_error in ("auth_error", "rate_limit"):
+                    workflow.logger.warning(
+                        f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
+                        f"invalidating cached token"
+                    )
+                    self.claude_max_token = None
+                    self.claude_max_token_fetched_at = None
+                else:
+                    workflow.logger.info(
+                        f"ℹ️ Claude token fallback (transient: {claude_token_error}): "
+                        f"actual_model={actual_model}, keeping token for retry"
+                    )
 
         # Use actual_model pricing if available
         # For Anthropic models: hardcoded pricing (includes -claude passthrough = $0)

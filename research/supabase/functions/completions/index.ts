@@ -43,6 +43,9 @@ interface RoseCompletionChunk {
   actual_model: string;
   pool_name: string;
   pool_size: number;
+  // Set when a claude_token call failed and we fell back to racing.
+  // Values: "auth_error" (401/403), "rate_limit" (429), "server_error" (5xx/network), "stall" (20s timeout)
+  claude_token_error?: string;
   // Token usage — only on the final chunk (when stream_options.include_usage=true)
   usage?: {
     prompt_tokens: number;
@@ -2177,6 +2180,7 @@ async function waterfallStream(
   poolSize: number,
   conversation_id: string | null,
   supabase: any,
+  claudeTokenError?: string,
 ): Promise<Response> {
   const errors: string[] = [];
 
@@ -2203,6 +2207,8 @@ async function waterfallStream(
           false,  // isCerebras
           poolName,
           poolSize,
+          undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+          claudeTokenError,
         ),
         WATERFALL_TIMEOUT_MS,
         `waterfall-${model}`
@@ -3262,7 +3268,8 @@ async function handleStreaming(
       poolName: string,
       poolSize: number,
     }>
-  }
+  },
+  claudeTokenError?: string,  // Set when this streaming call is a fallback from a failed claude_token attempt
 ) {
   // Get model-specific messages (transforms screenshots for vision models)
   const modelMessages = getMessagesForModel(messages, actualModel);
@@ -3476,6 +3483,7 @@ async function handleStreaming(
         let currentStallConfig = stallConfig;
         let hasReceivedContent = false;
         let lastContentTime = Date.now();
+        let currentClaudeTokenError = claudeTokenError;  // Mutable: set to 'stall' on stall fallback
 
         // Anthropic usage tracking - capture from message_start and message_delta
         let anthropicInputTokens = 0;
@@ -3500,7 +3508,8 @@ async function handleStreaming(
             requested_model: requestedModel,
             actual_model: currentModel,
             pool_name: currentPoolName,
-            pool_size: currentPoolSize
+            pool_size: currentPoolSize,
+            ...(currentClaudeTokenError && { claude_token_error: currentClaudeTokenError }),
           };
           const payload = `data: ${JSON.stringify(chunk)}\n\n`;
           controller.enqueue(encoder.encode(payload));
@@ -3527,6 +3536,7 @@ async function handleStreaming(
               // Never got content - seamlessly switch to racing
               slog('warn', '[Stall] No content from Claude in 20s, switching to racing');
               currentReader.cancel();
+              if (claudeAuth) currentClaudeTokenError = 'stall';  // Signal transient failure to agent
               try {
                 const fallback = await currentStallConfig.onFallback();
                 currentReader = fallback.reader;
@@ -3584,7 +3594,8 @@ async function handleStreaming(
                 requested_model: requestedModel,
                 actual_model: currentModel,
                 pool_name: currentPoolName,
-                pool_size: currentPoolSize
+                pool_size: currentPoolSize,
+                ...(currentClaudeTokenError && { claude_token_error: currentClaudeTokenError }),
               };
               const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
               controller.enqueue(encoder.encode(payload));
@@ -4549,6 +4560,7 @@ serve(async (req) => {
     // CLAUDE TOKEN PASSTHROUGH: Direct Anthropic call using user's Claude subscription ($0 cost)
     // If it fails, fall through to normal racing.
     // ============================================
+    let claudeTokenError: string | undefined;  // Set when claude_token call fails, threaded to racing response
     const isClaudeTokenPool = poolName === 'rose-1-ultra' || poolName === 'rose-ultra' || poolName === 'rose-1-lite' || poolName === 'rose-lite';
     if (claude_token && isClaudeTokenPool) {
       const claudeActualModel = 'claude-sonnet-4-6-claude';
@@ -4747,8 +4759,21 @@ serve(async (req) => {
           });
         }
       } catch (error) {
-        const isStall = String(error).includes('timed out');
-        slog('warn', `[${requestId}] Claude token call failed${isStall ? ' (stall detected)' : ''}, falling back to racing: ${error}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+        const errorStr = String(error);
+        const isStall = errorStr.includes('timed out');
+        // Classify the failure so the agent can decide whether to invalidate the token
+        const statusMatch = errorStr.match(/(\d{3})/);
+        const status = statusMatch ? parseInt(statusMatch[1]) : 0;
+        if (status === 401 || status === 403) {
+          claudeTokenError = 'auth_error';
+        } else if (status === 429) {
+          claudeTokenError = 'rate_limit';
+        } else if (isStall) {
+          claudeTokenError = 'stall';
+        } else {
+          claudeTokenError = 'server_error';
+        }
+        slog('warn', `[${requestId}] Claude token call failed (${claudeTokenError}), falling back to racing: ${error}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
         // Fall through to normal racing path
       }
     }
@@ -4878,7 +4903,9 @@ serve(async (req) => {
           model,
           selection.isCerebras,
           selection.poolName,
-          selection.poolSize
+          selection.poolSize,
+          undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+          claudeTokenError,
         );
       }
       
@@ -4913,7 +4940,9 @@ serve(async (req) => {
             model,
             false, // Not Cerebras
             poolName,
-            pool.length
+            pool.length,
+            undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+            claudeTokenError,
           );
         }
         
@@ -4977,6 +5006,7 @@ serve(async (req) => {
           effectivePool.length,
           conversation_id,
           supabase,
+          claudeTokenError,
         );
       }
 
@@ -5042,7 +5072,9 @@ serve(async (req) => {
           model,
           false,
           poolName,
-          pool.length
+          pool.length,
+          undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+          claudeTokenError,
         );
       }
       
@@ -5163,7 +5195,8 @@ serve(async (req) => {
                         pool_name: poolName,
                         pool_size: pool.length,
                         racing_ttft_ms: ttftMs,
-                        models_raced: modelsRaced
+                        models_raced: modelsRaced,
+                        ...(claudeTokenError && { claude_token_error: claudeTokenError }),
                       };
 
                       // Track first enqueue timing
@@ -5190,6 +5223,7 @@ serve(async (req) => {
                     parsed.pool_size = pool.length;
                     parsed.racing_ttft_ms = ttftMs;
                     parsed.models_raced = modelsRaced;
+                    if (claudeTokenError) parsed.claude_token_error = claudeTokenError;
 
                     // Track first enqueue timing
                     if (firstEnqueueTime === null) {
@@ -5269,7 +5303,8 @@ serve(async (req) => {
                       pool_size: pool.length,
                       racing_ttft_ms: ttftMs,
                       models_raced: modelsRaced,
-                      timings
+                      timings,
+                      ...(claudeTokenError && { claude_token_error: claudeTokenError }),
                     };
                     const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
                     controller.enqueue(encoder.encode(payload));
@@ -5326,7 +5361,9 @@ serve(async (req) => {
           model,
           false,
           poolName,
-          pool.length
+          pool.length,
+          undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+          claudeTokenError,
         );
       }
     }
@@ -5554,6 +5591,7 @@ serve(async (req) => {
     finalResponse.pool_name = poolName;
     finalResponse.pool_size = pool.length;
     finalResponse.request_id = requestId;
+    if (claudeTokenError) finalResponse.claude_token_error = claudeTokenError;
 
     // Calculate cost
     const costCents = calculateCost(totalPromptTokens, totalCompletionTokens, actualModel);
