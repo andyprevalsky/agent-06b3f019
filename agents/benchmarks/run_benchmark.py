@@ -889,7 +889,7 @@ def main():
     parser.add_argument(
         "--suite",
         type=str,
-        help="Run tasks matching a tag (basic, browser, claude-code, attachment, swarm, outreach, all)",
+        help="Run tasks matching a tag (basic, browser, claude-code, attachment, for-each, outreach, all)",
     )
     parser.add_argument(
         "--url",

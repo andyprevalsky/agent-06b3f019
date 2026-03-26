@@ -129,28 +129,28 @@ CONTEXT GATES (compute optimization):
   - shared_files controls whether file attachments are resolved into the LLM context
 - Example: context_gates: {"network": false, "recent_communications": false}""",
         "spawn_sub_agent_for_each": """
-SPAWN TYPE: swarm
-- Set type="swarm"
+SPAWN TYPE: for_each
+- Set type="for_each"
 - Required: goal (str), output_schema (object with field names → types), and either:
   - items (list), OR
   - items_csv (string)
-- The goal is shared across all rows/items; swarm applies it once per row/item downstream
+- The goal is shared across all rows/items; for_each applies it once per row/item downstream
 - Downstream behavior: one spawn_sub_agent child is started per row/item goal
 - Required by policy: start_phase ("plan" or "execute")
   - "execute" for clear direct tasks expected to need 1-2 tool calls
   - "plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
   - when in doubt, prefer "plan"
 - Optional: read_only (bool), verifier (object), attachments (list of filenames), context_gates (object)
-- Keep swarm lightweight: same high-level goal + one child per item/row
+- Keep for_each lightweight: same high-level goal + one child per item/row
 
 SELF-CONTAINED GOAL (CRITICAL):
-Each swarm child has NO access to your conversation or prior context.
+Each for_each child has NO access to your conversation or prior context.
 The goal string (combined with the per-item context) is their ONLY information.
 Embed ALL relevant user preferences, constraints, and instructions in the goal.
 
 CONTEXT GATES (compute optimization):
 - Optional: context_gates (object with boolean values, default all true)
-- ONLY set a gate to false when 100% certain the swarm children do NOT need that context
+- ONLY set a gate to false when 100% certain the for_each children do NOT need that context
 - Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files
 - Example: context_gates: {"network": false, "recent_communications": false}""",
     }

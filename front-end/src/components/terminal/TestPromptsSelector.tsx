@@ -285,8 +285,8 @@ Since you are limited on the sub-agents you can create, you may need to split th
     attachmentUrls: ['/test-assets/vcs-and-angels.csv'],
   },
   {
-    title: 'Test Agent Swarm',
-    description: 'Tests sub-agent swarm processing 12 CSV entities in parallel',
+    title: 'Test Agent For Each',
+    description: 'Tests sub-agent for_each processing 12 CSV entities in parallel',
     prompt: 'Get me one interesting fact about each entity on the csv.',
     attachmentUrls: ['/test-assets/entities-12.csv'],
   },

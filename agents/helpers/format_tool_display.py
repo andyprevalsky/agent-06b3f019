@@ -59,7 +59,7 @@ def _format_spawn_agent(args: Dict[str, Any]) -> str:
         "browser": f"Browsing the web to {goal}",
         "code": f"Coding: {goal}",
         "sub_agent": f"Delegating task: {goal}",
-        "swarm": f"Swarm delegation: {goal}",
+        "for_each": f"For each: {goal}",
     }
     return type_labels.get(agent_type, f"Spawning agent: {goal}")
 

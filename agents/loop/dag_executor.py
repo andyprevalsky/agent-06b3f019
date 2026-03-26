@@ -46,7 +46,7 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_browser_agent": {"type": "browser"},
     "spawn_code_agent": {"type": "code"},
     "spawn_sub_agent": {"type": "sub_agent"},
-    "spawn_sub_agent_for_each": {"type": "swarm"},
+    "spawn_sub_agent_for_each": {"type": "for_each"},
 }
 
 

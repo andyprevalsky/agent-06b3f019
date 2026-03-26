@@ -40,10 +40,10 @@ def _validate_spawn_params(tool_call: dict) -> None:
 
     if not agent_type:
         raise ValueError(
-            "spawn_agent requires 'type'. Must be one of: 'browser', 'code', 'sub_agent', 'explore', 'swarm'."
+            "spawn_agent requires 'type'. Must be one of: 'browser', 'code', 'sub_agent', 'explore', 'for_each'."
         )
 
-    valid_types = {"browser", "code", "sub_agent", "explore", "swarm"}
+    valid_types = {"browser", "code", "sub_agent", "explore", "for_each"}
     if agent_type not in valid_types:
         raise ValueError(
             f"spawn_agent type='{agent_type}' is invalid. Must be one of: {', '.join(sorted(valid_types))}."
@@ -59,25 +59,25 @@ def _validate_spawn_params(tool_call: dict) -> None:
             "spawn_agent(type='browser') requires 'start_url'. Provide the URL to navigate to."
         )
 
-    if agent_type in ("browser", "code", "sub_agent", "swarm") and not tool_call.get("output_schema"):
+    if agent_type in ("browser", "code", "sub_agent", "for_each") and not tool_call.get("output_schema"):
         raise ValueError(
             f"spawn_agent(type='{agent_type}') requires 'output_schema'. "
             "Define the expected response structure with fields."
         )
 
-    if agent_type in ("sub_agent", "swarm"):
+    if agent_type in ("sub_agent", "for_each"):
         start_phase = tool_call.get("start_phase")
         if start_phase is not None and str(start_phase).strip().lower() not in ("plan", "execute"):
             raise ValueError(
-                "spawn_agent(type='sub_agent'|'swarm') start_phase must be either 'plan' or 'execute'."
+                "spawn_agent(type='sub_agent'|'for_each') start_phase must be either 'plan' or 'execute'."
             )
 
-    if agent_type == "swarm":
+    if agent_type == "for_each":
         has_items = isinstance(tool_call.get("items"), list) and len(tool_call.get("items")) > 0
         has_csv = isinstance(tool_call.get("items_csv"), str) and bool(tool_call.get("items_csv").strip())
         if not has_items and not has_csv:
             raise ValueError(
-                "spawn_agent(type='swarm') requires either 'items' (list) or 'items_csv' (string)."
+                "spawn_agent(type='for_each') requires either 'items' (list) or 'items_csv' (string)."
             )
 
     if agent_type == "explore":
@@ -99,8 +99,8 @@ def _resolve_start_phase(tool_call: Dict[str, Any]) -> str:
     return "execute" if phase == "execute" else "plan"
 
 
-def _coerce_swarm_items(tool_call: Dict[str, Any]) -> List[Any]:
-    """Parse swarm items from list or CSV input."""
+def _coerce_for_each_items(tool_call: Dict[str, Any]) -> List[Any]:
+    """Parse for_each items from list or CSV input."""
     items = tool_call.get("items")
     if isinstance(items, list) and items:
         return items
@@ -147,7 +147,7 @@ def _coerce_swarm_items(tool_call: Dict[str, Any]) -> List[Any]:
     return rows
 
 
-def _build_swarm_goal(
+def _build_for_each_goal(
     base_goal: str,
     item: Any,
 ) -> str:
@@ -510,9 +510,9 @@ class SpawnAgentManager(ToolManager):
         try:
             _validate_spawn_params(tool_call)
         except ValueError as e:
-            # Swarm must stay a thin wrapper with no swarm-specific tool events.
+            # for_each must stay a thin wrapper with no for_each-specific tool events.
             # Bubble validation errors to workflow-level handling.
-            if agent_type == "swarm":
+            if agent_type == "for_each":
                 raise
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
@@ -534,8 +534,8 @@ class SpawnAgentManager(ToolManager):
         elif agent_type == "sub_agent":
             async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
                 yield event
-        elif agent_type == "swarm":
-            async for event in self._spawn_swarm(workflow_instance, tool_call, tool_call_id):
+        elif agent_type == "for_each":
+            async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
                 yield event
 
     async def _spawn_explore(
@@ -773,7 +773,7 @@ class SpawnAgentManager(ToolManager):
         async for event in manager.execute_tool(workflow_instance, sub_agent_tool_call, tool_call_id):
             yield event
 
-    async def _spawn_swarm(
+    async def _spawn_for_each(
         self,
         workflow_instance,
         tool_call: Dict[str, Any],
@@ -790,15 +790,15 @@ class SpawnAgentManager(ToolManager):
         2. DRAIN phase — resume all generators concurrently. Each one blocks on
            workflow.wait_condition until its child completes, then yields
            FINISHED/ERROR. We wait for ALL to finish before returning so the
-           DAG doesn't advance until the entire swarm is done.
+           DAG doesn't advance until the entire for_each is done.
         """
-        items = _coerce_swarm_items(tool_call)
+        items = _coerce_for_each_items(tool_call)
         if not items:
             raise ValueError("No items to process. Provide items or items_csv.")
 
         MAX_DEPTH = 4
         if workflow_instance.depth >= MAX_DEPTH:
-            raise ValueError(f"Cannot spawn swarm: maximum nesting depth ({MAX_DEPTH}) reached.")
+            raise ValueError(f"Cannot spawn for_each: maximum nesting depth ({MAX_DEPTH}) reached.")
 
         base_goal = tool_call.get("goal", "")
         start_phase = _resolve_start_phase(tool_call)
@@ -813,7 +813,7 @@ class SpawnAgentManager(ToolManager):
         # Build per-item tool_calls shaped as spawn_agent(type=sub_agent)
         per_item_calls: List[tuple] = []
         for i, item in enumerate(items):
-            row_goal = _build_swarm_goal(base_goal, item)
+            row_goal = _build_for_each_goal(base_goal, item)
             item_tool_call = {
                 "type": "sub_agent",
                 "goal": row_goal,
@@ -852,7 +852,7 @@ class SpawnAgentManager(ToolManager):
                     return None
                 except Exception as exc:
                     failed_count += 1
-                    logger.warning("Swarm child spawn failed", tcid=tcid, error=str(exc))
+                    logger.warning("for_each child spawn failed", tcid=tcid, error=str(exc))
                     return None
 
         async def _drain_one(gen, tcid: str):
@@ -868,7 +868,7 @@ class SpawnAgentManager(ToolManager):
                     failed_count += 1
             except Exception as exc:
                 failed_count += 1
-                logger.warning("Swarm child drain failed", tcid=tcid, error=str(exc))
+                logger.warning("for_each child drain failed", tcid=tcid, error=str(exc))
 
         # Phase 1: Spawn all children (MAX_INFLIGHT concurrent spawns)
         spawn_tasks = [asyncio.create_task(_spawn_one(tc, tcid)) for tc, tcid in per_item_calls]
@@ -884,7 +884,7 @@ class SpawnAgentManager(ToolManager):
         if failed_count > 0:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Swarm failed",
+                title="for_each failed",
                 message=f"{failed_count}/{len(per_item_calls)} children failed",
                 status=MessageStatus.ERROR,
             )

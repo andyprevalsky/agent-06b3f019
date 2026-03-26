@@ -182,10 +182,10 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         timeout=300,
         expected_tools=["message_person"],
     ),
-    "agent-swarm": TestPrompt(
-        name="agent-swarm",
-        title="Test Agent Swarm",
-        description="Tests sub-agent swarm processing 12 CSV entities in parallel",
+    "agent-for-each": TestPrompt(
+        name="agent-for-each",
+        title="Test Agent For Each",
+        description="Tests sub-agent for_each processing 12 CSV entities in parallel",
         prompt="Get me one interesting fact about each entity on the csv.",
         timeout=600,
         attachment_url="/test-assets/entities-12.csv",

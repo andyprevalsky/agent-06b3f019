@@ -53,12 +53,13 @@ type="sub_agent": Delegate complex tasks with own planning cycle. Run concurrent
   - start_phase="plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
   - when in doubt, prefer "plan"
 
-type="swarm": Lightweight fan-out wrapper over sub-agents (one child per item/row).
+type="for_each": Fan out one sub-agent per item/row from a list or CSV.
   Requires: output_schema and either items (list) or items_csv (string).
   The same shared goal is applied to every row/item, with row context appended per child goal.
   Downstream this executes one spawn_sub_agent child for each row/item goal.
   All children share the same parent bus/tree.
   start_phase follows the same criteria as sub_agent.
+  USE THIS whenever the same task must be repeated across multiple items (research each company, email each person, process each row).
 
 <bad-example>
 spawn_agent(type="browser", goal="Login to site")
@@ -641,6 +642,22 @@ SPAWN_SUB_AGENT vs SPAWN_SUB_AGENT_FOR_EACH
 spawn_sub_agent = ONE complex task delegated to a child agent (e.g., "research and book a venue").
 spawn_sub_agent_for_each = SAME task applied to MANY items from a list/CSV (e.g., "look up each company in this CSV").
 
+GOOD use of spawn_sub_agent_for_each:
+  Task 0: spawn_sub_agent_for_each "Research funding history and key investors for this company"
+    items: ["Acme Corp", "Widgets Inc", "FooBar LLC"]
+  Task 1: reasoning "Compile comparison table from results" → after 0
+
+  Task 0: spawn_sub_agent_for_each "Find one interesting fact about this entity"
+    items_csv: "Name,Type\nTesla,Company\nAlbert Einstein,Person\nMars,Planet"
+  Task 1: reasoning "Summarize all facts" → after 0
+
+BAD (should use spawn_sub_agent_for_each, not N separate sub-agents):
+  Task 0: spawn_sub_agent "Research Acme Corp funding"
+  Task 1: spawn_sub_agent "Research Widgets Inc funding"
+  Task 2: spawn_sub_agent "Research FooBar LLC funding"
+  Task 3: reasoning "Compile comparison table"
+
+RULE: If you see the SAME goal repeated across multiple items/rows/people/entities, use spawn_sub_agent_for_each. If the items come from a CSV attachment, pass the CSV content via items_csv. If the items come from a list in the user's message or prior context, pass them via items.
 
 GOOD use of spawn_sub_agent:
   Task 0: spawn_sub_agent "Research and book a venue in Austin for 20 people, March 28-30. Budget: $5k max. Prefer downtown locations with AV equipment. Contact: Andy, andy@example.com"  ← complex multi-step task with ALL context embedded
