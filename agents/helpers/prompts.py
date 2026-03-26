@@ -797,7 +797,7 @@ OUTPUT JSON ONLY - no prose, no commentary outside the JSON structure."""
 
     if strategy:
         strategy_start = "TWO-AXIS PLANNING FRAMEWORK"
-        strategy_end = "SPAWN_SUB_AGENT TOOL"
+        strategy_end = "SELF-CONTAINED GOALS (CRITICAL)"
         start_idx = base_prompt.find(strategy_start)
         end_idx = base_prompt.find(strategy_end)
         if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
