@@ -11,8 +11,12 @@
  *     |
  *     +--> calls onComplete callback
  *
- * When shouldAnimate=false:
- * [STATIC] --> renders full markdown immediately
+ * When shouldAnimate=false && breaks=false:
+ * [STATIC] --> renders full markdown via FadeInMarkdown (no animation)
+ *
+ * When shouldAnimate=false && breaks=true:
+ * [STATIC_BREAKS] --> renders via ReactMarkdown directly with remarkBreaks
+ *   (bypasses FadeInMarkdown because its DOM extraction pipeline doesn't preserve <br>)
  *
  * States:
  * - visibleCharCount: number
@@ -22,6 +26,7 @@
 import React, { memo, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { motion, useReducedMotion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 
@@ -30,6 +35,7 @@ interface MarkdownTextProps {
   shouldAnimate?: boolean;
   onComplete?: () => void;
   className?: string;
+  breaks?: boolean;
 }
 
 interface WordItem {
@@ -107,10 +113,10 @@ function FadeInMarkdown({
       } else if (node.nodeType === Node.ELEMENT_NODE) {
         const element = node as HTMLElement;
         const tagName = element.tagName.toLowerCase();
-        
+
         // Build formatting based on element type
         const newFormatting = { ...formatting };
-        
+
         // Inline formatting
         if (tagName === 'strong' || tagName === 'b') {
           newFormatting.isBold = true;
@@ -793,17 +799,29 @@ function normalizeMarkdownText(text: string): string {
 /**
  * MarkdownText - Component that renders markdown with optional animation
  */
-export const MarkdownText = memo(function MarkdownText({ 
-  text, 
-  shouldAnimate = false, 
+export const MarkdownText = memo(function MarkdownText({
+  text,
+  shouldAnimate = false,
   onComplete,
   className,
+  breaks = false,
 }: MarkdownTextProps) {
-  
+
   // Normalize text to handle escape sequences from LLM/backend
   const normalizedText = normalizeMarkdownText(text);
-  
-  // Always use FadeInMarkdown for consistent styling
+
+  // For breaks mode without animation, render ReactMarkdown directly
+  // (the FadeInMarkdown DOM extraction pipeline doesn't preserve <br> from remark-breaks)
+  if (breaks && !shouldAnimate) {
+    return (
+      <div className={cn('prose prose-sm dark:prose-invert max-w-none', className)}>
+        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+          {normalizedText}
+        </ReactMarkdown>
+      </div>
+    );
+  }
+
   return (
     <FadeInMarkdown
       markdown={normalizedText}

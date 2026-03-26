@@ -156,7 +156,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
               updated_at: data.updatedAt,
               answered: !!data.userResponse,
             };
-            setRequests((prev) => [request, ...prev]);
+            setRequests((prev) => [...prev, request]);
           },
           onUpdate: (payload) => {
             // Data is in payload.record or payload.payload.record
@@ -556,7 +556,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
 
                       {/* Question rendered as markdown */}
                       <div className="max-h-[300px] overflow-y-auto">
-                        <MarkdownText text={currentRequest.question} />
+                        <MarkdownText text={currentRequest.question} breaks />
                       </div>
 
                       {/* Automated action for send_sms_as_user */}
