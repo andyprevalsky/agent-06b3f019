@@ -349,7 +349,7 @@ Reply to approve, or say "no" to cancel."""
         except UserRejectedError:
             yield ToolEvent(type=EventType.POST_MESSAGE,
                             title=f"Message to {person_display} cancelled",
-                            message="User declined to send the message.",
+                            message=f"User declined to send the message: {generated_message}",
                             status=MessageStatus.ERROR)
             return
 
@@ -611,7 +611,7 @@ Use these to understand {system_name}'s general writing voice, tone, and habits 
 {exa_context if exa_context else "No additional research available."}
 
 ## Recent Conversation Context
-{conversation_context[:8000]}
+{conversation_context}
 
 ---
 
