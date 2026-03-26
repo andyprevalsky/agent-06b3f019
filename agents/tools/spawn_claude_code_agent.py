@@ -757,9 +757,15 @@ async def spawn_claude_code_activity(
                         elif llm_response.get("response"):
                             # Send response to Claude Code stdin
                             response_text = llm_response["response"]
+
+                            # Start echo suppression BEFORE send_stdin — it blocks
+                            # up to 5s waiting for ack, during which the event loop
+                            # runs the listen task that receives the PTY echo.
+                            last_stdin_send_time = _safe_time()
                             sent_ok = await ws_client.send_stdin(response_text)
 
                             if not sent_ok:
+                                last_stdin_send_time = 0.0  # Reset on failure
                                 logger.error(
                                     "[ClaudeCode] stdin send FAILED — message did not reach terminal",
                                     agent_id=agent_id,
@@ -770,11 +776,6 @@ async def spawn_claude_code_activity(
                                 # Re-set pending_output so we retry on next silence
                                 pending_output = True
                                 continue
-
-                            # Record send time for echo suppression — PTY echoes
-                            # our input back as stdout within ~100ms, which would
-                            # trigger another silence detection cycle without this.
-                            last_stdin_send_time = _safe_time()
 
                             interaction_count += 1
 
