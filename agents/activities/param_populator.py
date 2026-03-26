@@ -9,11 +9,13 @@ consistent behavior between DAG execution and the main agent loop.
 """
 
 from typing import Dict, List, Any, Optional
+from datetime import datetime, timezone
 from temporalio import activity
 import structlog
 
 from helpers.llm import call_llm_structured_streaming, build_llm_messages
 from helpers.tool_schemas import TOOL_MODELS, create_agent_action_model
+from helpers.fetch_config import _fetch_agent_data_impl
 
 logger = structlog.get_logger()
 
@@ -193,7 +195,7 @@ from previous calls will NOT be available. Include ALL necessary steps in a sing
 async def populate_tool_params_activity(
     tool_name: str,
     goal: str,
-    context: List[Dict],
+    agent_id: str,
     model: str,
     alias_hint: str = "",
     claude_token: Optional[str] = None,
@@ -205,10 +207,13 @@ async def populate_tool_params_activity(
     consistent behavior. The LLM outputs a response + tool_calls array,
     and we extract the single tool call for the specified tool.
 
+    Fetches context from DB rather than receiving it as an arg to avoid
+    bloating Temporal workflow task responses when many tasks run in parallel.
+
     Args:
         tool_name: Name of the tool to populate params for
         goal: The task goal from the plan
-        context: Full message context
+        agent_id: Agent ID to fetch context from DB
         model: LLM model to use (inherited from parent agent)
         alias_hint: Original alias name (e.g. 'spawn_sub_agent') for type-specific prompt instructions
         claude_token: Optional Claude OAuth token for direct Anthropic calls
@@ -230,6 +235,12 @@ async def populate_tool_params_activity(
 
     # Build system prompt (full agent style, not just extraction)
     system_prompt = _build_agent_system_prompt(tool_name, goal, alias_hint)
+
+    # Fetch context from DB (avoids serializing full context per activity arg,
+    # which causes GrpcMessageTooLarge when many DAG tasks schedule in parallel)
+    activity.heartbeat("Fetching context from DB")
+    data = await _fetch_agent_data_impl(agent_id)
+    context = data.get('messages', [])
 
     # Use build_llm_messages which handles file attachments (images, PDFs, etc.)
     # This ensures the LLM can see attached files and their filenames

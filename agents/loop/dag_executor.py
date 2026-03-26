@@ -467,7 +467,7 @@ async def _execute_single_task(
 
             param_result = await execute_activity(
                 populate_tool_params_activity,
-                args=[actual_tool, task.goal, context, model, task.tool_name, claude_token],
+                args=[actual_tool, task.goal, agent_id, model, task.tool_name, claude_token],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
