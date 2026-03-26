@@ -346,10 +346,14 @@ Reply to approve, or say "no" to cancel."""
                 question=approval_text,
                 metadata={"toolApproval": True},
             )
-        except UserRejectedError:
+        except UserRejectedError as e:
+            rejection_feedback = e.rejection_message
+            error_msg = f"User declined to send the message: {generated_message}"
+            if rejection_feedback:
+                error_msg = f"User rejected with feedback: \"{rejection_feedback}\"\n\nDeclined message: {generated_message}"
             yield ToolEvent(type=EventType.POST_MESSAGE,
                             title=f"Message to {person_display} cancelled",
-                            message=f"User declined to send the message: {generated_message}",
+                            message=error_msg,
                             status=MessageStatus.ERROR)
             return
 

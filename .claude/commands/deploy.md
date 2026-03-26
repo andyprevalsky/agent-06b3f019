@@ -36,15 +36,15 @@ EOF
 
 If a PR already exists for this branch, skip creation and use the existing one.
 
-## Step 3: Wait for Claude Code Review
+## Step 3: Wait for code reviews
 
-Poll every 30 seconds until the "Claude Code Review" check completes. **No timeout — keep waiting.**
+Poll every 30 seconds until **both** the "Claude Code Review" and "CodeRabbit" checks complete. **No timeout — keep waiting.**
 
 ```bash
 gh pr checks <PR_NUMBER> --json name,state,conclusion
 ```
 
-Once completed, read the review from ALL three comment locations (the bot may use any of them):
+Once completed, read reviews from ALL three comment locations (bots may use any of them):
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
@@ -52,13 +52,15 @@ gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
 gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
 ```
 
-## Step 4: Handle review result
+## Step 4: Handle review results
 
-Look across all three endpoints for review feedback. The Claude bot often posts findings as regular issue comments (not formal reviews).
+Look across all three endpoints for review feedback from **both** Claude Code Review and CodeRabbit. Both bots may post findings as formal reviews or regular comments.
 
-- **APPROVED** (formal review) with no critical issues in comments → proceed to Step 5.
-- **CHANGES_REQUESTED** or any comment flagging **critical** issues → fix them, push, go back to Step 3.
+- **Both APPROVED** with no critical issues → proceed to Step 5.
+- **CHANGES_REQUESTED** or any comment flagging **critical** issues (from either bot) → fix them, push, go back to Step 3.
 - **No critical issues found** → proceed to Step 5.
+
+Skip menial/style nits from either bot. Focus on correctness, bugs, and security issues.
 
 ## Step 5: Merge
 

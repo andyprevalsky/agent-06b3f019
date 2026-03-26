@@ -11,7 +11,7 @@ This is NOT called directly by the LLM - it's used internally by tools.
 from typing import Dict, Any, Optional, AsyncGenerator, List
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 import structlog
 import httpx
 
@@ -22,8 +22,14 @@ logger = structlog.get_logger()
 
 
 class UserRejectedError(Exception):
-    """Raised when user rejects an approval request."""
-    pass
+    """Raised when user rejects an approval request.
+
+    Attributes:
+        rejection_message: The user's rejection feedback text (if any).
+    """
+    def __init__(self, message: str = "User rejected the approval request", rejection_message: str = ""):
+        super().__init__(message)
+        self.rejection_message = rejection_message
 
 
 class RequestUserApprovalManager(ToolManager):
@@ -391,6 +397,10 @@ async def request_user_approval_direct(
     )
     await workflow_instance._handle_tool_event(pre_event, tool_call_id, "request_user_approval")
     
+    # Snapshot context length before waiting — used to scope rejection text extraction
+    # to only messages added during this approval window (avoids picking up older USER msgs)
+    context_len_before_wait = len(workflow_instance.context)
+
     # Wait indefinitely for this specific request's response
     await workflow.wait_condition(
         lambda: request_id in workflow_instance._signal_responses
@@ -401,21 +411,34 @@ async def request_user_approval_direct(
     if signal_response and signal_response.strip() == "__REJECTED__":
         logger.info("User rejected approval request (via signal)", request_id=request_id)
 
+        # Poll messages to get the user's rejection feedback text from DB
+        # (backend writes USER message BEFORE sending the rejection signal)
+        await workflow_instance._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
+
+        # Extract rejection message only from messages added during this approval window
+        rejection_text = ""
+        for i in range(len(workflow_instance.context) - 1, context_len_before_wait - 1, -1):
+            if workflow_instance.context[i].get("role") == "USER":
+                rejection_text = workflow_instance.context[i].get("text", "")
+                break
+
+        if rejection_text:
+            logger.info("User rejection message", request_id=request_id, rejection_text=rejection_text[:100])
+
         # Post FINISHED to close the approval chip cleanly (caller will post ERROR for the tool)
         reject_event = ToolEvent(
             type=EventType.POST_MESSAGE,
             title="✗ User rejected action",
-            message="",
+            message=rejection_text,
             status=MessageStatus.FINISHED,
             metadata=event_metadata
         )
         await workflow_instance._handle_tool_event(reject_event, tool_call_id, "request_user_approval")
 
         # Raise exception so caller posts ERROR for the actual tool
-        raise UserRejectedError("User rejected the approval request")
+        raise UserRejectedError("User rejected the approval request", rejection_message=rejection_text)
 
     # Poll messages to get the actual response content (for approvals with user text)
-    from datetime import datetime, timezone
     messages = await workflow_instance._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
 
     # Get the response from all consecutive USER messages at the end

@@ -1217,7 +1217,13 @@ class AgentWorkflow:
 
         except Exception as e:
             error_msg = extract_error_message(e)
-            workflow.logger.error(f"Tool {tool_name} failed: {error_msg}")
+
+            # Include user's rejection feedback in the error message
+            if isinstance(e, UserRejectedError) and e.rejection_message:
+                error_msg = f"User rejected with feedback: \"{e.rejection_message}\""
+                workflow.logger.info(f"Tool {tool_name} rejected by user: {e.rejection_message[:100]}")
+            else:
+                workflow.logger.error(f"Tool {tool_name} failed: {error_msg}")
 
             # For spawn_agent (sub_agent type), include sub-agent context so frontend renders
             # as a proper sub-agent failure (SubAgentTree) instead of a raw chip

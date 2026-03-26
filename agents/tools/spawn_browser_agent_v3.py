@@ -3895,13 +3895,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                         continue  # Loop back to start activity again with resume state
 
-                    except UserRejectedError:
+                    except UserRejectedError as e:
                         # User rejected - post rejection message and return
-                        logger.info("Write lock approval rejected by user")
+                        rejection_feedback = e.rejection_message
+                        logger.info("Write lock approval rejected by user", rejection_feedback=rejection_feedback[:100] if rejection_feedback else "")
+                        error_msg = f"User denied permission for {result.get('approval_type', 'action')}"
+                        if rejection_feedback:
+                            error_msg = f"User rejected with feedback: \"{rejection_feedback}\"\n\n{error_msg}"
                         yield ToolEvent(
                             type=EventType.POST_MESSAGE,
                             title="Action blocked by user",
-                            message=f"User denied permission for {result.get('approval_type', 'action')}",
+                            message=error_msg,
                             status=MessageStatus.FINISHED,
                             metadata={"toolName": "spawn_browser_agent", "action_type": "write_lock_rejected"}
                         )
