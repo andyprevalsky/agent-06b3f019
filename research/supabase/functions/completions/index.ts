@@ -3738,6 +3738,7 @@ async function handleStreaming(
                   parsed.actual_model = currentModel;
                   parsed.pool_name = currentPoolName;
                   parsed.pool_size = currentPoolSize;
+                  if (currentClaudeTokenError) parsed.claude_token_error = currentClaudeTokenError;
                   const payload = `data: ${JSON.stringify(parsed)}\n\n`;
                   controller.enqueue(encoder.encode(payload));
                 }

@@ -186,12 +186,12 @@ class WaitForTool(BaseModel):
         default=None,
         description="Natural language condition to poll for (e.g., 'Bitcoin price drops below $50,000'). An explore agent will periodically check if this condition is satisfied."
     )
-    check_interval_seconds: Optional[int] = Field(
+    check_interval_seconds: int = Field(
         default=900,
         ge=60, le=86400,
         description="Seconds between condition checks (60-86400, default 900). Only used with condition."
     )
-    max_checks: Optional[int] = Field(
+    max_checks: int = Field(
         default=20,
         ge=1, le=100,
         description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition."

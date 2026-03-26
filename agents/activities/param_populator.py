@@ -266,6 +266,7 @@ async def populate_tool_params_activity(
             reasoning_max_tokens=2048,
             skip_cache=True,  # Unique system prompt per call — no cache reuse
             call_site="dag_param_populator",
+            claude_token=claude_token,
         )
 
         # Extract tool calls from the Pydantic result
