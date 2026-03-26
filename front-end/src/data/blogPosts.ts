@@ -33,7 +33,7 @@ export const blogPosts: BlogPost[] = [
     title: 'Why task decomposition is the bottleneck to superintelligence & how we built a SOTA generalizable task decomposer',
     description: 'How we built a flexible task decomposition layer that enables agents to complete complex, multi-step tasks across diverse domains.',
     category: 'research',
-    date: '2026-02-23',
+    date: '2026-03-22',
     author: 'Andy Prevalsky',
     intro: `The birth of personal assistants that take action in the world has begun, and soon everyone will have an AI system that does the majority of intelligence related work for them. However, these agentic systems still fail to perform well on long-horizon problems in practical settings for 3 main reasons: context overflow, cost prohibition & complexity explosion. This post aims to describe our efforts in solving these 3 problems by creating a generalized task decomposer that recursively decomposes tasks into a set of context-independent, parallelizable, and proximate sub tasks that each fit into the current complexity requirements for modern day agentic systems.`,
     sections: [

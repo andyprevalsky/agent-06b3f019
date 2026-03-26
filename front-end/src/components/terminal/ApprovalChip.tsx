@@ -90,7 +90,7 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
 
     try {
       setActionState('rejecting');
-      await rejectAttentionRequest(pendingApproval.attentionRequestId);
+      await rejectAttentionRequest(pendingApproval.attentionRequestId, contextInput.trim() || undefined);
 
       toast({
         title: 'Rejected',

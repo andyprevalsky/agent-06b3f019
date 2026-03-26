@@ -16,7 +16,7 @@ export const blogMeta: BlogMeta[] = [
     title: 'Why task decomposition is the bottleneck to superintelligence & how we built a SOTA generalizable task decomposer',
     description: 'How we built a flexible task decomposition layer that enables agents to complete complex, multi-step tasks across diverse domains.',
     category: 'research',
-    date: '2026-02-23',
+    date: '2026-03-22',
     author: 'Andy Prevalsky',
   },
 ];

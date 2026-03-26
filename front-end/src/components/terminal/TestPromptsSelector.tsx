@@ -223,6 +223,13 @@ Each message should be personalized, sent from a@roselabs.ai and be centered aro
 
 We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent per row.
 
+GUIDELINES
+===
+0. At the start, do research for best practices on cold email outreach.
+1. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).
+2. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.
+3. Keep the email short and sweet, be personable, no dashes, or language that makes the email read like an AI wrote it. Do research on common phrases or patterns that AIs use when writing a message, and actively avoid them.
+
 REFERENCE MATERIALS FOR INFORMATION ABOUT ME
 ===
 I've attached my resume for reference.

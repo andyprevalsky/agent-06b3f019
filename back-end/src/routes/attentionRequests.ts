@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma';
 import { logJson } from '../lib/log';
 import { AuthRequest, authenticate } from '../middleware/auth';
 import { hybridAuth, HybridAuthRequest } from '../middleware/hybridAuth';
+import { createMessage } from '../lib/messages';
 import { createLogger } from '../lib/logger';
 
 const log = createLogger('Attention');
@@ -258,6 +259,16 @@ router.post('/:id/reject', authenticate, async (req: AuthRequest, res) => {
     // Verify ownership
     if (request.userId !== userId) {
       return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    // If the user provided a rejection message, post it as a USER message on the agent
+    const rejectionMessage = req.body?.message?.trim();
+    if (rejectionMessage) {
+      await createMessage({
+        agentId: request.agentId,
+        text: rejectionMessage,
+        role: 'USER',
+      });
     }
 
     // Update the request with rejection marker

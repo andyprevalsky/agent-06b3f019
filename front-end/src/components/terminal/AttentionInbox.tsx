@@ -362,7 +362,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
       setLoading(true);
       const remainingBeforeReject = requests.filter(r => !r.answered && r.id !== requestId).length;
 
-      await rejectAttentionRequest(requestId);
+      await rejectAttentionRequest(requestId, responses[requestId]?.trim() || undefined);
 
       // Clear the response if any
       setResponses(prev => {

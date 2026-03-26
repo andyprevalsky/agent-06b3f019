@@ -533,12 +533,13 @@ export async function skipAttentionRequest(requestId: string): Promise<void> {
   }
 }
 
-export async function rejectAttentionRequest(requestId: string): Promise<void> {
+export async function rejectAttentionRequest(requestId: string, message?: string): Promise<void> {
   const headers = getAuthHeaders();
 
   const res = await fetch(`${API_BASE_WITH_PATH}/attention-requests/${requestId}/reject`, {
     method: 'POST',
     headers,
+    body: message ? JSON.stringify({ message }) : undefined,
   });
 
   if (!res.ok) {
