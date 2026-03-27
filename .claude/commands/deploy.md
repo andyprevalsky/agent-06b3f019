@@ -8,6 +8,38 @@ Push the current branch, create a PR, wait for Claude Code Review, merge, and wa
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
+## Step 0: Lint and format
+
+Run the linter and formatter on all files that have been modified on this branch (compared to `main`):
+
+```bash
+cd back-end
+CHANGED_TS=$(git diff --name-only main...HEAD -- 'back-end/src/**/*.ts' | sed 's|^back-end/||')
+```
+
+If there are changed `.ts` files:
+
+1. Format them:
+   ```bash
+   npx prettier --write $CHANGED_TS
+   ```
+2. Lint and auto-fix:
+   ```bash
+   npx eslint --fix $CHANGED_TS
+   ```
+3. Check for remaining lint errors:
+   ```bash
+   npx eslint $CHANGED_TS
+   ```
+
+If there are remaining errors, fix them. Loop until `npx eslint` reports 0 errors on the changed files.
+
+If any files were modified by this step, stage and commit them:
+```bash
+git add -p  # review changes
+git commit -m "style: auto-format and lint fixes"
+```
+
 ## Step 1: Prepare the branch
 
 1. Check `git status` for uncommitted changes. If there are any, stage and commit them with a descriptive message.
@@ -64,13 +96,20 @@ Skip menial/style nits from either bot. Focus on correctness, bugs, and security
 
 ## Step 5: Merge
 
+Merge without deleting the branch. Do not delete the local branch or the remote branch unless the user explicitly asks for that.
+
 ```bash
-gh pr merge <PR_NUMBER> --squash --delete-branch
+gh pr merge <PR_NUMBER> --squash
 ```
 
-Switch back to main and pull:
+If `main` can be checked out in this worktree, switch back to main and pull:
 ```bash
 git checkout main && git pull origin main
+```
+
+If `main` is already checked out in another worktree, do not force a branch deletion or branch switch just to satisfy this step. Leave the current branch checked out and refresh refs instead:
+```bash
+git fetch origin main
 ```
 
 ## Step 6: Wait for deploys
@@ -95,9 +134,14 @@ If a deploy fails:
 1. Show the failure to the user
 2. If fixable, create a new fix commit, push, and loop back to Step 3 (new review cycle)
 
-## Step 7: Done
+## Step 7: New branch
+
+Run `/new_branch_with_context` to sync with main and create a new branch so we can keep working.
+
+## Step 8: Done
 
 Report to the user:
 - PR URL
 - Which services were deployed
 - Any review issues that were fixed along the way
+- The new branch name

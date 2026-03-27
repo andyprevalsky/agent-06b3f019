@@ -15,9 +15,7 @@ const PROD_MAX_LENGTH = 500;
  */
 export function logJson(obj: unknown, maxLength = PROD_MAX_LENGTH): string {
   try {
-    const str = isProd
-      ? JSON.stringify(obj)
-      : JSON.stringify(obj, null, 2);
+    const str = isProd ? JSON.stringify(obj) : JSON.stringify(obj, null, 2);
 
     if (str === undefined) return 'undefined';
 

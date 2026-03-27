@@ -1,9 +1,11 @@
 import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
+import { createLogger } from './logger';
 
 // Ensure env vars are loaded before accessing DATABASE_URL
 dotenv.config();
 
+const log = createLogger('Prisma');
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
 // Retryable Prisma error codes:
@@ -14,7 +16,7 @@ const RETRYABLE_ERROR_CODES = new Set(['P1001', 'P1017', 'P2024']);
 
 // Add connection pool parameters if not already present
 function getConnectionUrl(): string {
-  const url = process.env.DATABASE_URL || '';
+  const url = process.env.DATABASE_URL ?? '';
 
   const params: string[] = [];
   if (!url.includes('connection_limit')) params.push('connection_limit=10');
@@ -27,7 +29,7 @@ function getConnectionUrl(): string {
 }
 
 export const prisma =
-  globalForPrisma.prisma ||
+  globalForPrisma.prisma ??
   new PrismaClient({
     log: ['error', 'warn'],
     // Connection pool configuration for Supabase Transaction Pooler (port 6543)
@@ -45,12 +47,19 @@ export const prisma =
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
           try {
             return await query(args);
-          } catch (error: any) {
+          } catch (error: unknown) {
             lastError = error;
+            const prismaError = error as { code?: string };
 
-            if (RETRYABLE_ERROR_CODES.has(error.code) && attempt < maxRetries) {
-              console.log(`[Prisma] ${error.code} on ${model}.${operation} (attempt ${attempt}/${maxRetries}), retrying...`);
-              await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempt - 1)));
+            if (
+              typeof prismaError.code === 'string' &&
+              RETRYABLE_ERROR_CODES.has(prismaError.code) &&
+              attempt < maxRetries
+            ) {
+              log.warn(
+                `${prismaError.code} on ${model}.${operation} (attempt ${attempt}/${maxRetries}), retrying...`
+              );
+              await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt - 1)));
               continue;
             }
 
@@ -64,4 +73,3 @@ export const prisma =
   });
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
-

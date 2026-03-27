@@ -1,10 +1,13 @@
 /**
  * Credits & Usage Management
- * 
+ *
  * Handles credit allocation, usage tracking, and balance calculations
  */
 
 import { prisma } from './prisma';
+import { createLogger } from './logger';
+
+const log = createLogger('Credits');
 
 /**
  * Creates initial $5 non-expiring credit for new users
@@ -12,11 +15,11 @@ import { prisma } from './prisma';
 export async function createInitialCredit(userId: string) {
   // Check if user already has credits (avoid duplicates)
   const existingCredits = await prisma.credit.findFirst({
-    where: { userId }
+    where: { userId },
   });
 
   if (existingCredits) {
-    console.log(`User ${userId} already has credits, skipping initial credit creation`);
+    log.info('User already has credits, skipping initial credit creation', { userId });
     return existingCredits;
   }
 
@@ -26,10 +29,10 @@ export async function createInitialCredit(userId: string) {
       userId,
       amountCents: 100, // $1.00 (PUBLIC BETA - was 500)
       expirationDate: null, // Never expires
-    }
+    },
   });
 
-  console.log(`✅ Created initial $1 credit for user ${userId}`);
+  log.info('Created initial $1 credit', { userId });
   return credit;
 }
 
@@ -39,15 +42,15 @@ export async function createInitialCredit(userId: string) {
  */
 export async function calculateAvailableCredits(userId: string): Promise<number> {
   const now = new Date();
-  
+
   const credits = await prisma.credit.findMany({
     where: {
       userId,
       OR: [
         { expirationDate: null }, // Non-expiring credits
-        { expirationDate: { gt: now } } // Not yet expired
-      ]
-    }
+        { expirationDate: { gt: now } }, // Not yet expired
+      ],
+    },
   });
 
   const totalCents = credits.reduce((sum, credit) => {
@@ -79,7 +82,7 @@ export async function calculateTotalUsage(userId: string): Promise<number> {
 export async function getUserUsage(userId: string) {
   const [availableCredits, usedCredits] = await Promise.all([
     calculateAvailableCredits(userId),
-    calculateTotalUsage(userId)
+    calculateTotalUsage(userId),
   ]);
 
   const remaining = Math.max(0, availableCredits - usedCredits);
@@ -112,7 +115,7 @@ export async function createSignupBonusCredit(userId: string) {
     },
   });
 
-  console.log(`✅ Created $1 signup bonus credit for user ${userId}`);
+  log.info('Created $1 signup bonus credit', { userId });
   return credit;
 }
 
@@ -120,8 +123,8 @@ export async function createSignupBonusCredit(userId: string) {
  * Add credit for a subscription (called when subscription is created/renewed)
  */
 export async function addSubscriptionCredit(
-  userId: string, 
-  amountDollars: number, 
+  userId: string,
+  amountDollars: number,
   expirationDate: Date
 ) {
   const credit = await prisma.credit.create({
@@ -129,10 +132,14 @@ export async function addSubscriptionCredit(
       userId,
       amountCents: amountDollars * 100, // Convert dollars to cents
       expirationDate,
-    }
+    },
   });
 
-  console.log(`✅ Added $${amountDollars} subscription credit for user ${userId}, expires ${expirationDate}`);
+  log.info('Added subscription credit', {
+    userId,
+    amountDollars,
+    expirationDate: expirationDate.toISOString(),
+  });
   return credit;
 }
 
@@ -141,7 +148,7 @@ export async function addSubscriptionCredit(
  */
 export async function getSubscriptionTier(userId: string): Promise<number | null> {
   const subscription = await prisma.subscription.findUnique({
-    where: { userId }
+    where: { userId },
   });
 
   return subscription?.subscriptionTier ?? null;
@@ -156,44 +163,89 @@ export function getUpgradeOptions(currentTier: number | null): Array<{
   url: string;
 }> {
   const isProduction = process.env.NODE_ENV === 'production';
-  
+
   // Use test links in development, prod links in production
-  const allTiers = isProduction ? [
-    // Production payment links
-    { tier: 20, name: 'Agent Mini Cluster', url: 'https://buy.stripe.com/cNi7sL7HCfa59nPeBn5kk04' },
-    { tier: 30, name: 'Agent Mini Cluster Pro', url: 'https://buy.stripe.com/eVq4gze607HD57zgJv5kk05' },
-    { tier: 40, name: 'Agent Cluster', url: 'https://buy.stripe.com/28E4gz1je3rndE5bpb5kk06' },
-    { tier: 50, name: 'Agent Cluster Pro', url: 'https://buy.stripe.com/5kQ00j1jefa5eI90Kx5kk07' },
-    { tier: 100, name: 'Agent Mega Cluster', url: 'https://buy.stripe.com/fZu5kD4vq1jf0Rjal75kk08' },
-    { tier: 200, name: 'Agent Mega Cluster Pro', url: 'https://buy.stripe.com/fZu3cvaTO8LH8jL8cZ5kk09' },
-  ] : [
-    // Test payment links for development
-    { tier: 20, name: 'Agent Mini Cluster', url: 'https://buy.stripe.com/test_00w5kDge8e618jL1OB5kk00' },
-    { tier: 30, name: 'Agent Mini Cluster Pro', url: 'https://buy.stripe.com/test_6oU9AT1je3rn9nPgJv5kk01' },
-    { tier: 40, name: 'Agent Cluster', url: 'https://buy.stripe.com/test_8x2dR9aTO6Dz6bD0Kx5kk02' },
-    { tier: 50, name: 'Agent Cluster Pro', url: 'https://buy.stripe.com/test_5kQ5kD6Dy4vr2Zr1OB5kk03' },
-    { tier: 100, name: 'Agent Mega Cluster', url: 'https://buy.stripe.com/test_cNi7sL7HCfa59nPeBn5kk04' },
-    { tier: 200, name: 'Agent Mega Cluster Pro', url: 'https://buy.stripe.com/test_eVq4gze607HD57zgJv5kk05' },
-  ];
+  const allTiers = isProduction
+    ? [
+        // Production payment links
+        {
+          tier: 20,
+          name: 'Agent Mini Cluster',
+          url: 'https://buy.stripe.com/cNi7sL7HCfa59nPeBn5kk04',
+        },
+        {
+          tier: 30,
+          name: 'Agent Mini Cluster Pro',
+          url: 'https://buy.stripe.com/eVq4gze607HD57zgJv5kk05',
+        },
+        { tier: 40, name: 'Agent Cluster', url: 'https://buy.stripe.com/28E4gz1je3rndE5bpb5kk06' },
+        {
+          tier: 50,
+          name: 'Agent Cluster Pro',
+          url: 'https://buy.stripe.com/5kQ00j1jefa5eI90Kx5kk07',
+        },
+        {
+          tier: 100,
+          name: 'Agent Mega Cluster',
+          url: 'https://buy.stripe.com/fZu5kD4vq1jf0Rjal75kk08',
+        },
+        {
+          tier: 200,
+          name: 'Agent Mega Cluster Pro',
+          url: 'https://buy.stripe.com/fZu3cvaTO8LH8jL8cZ5kk09',
+        },
+      ]
+    : [
+        // Test payment links for development
+        {
+          tier: 20,
+          name: 'Agent Mini Cluster',
+          url: 'https://buy.stripe.com/test_00w5kDge8e618jL1OB5kk00',
+        },
+        {
+          tier: 30,
+          name: 'Agent Mini Cluster Pro',
+          url: 'https://buy.stripe.com/test_6oU9AT1je3rn9nPgJv5kk01',
+        },
+        {
+          tier: 40,
+          name: 'Agent Cluster',
+          url: 'https://buy.stripe.com/test_8x2dR9aTO6Dz6bD0Kx5kk02',
+        },
+        {
+          tier: 50,
+          name: 'Agent Cluster Pro',
+          url: 'https://buy.stripe.com/test_5kQ5kD6Dy4vr2Zr1OB5kk03',
+        },
+        {
+          tier: 100,
+          name: 'Agent Mega Cluster',
+          url: 'https://buy.stripe.com/test_cNi7sL7HCfa59nPeBn5kk04',
+        },
+        {
+          tier: 200,
+          name: 'Agent Mega Cluster Pro',
+          url: 'https://buy.stripe.com/test_eVq4gze607HD57zgJv5kk05',
+        },
+      ];
 
   if (currentTier === null || currentTier === 0) {
     // Free tier: show 20, 50, 100
-    return allTiers.filter(t => [20, 50, 100].includes(t.tier));
+    return allTiers.filter((t) => [20, 50, 100].includes(t.tier));
   } else if (currentTier === 20) {
     // $20 tier: show 30, 40, 50
-    return allTiers.filter(t => [30, 40, 50].includes(t.tier));
+    return allTiers.filter((t) => [30, 40, 50].includes(t.tier));
   } else if (currentTier === 40) {
     // $40 tier: show 50, 100, 200
-    return allTiers.filter(t => [50, 100, 200].includes(t.tier));
+    return allTiers.filter((t) => [50, 100, 200].includes(t.tier));
   } else if (currentTier === 100) {
     // $100 tier: show only 200
-    return allTiers.filter(t => t.tier === 200);
+    return allTiers.filter((t) => t.tier === 200);
   } else if (currentTier === 200) {
     // $200 tier: no upgrades, contact support
     return [];
   }
 
   // For 30, 50, or other tiers, show next available options
-  return allTiers.filter(t => t.tier > currentTier);
+  return allTiers.filter((t) => t.tier > currentTier);
 }
-

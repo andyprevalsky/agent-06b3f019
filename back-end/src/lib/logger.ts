@@ -13,8 +13,8 @@ const isDev = process.env.NODE_ENV !== 'production';
 
 // ANSI color codes for dev pretty-printing
 const COLORS = {
-  info: '\x1b[36m',  // cyan
-  warn: '\x1b[33m',  // yellow
+  info: '\x1b[36m', // cyan
+  warn: '\x1b[33m', // yellow
   error: '\x1b[31m', // red
   reset: '\x1b[0m',
 } as const;
@@ -35,7 +35,12 @@ function formatExtra(extra: Record<string, unknown>): string {
     .join(' ');
 }
 
-function emit(level: LogLevel, component: string, message: string, extra?: Record<string, unknown>) {
+function emit(
+  level: LogLevel,
+  component: string,
+  message: string,
+  extra?: Record<string, unknown>
+) {
   const timestamp = new Date().toISOString();
 
   const entry: LogEntry = {
@@ -75,8 +80,11 @@ export interface Logger {
 
 export function createLogger(component: string): Logger {
   return {
-    info: (message: string, extra?: Record<string, unknown>) => emit('info', component, message, extra),
-    warn: (message: string, extra?: Record<string, unknown>) => emit('warn', component, message, extra),
-    error: (message: string, extra?: Record<string, unknown>) => emit('error', component, message, extra),
+    info: (message: string, extra?: Record<string, unknown>) =>
+      emit('info', component, message, extra),
+    warn: (message: string, extra?: Record<string, unknown>) =>
+      emit('warn', component, message, extra),
+    error: (message: string, extra?: Record<string, unknown>) =>
+      emit('error', component, message, extra),
   };
 }

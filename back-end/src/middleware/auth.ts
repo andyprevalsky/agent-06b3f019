@@ -1,6 +1,9 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { createSecretKey, KeyObject } from 'crypto';
+import { createSecretKey, type KeyObject } from 'crypto';
+import { createLogger } from '../lib/logger';
+
+const log = createLogger('Auth');
 
 /**
  * Auth Middleware
@@ -24,12 +27,12 @@ let cachedSecretKey: KeyObject | null = null;
 // Get the JWT secret as a KeyObject for HS256 verification
 // Must use createSecretKey to ensure jsonwebtoken treats it as symmetric
 function getJwtSecret(): KeyObject {
-  if (cachedSecretKey) {
+  if (cachedSecretKey !== null) {
     return cachedSecretKey;
   }
 
   const secret = process.env.SUPABASE_JWT_SECRET;
-  if (!secret) {
+  if (secret === undefined || secret === '') {
     throw new Error('Missing SUPABASE_JWT_SECRET environment variable');
   }
 
@@ -39,17 +42,13 @@ function getJwtSecret(): KeyObject {
   return cachedSecretKey;
 }
 
-export async function authenticate(
-  req: AuthRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
+export function authenticate(req: AuthRequest, res: Response, next: NextFunction): void {
   try {
     // Try API key first (for internal/worker calls)
-    const apiKey = req.headers['x-api-key'] as string;
+    const apiKey = req.headers['x-api-key'] as string | undefined;
     const expectedKey = process.env.BACKEND_API_KEY;
 
-    if (apiKey && expectedKey && apiKey === expectedKey) {
+    if (apiKey !== undefined && expectedKey !== undefined && apiKey === expectedKey) {
       req.isInternal = true;
       return next();
     }
@@ -57,7 +56,7 @@ export async function authenticate(
     // JWT auth (for user calls)
     const authHeader = req.headers.authorization;
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (authHeader === undefined || !authHeader.startsWith('Bearer ')) {
       res.status(401).json({ error: 'Missing or invalid authorization header' });
       return;
     }
@@ -65,7 +64,7 @@ export async function authenticate(
     const token = authHeader.substring(7);
     const supabaseUrl = process.env.SUPABASE_URL;
 
-    if (!supabaseUrl) {
+    if (supabaseUrl === undefined || supabaseUrl === '') {
       res.status(500).json({ error: 'Server configuration error' });
       return;
     }
@@ -82,7 +81,7 @@ export async function authenticate(
       },
       (err, decoded) => {
         if (err) {
-          console.error('JWT verification failed:', err.message);
+          log.error('JWT verification failed', { error: err.message });
           res.status(401).json({ error: 'Invalid or expired token' });
           return;
         }
@@ -100,7 +99,9 @@ export async function authenticate(
       }
     );
   } catch (error) {
-    console.error('Authentication error:', error);
+    log.error('Authentication error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Internal server error' });
   }
 }

@@ -9,7 +9,7 @@ export interface CreateMessageParams {
   agentId: string;
   text: string;
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
-  metadata?: Record<string, any> | null;
+  metadata?: Record<string, unknown> | null;
   filePointer?: object | null; // FilePointer for file attachment messages (JSON)
 }
 

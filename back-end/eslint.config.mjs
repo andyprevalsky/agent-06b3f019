@@ -1,8 +1,32 @@
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import eslintConfigPrettier from 'eslint-config-prettier';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Domains under strict lint enforcement (type-aware rules, tighter limits).
+ * The /setup-formatter-and-linter skill adds file paths here as domains are cleaned.
+ * Paths are relative globs from back-end/.
+ */
+const STRICT_DOMAIN_FILES = [
+  'src/routes/attentionRequests.ts',
+  'src/lib/credits.ts',
+  'src/lib/log.ts',
+  'src/lib/logger.ts',
+  'src/lib/messages.ts',
+  'src/lib/prisma.ts',
+  'src/middleware/auth.ts',
+  'src/middleware/hybridAuth.ts',
+  'src/lib/asyncHandler.ts',
+];
 
 export default tseslint.config(
   { ignores: ['dist', 'node_modules'] },
+
+  // ── Base config: all TypeScript files ──
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ['**/*.{ts,tsx}'],
@@ -19,8 +43,39 @@ export default tseslint.config(
       'prefer-const': 'error',
     },
   },
+
+  // ── Strict overlay: cleaned domains only (type-aware) ──
+  ...(STRICT_DOMAIN_FILES.length > 0
+    ? [
+        {
+          files: STRICT_DOMAIN_FILES,
+          languageOptions: {
+            parserOptions: {
+              projectService: true,
+              tsconfigRootDir: __dirname,
+            },
+          },
+          rules: {
+            'max-lines': ['error', { max: 300, skipBlankLines: true, skipComments: true }],
+            'max-lines-per-function': [
+              'error',
+              { max: 80, skipBlankLines: true, skipComments: true },
+            ],
+            '@typescript-eslint/no-floating-promises': 'error',
+            '@typescript-eslint/no-misused-promises': 'error',
+            '@typescript-eslint/strict-boolean-expressions': 'error',
+            '@typescript-eslint/consistent-type-imports': [
+              'error',
+              { prefer: 'type-imports' },
+            ],
+          },
+        },
+      ]
+    : []),
+
+  // ── Ban .js files in src/ ──
   {
-    files: ['**/*.{js,jsx,mjs,cjs}'],
+    files: ['src/**/*.{js,jsx,mjs,cjs}'],
     rules: {
       'no-restricted-syntax': [
         'error',
@@ -30,5 +85,8 @@ export default tseslint.config(
         },
       ],
     },
-  }
+  },
+
+  // ── Prettier compat (must be last — disables conflicting format rules) ──
+  eslintConfigPrettier
 );
