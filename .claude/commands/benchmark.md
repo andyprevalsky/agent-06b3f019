@@ -108,6 +108,12 @@ When you detect an error (from monitoring or benchmark completion):
 
 4. **Identify root cause** — read the relevant agent code, don't guess.
 
+5. **If the error involves LLM calls, 429s, or auth failures**, trace through the research layer:
+   - Read `research/supabase/functions/completions/index.ts` — this is the Rose completions endpoint that handles Claude token auth, rate limiting (429 → `CLAUDE_RATE_LIMITED`), and racing fallback
+   - Check `--source research` logs for Supabase edge function errors
+   - Common issues: Claude OAuth token expired/rate-limited (429 from Anthropic → research returns `CLAUDE_RATE_LIMITED` with `fallback: 'racing'`), Supabase auth disabled (`phone_provider_disabled`), missing API keys in `.env` files
+   - The benchmark harness loads `BACKEND_API_KEY` from `agents/.env` then `back-end/.env` — if both are missing, auth fails entirely
+
 ## Step 5: Propose fix to user
 
 Present to the user in your LAST message (only the last message is visible):
@@ -129,48 +135,19 @@ After user approves:
 
 2. **Apply the approved code fix.**
 
-## Step 7: PR and review loop
+## Step 7: Deploy
 
-1. Create a branch and PR:
-   ```bash
-   git checkout -b fix/<descriptive-name>
-   git add <files> && git commit -m "Fix: <description>"
-   git push -u origin fix/<descriptive-name>
-   gh pr create --title "Fix: <description>" --body "..."
-   ```
+Run `/deploy` to push the fix, create a PR, wait for review, merge, and wait for deploys to complete. The deploy skill handles the full PR → review → merge → deploy loop.
 
-2. **Wait for Claude Code Review** (poll every 30s, no timeout):
-   ```bash
-   gh pr checks <PR_NUMBER> --json name,state,conclusion
-   ```
-
-3. If `CHANGES_REQUESTED` → fix critical issues, push, re-poll. Skip menial/P3+ nits.
-
-4. If `APPROVED` or no blocking issues → merge:
-   ```bash
-   gh pr merge <PR_NUMBER> --squash --delete-branch
-   ```
-
-## Step 8: Wait for deploy
-
-Poll deployment actions (every 30s):
-
-```bash
-gh run list --workflow deploy-agents.yml --branch main --limit 1
-gh run list --workflow deploy-research.yml --branch main --limit 1
-```
-
-Wait for all relevant deploys to show `completed success`. If any fail → new fix PR, review loop, merge, restart this step.
-
-## Step 9: Rerun benchmark
+## Step 8: Rerun benchmark
 
 Go back to **Step 1** (clean up old agents) and restart the full loop.
 
-- If the benchmark now passes → **Step 10**
+- If the benchmark now passes → **Step 9**
 - If it fails with a new error → **Step 4** (diagnose again)
 - If it fails with the same error → the fix didn't work, re-diagnose
 
-## Step 10: Celebrate
+## Step 9: Celebrate
 
 On `COMPLETED`:
 - Report final cost, elapsed time, number of fix iterations
@@ -178,7 +155,7 @@ On `COMPLETED`:
 
 ## CRITICAL RULES
 
-1. **NEVER stop the loop** unless waiting for user approval or celebrating (Step 10).
+1. **NEVER stop the loop** unless waiting for user approval or celebrating (Step 9).
 2. **NEVER fire-and-forget** — monitor every 60s while the benchmark runs.
 3. **120s stall = error** — if any sub-agent has no new messages for 120s, treat as actionable.
 4. **Only 1 agent alive** — delete old agents before starting new ones.

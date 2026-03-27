@@ -71,7 +71,8 @@ TEST_ASSETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
 )
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
-API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV)
+_BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
+API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 class AgentNotFoundError(Exception):
