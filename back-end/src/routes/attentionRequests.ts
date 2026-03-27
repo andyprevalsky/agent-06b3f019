@@ -301,4 +301,3 @@ router.post('/:id/reject', authenticate, async (req: AuthRequest, res) => {
 });
 
 export default router;
-

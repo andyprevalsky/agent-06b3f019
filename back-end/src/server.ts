@@ -318,17 +318,22 @@ app.listen(PORT, () => {
     ...(x402ReceivingWallet ? { x402: 'POST /api/x402/spawn-agent (min $0.05 USDC)' } : {}),
   });
 
-  // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
-  const cronLog = createLogger('Cron');
-  const runSync = () => {
-    cronLog.info('Running Gmail sync job...');
-    runGmailSyncJob().catch(err => {
-      cronLog.error('Gmail sync job error', { error: err instanceof Error ? err.message : String(err) });
-    });
-  };
-  runSync();
-  cron.schedule('*/5 * * * *', runSync);
-  cronLog.info('Gmail sync scheduled (every 5 minutes)');
+  // Contract-test backends should not run unrelated background jobs.
+  if (process.env.DISABLE_GMAIL_SYNC === '1') {
+    createLogger('Cron').info('Gmail sync disabled by DISABLE_GMAIL_SYNC');
+  } else {
+    // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
+    const cronLog = createLogger('Cron');
+    const runSync = () => {
+      cronLog.info('Running Gmail sync job...');
+      runGmailSyncJob().catch(err => {
+        cronLog.error('Gmail sync job error', { error: err instanceof Error ? err.message : String(err) });
+      });
+    };
+    runSync();
+    cron.schedule('*/5 * * * *', runSync);
+    cronLog.info('Gmail sync scheduled (every 5 minutes)');
+  }
 });
 
 // Graceful shutdown

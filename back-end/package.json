@@ -21,7 +21,13 @@
     "backfill:pricing": "tsx scripts/backfill-agent-pricing.ts",
     "test:api": "tsx src/tests/api-test-suite.ts",
     "test:x402": "tsx src/tests/x402-e2e-test.ts",
-    "test:all": "npm run test:api && npm run test:x402",
+    "test:blackbox": "bash scripts/run-blackbox-tests.sh",
+    "test:blackbox:runner": "tsx src/tests/blackbox/run.ts",
+    "test:blackbox:existing": "BLACKBOX_TEST_USE_EXISTING_BACKEND=1 bash scripts/run-blackbox-tests.sh",
+    "test:contracts": "bash scripts/run-blackbox-tests.sh",
+    "test:contracts:runner": "tsx src/tests/blackbox/run.ts",
+    "test:contracts:existing": "BLACKBOX_TEST_USE_EXISTING_BACKEND=1 bash scripts/run-blackbox-tests.sh",
+    "test:all": "npm run test:api && npm run test:x402 && npm run test:blackbox",
     "workers:check": "tsx scripts/query-temporal-workers.ts",
     "harbor:install": "echo 'Harbor installation: Install uv first (https://docs.astral.sh/uv/), then run: uv tool install harbor'",
     "harbor:check": "harbor --version || python3 -m harbor --version",
@@ -67,10 +73,13 @@
   },
   "devDependencies": {
     "@e2b/desktop": "^2.2.2",
+    "@eslint/js": "^9.39.4",
     "@types/adm-zip": "^0.5.7",
     "@types/mime-types": "^3.0.1",
     "@types/node-cron": "^3.0.11",
+    "eslint": "^9.39.4",
     "tsx": "^4.19.1",
+    "typescript-eslint": "^8.57.2",
     "x402": "^0.7.3"
   },
   "engines": {

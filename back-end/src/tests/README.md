@@ -6,7 +6,7 @@ Comprehensive test suite for all backend endpoints. Catches issues like double s
 
 ### Prerequisites
 
-1. **Backend server must be running:**
+1. **Backend server must be running** (for API/x402 suites):
    ```bash
    npm run dev
    ```
@@ -31,9 +31,18 @@ npm run test:api
 # Run x402 E2E tests (creates wallets, funds them, tests full flow)
 npm run test:x402
 
+# Run black-box tests (boots isolated backend automatically on a dedicated port)
+npm run test:blackbox
+
 # Run all tests
 npm run test:all
 ```
+
+Black-box suite port behavior:
+- `npm run test:blackbox` starts its own backend instance and sets `TEST_BASE_URL` automatically.
+- It derives from `CONDUCTOR_PORT` but uses a separate port range so it does not reuse the live workspace backend port.
+- To target an already-running backend instead: `BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=http://localhost:<port> npm run test:blackbox:existing`
+- Legacy aliases remain available: `npm run test:contracts` and `npm run test:contracts:existing`
 
 ### Pre-commit Hook
 
@@ -159,4 +168,3 @@ const authTests = [
   { name: 'My New Endpoint', fn: testMyNewEndpoint, group: 'auth' },
 ];
 ```
-
