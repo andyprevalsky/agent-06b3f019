@@ -1,0 +1,128 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+early_access: false
+
+tone_instructions: >-
+  Focus on bugs, security vulnerabilities, logic errors, race conditions, and
+  correctness issues. Do NOT comment on style, naming, logging format, or code
+  organization unless it introduces a bug.
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: false
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: false
+  in_progress_fortune: false
+  changed_files_summary: true
+  suggested_labels: false
+  suggested_reviewers: false
+  related_prs: false
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT REVIEW"
+
+  path_filters:
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!**/*.lock"
+    - "!**/package-lock.json"
+    - "!**/pnpm-lock.yaml"
+
+  path_instructions:
+    - path: "agents/**"
+      instructions: |
+        Focus on: bugs, race conditions, Temporal determinism violations,
+        incorrect error handling, security issues, and logic errors.
+        Do NOT flag: logging format, naming conventions, import ordering,
+        missing docstrings, or code style preferences.
+    - path: "back-end/**"
+      instructions: |
+        Focus on: SQL injection, auth bypasses, missing input validation,
+        incorrect Prisma queries, error handling bugs, and API contract violations.
+        Do NOT flag: logging format, variable naming, or style preferences.
+    - path: "front-end/**"
+      instructions: |
+        Focus on: state management bugs, memory leaks, incorrect hook usage,
+        missing error boundaries, security issues (XSS, data exposure).
+        Do NOT flag: CSS style preferences, component naming, or import ordering.
+    - path: "research/**"
+      instructions: |
+        Focus on: security issues in edge functions, incorrect API responses,
+        and error handling bugs. Ignore style.
+
+  tools:
+    # Security tools — keep enabled
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    checkov:
+      enabled: true
+    trivy:
+      enabled: true
+    osvScanner:
+      enabled: true
+    semgrep:
+      enabled: true
+    opengrep:
+      enabled: true
+
+    # Bug-finding tools — keep enabled
+    shellcheck:
+      enabled: true
+    hadolint:
+      enabled: true
+    actionlint:
+      enabled: true
+    eslint:
+      enabled: true
+    ruff:
+      enabled: true
+
+    # Style-heavy tools — disabled
+    languagetool:
+      enabled: false
+    markdownlint:
+      enabled: false
+    biome:
+      enabled: false
+    pylint:
+      enabled: false
+    flake8:
+      enabled: false
+    phpstan:
+      enabled: false
+    phpmd:
+      enabled: false
+    phpcs:
+      enabled: false
+    rubocop:
+      enabled: false
+    stylelint:
+      enabled: false
+    detekt:
+      enabled: false
+
+  slop_detection:
+    enabled: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: false
+  learnings:
+    scope: "auto"
+  web_search:
+    enabled: true
+
+chat:
+  auto_reply: true
