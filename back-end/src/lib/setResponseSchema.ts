@@ -1,6 +1,6 @@
 /**
  * Async schema generation for agents with exponential backoff retry.
- * Generates structured response schemas from goals using Rose Ultra.
+ * Generates structured response schemas from goals using Rose Lite.
  */
 
 import { z } from 'zod';
@@ -24,7 +24,7 @@ const SchemaFieldSchema = z.object({
 // The response schema structure
 const ResponseSchemaSchema = z.object({
   reasoning: z.string().describe('Your analysis of what outputs this goal requires'),
-  fields: z.array(SchemaFieldSchema).describe('List of output fields'),
+  fields: z.array(SchemaFieldSchema).min(1).describe('List of output fields'),
 });
 
 export type ResponseSchema = {
@@ -54,6 +54,7 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
     fields: {
       type: 'array',
       description: 'List of output fields (1-5 fields typically)',
+      minItems: 1,
       items: {
         type: 'object',
         properties: {
@@ -80,13 +81,28 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
   additionalProperties: false,
 };
 
+function isRetryableSchemaError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return true;
+  }
+
+  // These are generally configuration issues and should fail fast.
+  const nonRetryableStatuses = ['Rose API error: 400', 'Rose API error: 401', 'Rose API error: 403'];
+  if (nonRetryableStatuses.some((status) => error.message.startsWith(status))) {
+    return false;
+  }
+
+  return true;
+}
+
 /**
- * Generate a structured response schema from a goal using Rose Ultra.
+ * Generate a structured response schema from a goal using Rose Lite.
  * Uses structured output mode (JSON schema) for reliable JSON responses.
  */
 export async function generateResponseSchema(goal: string): Promise<GenerateResult> {
   const startTime = Date.now();
   const roseApiUrl = `${SUPABASE_FUNCTIONS_URL}/completions`;
+  const maxGenerationAttempts = 3;
 
   const systemPrompt = `You are an expert at analyzing agent goals and determining what structured output they should produce.
 
@@ -109,87 +125,114 @@ SUPPORTED TYPES:
 - file_pointer: Reference to a file created by the agent. Use for tasks that produce files (images, documents, etc.). The verifier will extract file metadata including: path (local path), id (UUID), storage_path (cloud storage), original_filename, mime_type, size_bytes, created_at.
 - list[file_pointer]: List of file references. Use when multiple files are produced.`;
 
-  const response = await fetch(roseApiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
-      'x-api-key': process.env.ROSE_API_KEY!,
-    },
-    body: JSON.stringify({
-      model: 'rose-labs/rose-1-ultra',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Goal: ${goal}` },
-      ],
-      temperature: 0.3,
-      max_tokens: 2000,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'response_schema',
-          strict: true,
-          schema: RESPONSE_SCHEMA_JSON_SCHEMA,
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxGenerationAttempts; attempt++) {
+    try {
+      const response = await fetch(roseApiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+          'x-api-key': process.env.ROSE_API_KEY!,
         },
-      },
-    }),
-  });
+        body: JSON.stringify({
+          model: 'rose-labs/rose-1-lite',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Goal: ${goal}` },
+          ],
+          temperature: 0.3,
+          max_tokens: 2000,
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response_schema',
+              strict: true,
+              schema: RESPONSE_SCHEMA_JSON_SCHEMA,
+            },
+          },
+        }),
+      });
 
-  if (!response.ok) {
-    throw new Error(`Rose API error: ${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => '');
+        throw new Error(
+          `Rose API error: ${response.status} ${response.statusText}${errorBody ? ` - ${errorBody.substring(0, 200)}` : ''}`
+        );
+      }
+
+      const data = (await response.json()) as {
+        choices: Array<{ message: { content: string } }>;
+        usage?: { prompt_tokens: number; completion_tokens: number };
+      };
+
+      const content = data.choices[0]?.message?.content;
+      if (!content) {
+        throw new Error('LLM returned no content');
+      }
+
+      // Parse JSON (structured output mode guarantees valid JSON)
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch (parseError) {
+        throw new Error(
+          `Failed to parse LLM response as JSON: ${parseError instanceof Error ? parseError.message : parseError}. Content: ${content.substring(0, 200)}`
+        );
+      }
+
+      // Validate with Zod
+      const result = ResponseSchemaSchema.parse(parsed);
+
+      const tokensIn = data.usage?.prompt_tokens || 0;
+      const tokensOut = data.usage?.completion_tokens || 0;
+
+      const durationMs = Date.now() - startTime;
+      console.log('✅ Generated response schema via Rose Lite', {
+        goal: goal.substring(0, 50),
+        reasoning: result.reasoning,
+        fieldCount: result.fields.length,
+        fields: result.fields.map((f) => f.name),
+        tokensIn,
+        tokensOut,
+        durationMs,
+        attempt,
+      });
+
+      // Hardcode required: true for all fields
+      const fieldsWithRequired = result.fields.map((f) => ({
+        name: f.name,
+        type: f.type,
+        required: true as const,
+        description: f.description,
+      }));
+
+      return {
+        schema: { fields: fieldsWithRequired },
+        tokensIn,
+        tokensOut,
+      };
+    } catch (error) {
+      lastError = error;
+      const shouldRetry = attempt < maxGenerationAttempts && isRetryableSchemaError(error);
+
+      console.warn('⚠️ Response schema generation attempt failed', {
+        attempt,
+        maxGenerationAttempts,
+        error: error instanceof Error ? error.message : error,
+        shouldRetry,
+      });
+
+      if (!shouldRetry) {
+        break;
+      }
+
+      await sleep(200 * Math.pow(2, attempt - 1));
+    }
   }
 
-  const data = (await response.json()) as {
-    choices: Array<{ message: { content: string } }>;
-    usage?: { prompt_tokens: number; completion_tokens: number };
-  };
-
-  const content = data.choices[0]?.message?.content;
-
-  if (!content) {
-    throw new Error('LLM returned no content');
-  }
-
-  // Parse JSON (structured output mode guarantees valid JSON)
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch (parseError) {
-    throw new Error(
-      `Failed to parse LLM response as JSON: ${parseError instanceof Error ? parseError.message : parseError}. Content: ${content.substring(0, 200)}`
-    );
-  }
-
-  // Validate with Zod
-  const result = ResponseSchemaSchema.parse(parsed);
-
-  const tokensIn = data.usage?.prompt_tokens || 0;
-  const tokensOut = data.usage?.completion_tokens || 0;
-
-  const durationMs = Date.now() - startTime;
-  console.log('✅ Generated response schema via Rose Ultra', {
-    goal: goal.substring(0, 50),
-    reasoning: result.reasoning,
-    fieldCount: result.fields.length,
-    fields: result.fields.map((f) => f.name),
-    tokensIn,
-    tokensOut,
-    durationMs,
-  });
-
-  // Hardcode required: true for all fields
-  const fieldsWithRequired = result.fields.map((f) => ({
-    name: f.name,
-    type: f.type,
-    required: true as const,
-    description: f.description,
-  }));
-
-  return {
-    schema: { fields: fieldsWithRequired },
-    tokensIn,
-    tokensOut,
-  };
+  throw lastError instanceof Error ? lastError : new Error('Unknown error generating response schema');
 }
 
 /**
@@ -222,7 +265,7 @@ export async function setResponseSchema(agentId: string): Promise<void> {
         return;
       }
 
-      // Generate schema using Opus 4.5
+      // Generate schema using Rose Lite
       const { schema, tokensIn, tokensOut } = await generateResponseSchema(agent.goal);
 
       // Update agent with schema and token usage
