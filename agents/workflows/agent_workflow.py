@@ -787,7 +787,7 @@ class AgentWorkflow:
             on_tokens=self._on_tokens,  # Real-time cost tracking and limit checking
             max_context_tokens=self.max_context_tokens,
             reasoning_max_tokens=reasoning_max_tokens,
-            skip_blueprint_query=not skip_plan,  # Only skip if we ran PLAN phase
+            skip_blueprint_query=True,
             response_schema=response_schema,
             get_response_schema=self._make_response_schema_getter(),
             claude_token=self.claude_max_token,
@@ -2239,16 +2239,17 @@ class AgentWorkflow:
 
         # Save blueprint (fire-and-forget, no tool messages - just logs)
         # This is the last step so it doesn't block completion UX
-        try:
-            await workflow.execute_activity(
-                save_blueprint_activity,
-                args=[self.user_id, context],
-                start_to_close_timeout=timedelta(seconds=120),
-                retry_policy=RetryPolicy(maximum_attempts=2)
-            )
-            workflow.logger.info("Blueprint saved successfully")
-        except Exception as e:
-            workflow.logger.warning(f"Blueprint save failed (non-fatal): {e}")
+        if False:
+            try:
+                await workflow.execute_activity(
+                    save_blueprint_activity,
+                    args=[self.user_id, context],
+                    start_to_close_timeout=timedelta(seconds=120),
+                    retry_policy=RetryPolicy(maximum_attempts=2)
+                )
+                workflow.logger.info("Blueprint saved successfully")
+            except Exception as e:
+                workflow.logger.warning(f"Blueprint save failed (non-fatal): {e}")
     
     @workflow.query
     def get_status(self) -> Dict:

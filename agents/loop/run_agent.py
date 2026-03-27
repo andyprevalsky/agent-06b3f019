@@ -235,7 +235,7 @@ async def run_agent(
             last_checked = await poll_and_update_context(poll_messages, context, last_checked)
         
         # 3. Query blueprints after first iteration (only in PLAN phase, not EXECUTE)
-        if not blueprint_queried and iteration == 1 and not skip_blueprint_query:
+        if False and not blueprint_queried and iteration == 1 and not skip_blueprint_query:
             blueprint_queried = True
             # Check if we have any user messages
             user_messages = [m.get("text", "") for m in context if m.get("role") == "USER"]
