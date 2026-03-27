@@ -13,6 +13,7 @@ import {
   uploadFileToSession,
   listSessionFiles,
   getFingerprintInjectionData,
+  SteelRateLimitError,
   SteelFileInfo
 } from '../lib/steel';
 import { DEFAULT_GEOLOCATION, ProxyGeoLocation } from '../lib/geoip';
@@ -157,9 +158,17 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     });
     
   } catch (error) {
+    // Forward Steel 429 so agents can back off and retry
+    if (error instanceof SteelRateLimitError) {
+      console.warn('⚠️ Steel rate limit hit during session init');
+      return res.status(429).json({
+        error: 'steel_rate_limit',
+        message: 'Browser session rate limit exceeded. Retry after delay.',
+      });
+    }
     console.error('❌ Failed to init browser session:', error);
-    res.status(500).json({ 
-      error: error instanceof Error ? error.message : 'Failed to initialize browser session' 
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to initialize browser session'
     });
   }
 });
@@ -239,9 +248,16 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
     });
     
   } catch (error) {
+    if (error instanceof SteelRateLimitError) {
+      console.warn('⚠️ Steel rate limit hit during session resume');
+      return res.status(429).json({
+        error: 'steel_rate_limit',
+        message: 'Browser session rate limit exceeded. Retry after delay.',
+      });
+    }
     console.error('❌ Failed to resume browser task:', error);
-    res.status(500).json({ 
-      error: error instanceof Error ? error.message : 'Failed to resume browser task' 
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to resume browser task'
     });
   }
 });

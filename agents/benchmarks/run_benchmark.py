@@ -145,7 +145,7 @@ async def create_agent(
     if task.start_phase:
         body["start_phase"] = task.start_phase
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=90) as client:
         resp = await client.post(f"{base_url}/api/agents", headers=headers, json=body)
         if resp.status_code not in (200, 201):
             raise Exception(f"Failed to create agent: {resp.status_code} - {resp.text}")
@@ -713,7 +713,7 @@ async def run_single_task(
 
     except Exception as e:
         duration = time.time() - start
-        print(f"\n    ❌ {task.name}: ERROR - {e}")
+        print(f"\n    ❌ {task.name}: ERROR - {type(e).__name__}: {e}")
         # Best-effort log collection — errors are when logs matter most
         logs = None
         if agent_id:

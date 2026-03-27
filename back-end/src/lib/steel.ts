@@ -16,6 +16,17 @@ const steel = new Steel({
 const MAX_SESSION_RETRIES = 3;
 const SESSION_VALIDATION_TIMEOUT = 10000; // 10 seconds
 
+/**
+ * Thrown when Steel.dev returns HTTP 429 (concurrent session limit reached).
+ * The agent should back off and retry rather than failing immediately.
+ */
+export class SteelRateLimitError extends Error {
+  constructor(message: string = 'Steel session rate limit exceeded') {
+    super(message);
+    this.name = 'SteelRateLimitError';
+  }
+}
+
 // WebSocket connection retry config
 const WS_CONNECTION_RETRIES = 3;
 const WS_BACKOFF_DELAYS = [100, 400, 800]; // ms
@@ -263,6 +274,13 @@ export async function createSessionWithContext(
       };
 
     } catch (error) {
+      // Steel 429 = concurrent session limit. Don't retry locally — bubble up so agent can backoff.
+      const status = (error as any)?.status ?? (error as any)?.statusCode;
+      if (status === 429) {
+        const msg = error instanceof Error ? error.message : 'Steel session rate limit exceeded';
+        console.log(`  ⚠️ Steel rate limit (429): ${msg}`);
+        throw new SteelRateLimitError(msg);
+      }
       console.log(`  ❌ Attempt ${attempt} failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       lastError = error instanceof Error ? error : new Error('Unknown error');
     }
@@ -452,6 +470,12 @@ export async function resumeSession(taskId: string): Promise<{ debugUrl: string;
       };
 
     } catch (error) {
+      const status = (error as any)?.status ?? (error as any)?.statusCode;
+      if (status === 429) {
+        const msg = error instanceof Error ? error.message : 'Steel session rate limit exceeded';
+        console.log(`  ⚠️ Steel rate limit (429): ${msg}`);
+        throw new SteelRateLimitError(msg);
+      }
       console.log(`  ❌ Attempt ${attempt} failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       lastError = error instanceof Error ? error : new Error('Unknown error');
     }

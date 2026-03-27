@@ -2374,23 +2374,59 @@ async def spawn_browser_agent_activity_v3(
             activity.heartbeat(f"Resuming task {task_id}")
         else:
             activity.heartbeat("Initializing browser session")
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    f"{config.backend.api_url}/api/browser-session/init",
-                    headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-                    json={"user_id": user_id, "agent_id": agent_id, "start_url": start_url}
-                )
-                if response.status_code not in [200, 201]:
-                    raise Exception(f"Failed to init session: {response.text}")
+            # Retry loop: if Steel is at capacity (429), wait and retry with heartbeats
+            _session_wait_start = time.monotonic()
+            _SESSION_MAX_WAIT = 900  # 15 minutes max
+            _SESSION_RETRY_INTERVAL = 30  # seconds between retries
+            _waiting_msg_sent = False
 
-                session_data = response.json()
-                task_id = session_data["task_id"]
-                session_id = session_data["session_id"]
-                browser_url = session_data["debug_url"]
-                cdp_url = session_data.get("ws_url")
-                fingerprint_injection = session_data.get("fingerprint_injection")
-                session_passwords = session_data.get("passwords", [])
-                user_profile = session_data.get("user_settings") or {}
+            while True:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(
+                        f"{config.backend.api_url}/api/browser-session/init",
+                        headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                        json={"user_id": user_id, "agent_id": agent_id, "start_url": start_url}
+                    )
+                if response.status_code in [200, 201]:
+                    break
+
+                if response.status_code == 429:
+                    _elapsed = time.monotonic() - _session_wait_start
+                    if _elapsed > _SESSION_MAX_WAIT:
+                        raise Exception(f"Browser session unavailable after {int(_elapsed)}s (rate limited by Steel)")
+
+                    # Emit waiting status once so the user sees why the browser isn't starting yet
+                    if not _waiting_msg_sent:
+                        await save_browser_action_message(
+                            agent_id=agent_id,
+                            title="Waiting for browser availability",
+                            task_id=tool_call_id,
+                            message="All browser slots are in use. Waiting for one to free up...",
+                            status=MessageStatus.IN_PROGRESS,
+                            tool_call_id=tool_call_id,
+                            is_init_message=True,
+                        )
+                        _waiting_msg_sent = True
+
+                    logger.info(
+                        "Steel rate limited, waiting for browser slot",
+                        elapsed_s=int(_elapsed),
+                        retry_in=_SESSION_RETRY_INTERVAL,
+                    )
+                    activity.heartbeat(f"Waiting for browser availability ({int(_elapsed)}s)")
+                    await asyncio.sleep(_SESSION_RETRY_INTERVAL)
+                    continue
+
+                raise Exception(f"Failed to init session: {response.text}")
+
+            session_data = response.json()
+            task_id = session_data["task_id"]
+            session_id = session_data["session_id"]
+            browser_url = session_data["debug_url"]
+            cdp_url = session_data.get("ws_url")
+            fingerprint_injection = session_data.get("fingerprint_injection")
+            session_passwords = session_data.get("passwords", [])
+            user_profile = session_data.get("user_settings") or {}
         _record_timing("session_init", t_session)
 
         if not cdp_url:
