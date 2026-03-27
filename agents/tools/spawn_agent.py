@@ -266,6 +266,7 @@ async def spawn_explore_agent_activity(
         cache_read_input_tokens: int = 0,
         cache_creation_input_tokens: int = 0,
         call_site: str = "explore_agent",
+        claude_token_error: Optional[str] = None,
     ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append({
